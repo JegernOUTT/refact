@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use axum::Extension;
 use axum::extract::Query;
 use axum::response::Json;
+use axum::extract::State;
 use hyper::StatusCode;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
@@ -11,8 +11,9 @@ use tokio::sync::RwLock as ARwLock;
 use tokio::time::{Duration, Instant};
 use std::sync::Mutex;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
+use crate::global_context::{GlobalContext, SharedGlobalContext};
 use crate::integrations::mcp::mcp_naming;
 use crate::http::routers::v1::mcp_marketplace_sources::{
     load_sources, get_all_sources, smithery_api_key, source_to_api_json, BUNDLED_SOURCE_ID,
@@ -596,9 +597,10 @@ pub struct MarketplaceQuery {
 const MERGED_MODE_PAGE_SIZE_CAP: u32 = 500;
 
 pub async fn handle_v1_mcp_marketplace_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(params): Query<MarketplaceQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let page = params.page.unwrap_or(1).max(1);
     let page_size = params.page_size.unwrap_or(50).min(100).max(1);
     let query = params.q.as_deref();
@@ -799,8 +801,8 @@ async fn find_server_in_sources(
     None
 }
 
-pub async fn handle_v1_mcp_marketplace_install(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+pub async fn install_mcp_marketplace_server(
+    gcx: SharedGlobalContext,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
     let req = serde_json::from_slice::<InstallRequest>(&body_bytes)
@@ -941,6 +943,13 @@ pub async fn handle_v1_mcp_marketplace_install(
         "installed": true,
         "config_path": config_path.display().to_string(),
     })))
+}
+
+pub async fn handle_v1_mcp_marketplace_install(
+    State(app): State<AppState>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Json<Value>, ScratchError> {
+    install_mcp_marketplace_server(app.gcx.clone(), body_bytes).await
 }
 
 fn build_integration_yaml(
@@ -1106,8 +1115,9 @@ fn parse_marketplace_comments(content: &str) -> (Option<String>, Option<String>)
 }
 
 pub async fn handle_v1_mcp_marketplace_installed(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
 

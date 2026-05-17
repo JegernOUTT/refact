@@ -1,8 +1,9 @@
-use axum::Extension;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
+use crate::app_state::AppState;
 use crate::ast::ast_structs::AstStatus;
 use crate::custom_error::ScratchError;
 use crate::global_context::SharedGlobalContext;
@@ -53,8 +54,9 @@ pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
 }
 
 pub async fn handle_v1_rag_status(
-    Extension(gcx): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let status = get_rag_status(gcx).await;
 
     let json_string = serde_json::to_string_pretty(&status).map_err(|e| {

@@ -1,10 +1,10 @@
 use axum::response::Result;
-use axum::Extension;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::SharedGlobalContext;
 
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -16,9 +16,10 @@ struct VecDBPost {
 const NO_VECDB: &str = "Vector db is not running, check if you have --vecdb parameter and a vectorization model is running on server side.";
 
 pub async fn handle_v1_vecdb_search(
-    Extension(gcx): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<VecDBPost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
 
@@ -54,9 +55,10 @@ pub async fn handle_v1_vecdb_search(
 }
 
 pub async fn handle_v1_vecdb_status(
-    Extension(gcx): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let vec_db = gcx.read().await.vec_db.clone();
     let status_str = match crate::vecdb::vdb_highlev::get_status(vec_db).await {
         Ok(Some(status)) => serde_json::to_string_pretty(&status).unwrap(),

@@ -1,13 +1,11 @@
-use axum::Extension;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::Serialize;
-use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::load_merged_registry;
 use crate::yaml_configs::project_configs_bootstrap::{
     global_configs_try_create_all, project_configs_ensure_dirs,
@@ -69,8 +67,9 @@ fn json_response<T: Serialize>(data: &T) -> Result<Response<Body>, ScratchError>
 }
 
 pub async fn handle_v1_chat_modes(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 

@@ -1,6 +1,6 @@
 use axum::extract::Path;
-use axum::Extension;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -9,9 +9,10 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::{
     load_merged_registry, load_registry_from_dir, invalidate_all_registry_caches, ConfigScope,
 };
@@ -210,8 +211,9 @@ pub struct ErrorItem {
 }
 
 pub async fn handle_v1_customization_registry(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
@@ -352,10 +354,11 @@ pub struct ConfigDetailResponse {
 }
 
 pub async fn handle_v1_customization_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path((kind, id)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<GetConfigQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_kind(&kind) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -494,10 +497,11 @@ pub struct SaveConfigResponse {
 }
 
 pub async fn handle_v1_customization_save(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path((kind, id)): Path<(String, String)>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_kind(&kind) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -629,10 +633,11 @@ pub struct CreateConfigRequest {
 }
 
 pub async fn handle_v1_customization_create(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(kind): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_kind(&kind) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
@@ -764,10 +769,11 @@ pub struct DeleteConfigResponse {
 }
 
 pub async fn handle_v1_customization_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path((kind, id)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<DeleteConfigQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_kind(&kind) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }

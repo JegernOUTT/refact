@@ -1,16 +1,17 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::Extension;
 use axum::extract::Query;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
-use crate::custom_error::ScratchError;
+use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
+use crate::custom_error::ScratchError;
 use crate::integrations::mcp::mcp_auth::{
     MCPOAuthSessionManager, clear_tokens_from_config, load_tokens_from_config,
     save_tokens_to_config,
@@ -131,9 +132,10 @@ struct McpOAuthStartResponse {
 }
 
 pub async fn handle_v1_mcp_oauth_start(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: McpOAuthStartRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -197,9 +199,10 @@ pub struct McpOAuthExchangeRequest {
 }
 
 pub async fn handle_v1_mcp_oauth_exchange(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: McpOAuthExchangeRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -238,9 +241,10 @@ pub struct McpOAuthCallbackQuery {
 }
 
 pub async fn handle_v1_mcp_oauth_callback(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<McpOAuthCallbackQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     if let Some(err) = &query.error {
         let desc = query
             .error_description
@@ -331,9 +335,10 @@ pub struct McpOAuthLogoutRequest {
 }
 
 pub async fn handle_v1_mcp_oauth_logout(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: McpOAuthLogoutRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -389,9 +394,10 @@ struct McpOAuthStatusResponse {
 }
 
 pub async fn handle_v1_mcp_oauth_status(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<McpOAuthStatusQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_mcp_config_path(&gcx, &query.config_path).await?;
 
     let config_content = tokio::fs::read_to_string(&query.config_path)

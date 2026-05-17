@@ -1,13 +1,11 @@
-use std::sync::Arc;
-use axum::Extension;
 use axum::extract::Query;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::integrations::mcp::mcp_naming;
 use crate::integrations::mcp::session_mcp::{SessionMCP, MCPConnectionStatus};
 use crate::integrations::mcp::mcp_metrics::MCPServerMetrics;
@@ -70,9 +68,10 @@ struct McpServerInfoResponse {
 }
 
 pub async fn handle_v1_mcp_server_info(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(params): Query<McpServerInfoQuery>,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let session_key = params.config_path.clone();
 
     let session = {
@@ -240,9 +239,10 @@ pub async fn handle_v1_mcp_server_info(
 }
 
 pub async fn handle_v1_mcp_server_reconnect(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<McpServerReconnectRequest>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -331,6 +331,7 @@ pub async fn handle_v1_mcp_server_reconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::integrations::mcp::session_mcp::{MCPAuthStatus};
 
     #[test]

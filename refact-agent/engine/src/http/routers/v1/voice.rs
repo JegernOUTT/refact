@@ -1,22 +1,22 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use axum::extract::Path;
-use axum::Extension;
 use axum::response::Response;
+use axum::extract::State;
 use base64::Engine;
 use hyper::{Body, StatusCode};
-use tokio::sync::{broadcast, RwLock as ARwLock};
+use tokio::sync::broadcast;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 #[cfg(feature = "voice")]
 use crate::voice::models::WhisperModel;
 use crate::voice::types::*;
 
 pub async fn handle_v1_voice_transcribe(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: TranscribeRequest = serde_json::from_slice(&body)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -67,9 +67,10 @@ pub async fn handle_v1_voice_transcribe(
 }
 
 pub async fn handle_v1_voice_download(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: DownloadModelRequest = serde_json::from_slice(&body).unwrap_or(DownloadModelRequest {
         model: "base.en".to_string(),
     });
@@ -115,8 +116,9 @@ pub async fn handle_v1_voice_download(
 }
 
 pub async fn handle_v1_voice_status(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let gcx_locked = gcx.read().await;
     let voice_service = gcx_locked.voice_service.clone();
     drop(gcx_locked);
@@ -137,10 +139,11 @@ pub async fn handle_v1_voice_status(
 }
 
 pub async fn handle_v1_voice_stream_subscribe(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(session_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let language = params.get("language").cloned();
 
     let gcx_locked = gcx.read().await;
@@ -180,10 +183,11 @@ pub async fn handle_v1_voice_stream_subscribe(
 }
 
 pub async fn handle_v1_voice_stream_chunk(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(session_id): Path<String>,
     body: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: StreamingChunkRequest = serde_json::from_slice(&body)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 

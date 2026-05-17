@@ -1,4 +1,4 @@
-use axum::extract::{Extension, State};
+use axum::extract::State;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::response::Result;
@@ -716,8 +716,8 @@ async fn install_marketplace_action(
         MarketKind::Mcp => {
             let body = serde_json::to_vec(&serde_json::json!({ "server_id": item_id }))
                 .map_err(|e| e.to_string())?;
-            crate::http::routers::v1::mcp_marketplace::handle_v1_mcp_marketplace_install(
-                Extension(gcx),
+            crate::http::routers::v1::mcp_marketplace::install_mcp_marketplace_server(
+                gcx,
                 hyper::body::Bytes::from(body),
             )
             .await

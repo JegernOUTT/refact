@@ -1,13 +1,14 @@
-use axum::Extension;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 
-use crate::custom_error::ScratchError;
+use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
+use crate::custom_error::ScratchError;
 use crate::chat::system_context::{
     SystemInfo, find_instruction_files, find_project_configs, gather_git_info, detect_environments,
     generate_compact_project_tree, generate_git_info_prompt, generate_environment_instructions,
@@ -44,16 +45,18 @@ pub struct ProjectInformationPreviewResponse {
 }
 
 pub async fn handle_v1_project_information_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<ProjectInformationConfig>, ScratchError> {
+    let gcx = app.gcx.clone();
     let config = load_project_information_config(gcx).await;
     Ok(axum::Json(config))
 }
 
 pub async fn handle_v1_project_information_save(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(mut config): axum::Json<ProjectInformationConfig>,
 ) -> Result<StatusCode, ScratchError> {
+    let gcx = app.gcx.clone();
     let project_roots = get_project_dirs(gcx.clone()).await;
     config.sections.instruction_files.overrides =
         sanitize_overrides(&config.sections.instruction_files.overrides, &project_roots);
@@ -100,9 +103,10 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> TruncateResult {
 }
 
 pub async fn handle_v1_project_information_preview(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(config): axum::Json<ProjectInformationConfig>,
 ) -> Result<axum::Json<ProjectInformationPreviewResponse>, ScratchError> {
+    let gcx = app.gcx.clone();
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
 

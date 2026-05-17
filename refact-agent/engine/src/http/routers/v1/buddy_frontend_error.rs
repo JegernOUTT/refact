@@ -1,17 +1,17 @@
 use axum::Extension;
 use axum::http::HeaderMap;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::buddy::actor::redact_sensitive;
 use crate::buddy::diagnostics::{classify_error, DiagnosticContext, DiagnosticSeverity};
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 const RATE_LIMIT_PER_MIN: usize = 60;
 
@@ -48,11 +48,12 @@ pub struct FrontendErrorRequest {
 }
 
 pub async fn handle_v1_buddy_frontend_error(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Extension(rl): Extension<Arc<FrontendErrorRateLimiter>>,
     headers: HeaderMap,
     axum::Json(req): axum::Json<FrontendErrorRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let ip_key = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())

@@ -1,15 +1,16 @@
-use axum::Extension;
 use axum::extract::Path;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::buddy::drafts::DraftCreateError;
 use crate::buddy::types::{BuddyDraft, DraftKind};
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 #[derive(Debug, Deserialize)]
 pub struct DraftCreateRequest {
@@ -23,58 +24,66 @@ fn draft_create_error(err: DraftCreateError) -> ScratchError {
 }
 
 pub async fn handle_v1_buddy_draft_create_skill(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::Skill).await
 }
 
 pub async fn handle_v1_buddy_draft_create_command(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::Command).await
 }
 
 pub async fn handle_v1_buddy_draft_create_subagent(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::Delegate).await
 }
 
 pub async fn handle_v1_buddy_draft_create_mode(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::Mode).await
 }
 
 pub async fn handle_v1_buddy_draft_create_agents_md(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::AgentsMd).await
 }
 
 pub async fn handle_v1_buddy_draft_create_defaults(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::DefaultsModel).await
 }
 
 pub async fn handle_v1_buddy_draft_create_hook(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::Hook).await
 }
 
 pub async fn handle_v1_buddy_draft_create_pulse_report(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     axum::Json(req): axum::Json<DraftCreateRequest>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     create_draft(gcx, req, DraftKind::PulseReport).await
 }
 
@@ -98,9 +107,10 @@ async fn create_draft(
 }
 
 pub async fn handle_v1_buddy_draft_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     let svc = lock.as_ref().ok_or_else(|| {
@@ -116,9 +126,10 @@ pub async fn handle_v1_buddy_draft_get(
 }
 
 pub async fn handle_v1_buddy_draft_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {

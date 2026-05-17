@@ -1,19 +1,17 @@
-use std::sync::Arc;
 
-use axum::Extension;
 use axum::extract::Query;
 use axum::response::Json;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::ext::extensions_marketplace::{
     InstallMarketplaceItemRequest, MarketplaceKind, install_marketplace_item,
     list_marketplace_items,
 };
-use crate::global_context::GlobalContext;
 
 #[derive(Debug, Deserialize)]
 pub struct CommandsMarketplaceQuery {
@@ -22,9 +20,10 @@ pub struct CommandsMarketplaceQuery {
 }
 
 pub async fn handle_v1_commands_marketplace_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(params): Query<CommandsMarketplaceQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let (items, sources) = list_marketplace_items(gcx.clone(), MarketplaceKind::Command)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -48,9 +47,10 @@ pub async fn handle_v1_commands_marketplace_get(
 }
 
 pub async fn handle_v1_commands_marketplace_install(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<InstallMarketplaceItemRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
     let installed = install_marketplace_item(gcx, MarketplaceKind::Command, req)
@@ -100,7 +100,7 @@ mod tests {
         .unwrap();
 
         let result =
-            handle_v1_commands_marketplace_install(Extension(gcx), hyper::body::Bytes::from(body))
+            handle_v1_commands_marketplace_install(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), hyper::body::Bytes::from(body))
                 .await;
         assert!(result.is_err());
         let err = result.unwrap_err();

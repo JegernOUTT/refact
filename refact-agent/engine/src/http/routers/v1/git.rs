@@ -13,6 +13,7 @@ use url::Url;
 use crate::call_validation::ChatMeta;
 use crate::files_correction::{deserialize_path, serialize_path};
 use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
 use crate::git::{CommitInfo, FileChange};
 use crate::git::operations::{get_configured_author_email_and_name, stage_changes};
@@ -20,7 +21,6 @@ use crate::git::checkpoints::{
     preview_changes_for_workspace_checkpoint, preview_changes_for_workspace_checkpoint_for_root,
     restore_workspace_checkpoint, restore_workspace_checkpoint_for_root, Checkpoint,
 };
-use crate::global_context::GlobalContext;
 use crate::worktrees::types::WorktreeMeta;
 
 #[derive(Serialize, Deserialize, Debug)]

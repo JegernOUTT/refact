@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use axum::Extension;
 use axum::response::Response;
+use axum::extract::State;
 use hyper::{Body, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock as ARwLock, broadcast, mpsc};
@@ -12,10 +12,11 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::buddy::events::BuddyEvent;
 use crate::chat::{TrajectoryEvent, TrajectoryMeta, list_all_trajectories_meta};
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::http::routers::v1::tasks::list_tasks_with_session_state;
 use crate::tasks::events::TaskEvent;
 use crate::tasks::types::TaskMeta;
@@ -508,8 +509,9 @@ fn push_or_emit_live_event(
 }
 
 pub async fn handle_sidebar_subscribe(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let (trajectory_rx, workspace_changed_rx, task_rx, notification_rx, buddy_rx, seq_counter) = {
         let gcx_locked = gcx.read().await;
 

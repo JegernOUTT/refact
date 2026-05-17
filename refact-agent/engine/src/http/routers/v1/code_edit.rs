@@ -1,12 +1,10 @@
+use crate::app_state::AppState;
 use crate::agentic::generate_code_edit::generate_code_edit;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use axum::http::{Response, StatusCode};
-use axum::Extension;
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 #[derive(Deserialize)]
 pub struct CodeEditPost {
@@ -22,9 +20,10 @@ pub struct CodeEditResponse {
 }
 
 pub async fn handle_v1_code_edit(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<CodeEditPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

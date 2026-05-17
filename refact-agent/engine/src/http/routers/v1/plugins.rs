@@ -1,18 +1,16 @@
-use std::sync::Arc;
-use axum::Extension;
 use axum::extract::Path;
 use axum::response::Json;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::ext::plugins::{
     add_marketplace, ensure_default_marketplaces, install_plugin, list_marketplace_plugins,
     load_plugins_db, remove_marketplace, uninstall_plugin, validate_plugin_name,
 };
-use crate::global_context::GlobalContext;
 
 #[derive(Deserialize)]
 pub struct AddMarketplaceRequest {
@@ -26,8 +24,9 @@ pub struct InstallPluginRequest {
 }
 
 pub async fn handle_list_marketplaces(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let _ = ensure_default_marketplaces(gcx.clone()).await;
     let config_dir = gcx.read().await.config_dir.clone();
     let db = load_plugins_db(&config_dir)
@@ -48,9 +47,10 @@ pub async fn handle_list_marketplaces(
 }
 
 pub async fn handle_add_marketplace(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<AddMarketplaceRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
     let mj = add_marketplace(gcx, &req.source).await.map_err(|e| {
@@ -67,9 +67,10 @@ pub async fn handle_add_marketplace(
 }
 
 pub async fn handle_delete_marketplace(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_plugin_name(&name) {
         return Err((StatusCode::BAD_REQUEST, e));
     }
@@ -80,9 +81,10 @@ pub async fn handle_delete_marketplace(
 }
 
 pub async fn handle_list_marketplace_plugins(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_plugin_name(&name) {
         return Err((StatusCode::BAD_REQUEST, e));
     }
@@ -109,9 +111,10 @@ pub async fn handle_list_marketplace_plugins(
 }
 
 pub async fn handle_install_plugin(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<InstallPluginRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
     if let Err(e) = validate_plugin_name(&req.plugin) {
@@ -143,8 +146,9 @@ pub async fn handle_install_plugin(
 }
 
 pub async fn handle_list_installed(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     let db = load_plugins_db(&config_dir)
         .await
@@ -153,9 +157,10 @@ pub async fn handle_list_installed(
 }
 
 pub async fn handle_uninstall_plugin(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     if let Err(e) = validate_plugin_name(&name) {
         return Err((StatusCode::BAD_REQUEST, e));
     }

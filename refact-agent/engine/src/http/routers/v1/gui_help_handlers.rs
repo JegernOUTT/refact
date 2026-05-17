@@ -1,14 +1,12 @@
 use std::collections::HashSet;
-use std::sync::Arc;
-use axum::Extension;
 use axum::http::Response;
+use axum::extract::State;
 use hyper::{Body, StatusCode};
 use serde::Deserialize;
-use tokio::sync::RwLock as ARwLock;
+use crate::app_state::AppState;
 use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_or_a_good_error};
 use crate::custom_error::ScratchError;
 use crate::files_correction::{correct_to_nearest_dir_path, preprocess_path_for_normalization};
-use crate::global_context::GlobalContext;
 
 #[derive(Deserialize)]
 struct ResolveShortenedPathPost {
@@ -16,9 +14,10 @@ struct ResolveShortenedPathPost {
 }
 
 pub async fn handle_v1_fullpath(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<ResolveShortenedPathPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

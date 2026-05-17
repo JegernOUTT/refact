@@ -1,14 +1,12 @@
-use std::sync::Arc;
-use axum::Extension;
 use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::body::Body;
+use axum::extract::State;
 use serde::Serialize;
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 #[derive(Serialize)]
 pub struct SkillsStatusResponse {
@@ -19,9 +17,10 @@ pub struct SkillsStatusResponse {
 }
 
 pub async fn handle_v1_skills_status(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(chat_id): Path<String>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let sessions = gcx.read().await.chat_sessions.clone();
     let session_arc = {
         let sessions_read = sessions.read().await;

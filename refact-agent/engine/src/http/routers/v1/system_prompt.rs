@@ -1,13 +1,11 @@
-use std::sync::Arc;
-use axum::Extension;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::call_validation::{ChatMessage, ChatMeta, validate_mode_for_request};
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::indexing_utils::wait_for_indexing_if_needed;
 use crate::scratchpads::chat_utils_prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
@@ -26,9 +24,10 @@ pub struct PrependSystemPromptResponse {
 }
 
 pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     wait_for_indexing_if_needed(gcx.clone()).await;
 
     let post = serde_json::from_slice::<PrependSystemPromptPost>(&body_bytes).map_err(|e| {

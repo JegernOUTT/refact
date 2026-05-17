@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, State};
 use axum::response::Json;
-use axum::Extension;
 use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::agentic::generate_commit_message::generate_commit_message_by_diff;
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{
     CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
@@ -142,9 +142,10 @@ async fn service_for_request(
 }
 
 pub async fn handle_v1_worktrees_list(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<WorktreeQuery>,
 ) -> ApiResult<WorktreeListResponse> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     service
         .list_worktrees()
@@ -154,9 +155,10 @@ pub async fn handle_v1_worktrees_list(
 }
 
 pub async fn handle_v1_worktrees_summary(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<WorktreeQuery>,
 ) -> ApiResult<WorktreeInventory> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     service
         .inspect_worktrees()
@@ -166,10 +168,11 @@ pub async fn handle_v1_worktrees_summary(
 }
 
 pub async fn handle_v1_worktrees_cleanup_dry_run(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<WorktreeQuery>,
     Json(request): Json<WorktreeCleanupRequest>,
 ) -> ApiResult<WorktreeCleanupPlan> {
+    let gcx = app.gcx.clone();
     let requested_root = request
         .source_workspace_root
         .clone()
@@ -183,10 +186,11 @@ pub async fn handle_v1_worktrees_cleanup_dry_run(
 }
 
 pub async fn handle_v1_worktrees_cleanup(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<WorktreeQuery>,
     Json(request): Json<WorktreeCleanupRequest>,
 ) -> ApiResult<WorktreeCleanupResult> {
+    let gcx = app.gcx.clone();
     let requested_root = request
         .source_workspace_root
         .clone()
@@ -200,9 +204,10 @@ pub async fn handle_v1_worktrees_cleanup(
 }
 
 pub async fn handle_v1_worktrees_create(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Json(request): Json<CreateWorktreeRequest>,
 ) -> ApiResult<CreateWorktreeResponse> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx, request.source_workspace_root.clone()).await?;
     service
         .create_worktree(request)
@@ -212,10 +217,11 @@ pub async fn handle_v1_worktrees_create(
 }
 
 pub async fn handle_v1_worktrees_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<WorktreeQuery>,
 ) -> ApiResult<WorktreeRecordView> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     service
         .get_worktree(&id)
@@ -225,10 +231,11 @@ pub async fn handle_v1_worktrees_get(
 }
 
 pub async fn handle_v1_worktrees_diff(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<WorktreeDiffQuery>,
 ) -> ApiResult<WorktreeDiffResponse> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     match query.max_patch_bytes {
         Some(max_patch_bytes) => service
@@ -245,11 +252,12 @@ pub async fn handle_v1_worktrees_diff(
 }
 
 pub async fn handle_v1_worktrees_merge(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<WorktreeQuery>,
     Json(mut request): Json<MergeWorktreeRequest>,
 ) -> ApiResult<MergeWorktreeResponse> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx.clone(), query.source_workspace_root).await?;
     if request.generate_commit_message
         && request
@@ -284,10 +292,11 @@ pub async fn handle_v1_worktrees_merge(
 }
 
 pub async fn handle_v1_worktrees_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<DeleteWorktreeQuery>,
 ) -> ApiResult<DeleteWorktreeResponse> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     service
         .delete_worktree(&id, query.delete_branch.unwrap_or(false))
@@ -297,10 +306,11 @@ pub async fn handle_v1_worktrees_delete(
 }
 
 pub async fn handle_v1_worktrees_open(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<WorktreeQuery>,
 ) -> ApiResult<OpenWorktreeResponse> {
+    let gcx = app.gcx.clone();
     let service = service_for_request(gcx, query.source_workspace_root).await?;
     service
         .open_worktree(&id)

@@ -705,7 +705,7 @@ pub mod tests {
     #[tokio::test]
     async fn app_state_from_test_gcx_clones() {
         let gcx = make_test_gcx().await;
-        let app_state = gcx.read().await.app_state(gcx.clone());
+        let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
         let cloned = app_state.clone();
 
         assert_eq!(cloned.paths.app_searchable_id, "test");

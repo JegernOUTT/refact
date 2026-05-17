@@ -1,14 +1,14 @@
 use std::path::PathBuf;
 
-use axum::Extension;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use url::Url;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::SharedGlobalContext;
 use crate::files_in_workspace;
 use crate::lsp::{
     add_workspace_root_to_set, canonical_workspace_roots, remove_workspace_root_from_set,
@@ -37,9 +37,10 @@ struct LspLikeAddFolder {
 }
 
 pub async fn handle_v1_lsp_initialize(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<LspLikeInit>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
 
@@ -91,9 +92,10 @@ pub async fn handle_v1_lsp_initialize(
 }
 
 pub async fn handle_v1_lsp_did_change(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<LspLikeDidChange>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {
@@ -111,9 +113,10 @@ pub async fn handle_v1_lsp_did_change(
 }
 
 pub async fn handle_v1_set_active_document(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<LspLikeSetActiveDocument>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {
@@ -139,9 +142,10 @@ pub async fn handle_v1_set_active_document(
 }
 
 pub async fn handle_v1_lsp_add_folder(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<LspLikeAddFolder>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {
@@ -169,9 +173,10 @@ pub async fn handle_v1_lsp_add_folder(
 }
 
 pub async fn handle_v1_lsp_remove_folder(
-    Extension(global_context): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<LspLikeAddFolder>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
     let file_path = post.uri.to_file_path().map_err(|_| {

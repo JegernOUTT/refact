@@ -9,13 +9,13 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock as ARwLock;
 
 use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
 use crate::ext::config_dirs::{CommandSource, ExtDirs, get_ext_dirs};
 use crate::ext::hooks::{HookConfig, HookEvent, load_hooks};
 use crate::ext::skills::{load_skill_full, load_skill_indices};
 use crate::ext::slash_commands::{load_slash_commands, parse_frontmatter_and_body};
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 use crate::http::routers::v1::at_commands::invalidate_slash_cache;
 use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};
 use crate::buddy::types::DraftKind;

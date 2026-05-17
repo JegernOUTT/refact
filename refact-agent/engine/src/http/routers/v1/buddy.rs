@@ -17,8 +17,8 @@ use crate::buddy::types::{BuddyActivity, BuddyCareAction, BuddyConversationEntry
 use crate::buddy::user_activity::{time_of_day_pattern, UserAction};
 use crate::buddy::voice_service::SpeechIntent;
 use crate::app_state::AppState;
-use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
+use crate::custom_error::ScratchError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuddyConversationMeta {

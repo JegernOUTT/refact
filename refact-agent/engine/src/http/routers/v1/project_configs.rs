@@ -1,13 +1,14 @@
-use axum::Extension;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::load_merged_registry;
 use crate::yaml_configs::project_configs_bootstrap::{
     global_configs_try_create_all, project_configs_ensure_dirs,
@@ -78,9 +79,10 @@ async fn validate_project_root(
 }
 
 pub async fn handle_v1_project_configs_rescan(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let request: RescanRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -154,9 +156,10 @@ pub struct CodeLensInfo {
 }
 
 pub async fn handle_v1_project_configs_bootstrap(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let request: RescanRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -196,8 +199,9 @@ pub async fn handle_v1_project_configs_bootstrap(
 }
 
 pub async fn handle_v1_project_configs_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
 
     let project_root = match dirs.first() {

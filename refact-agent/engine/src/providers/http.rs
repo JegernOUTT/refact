@@ -1,5 +1,4 @@
-use axum::extract::{Path, Query};
-use axum::Extension;
+use axum::extract::{Path, Query, State};
 use axum::http::{Response, StatusCode};
 use hyper::Body;
 use serde::{Deserialize, Serialize};
@@ -8,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};
 use crate::buddy::types::DraftKind;
 use crate::caps::model_caps::get_model_caps;
@@ -559,8 +559,9 @@ struct ProviderListResponse {
 }
 
 pub async fn handle_v1_providers_list(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let gcx_locked = gcx.read().await;
     let registry = gcx_locked.providers.read().await;
 
@@ -620,9 +621,10 @@ struct ProviderDetailResponse {
 }
 
 pub async fn handle_v1_provider_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let (registry_provider, config_dir) = {
         let gcx_locked = gcx.read().await;
@@ -683,9 +685,10 @@ struct ProviderSchemaResponse {
 }
 
 pub async fn handle_v1_provider_schema(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let schema = {
         let gcx_locked = gcx.read().await;
@@ -712,10 +715,11 @@ pub async fn handle_v1_provider_schema(
 }
 
 pub async fn handle_v1_provider_update(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let settings: serde_yaml::Value =
         if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
@@ -810,9 +814,10 @@ pub async fn handle_v1_provider_update(
 }
 
 pub async fn handle_v1_provider_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
 
     let config_dir = {
@@ -857,9 +862,10 @@ struct ProviderModelsResponse {
 }
 
 pub async fn handle_v1_provider_models(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let gcx_locked = gcx.read().await;
     let registry = gcx_locked.providers.read().await;
@@ -892,8 +898,9 @@ pub async fn handle_v1_provider_models(
 }
 
 pub async fn handle_v1_defaults_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     let defaults = ProviderDefaults::load(&config_dir)
         .await
@@ -1015,9 +1022,10 @@ async fn consume_defaults_draft(
 }
 
 pub async fn handle_v1_defaults_update(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: DefaultsUpdateRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1078,9 +1086,10 @@ impl From<&ProviderModel> for SimplifiedModel {
 }
 
 pub async fn handle_v1_models(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(params): Query<ModelsQueryParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.provider_name)?;
     let gcx_locked = gcx.read().await;
     let registry = gcx_locked.providers.read().await;
@@ -1149,9 +1158,10 @@ pub struct GoogleGeminiHealthResponse {
 /// GET /v1/providers/{name}/available-models
 /// Fetches all available models for a provider from model_caps or API
 pub async fn handle_v1_provider_available_models(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let (provider, http_client) = {
         let gcx_locked = gcx.read().await;
@@ -1229,10 +1239,11 @@ pub struct ModelProviderRequest {
 /// Enable or disable a model for a provider
 /// Body: { "model_id": "claude-3-5-sonnet", "enabled": true }
 pub async fn handle_v1_provider_model_toggle(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let request: ModelToggleRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
@@ -1262,10 +1273,11 @@ pub async fn handle_v1_provider_model_toggle(
 /// Set preferred upstream provider for a model (OpenRouter)
 /// Body: { "model_id": "openai/gpt-4.1", "selected_provider": "openai" }
 pub async fn handle_v1_provider_model_provider_update(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let request: ModelProviderRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
@@ -1301,9 +1313,10 @@ pub async fn handle_v1_provider_model_provider_update(
 
 /// GET /v1/providers/:name/models/:model_id/endpoints
 pub async fn handle_v1_openrouter_model_endpoints(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderModelPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let (provider, http_client) =
         resolve_provider_for_base(&gcx, &params.name, "openrouter").await?;
     let openrouter = downcast_provider::<OpenRouterProvider>(provider.as_ref(), "OpenRouter")?;
@@ -1340,15 +1353,17 @@ async fn openrouter_account_info_response(
 
 /// GET /v1/openrouter/account-info
 pub async fn handle_v1_openrouter_account_info(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     openrouter_account_info_response(gcx, "openrouter").await
 }
 
 pub async fn handle_v1_provider_account_info(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let identity = resolve_provider_identity(&gcx, &params.name).await?;
     if !openrouter_base_provider_supported(&identity.base_provider) {
@@ -1418,22 +1433,25 @@ async fn google_gemini_health_response(
 
 /// GET /v1/openrouter/health
 pub async fn handle_v1_openrouter_health(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     openrouter_health_response(gcx, "openrouter").await
 }
 
 /// GET /v1/google-gemini/health
 pub async fn handle_v1_google_gemini_health(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     google_gemini_health_response(gcx, "google_gemini").await
 }
 
 pub async fn handle_v1_provider_health(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let identity = resolve_provider_identity(&gcx, &params.name).await?;
     if !health_base_provider_supported(&identity.base_provider) {
@@ -1585,10 +1603,11 @@ pub struct AddCustomModelRequest {
 /// POST /v1/providers/{name}/custom-models
 /// Add a custom model to a provider
 pub async fn handle_v1_provider_add_custom_model(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let request: AddCustomModelRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
@@ -1661,10 +1680,11 @@ pub struct RemoveCustomModelRequest {
 /// Remove a custom model from a provider (preferred over DELETE with body)
 /// Body: { "model_id": "my-custom-model" }
 pub async fn handle_v1_provider_remove_custom_model_post(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     handle_v1_provider_remove_custom_model_impl(gcx, &params.name, body_bytes).await
 }
 
@@ -1673,10 +1693,11 @@ pub async fn handle_v1_provider_remove_custom_model_post(
 /// Note: Some proxies may strip DELETE request bodies. Prefer POST /custom-models/remove.
 /// Body: { "model_id": "my-custom-model" }
 pub async fn handle_v1_provider_remove_custom_model(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     handle_v1_provider_remove_custom_model_impl(gcx, &params.name, body_bytes).await
 }
 
@@ -2135,10 +2156,11 @@ async fn oauth_base_provider_for_instance(
 }
 
 pub async fn handle_v1_provider_oauth_start(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let base_provider = oauth_base_provider_for_instance(&gcx, &params.name).await?;
     match base_provider.as_str() {
@@ -2264,10 +2286,11 @@ pub struct OAuthExchangeRequest {
 }
 
 pub async fn handle_v1_provider_oauth_exchange(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let request: OAuthExchangeRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -2424,9 +2447,10 @@ pub async fn handle_v1_provider_oauth_exchange(
 }
 
 pub async fn handle_v1_provider_oauth_logout(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let base_provider = oauth_base_provider_for_instance(&gcx, &params.name).await?;
     let config_dir = gcx.read().await.config_dir.clone();
@@ -2647,10 +2671,11 @@ async fn handle_openai_codex_oauth_callback_impl(
 }
 
 pub async fn handle_v1_provider_oauth_callback(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
     Query(query): Query<OAuthCallbackParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let base_provider = oauth_base_provider_for_instance(&gcx, &params.name).await?;
     if base_provider != "openai_codex" {
@@ -2666,9 +2691,10 @@ pub async fn handle_v1_provider_oauth_callback(
 }
 
 pub async fn handle_openai_codex_auth_callback(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Query(query): Query<OAuthCallbackParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     handle_openai_codex_oauth_callback_impl(gcx, query, None).await
 }
 
@@ -2700,22 +2726,25 @@ async fn openai_codex_usage_response(
 
 /// GET /v1/claude-code/usage
 pub async fn handle_v1_claude_code_usage(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     claude_code_usage_response(gcx, "claude_code").await
 }
 
 /// GET /v1/openai-codex/usage
 pub async fn handle_v1_openai_codex_usage(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     openai_codex_usage_response(gcx, "openai_codex").await
 }
 
 pub async fn handle_v1_provider_usage(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let identity = resolve_provider_identity(&gcx, &params.name).await?;
     if !usage_base_provider_supported(&identity.base_provider) {
@@ -3228,7 +3257,7 @@ oauth_tokens:
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let config_dir = gcx.read().await.config_dir.clone();
         let response = handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -3275,7 +3304,7 @@ oauth_tokens:
     async fn provider_get_openai_alias_returns_identity_fields() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -3292,7 +3321,7 @@ oauth_tokens:
         .unwrap();
 
         let response = handle_v1_provider_get(
-            Extension(gcx),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -3325,7 +3354,7 @@ oauth_tokens:
             .await
             .unwrap();
         handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -3343,7 +3372,7 @@ oauth_tokens:
         .unwrap();
 
         let response = handle_v1_provider_model_toggle(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -3390,7 +3419,7 @@ extra_headers:
         .unwrap();
 
         let response = handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "custom_2".to_string(),
             }),
@@ -3454,7 +3483,7 @@ extra_headers:
             .await
             .unwrap();
         handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -3471,7 +3500,7 @@ extra_headers:
         .unwrap();
 
         let response = handle_v1_provider_delete(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -3531,7 +3560,7 @@ extra_headers:
         }))
         .unwrap();
         let response = handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "custom".to_string(),
             }),
@@ -3595,7 +3624,7 @@ extra_headers:
         }))
         .unwrap();
         let err = handle_v1_provider_update(
-            Extension(gcx),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "custom".to_string(),
             }),
@@ -3988,7 +4017,7 @@ extra_headers:
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let config_dir = gcx.read().await.config_dir.clone();
         handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "custom_2".to_string(),
             }),
@@ -4019,7 +4048,7 @@ extra_headers:
         }
 
         let update_auth = handle_v1_provider_update(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "custom_2".to_string(),
             }),
@@ -4121,7 +4150,7 @@ extra_headers:
         .unwrap();
 
         let err = handle_v1_provider_health(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -4131,7 +4160,7 @@ extra_headers:
         assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
 
         let err = handle_v1_provider_usage(
-            Extension(gcx),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
                 name: "openai_2".to_string(),
             }),
@@ -4155,7 +4184,7 @@ extra_headers:
         .unwrap();
 
         let err = handle_v1_openrouter_model_endpoints(
-            Extension(gcx),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderModelPathParams {
                 name: "openrouter_2".to_string(),
                 model_id: "openai/gpt-4.1".to_string(),

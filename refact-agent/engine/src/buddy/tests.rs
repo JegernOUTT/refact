@@ -4606,15 +4606,14 @@ async fn tool_buddy_create_draft_rejects_oversized_content() {
 
 #[tokio::test]
 async fn draft_create_endpoint_emits_exactly_one_created() {
-    use axum::Extension;
-    let gcx = make_gcx_with_buddy().await;
+        let gcx = make_gcx_with_buddy().await;
     let mut rx = {
         let buddy_arc = gcx.read().await.buddy.clone();
         let lock = buddy_arc.lock().await;
         lock.as_ref().unwrap().events_tx.subscribe()
     };
     let response = crate::http::routers::v1::buddy_drafts::handle_v1_buddy_draft_create_skill(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         axum::Json(crate::http::routers::v1::buddy_drafts::DraftCreateRequest {
             title: "Skill".to_string(),
             yaml_or_json: "---\nname: skill\n---\nBody".to_string(),
@@ -4635,11 +4634,10 @@ async fn draft_create_endpoint_emits_exactly_one_created() {
 
 #[tokio::test]
 async fn draft_create_endpoint_rejects_oversized_title() {
-    use axum::Extension;
-    use hyper::StatusCode;
+        use hyper::StatusCode;
     let gcx = make_gcx_with_buddy().await;
     let err = crate::http::routers::v1::buddy_drafts::handle_v1_buddy_draft_create_skill(
-        Extension(gcx),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         axum::Json(crate::http::routers::v1::buddy_drafts::DraftCreateRequest {
             title: "x".repeat(super::drafts::DRAFT_TITLE_MAX_CHARS + 1),
             yaml_or_json: "{}".to_string(),
@@ -4654,8 +4652,7 @@ async fn draft_create_endpoint_rejects_oversized_title() {
 
 #[tokio::test]
 async fn draft_delete_emits_removed_event() {
-    use axum::Extension;
-    use axum::extract::Path;
+        use axum::extract::Path;
     let gcx = make_gcx_with_buddy().await;
     let draft_id = add_draft_to_gcx(
         &gcx,
@@ -4670,7 +4667,7 @@ async fn draft_delete_emits_removed_event() {
         lock.as_ref().unwrap().events_tx.subscribe()
     };
     let _ = crate::http::routers::v1::buddy_drafts::handle_v1_buddy_draft_delete(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path(draft_id.clone()),
     )
     .await
@@ -5118,8 +5115,7 @@ async fn draft_customization_change_reads_real_editor_storage() {
 #[tokio::test]
 async fn ext_skill_save_with_command_draft_fails_and_keeps_draft() {
     use axum::extract::Path;
-    use axum::Extension;
-    use hyper::StatusCode;
+        use hyper::StatusCode;
 
     let gcx = make_gcx_with_buddy().await;
     let draft_id = add_draft_to_gcx(
@@ -5136,7 +5132,7 @@ async fn ext_skill_save_with_command_draft_fails_and_keeps_draft() {
     }))
     .unwrap();
     let response = crate::http::routers::v1::ext_management::handle_v1_ext_skill_put(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("target_skill".to_string()),
         hyper::body::Bytes::from(body),
     )
@@ -5149,8 +5145,7 @@ async fn ext_skill_save_with_command_draft_fails_and_keeps_draft() {
 #[tokio::test]
 async fn ext_skill_save_with_mismatched_draft_target_keeps_draft() {
     use axum::extract::Path;
-    use axum::Extension;
-    use hyper::StatusCode;
+        use hyper::StatusCode;
 
     let gcx = make_gcx_with_buddy().await;
     let draft_id = add_draft_to_gcx(
@@ -5168,7 +5163,7 @@ async fn ext_skill_save_with_mismatched_draft_target_keeps_draft() {
     }))
     .unwrap();
     let response = crate::http::routers::v1::ext_management::handle_v1_ext_skill_put(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("target_skill".to_string()),
         hyper::body::Bytes::from(body),
     )
@@ -5181,8 +5176,7 @@ async fn ext_skill_save_with_mismatched_draft_target_keeps_draft() {
 #[tokio::test]
 async fn raw_skill_save_rejects_mismatched_frontmatter_name() {
     use axum::extract::Path;
-    use axum::Extension;
-    use hyper::StatusCode;
+        use hyper::StatusCode;
 
     let gcx = make_gcx_with_buddy().await;
     let body = serde_json::to_vec(&serde_json::json!({
@@ -5191,7 +5185,7 @@ async fn raw_skill_save_rejects_mismatched_frontmatter_name() {
     }))
     .unwrap();
     let response = crate::http::routers::v1::ext_management::handle_v1_ext_skill_put(
-        Extension(gcx),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("target_skill".to_string()),
         hyper::body::Bytes::from(body),
     )
@@ -5202,8 +5196,7 @@ async fn raw_skill_save_rejects_mismatched_frontmatter_name() {
 
 #[tokio::test]
 async fn registry_validation_error_does_not_consume_draft() {
-    use axum::Extension;
-    use hyper::{Body, Request, StatusCode};
+        use hyper::{Body, Request, StatusCode};
     use tower::ServiceExt;
 
     let gcx = make_gcx_with_buddy().await;
@@ -5232,8 +5225,8 @@ async fn registry_validation_error_does_not_consume_draft() {
         "draft_id": draft_id.clone()
     }))
     .unwrap();
-    let app_state = gcx.read().await.app_state(gcx.clone());
-    let app = crate::http::routers::v1::make_v1_router(gcx.clone(), app_state);
+    let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let app = crate::http::routers::v1::make_v1_router(app_state.clone()).with_state(app_state);
     let response = app
         .oneshot(
             Request::builder()
@@ -5254,8 +5247,7 @@ async fn registry_validation_error_does_not_consume_draft() {
 
 #[tokio::test]
 async fn customization_delegates_route_writes_subagent_storage_and_consumes() {
-    use axum::Extension;
-    use hyper::{Body, Request, StatusCode};
+        use hyper::{Body, Request, StatusCode};
     use tower::ServiceExt;
 
     let gcx = make_gcx_with_buddy().await;
@@ -5278,8 +5270,8 @@ async fn customization_delegates_route_writes_subagent_storage_and_consumes() {
         "draft_id": draft_id.clone()
     }))
     .unwrap();
-    let app_state = gcx.read().await.app_state(gcx.clone());
-    let app = crate::http::routers::v1::make_v1_router(gcx.clone(), app_state);
+    let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let app = crate::http::routers::v1::make_v1_router(app_state.clone()).with_state(app_state);
     let response = app
         .oneshot(
             Request::builder()
@@ -5320,8 +5312,7 @@ async fn concurrent_ext_atomic_writes_use_unique_temp_files() {
 
 #[tokio::test]
 async fn customization_save_leaves_no_atomic_temp_file() {
-    use axum::Extension;
-    use hyper::{Body, Request, StatusCode};
+        use hyper::{Body, Request, StatusCode};
     use tower::ServiceExt;
 
     let gcx = make_gcx_with_buddy().await;
@@ -5336,8 +5327,8 @@ async fn customization_save_leaves_no_atomic_temp_file() {
         "scope": "global"
     }))
     .unwrap();
-    let app_state = gcx.read().await.app_state(gcx.clone());
-    let app = crate::http::routers::v1::make_v1_router(gcx, app_state);
+    let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let app = crate::http::routers::v1::make_v1_router(app_state.clone()).with_state(app_state);
     let response = app
         .oneshot(
             Request::builder()
@@ -6268,8 +6259,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
 
 #[tokio::test]
 async fn defaults_update_with_valid_draft_consumes_after_save() {
-    use axum::Extension;
-    use crate::providers::config::ProviderDefaults;
+        use crate::providers::config::ProviderDefaults;
     use crate::providers::http::handle_v1_defaults_update;
     use hyper::body::Bytes;
     use hyper::StatusCode;
@@ -6297,7 +6287,7 @@ async fn defaults_update_with_valid_draft_consumes_after_save() {
         "chat_buddy": {},
         "draft_id": draft_id.clone(),
     });
-    let response = handle_v1_defaults_update(Extension(gcx.clone()), Bytes::from(body.to_string()))
+    let response = handle_v1_defaults_update(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), Bytes::from(body.to_string()))
         .await
         .unwrap();
 
@@ -6315,8 +6305,7 @@ async fn defaults_update_with_valid_draft_consumes_after_save() {
 
 #[tokio::test]
 async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
-    use axum::Extension;
-    use crate::providers::http::handle_v1_defaults_update;
+        use crate::providers::http::handle_v1_defaults_update;
     use hyper::body::Bytes;
     use hyper::StatusCode;
 
@@ -6343,7 +6332,7 @@ async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
         "chat_buddy": {},
         "draft_id": draft_id.clone(),
     });
-    let err = handle_v1_defaults_update(Extension(gcx.clone()), Bytes::from(body.to_string()))
+    let err = handle_v1_defaults_update(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), Bytes::from(body.to_string()))
         .await
         .unwrap_err();
 
@@ -6355,8 +6344,7 @@ async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
 
 #[tokio::test]
 async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
-    use axum::Extension;
-    use crate::providers::http::handle_v1_defaults_update;
+        use crate::providers::http::handle_v1_defaults_update;
     use hyper::body::Bytes;
     use hyper::StatusCode;
 
@@ -6383,7 +6371,7 @@ async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
         "chat_buddy": {},
         "draft_id": draft_id.clone(),
     });
-    let err = handle_v1_defaults_update(Extension(gcx.clone()), Bytes::from(body.to_string()))
+    let err = handle_v1_defaults_update(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), Bytes::from(body.to_string()))
         .await
         .unwrap_err();
 
@@ -6395,8 +6383,7 @@ async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
 
 #[tokio::test]
 async fn defaults_update_without_draft_id_still_saves() {
-    use axum::Extension;
-    use crate::providers::config::ProviderDefaults;
+        use crate::providers::config::ProviderDefaults;
     use crate::providers::http::handle_v1_defaults_update;
     use hyper::body::Bytes;
     use hyper::StatusCode;
@@ -6411,7 +6398,7 @@ async fn defaults_update_without_draft_id_still_saves() {
         "chat_thinking": {},
         "chat_buddy": {}
     });
-    let response = handle_v1_defaults_update(Extension(gcx), Bytes::from(body.to_string()))
+    let response = handle_v1_defaults_update(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), Bytes::from(body.to_string()))
         .await
         .unwrap();
 
@@ -6455,8 +6442,7 @@ fn accepted_opportunity_has_resolved_at() {
 #[tokio::test]
 async fn accept_route_terminal_status_returns_409() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
     use hyper::StatusCode;
@@ -6473,7 +6459,7 @@ async fn accept_route_terminal_status_returns_409() {
     *gcx.read().await.buddy.lock().await = Some(svc);
 
     let err = handle_v1_buddy_opportunity_accept(
-        Extension(gcx),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-terminal-accept".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6485,8 +6471,7 @@ async fn accept_route_terminal_status_returns_409() {
 #[tokio::test]
 async fn accept_after_dismiss_returns_409() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, handle_v1_buddy_opportunity_dismiss, AcceptRequest,
     };
     use hyper::StatusCode;
@@ -6500,14 +6485,14 @@ async fn accept_after_dismiss_returns_409() {
     svc.add_opportunity(opp);
     *gcx.read().await.buddy.lock().await = Some(svc);
 
-    handle_v1_buddy_opportunity_dismiss(
-        Extension(gcx.clone()),
+    let _ = handle_v1_buddy_opportunity_dismiss(
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-dismiss-then-accept".to_string()),
     )
     .await
     .unwrap();
     let accept_err = handle_v1_buddy_opportunity_accept(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-dismiss-then-accept".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6515,7 +6500,7 @@ async fn accept_after_dismiss_returns_409() {
     .unwrap_err();
     assert_eq!(accept_err.status_code, StatusCode::CONFLICT);
     let dismiss_err = handle_v1_buddy_opportunity_dismiss(
-        Extension(gcx),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-dismiss-then-accept".to_string()),
     )
     .await
@@ -6526,8 +6511,7 @@ async fn accept_after_dismiss_returns_409() {
 #[tokio::test]
 async fn expired_opportunity_cannot_be_accepted() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
     use hyper::StatusCode;
@@ -6544,7 +6528,7 @@ async fn expired_opportunity_cannot_be_accepted() {
     *gcx.read().await.buddy.lock().await = Some(svc);
 
     let err = handle_v1_buddy_opportunity_accept(
-        Extension(gcx),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-expired-accept".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6578,8 +6562,7 @@ async fn resolve_opportunity_missing_id_emits_no_event() {
 #[tokio::test]
 async fn concurrent_accepts_only_one_succeeds() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
     use hyper::StatusCode;
@@ -6597,7 +6580,7 @@ async fn concurrent_accepts_only_one_succeeds() {
     let gcx2 = gcx.clone();
     let task1 = tokio::spawn(async move {
         match handle_v1_buddy_opportunity_accept(
-            Extension(gcx1),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx1.clone()).await),
             Path("opp-concurrent-accept".to_string()),
             Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
         )
@@ -6609,7 +6592,7 @@ async fn concurrent_accepts_only_one_succeeds() {
     });
     let task2 = tokio::spawn(async move {
         match handle_v1_buddy_opportunity_accept(
-            Extension(gcx2),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx2.clone()).await),
             Path("opp-concurrent-accept".to_string()),
             Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
         )
@@ -6628,8 +6611,7 @@ async fn concurrent_accepts_only_one_succeeds() {
 #[tokio::test]
 async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
 
@@ -6640,8 +6622,8 @@ async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted()
     svc.add_opportunity(opp);
     *gcx.read().await.buddy.lock().await = Some(svc);
 
-    handle_v1_buddy_opportunity_accept(
-        Extension(gcx.clone()),
+    let _ = handle_v1_buddy_opportunity_accept(
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-accept-dismiss-action".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6664,8 +6646,7 @@ async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted()
 #[tokio::test]
 async fn accept_route_with_action_index_1_returns_second_action_without_navigation_event() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::buddy::events::BuddyEvent;
+        use crate::buddy::events::BuddyEvent;
     use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
@@ -6696,7 +6677,7 @@ async fn accept_route_with_action_index_1_returns_second_action_without_navigati
     *gcx.read().await.buddy.lock().await = Some(svc);
 
     let response = handle_v1_buddy_opportunity_accept(
-        Extension(gcx),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-action-index".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 1 })),
     )
@@ -6718,8 +6699,7 @@ async fn accept_route_with_action_index_1_returns_second_action_without_navigati
 #[tokio::test]
 async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
     use hyper::StatusCode;
@@ -6736,7 +6716,7 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     *gcx.read().await.buddy.lock().await = Some(svc);
 
     let err = handle_v1_buddy_opportunity_accept(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-dispatch-fails".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6754,7 +6734,7 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     }
 
     let err = handle_v1_buddy_opportunity_accept(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-dispatch-fails".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6766,8 +6746,7 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
 #[tokio::test]
 async fn failed_marketplace_install_leaves_opportunity_retryable() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
     use hyper::StatusCode;
@@ -6783,7 +6762,7 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
     *gcx.read().await.buddy.lock().await = Some(svc);
 
     let err = handle_v1_buddy_opportunity_accept(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-marketplace-fails".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6802,7 +6781,7 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
     }
 
     let err = handle_v1_buddy_opportunity_accept(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-marketplace-fails".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -6814,8 +6793,7 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
 #[tokio::test]
 async fn successful_marketplace_install_accepts_opportunity() {
     use axum::extract::Path;
-    use axum::Extension;
-    use crate::http::routers::v1::buddy_opportunities::{
+        use crate::http::routers::v1::buddy_opportunities::{
         handle_v1_buddy_opportunity_accept, AcceptRequest,
     };
 
@@ -6830,7 +6808,7 @@ async fn successful_marketplace_install_accepts_opportunity() {
     *gcx.read().await.buddy.lock().await = Some(svc);
 
     let response = handle_v1_buddy_opportunity_accept(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         Path("opp-marketplace-ok".to_string()),
         Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
     )
@@ -7365,8 +7343,7 @@ fn cluster_opportunity_links_both_task_ids() {
 
 #[tokio::test]
 async fn target_files_persisted_through_api() {
-    use axum::Extension;
-    use crate::http::routers::v1::tasks::{handle_create_task, CreateTaskRequest};
+        use crate::http::routers::v1::tasks::{handle_create_task, CreateTaskRequest};
     use crate::tasks::storage::load_board;
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -7377,7 +7354,7 @@ async fn target_files_persisted_through_api() {
             vec![dir.path().to_path_buf()];
     }
     let meta = handle_create_task(
-        Extension(gcx.clone()),
+        axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
         axum::Json(CreateTaskRequest {
             name: "API target files".to_string(),
             target_files: vec!["src/foo.rs".to_string(), "src/bar.ts".to_string()],

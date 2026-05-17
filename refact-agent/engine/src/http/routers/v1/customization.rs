@@ -1,12 +1,10 @@
 use axum::response::Result;
-use axum::Extension;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
-use std::sync::Arc;
 use std::collections::HashMap;
-use tokio::sync::RwLock as ARwLock;
 use serde::Serialize;
 
-use crate::global_context::GlobalContext;
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::yaml_configs::customization_registry::get_project_registry;
 
@@ -26,9 +24,10 @@ struct CustomizationCompat {
 }
 
 pub async fn handle_v1_config_path(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     _body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let config_dir = global_context.read().await.config_dir.clone();
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -37,9 +36,10 @@ pub async fn handle_v1_config_path(
 }
 
 pub async fn handle_v1_customization(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     _body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let registry = get_project_registry(global_context.clone()).await;
 
     let mut system_prompts: HashMap<String, SystemPromptCompat> = HashMap::new();

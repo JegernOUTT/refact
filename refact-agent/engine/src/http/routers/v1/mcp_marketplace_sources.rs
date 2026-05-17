@@ -1,17 +1,15 @@
 #[cfg(test)]
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use axum::Extension;
 use axum::extract::Path;
 use axum::response::Json;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 pub const BUNDLED_SOURCE_ID: &str = "refact-bundled";
 pub const SMITHERY_SOURCE_ID: &str = "smithery";
@@ -161,8 +159,9 @@ pub fn source_to_api_json(source: &MarketplaceSource, removable: bool) -> Value 
 }
 
 pub async fn handle_v1_mcp_marketplace_sources_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     let cfg = load_sources(&config_dir).await;
 
@@ -187,9 +186,10 @@ pub struct AddSourceRequest {
 }
 
 pub async fn handle_v1_mcp_marketplace_sources_post(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<AddSourceRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
@@ -245,9 +245,10 @@ pub async fn handle_v1_mcp_marketplace_sources_post(
 }
 
 pub async fn handle_v1_mcp_marketplace_sources_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(source_id): Path<String>,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     if source_id == BUNDLED_SOURCE_ID {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
@@ -283,10 +284,11 @@ pub struct ConfigureSourceRequest {
 }
 
 pub async fn handle_v1_mcp_marketplace_sources_configure(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(source_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<ConfigureSourceRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 

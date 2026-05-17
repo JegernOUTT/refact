@@ -3,7 +3,6 @@ use axum::Router;
 use axum::routing::{get, post, put, patch, delete};
 
 use crate::app_state::AppState;
-use crate::global_context::SharedGlobalContext;
 use crate::http::utils::request_logging_middleware;
 use crate::http::routers::v1::code_completion::{
     handle_v1_code_completion_web, handle_v1_code_completion_prompt,
@@ -220,7 +219,7 @@ use crate::http::routers::v1::v1_browser::{
     handle_browser_annotate_result, handle_browser_annotate_clear, handle_browser_action,
 };
 
-pub fn make_v1_router(gcx: SharedGlobalContext, app_state: AppState) -> Router<AppState> {
+pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
         .route("/ping", get(handle_v1_ping))
         .route("/graceful-shutdown", get(handle_v1_graceful_shutdown))
@@ -877,6 +876,5 @@ pub fn make_v1_router(gcx: SharedGlobalContext, app_state: AppState) -> Router<A
     builder
         .layer(axum::Extension(rl))
         .layer(axum::middleware::from_fn(request_logging_middleware))
-        .layer(axum::Extension(gcx))
         .with_state(app_state)
 }

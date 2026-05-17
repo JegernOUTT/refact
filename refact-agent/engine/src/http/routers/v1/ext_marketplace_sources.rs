@@ -1,12 +1,11 @@
-use std::sync::Arc;
 
-use axum::Extension;
 use axum::extract::Path;
 use axum::response::Json;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde_json::json;
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::ext::extensions_marketplace::{
     ConfigureMarketplaceSourceRequest, ExtensionsMarketplaceSource, MarketplaceKind,
@@ -14,11 +13,11 @@ use crate::ext::extensions_marketplace::{
     delete_user_source, load_all_sources, normalize_github_source, refresh_source_cache,
     save_user_source, source_id_from_repo,
 };
-use crate::global_context::GlobalContext;
 
 pub async fn handle_v1_ext_marketplace_sources_get(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     let sources = load_all_sources(&config_dir)
         .await
@@ -27,9 +26,10 @@ pub async fn handle_v1_ext_marketplace_sources_get(
 }
 
 pub async fn handle_v1_ext_marketplace_sources_post(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<SaveMarketplaceSourceRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
     let (owner_repo, canonical_url) = normalize_github_source(&req.url)
@@ -63,9 +63,10 @@ pub async fn handle_v1_ext_marketplace_sources_post(
 }
 
 pub async fn handle_v1_ext_marketplace_sources_delete(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let config_dir = gcx.read().await.config_dir.clone();
     delete_user_source(&config_dir, &id).await.map_err(|e| {
         let status = if e.contains("cannot delete") {
@@ -81,10 +82,11 @@ pub async fn handle_v1_ext_marketplace_sources_delete(
 }
 
 pub async fn handle_v1_ext_marketplace_sources_configure(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<ConfigureMarketplaceSourceRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
     let config_dir = gcx.read().await.config_dir.clone();
@@ -102,9 +104,10 @@ pub async fn handle_v1_ext_marketplace_sources_configure(
 }
 
 pub async fn handle_v1_ext_marketplace_sources_refresh(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let (config_dir, cache_dir) = {
         let g = gcx.read().await;
         (g.config_dir.clone(), g.cache_dir.clone())
@@ -140,7 +143,7 @@ mod tests {
         .unwrap();
 
         let result = handle_v1_ext_marketplace_sources_post(
-            Extension(gcx.clone()),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             hyper::body::Bytes::from(body),
         )
         .await;
@@ -161,7 +164,7 @@ mod tests {
         .unwrap();
 
         let result =
-            handle_v1_ext_marketplace_sources_post(Extension(gcx), hyper::body::Bytes::from(body))
+            handle_v1_ext_marketplace_sources_post(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), hyper::body::Bytes::from(body))
                 .await;
         assert!(result.is_err());
     }

@@ -1,17 +1,18 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use axum::Extension;
 use axum::extract::Path;
 use axum::http::{Response, StatusCode};
 use axum::response::Json;
+use axum::extract::State;
 use hyper::Body;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{RwLock as ARwLock, broadcast};
 use chrono::Utc;
 
-use crate::custom_error::ScratchError;
+use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
+use crate::custom_error::ScratchError;
 use crate::tasks::types::{TaskMeta, TaskBoard, BoardCard, StatusUpdate, TaskStatus, TrajectoryInfo};
 use crate::chat::trajectories::TrajectoryEvent;
 use crate::chat::types::SessionState;
@@ -154,8 +155,9 @@ pub async fn list_tasks_with_session_state(
 }
 
 pub async fn handle_list_tasks(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Json<Vec<TaskMeta>>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let tasks = list_tasks_with_session_state(gcx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -163,9 +165,10 @@ pub async fn handle_list_tasks(
 }
 
 pub async fn handle_create_task(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let meta = storage::create_task(gcx.clone(), &req.name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -202,9 +205,10 @@ pub async fn handle_create_task(
 }
 
 pub async fn handle_get_task(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let meta = storage::load_task_meta(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -224,9 +228,10 @@ pub async fn handle_get_task(
 }
 
 pub async fn handle_delete_task(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     storage::delete_task(gcx, &task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -234,9 +239,10 @@ pub async fn handle_delete_task(
 }
 
 pub async fn handle_get_board(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<TaskBoard>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let board = storage::load_board(gcx, &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -244,10 +250,11 @@ pub async fn handle_get_board(
 }
 
 pub async fn handle_patch_board(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
     Json(req): Json<UpdateBoardRequest>,
 ) -> Result<Json<TaskBoard>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let mut board = storage::load_board(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -403,9 +410,10 @@ pub async fn handle_patch_board(
 }
 
 pub async fn handle_get_planner_instructions(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let content = storage::load_planner_instructions(gcx, &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -418,10 +426,11 @@ pub struct SetPlannerInstructionsRequest {
 }
 
 pub async fn handle_set_planner_instructions(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
     Json(req): Json<SetPlannerInstructionsRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     storage::save_planner_instructions(gcx, &task_id, &req.content)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -429,9 +438,10 @@ pub async fn handle_set_planner_instructions(
 }
 
 pub async fn handle_get_ready_cards(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let board = storage::load_board(gcx, &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -440,10 +450,11 @@ pub async fn handle_get_ready_cards(
 }
 
 pub async fn handle_update_task_status(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
     Json(req): Json<UpdateTaskStatusRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let mut meta = storage::load_task_meta(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -539,10 +550,11 @@ pub struct UpdateTaskMetaRequest {
 }
 
 pub async fn handle_update_task_meta(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
     Json(req): Json<UpdateTaskMetaRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let mut meta = storage::load_task_meta(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -574,9 +586,10 @@ pub async fn handle_update_task_meta(
 }
 
 pub async fn handle_list_task_trajectories(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path((task_id, role)): Path<(String, String)>,
 ) -> Result<Json<Vec<TrajectoryInfo>>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     let trajectories = storage::list_task_trajectories(gcx, &task_id, &role, None)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -584,9 +597,10 @@ pub async fn handle_list_task_trajectories(
 }
 
 pub async fn handle_create_planner_chat(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     storage::load_task_meta(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -640,9 +654,10 @@ async fn planner_agent_refs(
 }
 
 pub async fn handle_delete_planner_chat(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path((task_id, chat_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let gcx = app.gcx.clone();
     storage::load_task_meta(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -729,8 +744,9 @@ pub async fn handle_delete_planner_chat(
 }
 
 pub async fn handle_tasks_subscribe(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let (rx, seq_counter, tasks) = {
         let gcx_locked = gcx.read().await;
         let rx = match &gcx_locked.task_events_tx {

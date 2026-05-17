@@ -1,14 +1,13 @@
-use std::sync::Arc;
-use axum::Extension;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::call_validation::{ChatMessage, ChatMeta, is_agentic_mode_id, validate_mode_for_request};
 use crate::custom_error::ScratchError;
 use crate::caps::resolve_chat_model;
-use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
+use crate::global_context::try_load_caps_quickly_if_not_present;
 use crate::integrations::go_to_configuration_message;
 use crate::agentic::generate_follow_up_message::generate_follow_up_message;
 use crate::git::commit_info::{get_commit_information_from_current_changes, generate_commit_messages};
@@ -71,9 +70,10 @@ fn last_message_stripped_assistant(messages: &[ChatMessage]) -> bool {
 }
 
 pub async fn handle_v1_links(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<LinksPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

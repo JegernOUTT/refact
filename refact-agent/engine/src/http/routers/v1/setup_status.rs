@@ -1,13 +1,11 @@
-use axum::Extension;
 use axum::response::Result;
+use axum::extract::State;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 
 #[derive(Serialize)]
 pub struct SetupStatusResponse {
@@ -40,8 +38,9 @@ async fn path_exists(path: PathBuf) -> bool {
 }
 
 pub async fn handle_v1_setup_status(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<SetupStatusResponse>, ScratchError> {
+    let gcx = app.gcx.clone();
     let project_dirs = get_project_dirs(gcx).await;
     let project_root = first_project_root(&project_dirs);
 

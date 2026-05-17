@@ -1,4 +1,5 @@
 use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use std::collections::HashSet;
 use std::path::{Component, Path as FilePath, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -12,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
-use crate::global_context::GlobalContext;
 use crate::memories::memories_search;
 use crate::subchat::{resolve_subchat_config, run_subchat};
 use crate::yaml_configs::customization_registry::get_subagent_config;

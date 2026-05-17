@@ -1,14 +1,12 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio_tar::ArchiveBuilder;
-use axum::Extension;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SyncFilesExtractTarPost {
@@ -17,7 +15,7 @@ pub struct SyncFilesExtractTarPost {
 }
 
 pub async fn handle_v1_sync_files_extract_tar(
-    Extension(_gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(_app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let post = serde_json::from_slice::<SyncFilesExtractTarPost>(&body_bytes).map_err(|e| {

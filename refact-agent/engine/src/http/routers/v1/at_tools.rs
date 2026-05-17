@@ -1,11 +1,13 @@
 use std::sync::Arc;
-use axum::{Extension, Json};
+use axum::Json;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 
+use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
     ChatMessage, ChatMeta, ChatToolCall, PostprocessSettings, SubchatParameters,
@@ -18,7 +20,6 @@ use crate::tools::tools_description::{
 };
 use crate::tools::tools_list::{get_available_tool_groups, get_available_tools};
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ToolsPermissionCheckPost {
@@ -79,8 +80,9 @@ pub struct ToolGroupResponse {
 }
 
 pub async fn handle_v1_get_tools(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Json<Vec<ToolGroupResponse>> {
+    let gcx = app.gcx.clone();
     let tool_groups = get_available_tool_groups(gcx.clone()).await;
 
     let tool_groups: Vec<ToolGroupResponse> = tool_groups
@@ -165,9 +167,10 @@ pub async fn handle_v1_post_tools(
 }
 
 pub async fn handle_v1_tools_check_if_confirmation_needed(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     fn reply(pause: bool, pause_reasons: &Vec<PauseReason>) -> Response<Body> {
         let body = serde_json::json!({
             "pause": pause,
@@ -278,9 +281,10 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
 }
 
 pub async fn handle_v1_tools_execute(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     wait_for_indexing_if_needed(gcx.clone()).await;
 
     let tools_execute_post =

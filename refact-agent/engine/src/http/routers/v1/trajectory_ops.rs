@@ -1,12 +1,14 @@
 use std::sync::Arc;
 use axum::extract::Path;
 use axum::http::{Response, StatusCode};
-use axum::Extension;
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use uuid::Uuid;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::chat::trajectory_ops::{
     CompressOptions, HandoffOptions, TransformStats, compress_in_place, handoff_select,
     sanitize_messages_for_new_thread,
@@ -19,7 +21,6 @@ use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::trajectories::TrajectorySnapshot;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 #[derive(Deserialize)]
 pub struct TransformRequest {
@@ -131,10 +132,11 @@ fn describe_handoff_actions(opts: &HandoffOptions) -> Vec<String> {
 }
 
 pub async fn handle_transform_preview(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: TransformRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -164,10 +166,11 @@ pub async fn handle_transform_preview(
 }
 
 pub async fn handle_transform_apply(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: TransformRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -213,10 +216,11 @@ pub async fn handle_transform_apply(
 }
 
 pub async fn handle_handoff_preview(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: HandoffRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -248,10 +252,11 @@ pub async fn handle_handoff_preview(
 }
 
 pub async fn handle_handoff_apply(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: HandoffRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -368,10 +373,11 @@ async fn save_trajectory_snapshot_with_parent(
 }
 
 pub async fn handle_mode_transition_apply(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: ModeTransitionApplyRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
@@ -480,10 +486,11 @@ pub async fn handle_mode_transition_apply(
 }
 
 pub async fn handle_planner_from_transition(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     Path(task_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req: PlannerFromTransitionRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 

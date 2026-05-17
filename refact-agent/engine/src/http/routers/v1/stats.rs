@@ -1,11 +1,11 @@
-use axum::Extension;
 use axum::extract::Query;
 use axum::response::Result;
+use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::Deserialize;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::SharedGlobalContext;
 use crate::stats::reader::{aggregate_summary, read_stats_events_from_dirs};
 
 #[derive(Deserialize)]
@@ -35,9 +35,10 @@ struct EventsResponse<'a> {
 }
 
 pub async fn handle_v1_stats_llm_summary(
-    Extension(gcx): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     Query(params): Query<StatsQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let stats_dirs = crate::stats::get_stats_dirs_for_read(gcx).await;
     let from = params.from.as_deref();
     let to = params.to.as_deref();
@@ -57,9 +58,10 @@ pub async fn handle_v1_stats_llm_summary(
 }
 
 pub async fn handle_v1_stats_llm_events(
-    Extension(gcx): Extension<SharedGlobalContext>,
+    State(app): State<AppState>,
     Query(params): Query<StatsEventsQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let stats_dirs = crate::stats::get_stats_dirs_for_read(gcx).await;
     let from = params.from.as_deref();
     let to = params.to.as_deref();

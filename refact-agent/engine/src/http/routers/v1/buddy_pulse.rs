@@ -1,15 +1,14 @@
-use axum::Extension;
 use axum::response::Result;
-use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
+use axum::extract::State;
 
+use crate::app_state::AppState;
 use crate::buddy::types::BuddyPulse;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 
 pub async fn handle_v1_buddy_pulse(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<axum::Json<BuddyPulse>, ScratchError> {
+    let gcx = app.gcx.clone();
     let buddy_arc = gcx.read().await.buddy.clone();
     let lock = buddy_arc.lock().await;
     let pulse = lock

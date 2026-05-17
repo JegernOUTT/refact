@@ -346,8 +346,7 @@ fn format_window(start: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::Extension;
-    use chrono::TimeZone;
+        use chrono::TimeZone;
     use hyper::{Body, Request, StatusCode};
     use tower::ServiceExt;
 
@@ -452,8 +451,8 @@ mod tests {
     #[tokio::test]
     async fn post_user_action_endpoint_writes_to_ring() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app_state = gcx.read().await.app_state(gcx.clone());
-        let app = crate::http::routers::v1::make_v1_router(gcx.clone(), app_state);
+        let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let app = crate::http::routers::v1::make_v1_router(app_state.clone()).with_state(app_state);
         let body = serde_json::to_vec(&UserAction::ChatStarted {
             chat_id: "chat-1".to_string(),
             first_user_text_preview: "hello".to_string(),

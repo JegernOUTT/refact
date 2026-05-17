@@ -1,14 +1,15 @@
 use std::sync::Arc;
-use axum::Extension;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use base64::Engine;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::chat::types::{BrowserTabInfo, ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::integrations::browser_runtime::{
     BrowserRuntime, compute_frame_hash, ensure_injection_into_tab, get_browser_profile_dir,
     register_browser_runtime, remove_browser_runtime, find_runtime_by_chat_id,
@@ -101,9 +102,10 @@ struct AccessibilityNode {
 }
 
 pub async fn handle_browser_start(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -253,9 +255,10 @@ pub async fn handle_browser_start(
 }
 
 pub async fn handle_browser_stop(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -285,9 +288,10 @@ pub async fn handle_browser_stop(
 }
 
 pub async fn handle_browser_screenshot(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ScreenshotBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -402,9 +406,10 @@ fn resize_screenshot(data: &[u8], max_dim: u32, mime: &str) -> Result<Vec<u8>, S
 }
 
 pub async fn handle_browser_context(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ContextBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -539,9 +544,10 @@ pub async fn handle_browser_context(
 }
 
 pub async fn handle_browser_context_commit(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -570,9 +576,10 @@ pub async fn handle_browser_context_commit(
 }
 
 pub async fn handle_browser_element_pick(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -652,9 +659,10 @@ pub async fn handle_browser_element_pick(
 }
 
 pub async fn handle_browser_element_pick_result(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -713,9 +721,10 @@ pub async fn handle_browser_element_pick_result(
 }
 
 pub async fn handle_browser_annotate_start(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -972,9 +981,10 @@ pub async fn handle_browser_annotate_start(
 }
 
 pub async fn handle_browser_annotate_result(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1021,9 +1031,10 @@ pub async fn handle_browser_annotate_result(
 }
 
 pub async fn handle_browser_annotate_clear(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1087,9 +1098,10 @@ pub async fn handle_browser_annotate_clear(
 }
 
 pub async fn handle_browser_curl(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: CurlBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1141,9 +1153,10 @@ fn format_curl_minimal(entry: &crate::integrations::browser_types::NetworkEntry)
 }
 
 pub async fn handle_browser_eval(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: EvalBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1223,9 +1236,10 @@ pub async fn handle_browser_eval(
 }
 
 pub async fn handle_browser_inject_css(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: InjectCssBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1286,9 +1300,10 @@ pub async fn handle_browser_inject_css(
 }
 
 pub async fn handle_browser_remove_css(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: RemoveCssBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1336,9 +1351,10 @@ pub async fn handle_browser_remove_css(
 }
 
 pub async fn handle_browser_dom_snapshot(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: DomSnapshotBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1427,9 +1443,10 @@ pub async fn handle_browser_dom_snapshot(
 }
 
 pub async fn handle_browser_accessibility(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1500,9 +1517,10 @@ pub async fn handle_browser_accessibility(
 }
 
 pub async fn handle_browser_record_animation(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: RecordAnimationBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1588,9 +1606,10 @@ pub async fn handle_browser_record_animation(
 }
 
 pub async fn handle_browser_handoff(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: HandoffBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1650,9 +1669,10 @@ pub async fn handle_browser_handoff(
 }
 
 pub async fn handle_browser_status(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post: ChatIdBody = serde_json::from_slice(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1700,9 +1720,10 @@ pub async fn handle_browser_status(
 }
 
 pub async fn handle_browser_action(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     #[derive(Deserialize)]
     struct ActionBody {
         chat_id: String,
@@ -2091,8 +2112,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use axum::Extension;
-    use hyper::body::to_bytes;
+        use hyper::body::to_bytes;
     use tower::ServiceExt;
 
     #[test]
@@ -2158,8 +2178,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_browser_action_route_rejects_invalid_json() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app_state = gcx.read().await.app_state(gcx.clone());
-        let router = crate::http::routers::make_refact_http_server(gcx, app_state);
+        let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let router = crate::http::routers::make_refact_http_server(app_state);
 
         let response = router
             .oneshot(
@@ -2184,8 +2204,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_browser_action_route_returns_not_found_without_runtime() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app_state = gcx.read().await.app_state(gcx.clone());
-        let router = crate::http::routers::make_refact_http_server(gcx, app_state);
+        let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let router = crate::http::routers::make_refact_http_server(app_state);
 
         let response = router
             .oneshot(

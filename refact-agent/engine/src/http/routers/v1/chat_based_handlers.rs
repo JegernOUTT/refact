@@ -1,11 +1,9 @@
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use axum::http::{Response, StatusCode};
-use axum::Extension;
+use axum::extract::State;
 use hyper::Body;
 use serde::Deserialize;
-use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 use crate::agentic::generate_commit_message::generate_commit_message_by_diff;
 use crate::agentic::compress_trajectory::compress_trajectory;
 use crate::call_validation::ChatMessage;
@@ -18,9 +16,10 @@ struct CommitMessageFromDiffPost {
 }
 
 pub async fn handle_v1_commit_message_from_diff(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<CommitMessageFromDiffPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -48,9 +47,10 @@ struct CompressTrajectoryPost {
 }
 
 pub async fn handle_v1_trajectory_compress(
-    Extension(global_context): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let global_context = app.gcx.clone();
     let post = serde_json::from_slice::<CompressTrajectoryPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

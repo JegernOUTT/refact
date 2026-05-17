@@ -1,18 +1,19 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use axum::Extension;
 use axum::http::{Response, StatusCode};
+use axum::extract::State;
 use hyper::Body;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock as ARwLock;
 use chrono::Local;
 
+use crate::app_state::AppState;
+use crate::global_context::GlobalContext;
 use crate::buddy::memory_lifecycle::parse_memory_lifecycle_status;
 use crate::custom_error::ScratchError;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
-use crate::global_context::GlobalContext;
 use crate::knowledge_graph::{KnowledgeFrontmatter, build_knowledge_graph};
 use crate::memories::{normalize_memory_tags, rewrite_memory_document};
 
@@ -233,9 +234,10 @@ async fn validate_knowledge_path(
 }
 
 pub async fn handle_v1_knowledge_update_memory(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<UpdateMemoryPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -324,8 +326,7 @@ pub async fn handle_v1_knowledge_update_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::Extension;
-    use hyper::body::Bytes;
+        use hyper::body::Bytes;
     use serde_json::json;
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -406,7 +407,7 @@ mod tests {
         status: &str,
     ) -> Result<Response<Body>, ScratchError> {
         handle_v1_knowledge_update_memory(
-            Extension(gcx),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Bytes::from(
                 json!({
                     "file_path": path.to_string_lossy(),
@@ -425,7 +426,7 @@ mod tests {
         archive: bool,
     ) -> Result<Response<Body>, ScratchError> {
         handle_v1_knowledge_delete_memory(
-            Extension(gcx),
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Bytes::from(
                 json!({
                     "file_path": path.to_string_lossy(),
@@ -758,9 +759,10 @@ mod tests {
 }
 
 pub async fn handle_v1_knowledge_delete_memory(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
     let post = serde_json::from_slice::<DeleteMemoryPost>(&body_bytes).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

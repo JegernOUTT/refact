@@ -1,14 +1,12 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use axum::Extension;
 use axum::response::Json;
+use axum::extract::State;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::integrations::mcp::mcp_naming;
 
 const EXPORT_VERSION: u32 = 1;
@@ -110,9 +108,10 @@ pub struct ExportRequest {
 }
 
 pub async fn handle_v1_mcp_export(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<ExportRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
@@ -241,9 +240,10 @@ fn apply_secrets_to_config(config: &mut HashMap<String, Value>, secrets: &HashMa
 }
 
 pub async fn handle_v1_mcp_import(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<ImportRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
@@ -324,8 +324,9 @@ pub async fn handle_v1_mcp_import(
 }
 
 pub async fn handle_v1_mcp_project_config(
-    Extension(gcx): Extension<Arc<ARwLock<GlobalContext>>>,
+    State(app): State<AppState>,
 ) -> Result<Json<Value>, ScratchError> {
+    let gcx = app.gcx.clone();
     let workspace_folders = {
         let gcx_locked = gcx.read().await;
         let folders = gcx_locked
