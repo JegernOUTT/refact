@@ -12,6 +12,7 @@ Axum (HTTP), tower-lsp (LSP), tree-sitter (AST), SQLite + vec0 (VecDB), LMDB/Hee
 cargo build --release                    # binary at target/release/refact-lsp
 cargo build --release --features voice   # with Whisper transcription
 cargo test --lib && cargo test --doc
+bash tools/compile_bench.sh               # compile-time before/after benchmark
 ```
 
 Release profile: `opt-level = "z"`, `lto = true`, `strip = true`, `codegen-units = 1`.
