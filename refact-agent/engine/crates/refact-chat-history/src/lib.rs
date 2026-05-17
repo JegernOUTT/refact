@@ -1,2 +1,9 @@
+pub mod config;
+pub mod content;
 pub mod history_limit;
+pub mod openai_merge;
+pub mod prompt_snippets;
+pub mod retry_policy;
+pub mod tool_call_recovery;
+pub mod tool_call_recovery_oss;
 pub mod trajectory_ops;
