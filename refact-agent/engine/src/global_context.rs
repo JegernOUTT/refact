@@ -277,6 +277,14 @@ impl PathsAccess for GlobalContext {
     fn config_dir(&self) -> PathBuf {
         self.config_dir.clone()
     }
+
+    fn workspace_folders(&self) -> Vec<PathBuf> {
+        self.documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .clone()
+    }
 }
 
 impl HttpClientAccess for GlobalContext {

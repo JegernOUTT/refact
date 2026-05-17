@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
-use crate::agentic::mode_transition::{assemble_new_chat, ParsedDecisions};
+use crate::agentic::mode_transition::{AgenticPathContext, ParsedDecisions, assemble_new_chat};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::get_or_create_session_with_trajectory;
@@ -239,7 +239,11 @@ impl Tool for ToolHandoffToMode {
 
         apply_overrides(&mut decisions, args);
 
-        let new_messages = assemble_new_chat(gcx.clone(), &messages, &decisions)
+        let path_context = {
+            let gcx_lock = gcx.read().await;
+            AgenticPathContext::from_context(&*gcx_lock)
+        };
+        let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
             .await
             .map_err(|e| format!("handoff assembly failed: {}", e))?;
 

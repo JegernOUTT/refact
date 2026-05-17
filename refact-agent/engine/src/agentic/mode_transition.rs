@@ -19,7 +19,10 @@ pub use refact_agentic::mode_transition::{
     truncate_utf8,
 };
 
+use std::path::PathBuf;
 use std::sync::Arc;
+
+use refact_context_api::PathsAccess;
 use tokio::sync::RwLock as ARwLock;
 
 use crate::call_validation::{ChatContent, ChatMessage};
@@ -28,6 +31,37 @@ use crate::subchat::run_subchat_once;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
 const SUBAGENT_ID: &str = "mode_transition";
+
+#[derive(Clone, Debug)]
+pub struct AgenticPathContext {
+    cache_dir: PathBuf,
+    config_dir: PathBuf,
+    workspace_folders: Vec<PathBuf>,
+}
+
+impl AgenticPathContext {
+    pub fn from_context<T: PathsAccess + ?Sized>(context: &T) -> Self {
+        Self {
+            cache_dir: context.cache_dir(),
+            config_dir: context.config_dir(),
+            workspace_folders: context.workspace_folders(),
+        }
+    }
+}
+
+impl PathsAccess for AgenticPathContext {
+    fn cache_dir(&self) -> PathBuf {
+        self.cache_dir.clone()
+    }
+
+    fn config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
+
+    fn workspace_folders(&self) -> Vec<PathBuf> {
+        self.workspace_folders.clone()
+    }
+}
 
 pub async fn analyze_mode_transition(
     gcx: Arc<ARwLock<GlobalContext>>,
@@ -92,12 +126,12 @@ pub async fn analyze_mode_transition(
     Ok(parse_llm_response(&response_text))
 }
 
-pub async fn assemble_new_chat(
-    gcx: Arc<ARwLock<GlobalContext>>,
+pub async fn assemble_new_chat<T: PathsAccess + ?Sized>(
+    context: &T,
     original_messages: &[ChatMessage],
     decisions: &ParsedDecisions,
 ) -> Result<Vec<ChatMessage>, String> {
-    let workspace_dirs = crate::files_correction::get_project_dirs(gcx).await;
+    let workspace_dirs = context.workspace_folders();
     assemble_new_chat_pure(original_messages, decisions, &workspace_dirs).await
 }
 
@@ -106,11 +140,35 @@ mod tests {
     use super::*;
     use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 
+    struct TestPaths {
+        workspace_folders: Vec<PathBuf>,
+    }
+
+    impl TestPaths {
+        fn new(workspace_folders: Vec<PathBuf>) -> Self {
+            Self { workspace_folders }
+        }
+    }
+
+    impl PathsAccess for TestPaths {
+        fn cache_dir(&self) -> PathBuf {
+            PathBuf::new()
+        }
+
+        fn config_dir(&self) -> PathBuf {
+            PathBuf::new()
+        }
+
+        fn workspace_folders(&self) -> Vec<PathBuf> {
+            self.workspace_folders.clone()
+        }
+    }
+
     #[tokio::test]
     async fn test_assemble_new_chat_limits_message_budget_and_images() {
         use crate::scratchpads::multimodality::MultimodalElement;
 
-        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let paths = TestPaths::new(vec![]);
         let original_messages = vec![
             ChatMessage {
                 role: "user".to_string(),
@@ -154,7 +212,7 @@ mod tests {
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(gcx, &original_messages, &decisions)
+        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions)
             .await
             .unwrap();
         let message_symbols = new_messages
@@ -179,12 +237,7 @@ mod tests {
         )
         .unwrap();
 
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
-        }
+        let paths = TestPaths::new(vec![dir.path().to_path_buf()]);
 
         let original_messages = vec![
             ChatMessage {
@@ -210,7 +263,7 @@ mod tests {
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(gcx, &original_messages, &decisions)
+        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions)
             .await
             .unwrap();
         let file_symbols = new_messages

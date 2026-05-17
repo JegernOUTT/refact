@@ -9,6 +9,7 @@ pub trait ShutdownAccess: Send + Sync {
 pub trait PathsAccess: Send + Sync {
     fn cache_dir(&self) -> PathBuf;
     fn config_dir(&self) -> PathBuf;
+    fn workspace_folders(&self) -> Vec<PathBuf>;
 }
 
 #[cfg(feature = "http-client")]

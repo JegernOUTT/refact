@@ -12,7 +12,9 @@ use crate::chat::trajectory_ops::{
     sanitize_messages_for_new_thread,
 };
 use crate::integrations::browser_runtime::find_runtime_by_chat_id;
-use crate::agentic::mode_transition::{analyze_mode_transition, assemble_new_chat};
+use crate::agentic::mode_transition::{
+    AgenticPathContext, analyze_mode_transition, assemble_new_chat,
+};
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::trajectories::TrajectorySnapshot;
@@ -410,7 +412,11 @@ pub async fn handle_mode_transition_apply(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let new_messages = assemble_new_chat(gcx.clone(), &messages, &decisions)
+    let path_context = {
+        let gcx_lock = gcx.read().await;
+        AgenticPathContext::from_context(&*gcx_lock)
+    };
+    let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -524,7 +530,11 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let new_messages = assemble_new_chat(gcx.clone(), &messages, &decisions)
+    let path_context = {
+        let gcx_lock = gcx.read().await;
+        AgenticPathContext::from_context(&*gcx_lock)
+    };
+    let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
