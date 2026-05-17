@@ -300,7 +300,8 @@ pub async fn get_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Pa
 }
 
 pub async fn get_global_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
-    let config_dir = gcx.read().await.config_dir.clone();
+    let app = AppState::from_gcx(gcx).await;
+    let config_dir = app.paths.config_dir.read().unwrap().clone();
     config_dir.join("trajectories")
 }
 
@@ -439,11 +440,11 @@ fn sanitize_worktree_extra(
 }
 
 async fn worktree_service_from_gcx(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     requested_source_root: Option<&Path>,
 ) -> Result<WorktreeService, String> {
-    let cache_dir = gcx.read().await.cache_dir.clone();
-    let project_dirs = get_project_dirs(gcx).await;
+    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let project_dirs = get_project_dirs(app.gcx.clone()).await;
     if project_dirs.is_empty() {
         return Err("No project root available".to_string());
     }
@@ -473,12 +474,12 @@ async fn worktree_service_from_gcx(
 }
 
 async fn validate_loaded_worktree_strict(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     chat_id: &str,
     worktree: WorktreeMeta,
 ) -> Option<WorktreeMeta> {
     let service =
-        match worktree_service_from_gcx(gcx.clone(), Some(&worktree.source_workspace_root)).await {
+        match worktree_service_from_gcx(app.clone(), Some(&worktree.source_workspace_root)).await {
             Ok(service) => service,
             Err(e) => {
                 warn!(
@@ -501,12 +502,12 @@ async fn validate_loaded_worktree_strict(
 }
 
 async fn validate_loaded_legacy_task_agent_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     chat_id: &str,
     worktree: WorktreeMeta,
 ) -> Option<WorktreeMeta> {
     let service =
-        match worktree_service_from_gcx(gcx.clone(), Some(&worktree.source_workspace_root)).await {
+        match worktree_service_from_gcx(app.clone(), Some(&worktree.source_workspace_root)).await {
             Ok(service) => service,
             Err(e) => {
                 warn!(
@@ -602,6 +603,7 @@ pub async fn load_trajectory_for_chat(
     gcx: Arc<ARwLock<GlobalContext>>,
     chat_id: &str,
 ) -> Option<LoadedTrajectory> {
+    let app = AppState::from_gcx(gcx.clone()).await;
     let traj_path = find_trajectory_path(gcx.clone(), chat_id).await?;
     let content = tokio::fs::read_to_string(&traj_path).await.ok()?;
     let t: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -645,11 +647,11 @@ pub async fn load_trajectory_for_chat(
         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let worktree = if let Some(candidate) = t.get("worktree").and_then(parse_worktree_meta) {
-        validate_loaded_worktree_strict(gcx.clone(), chat_id, candidate).await
+        validate_loaded_worktree_strict(app.clone(), chat_id, candidate).await
     } else if let Some(candidate) =
         synthesize_legacy_task_agent_worktree(gcx.clone(), chat_id, task_meta.as_ref()).await
     {
-        validate_loaded_legacy_task_agent_worktree(gcx.clone(), chat_id, candidate).await
+        validate_loaded_legacy_task_agent_worktree(app.clone(), chat_id, candidate).await
     } else {
         None
     };
@@ -934,6 +936,7 @@ pub async fn save_trajectory_snapshot(
     gcx: Arc<ARwLock<GlobalContext>>,
     snapshot: TrajectorySnapshot,
 ) -> Result<(), String> {
+    let app = AppState::from_gcx(gcx.clone()).await;
     if snapshot.messages.is_empty() && snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none()
     {
         return Ok(());
@@ -1080,7 +1083,7 @@ pub async fn save_trajectory_snapshot(
         file_path
     );
 
-    let vec_db = gcx.read().await.vec_db.clone();
+    let vec_db = app.workspace.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], false)
@@ -1092,7 +1095,7 @@ pub async fn save_trajectory_snapshot(
             .root_chat_id
             .clone()
             .unwrap_or_else(|| snapshot.chat_id.clone());
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = app.chat.sessions.clone();
         let (session_state, session_error) =
             get_session_state_for_chat(&sessions, &snapshot.chat_id).await;
         let (total_lines_added, total_lines_removed) =
@@ -1100,7 +1103,8 @@ pub async fn save_trajectory_snapshot(
         let (tasks_total, tasks_done, tasks_failed) =
             calculate_task_progress_from_chat_messages(&snapshot.messages);
         let token_totals = calculate_token_totals_from_chat_messages(&snapshot.messages);
-        if let Some(tx) = &gcx.read().await.trajectory_events_tx {
+        let tx = &app.chat.trajectory_events_tx;
+        {
             let event = TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: snapshot.chat_id.clone(),
@@ -1161,7 +1165,7 @@ pub async fn save_trajectory_snapshot(
 }
 
 pub async fn maybe_save_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
     let snapshot = {
@@ -1175,7 +1179,7 @@ pub async fn maybe_save_trajectory(
     let saved_version = snapshot.version;
     let chat_id = snapshot.chat_id.clone();
 
-    match save_trajectory_snapshot(gcx, snapshot).await {
+    match save_trajectory_snapshot(app.gcx.clone(), snapshot).await {
         Ok(()) => {
             let mut session = session_arc.lock().await;
             if session.trajectory_version == saved_version {
@@ -1230,9 +1234,11 @@ async fn process_trajectory_change(
     chat_id: &str,
     is_remove: bool,
 ) {
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let sessions = app.chat.sessions.clone();
     if is_remove {
-        if let Some(tx) = &gcx.read().await.trajectory_events_tx {
+        let tx = &app.chat.trajectory_events_tx;
+        {
             let _ = tx.send(TrajectoryEvent {
                 event_type: "deleted".to_string(),
                 id: chat_id.to_string(),
@@ -1316,7 +1322,8 @@ async fn process_trajectory_change(
             )
         };
         let (session_state, session_error) = get_session_state_for_chat(&sessions, chat_id).await;
-        if let Some(tx) = &gcx.read().await.trajectory_events_tx {
+        let tx = &app.chat.trajectory_events_tx;
+        {
             let _ = tx.send(TrajectoryEvent {
                 event_type: "updated".to_string(),
                 id: chat_id.to_string(),
@@ -1347,7 +1354,7 @@ async fn process_trajectory_change(
         }
     }
 
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = app.chat.sessions.clone();
     let session_arc = {
         let sessions_read = sessions.read().await;
         sessions_read.get(chat_id).cloned()
@@ -1729,10 +1736,11 @@ fn spawn_title_generation_task(
     trajectories_dir: PathBuf,
 ) {
     tokio::spawn(async move {
+        let app = AppState::from_gcx(gcx.clone()).await;
         let gcx2 = gcx.clone();
         let messages2 = messages.clone();
         let generated_title = crate::buddy::workflows::buddy_wrap_workflow(
-            crate::app_state::AppState::from_gcx(gcx.clone()).await,
+            app.clone(),
             "title_generation",
             "📋",
             5,
@@ -1759,7 +1767,7 @@ fn spawn_title_generation_task(
                 None => return,
             },
         };
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = app.chat.sessions.clone();
         let maybe_session_arc = {
             let sessions_read = sessions.read().await;
             sessions_read.get(&id).cloned()
@@ -1772,7 +1780,7 @@ fn spawn_title_generation_task(
             }
             session.set_title(title.clone(), true);
             drop(session);
-            maybe_save_trajectory(gcx.clone(), session_arc).await;
+            maybe_save_trajectory(app.clone(), session_arc).await;
             info!("Updated session {} with generated title: {}", id, title);
             return;
         }
@@ -1811,7 +1819,7 @@ fn spawn_title_generation_task(
         info!("Updated trajectory {} with generated title: {}", id, title);
         let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
         let worktree = if let Some(candidate) = trajectory_worktree_from_extra(&data.extra) {
-            validate_loaded_worktree_strict(gcx.clone(), &id, candidate).await
+            validate_loaded_worktree_strict(app.clone(), &id, candidate).await
         } else {
             None
         };
@@ -1842,7 +1850,8 @@ fn spawn_title_generation_task(
             total_cache_creation_tokens: None,
             total_cost_usd: None,
         };
-        if let Some(tx) = &gcx.read().await.trajectory_events_tx {
+        let tx = &app.chat.trajectory_events_tx;
+        {
             let _ = tx.send(event);
         }
     });
@@ -2312,12 +2321,12 @@ fn decode_cursor(cursor: &str) -> Option<(String, String)> {
 }
 
 async fn trajectory_data_to_meta_validated(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     data: &TrajectoryData,
 ) -> TrajectoryMeta {
     let mut meta = trajectory_data_to_meta(data);
     if let Some(worktree) = trajectory_worktree_from_extra(&data.extra) {
-        meta.worktree = validate_loaded_worktree_strict(gcx, &data.id, worktree).await;
+        meta.worktree = validate_loaded_worktree_strict(app, &data.id, worktree).await;
     }
     meta
 }
@@ -2364,13 +2373,13 @@ pub async fn handle_v1_trajectories_list(
                         continue;
                     }
                     if seen_ids.insert(data.id.clone()) {
-                        all_items.push(trajectory_data_to_meta_validated(gcx.clone(), &data).await);
+                        all_items.push(trajectory_data_to_meta_validated(app.clone(), &data).await);
                     }
                 }
             }
         }
     }
-    enrich_with_session_state(gcx, &mut all_items).await;
+    enrich_with_session_state(app, &mut all_items).await;
     all_items.sort_by(|a, b| match b.updated_at.cmp(&a.updated_at) {
         std::cmp::Ordering::Equal => b.id.cmp(&a.id),
         other => other,
@@ -2427,9 +2436,8 @@ pub async fn handle_v1_trajectories_list(
         .unwrap())
 }
 
-pub async fn list_all_trajectories_meta(
-    gcx: Arc<ARwLock<GlobalContext>>,
-) -> Result<Vec<TrajectoryMeta>, String> {
+pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryMeta>, String> {
+    let gcx = app.gcx.clone();
     let mut result: Vec<TrajectoryMeta> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
@@ -2452,7 +2460,7 @@ pub async fn list_all_trajectories_meta(
                         continue;
                     }
                     if seen_ids.insert(data.id.clone()) {
-                        result.push(trajectory_data_to_meta_validated(gcx.clone(), &data).await);
+                        result.push(trajectory_data_to_meta_validated(app.clone(), &data).await);
                     }
                 }
             }
@@ -2491,7 +2499,7 @@ pub async fn list_all_trajectories_meta(
         }
     }
 
-    enrich_with_session_state(gcx, &mut result).await;
+    enrich_with_session_state(app, &mut result).await;
     result.sort_by(|a, b| match b.updated_at.cmp(&a.updated_at) {
         std::cmp::Ordering::Equal => b.id.cmp(&a.id),
         other => other,
@@ -2503,8 +2511,7 @@ pub async fn list_all_trajectories_meta(
 pub async fn handle_v1_trajectories_all(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    let result = list_all_trajectories_meta(gcx)
+    let result = list_all_trajectories_meta(app)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Response::builder()
@@ -2514,13 +2521,9 @@ pub async fn handle_v1_trajectories_all(
         .unwrap())
 }
 
-async fn enrich_with_session_state(
-    gcx: Arc<ARwLock<GlobalContext>>,
-    trajectories: &mut Vec<TrajectoryMeta>,
-) {
+async fn enrich_with_session_state(app: AppState, trajectories: &mut Vec<TrajectoryMeta>) {
     let session_arcs: Vec<(usize, Arc<AMutex<ChatSession>>)> = {
-        let gcx_locked = gcx.read().await;
-        let sessions = gcx_locked.chat_sessions.read().await;
+        let sessions = app.chat.sessions.read().await;
         trajectories
             .iter()
             .enumerate()
@@ -2645,7 +2648,7 @@ pub async fn handle_v1_trajectories_save(
     let should_generate_title =
         is_placeholder_title(&data.title) && !is_title_generated && !data.messages.is_empty();
     let worktree = if let Some(candidate) = sanitize_worktree_extra(&mut data.extra) {
-        match validate_loaded_worktree_strict(gcx.clone(), &id, candidate).await {
+        match validate_loaded_worktree_strict(app.clone(), &id, candidate).await {
             Some(validated) => {
                 data.extra.insert(
                     "worktree".to_string(),
@@ -2680,7 +2683,7 @@ pub async fn handle_v1_trajectories_save(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| id.clone());
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = app.chat.sessions.clone();
     let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
     let (total_lines_added, total_lines_removed) =
         calculate_line_changes_from_messages(&data.messages);
@@ -2718,9 +2721,7 @@ pub async fn handle_v1_trajectories_save(
         total_cache_creation_tokens: Some(token_totals.cache_creation_tokens),
         total_cost_usd: token_totals.cost_usd,
     };
-    if let Some(tx) = &gcx.read().await.trajectory_events_tx {
-        let _ = tx.send(event);
-    }
+    let _ = app.chat.trajectory_events_tx.send(event);
     if should_generate_title {
         spawn_title_generation_task(
             gcx.clone(),
@@ -2777,9 +2778,7 @@ pub async fn handle_v1_trajectories_delete(
         total_cache_creation_tokens: None,
         total_cost_usd: None,
     };
-    if let Some(tx) = &gcx.read().await.trajectory_events_tx {
-        let _ = tx.send(event);
-    }
+    let _ = app.chat.trajectory_events_tx.send(event);
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
@@ -2790,19 +2789,7 @@ pub async fn handle_v1_trajectories_delete(
 pub async fn handle_v1_trajectories_subscribe(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    let rx = {
-        let gcx_locked = gcx.read().await;
-        match &gcx_locked.trajectory_events_tx {
-            Some(tx) => tx.subscribe(),
-            None => {
-                return Err(ScratchError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Trajectory events not available".to_string(),
-                ))
-            }
-        }
-    };
+    let rx = app.chat.trajectory_events_tx.subscribe();
     let stream = async_stream::stream! {
         let mut rx = rx;
         loop {
@@ -3632,11 +3619,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache.clone();
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *app.paths.cache_dir.write().unwrap() = cache.clone();
         }
         let service = WorktreeService::new(cache, source.clone()).unwrap();
         let created = service
@@ -3700,7 +3686,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.thread.worktree, Some(worktree.clone()));
-        let listed = list_all_trajectories_meta(gcx).await.unwrap();
+        let listed = list_all_trajectories_meta(app).await.unwrap();
         let listed_worktree = listed
             .iter()
             .find(|item| item.id == chat_id)
@@ -3713,9 +3699,9 @@ mod tests {
     async fn save_trajectory_preserves_updated_at_when_messages_do_not_change() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() =
                 vec![dir.path().to_path_buf()];
         }
 
@@ -3800,9 +3786,9 @@ mod tests {
     async fn trajectory_worktree_old_json_without_worktree_loads_none() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() =
                 vec![dir.path().to_path_buf()];
         }
         let traj_dir = dir.path().join(".refact").join("trajectories");
@@ -3826,11 +3812,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache;
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *app.paths.cache_dir.write().unwrap() = cache.clone();
         }
         let traj_dir = source.join(".refact").join("trajectories");
         tokio::fs::create_dir_all(&traj_dir).await.unwrap();
@@ -3865,7 +3850,7 @@ mod tests {
             .await
             .unwrap();
         assert!(loaded.thread.worktree.is_none());
-        let listed = list_all_trajectories_meta(gcx).await.unwrap();
+        let listed = list_all_trajectories_meta(app).await.unwrap();
         let listed_worktree = listed
             .iter()
             .find(|item| item.id == "untrusted-wt-chat")
@@ -3881,11 +3866,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache;
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *app.paths.cache_dir.write().unwrap() = cache.clone();
         }
 
         let task_id = "task-legacy";
@@ -4012,11 +3996,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache;
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *app.paths.cache_dir.write().unwrap() = cache.clone();
         }
 
         let task_id = "task-legacy-mismatch";

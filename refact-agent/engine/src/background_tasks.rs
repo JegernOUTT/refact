@@ -62,6 +62,7 @@ pub async fn start_background_tasks(
     }
     let gcx_for_knowledge_index = gcx.clone();
     let gcx_for_stats = gcx.clone();
+    let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let mut bg = BackgroundTasksHolder::new(vec![
         tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
             gcx.clone(),
@@ -81,7 +82,7 @@ pub async fn start_background_tasks(
         tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
             gcx.clone(),
         )),
-        tokio::spawn(crate::chat::start_agent_monitor(gcx.clone())),
+        tokio::spawn(crate::chat::start_agent_monitor(app_state)),
         tokio::spawn(
             crate::providers::oauth_refresh::oauth_token_refresh_background_task(gcx.clone()),
         ),

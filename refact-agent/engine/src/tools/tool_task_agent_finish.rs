@@ -320,7 +320,7 @@ impl Tool for ToolTaskAgentFinish {
         let _finish_guard = finish_lock.lock().await;
 
         let _ =
-            crate::chat::task_agent_monitor::update_card_heartbeat(gcx.clone(), &task_id, &card_id)
+            crate::chat::task_agent_monitor::update_card_heartbeat(crate::app_state::AppState::from_gcx(gcx.clone()).await, &task_id, &card_id)
                 .await;
 
         let board_pre = storage::load_board(gcx.clone(), &task_id).await?;
@@ -427,7 +427,7 @@ impl Tool for ToolTaskAgentFinish {
                 if let Some(branch) = worktree.branch.clone() {
                     let worktree_root = worktree.root.to_string_lossy().to_string();
                     let _diff = crate::chat::task_agent_monitor::cleanup_failed_agent_worktree(
-                        gcx.clone(),
+                        crate::app_state::AppState::from_gcx(gcx.clone()).await,
                         &worktree_root,
                         &branch,
                         worktree.name.as_deref(),
@@ -481,7 +481,7 @@ impl Tool for ToolTaskAgentFinish {
         );
 
         let notify_error = crate::chat::task_agent_monitor::notify_planner_agents_finished(
-            gcx.clone(),
+            crate::app_state::AppState::from_gcx(gcx.clone()).await,
             &task_id,
             &board,
             all_finished,

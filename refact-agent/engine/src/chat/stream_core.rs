@@ -5,12 +5,11 @@ use std::time::Instant;
 use futures::{SinkExt, StreamExt};
 use eventsource_stream::Eventsource;
 use serde_json::{json, Value};
-use tokio::sync::RwLock as ARwLock;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+use crate::app_state::AppState;
 use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
-use crate::global_context::GlobalContext;
 use crate::llm::{LlmRequest, LlmStreamDelta, WireFormat, get_adapter, safe_truncate};
 use crate::llm::adapter::{AdapterSettings, HttpParts, StreamParseError};
 
@@ -127,7 +126,7 @@ fn is_openai_codex_chatgpt_backend(model_rec: &BaseModelRecord) -> bool {
 }
 
 async fn force_refresh_openai_codex_for_retry(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     http_client: &reqwest::Client,
     provider_instance_id: &str,
     status: reqwest::StatusCode,
@@ -136,8 +135,7 @@ async fn force_refresh_openai_codex_for_retry(
     let _guard = crate::providers::openai_codex::OpenAICodexProvider::lock_refresh_guard().await?;
 
     let (config_dir, provider) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = app.model.providers.read().await;
         let provider = registry
             .get(provider_instance_id)
             .and_then(|p| {
@@ -145,7 +143,8 @@ async fn force_refresh_openai_codex_for_retry(
                     .downcast_ref::<crate::providers::openai_codex::OpenAICodexProvider>()
             })
             .cloned();
-        (gcx_locked.config_dir.clone(), provider)
+        let config_dir = app.paths.config_dir.read().unwrap().clone();
+        (config_dir, provider)
     };
 
     let Some(mut provider) = provider else {
@@ -190,8 +189,7 @@ async fn force_refresh_openai_codex_for_retry(
 
     if !provider.auth_state_matches(&previous_tokens, &previous_session_id) {
         let changed = {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = app.model.providers.write().await;
             registry
                 .get_mut(provider_instance_id)
                 .and_then(|p| {
@@ -209,9 +207,9 @@ async fn force_refresh_openai_codex_for_retry(
         };
 
         if changed {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.caps = None;
-            gcx_locked.caps_last_attempted_ts = 0;
+            let mut caps = app.model.caps.write().await;
+            caps.caps = None;
+            caps.last_attempted_ts = 0;
         }
     }
 
@@ -904,7 +902,7 @@ fn websocket_header_entries(
 }
 
 async fn commit_cache_guard_snapshot_if_needed(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     chat_id: Option<&String>,
     sanitized_for_commit: Option<serde_json::Value>,
 ) {
@@ -912,8 +910,7 @@ async fn commit_cache_guard_snapshot_if_needed(
         return;
     };
     let session_arc_opt = {
-        let gcx_locked = gcx.read().await;
-        let sessions = gcx_locked.chat_sessions.read().await;
+        let sessions = app.chat.sessions.read().await;
         sessions.get(chat_id).cloned()
     };
     if let Some(session_arc) = session_arc_opt {
@@ -1108,7 +1105,7 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
 }
 
 pub async fn run_llm_stream<C: StreamCollector>(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     params: StreamRunParams,
     collector: &mut C,
 ) -> Result<Vec<ChoiceFinal>, String> {
@@ -1116,13 +1113,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
         return Err("Streaming with n > 1 is not supported".to_string());
     }
 
-    let (client, slowdown_arc) = {
-        let gcx_locked = gcx.read().await;
-        (
-            gcx_locked.http_client.clone(),
-            gcx_locked.http_client_slowdown.clone(),
-        )
-    };
+    let client = app.runtime.http_client.clone();
+    let slowdown_arc = app.runtime.http_client_slowdown.clone();
 
     let _ = slowdown_arc.acquire().await;
 
@@ -1152,13 +1144,12 @@ pub async fn run_llm_stream<C: StreamCollector>(
     let mut sanitized_for_commit: Option<serde_json::Value> = None;
     if let Some(chat_id) = &params.chat_id {
         let session_arc_opt = {
-            let gcx_locked = gcx.read().await;
-            let sessions = gcx_locked.chat_sessions.read().await;
+            let sessions = app.chat.sessions.read().await;
             sessions.get(chat_id).cloned()
         };
         if let Some(session_arc) = session_arc_opt {
             sanitized_for_commit = crate::chat::cache_guard::check_or_pause_cache_guard(
-                gcx.clone(),
+                app.clone(),
                 session_arc,
                 &params.llm_request.model_id,
                 &http_parts.body,
@@ -1192,7 +1183,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         {
             Ok(results) => {
                 commit_cache_guard_snapshot_if_needed(
-                    gcx.clone(),
+                    app.clone(),
                     params.chat_id.as_ref(),
                     sanitized_for_commit.clone(),
                 )
@@ -1221,7 +1212,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         let provider_instance_id =
             openai_codex_instance_id(&params.model_rec).unwrap_or("openai_codex");
         match force_refresh_openai_codex_for_retry(
-            gcx.clone(),
+            app.clone(),
             &client,
             provider_instance_id,
             status,
@@ -1254,7 +1245,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         let text = response.text().await.unwrap_or_default();
         if should_commit_cache_guard_after_http_success(status, &text) {
             commit_cache_guard_snapshot_if_needed(
-                gcx.clone(),
+                app.clone(),
                 params.chat_id.as_ref(),
                 sanitized_for_commit,
             )
@@ -1264,7 +1255,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
     }
 
     commit_cache_guard_snapshot_if_needed(
-        gcx.clone(),
+        app.clone(),
         params.chat_id.as_ref(),
         sanitized_for_commit,
     )

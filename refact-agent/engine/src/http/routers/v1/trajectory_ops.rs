@@ -141,7 +141,7 @@ pub async fn handle_transform_preview(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.read().await.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let mut messages = {
         let session = session_arc.lock().await;
@@ -175,7 +175,7 @@ pub async fn handle_transform_apply(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.read().await.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let stats = {
         let mut session = session_arc.lock().await;
@@ -202,7 +202,7 @@ pub async fn handle_transform_apply(
         stats
     };
 
-    crate::chat::trajectories::maybe_save_trajectory(gcx.clone(), session_arc).await;
+    crate::chat::trajectories::maybe_save_trajectory(AppState::from_gcx(gcx.clone()).await, session_arc).await;
 
     let response = TransformApplyResponse { stats };
 
@@ -225,7 +225,7 @@ pub async fn handle_handoff_preview(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.read().await.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let messages = {
         let session = session_arc.lock().await;
@@ -261,7 +261,7 @@ pub async fn handle_handoff_apply(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.read().await.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let (messages, thread, task_meta) = {
         let session = session_arc.lock().await;
@@ -382,7 +382,7 @@ pub async fn handle_mode_transition_apply(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.read().await.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let (messages, thread, task_meta, session_state) = {
         let session = session_arc.lock().await;
@@ -501,7 +501,7 @@ pub async fn handle_planner_from_transition(
 
     let sessions = gcx.read().await.chat_sessions.clone();
     let session_arc =
-        get_or_create_session_with_trajectory(gcx.clone(), &sessions, &req.source_chat_id).await;
+        get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &req.source_chat_id).await;
 
     let (messages, thread, session_state) = {
         let session = session_arc.lock().await;

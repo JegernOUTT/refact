@@ -333,7 +333,7 @@ pub async fn handle_v1_tools_execute(
     };
 
     let (messages, tools_ran) = execute_tools(
-        gcx.clone(),
+        AppState::from_gcx(gcx.clone()).await,
         &tool_calls,
         &tools_execute_post.messages,
         &thread,

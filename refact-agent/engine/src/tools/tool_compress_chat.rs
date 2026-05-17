@@ -125,7 +125,7 @@ impl Tool for ToolCompressChatProbe {
 
         let sessions = gcx.read().await.chat_sessions.clone();
         let session_arc =
-            get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+            get_or_create_session_with_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
         let messages = {
             let session = session_arc.lock().await;
             session.messages.clone()
@@ -429,7 +429,7 @@ impl Tool for ToolCompressChatApply {
 
         let sessions = gcx.read().await.chat_sessions.clone();
         let session_arc =
-            get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+            get_or_create_session_with_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
         let (
             before_tokens,
@@ -661,7 +661,7 @@ impl Tool for ToolCompressChatApply {
             session.emit(snapshot);
         }
 
-        maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+        maybe_save_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, session_arc.clone()).await;
 
         let result = json!({
             "type": "compress_chat_apply",

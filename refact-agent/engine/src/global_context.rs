@@ -693,7 +693,8 @@ pub async fn create_global_context(
     };
     let gcx = Arc::new(ARwLock::new(cx));
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
-    crate::chat::start_session_cleanup_task(gcx.clone());
+    let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    crate::chat::start_session_cleanup_task(app_state);
     crate::chat::start_trajectory_watcher(gcx.clone());
     (gcx, ask_shutdown_receiver, cmdline)
 }

@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 use similar::{Algorithm, TextDiff};
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::{Mutex as AMutex};
 
-use crate::global_context::GlobalContext;
+use crate::app_state::AppState;
 use crate::tokens::{cached_tokenizer, count_text_tokens_with_fallback};
 
 const CACHE_GUARD_TOOL_NAME: &str = "cache_guard";
@@ -36,8 +36,8 @@ pub fn is_cache_guard_pause_reason(reason: &crate::chat::types::PauseReason) -> 
     reason.tool_name == CACHE_GUARD_TOOL_NAME || is_cache_guard_pause_id(&reason.tool_call_id)
 }
 
-pub async fn is_guard_enabled_for_model(gcx: Arc<ARwLock<GlobalContext>>, model_id: &str) -> bool {
-    let Some(pricing) = crate::providers::pricing::lookup_model_pricing(&gcx, model_id).await
+pub async fn is_guard_enabled_for_model(app: AppState, model_id: &str) -> bool {
+    let Some(pricing) = crate::providers::pricing::lookup_model_pricing(&app.gcx, model_id).await
     else {
         return false;
     };
@@ -111,11 +111,11 @@ pub fn unified_json_diff(prev: &Value, next: &Value) -> String {
 }
 
 pub async fn estimate_extra_cache_miss_usd(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     model_id: &str,
     previous_sanitized: &Value,
 ) -> Option<f64> {
-    let pricing = crate::providers::pricing::lookup_model_pricing(&gcx, model_id).await?;
+    let pricing = crate::providers::pricing::lookup_model_pricing(&app.gcx, model_id).await?;
     let cache_read_rate = pricing.cache_read?;
     if pricing.prompt <= cache_read_rate {
         return Some(0.0);
@@ -123,24 +123,24 @@ pub async fn estimate_extra_cache_miss_usd(
 
     let previous_pretty = serde_json::to_string_pretty(previous_sanitized).ok()?;
     let model_rec = {
-        let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
             .await
             .ok()?;
         crate::caps::resolve_chat_model(caps, model_id).ok()?
     };
-    let tokenizer = cached_tokenizer(gcx, &model_rec.base).await.ok().flatten();
+    let tokenizer = cached_tokenizer(app.gcx, &model_rec.base).await.ok().flatten();
     let cached_tokens = count_text_tokens_with_fallback(tokenizer, &previous_pretty);
     let delta_rate = pricing.prompt - cache_read_rate;
     Some((cached_tokens as f64) * delta_rate / 1_000_000.0)
 }
 
 pub async fn check_or_pause_cache_guard(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<crate::chat::types::ChatSession>>,
     model_id: &str,
     request_body: &Value,
 ) -> Result<Option<Value>, String> {
-    if !is_guard_enabled_for_model(gcx.clone(), model_id).await {
+    if !is_guard_enabled_for_model(app.clone(), model_id).await {
         return Ok(None);
     }
 
@@ -178,7 +178,7 @@ pub async fn check_or_pause_cache_guard(
     };
 
     let diff = unified_json_diff(&previous, &sanitized);
-    let estimated_extra_usd = estimate_extra_cache_miss_usd(gcx.clone(), model_id, &previous).await;
+    let estimated_extra_usd = estimate_extra_cache_miss_usd(app.clone(), model_id, &previous).await;
 
     {
         let mut session = session_arc.lock().await;
@@ -348,6 +348,7 @@ mod tests {
     #[tokio::test]
     async fn test_models_dev_cache_guard_uses_central_pricing_lookup() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
         let mut model_caps = std::collections::HashMap::new();
         model_caps.insert(
             "openai/gpt-4o".to_string(),
@@ -365,18 +366,18 @@ mod tests {
             },
         );
         {
-            let mut gcx = gcx.write().await;
-            gcx.caps = Some(std::sync::Arc::new(crate::caps::CodeAssistantCaps {
+            let mut caps = app.model.caps.write().await;
+            caps.caps = Some(std::sync::Arc::new(crate::caps::CodeAssistantCaps {
                 model_caps: std::sync::Arc::new(model_caps),
                 ..Default::default()
             }));
-            gcx.caps_last_attempted_ts = std::time::SystemTime::now()
+            caps.last_attempted_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
         }
 
-        assert!(is_guard_enabled_for_model(gcx, "openai/gpt-4o").await);
+        assert!(is_guard_enabled_for_model(app, "openai/gpt-4o").await);
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
         })?;
 
     let (messages, _) = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
-        gcx.clone(),
+        crate::app_state::AppState::from_gcx(gcx.clone()).await,
         post.messages,
         &post.chat_meta,
         &None,

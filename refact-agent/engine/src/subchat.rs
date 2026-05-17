@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::app_state::AppState;
 use crate::caps::{resolve_chat_model, resolve_model};
 use crate::tools::tools_description::ToolDesc;
 use crate::tools::tools_list::get_available_tools;
@@ -1276,6 +1277,7 @@ async fn execute_pending_tool_calls(
             ccx_locked.execution_scope_worktree(),
         )
     };
+    let app = AppState::from_gcx(gcx.clone()).await;
     let last = match messages.last() {
         Some(m) => m,
         None => return Ok(messages),
@@ -1285,7 +1287,7 @@ async fn execute_pending_tool_calls(
         _ => return Ok(messages),
     };
     let tool_calls =
-        resolve_tool_call_aliases(gcx.clone(), tool_calls, mode_id, Some(model_id)).await;
+        resolve_tool_call_aliases(app.clone(), tool_calls, mode_id, Some(model_id)).await;
 
     let mut allowed: Vec<ChatToolCall> = vec![];
     let mut denied_msgs: Vec<ChatMessage> = vec![];
@@ -1341,7 +1343,7 @@ async fn execute_pending_tool_calls(
     }
 
     let (mut tool_results, _) = execute_tools(
-        gcx.clone(),
+        app,
         &allowed,
         &messages,
         &thread,
@@ -1538,7 +1540,7 @@ async fn subchat_stream(
 
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
-        let attempt_result = run_llm_stream(gcx.clone(), params, &mut collector).await;
+        let attempt_result = run_llm_stream(AppState::from_gcx(gcx.clone()).await, params, &mut collector).await;
         let attempt_sent_progress = collector.has_sent_progress();
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();

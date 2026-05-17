@@ -1,14 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::OnceLock;
 use std::path::PathBuf;
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
 
+use crate::app_state::AppState;
 use crate::buddy::pulse_inject::{build_buddy_pulse_message, BUDDY_PULSE_MARKER};
 use crate::call_validation;
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use super::system_context::{
     self, create_instruction_files_message, create_memories_message, gather_system_context,
@@ -48,13 +46,13 @@ fn buddy_persona_cache() -> &'static AMutex<HashMap<(String, String), BuddyPerso
 }
 
 pub async fn get_mode_system_prompt(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     mode_id: &str,
     model_id: Option<&str>,
 ) -> String {
     let mode_id = map_legacy_mode_to_id(mode_id);
 
-    match get_mode_config(gcx, mode_id, model_id).await {
+    match get_mode_config(app.gcx.clone(), mode_id, model_id).await {
         Some(mode_config) => mode_config.prompt,
         None => {
             tracing::warn!("Mode '{}' not found, using empty prompt", mode_id);
@@ -107,7 +105,7 @@ async fn _workspace_info(workspace_dirs: &[String], active_file_path: &Option<Pa
 }
 
 pub async fn system_prompt_add_extra_instructions(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     system_prompt: String,
     tool_names: HashSet<String>,
     chat_meta: &call_validation::ChatMeta,
@@ -117,15 +115,14 @@ pub async fn system_prompt_add_extra_instructions(
     let include_project_info = chat_meta.include_project_info;
 
     // Load project information config to respect user settings
-    let config = load_project_information_config(gcx.clone()).await;
+    let config = load_project_information_config(app.gcx.clone()).await;
     // If config is globally disabled, treat as if include_project_info is false
     let include_project_info = include_project_info && config.enabled;
 
     async fn workspace_files_info(
-        gcx: &Arc<ARwLock<GlobalContext>>,
+        app: &AppState,
     ) -> (Vec<String>, Option<PathBuf>) {
-        let gcx_locked = gcx.read().await;
-        let documents_state = &gcx_locked.documents_state;
+        let documents_state = &app.workspace.documents_state;
         let dirs_locked = documents_state.workspace_folders.lock().unwrap();
         let workspace_dirs = dirs_locked
             .clone()
@@ -149,7 +146,7 @@ pub async fn system_prompt_add_extra_instructions(
     let mut system_prompt = system_prompt.clone();
 
     if system_prompt.contains(BUDDY_PERSONALITY_MARKER) {
-        let buddy_block = buddy_persona_block(gcx.clone(), mode_id).await;
+        let buddy_block = buddy_persona_block(app.clone(), mode_id).await;
         system_prompt = system_prompt.replace(BUDDY_PERSONALITY_MARKER, &buddy_block);
     }
 
@@ -172,7 +169,7 @@ pub async fn system_prompt_add_extra_instructions(
     // Respects config.sections.environment_instructions.enabled and max_chars
     if system_prompt.contains("%ENVIRONMENT_INFO%") {
         if include_project_info && config.sections.environment_instructions.enabled {
-            let project_dirs = get_project_dirs(gcx.clone()).await;
+            let project_dirs = get_project_dirs(app.gcx.clone()).await;
             let environments = system_context::detect_environments(&project_dirs).await;
             let mut env_instructions =
                 system_context::generate_environment_instructions(&environments);
@@ -189,7 +186,7 @@ pub async fn system_prompt_add_extra_instructions(
     // Respects config.sections.project_configs.enabled and max_items
     if system_prompt.contains("%PROJECT_CONFIGS%") {
         if include_project_info && config.sections.project_configs.enabled {
-            let project_dirs = get_project_dirs(gcx.clone()).await;
+            let project_dirs = get_project_dirs(app.gcx.clone()).await;
             let configs = system_context::find_project_configs(&project_dirs).await;
             let max_items = config.sections.project_configs.max_items.unwrap_or(30);
             let configs_to_show: Vec<_> = configs.into_iter().take(max_items).collect();
@@ -215,7 +212,7 @@ pub async fn system_prompt_add_extra_instructions(
         if include_project_info && config.sections.project_tree.enabled {
             let max_depth = config.sections.project_tree.max_depth.unwrap_or(4);
             let max_chars = config.sections.project_tree.max_chars.unwrap_or(16000);
-            match system_context::generate_compact_project_tree(gcx.clone(), max_depth).await {
+            match system_context::generate_compact_project_tree(app.gcx.clone(), max_depth).await {
                 Ok(tree) if !tree.is_empty() => {
                     let tree_content = truncate_to_chars(&tree, max_chars);
                     let tree_section = format!("## Project Structure\n```\n{}```", tree_content);
@@ -234,7 +231,7 @@ pub async fn system_prompt_add_extra_instructions(
     // Respects config.sections.git_info.enabled and max_chars
     if system_prompt.contains("%GIT_INFO%") {
         if include_project_info && config.sections.git_info.enabled {
-            let project_dirs = get_project_dirs(gcx.clone()).await;
+            let project_dirs = get_project_dirs(app.gcx.clone()).await;
             let git_infos = gather_git_info(&project_dirs).await;
             let mut git_section = generate_git_info_prompt(&git_infos);
             if let Some(max_chars) = config.sections.git_info.max_chars {
@@ -248,7 +245,7 @@ pub async fn system_prompt_add_extra_instructions(
 
     if system_prompt.contains("%WORKSPACE_INFO%") {
         if include_project_info {
-            let (workspace_dirs, active_file_path) = workspace_files_info(&gcx).await;
+            let (workspace_dirs, active_file_path) = workspace_files_info(&app).await;
             let info = _workspace_info(&workspace_dirs, &active_file_path).await;
             system_prompt = system_prompt.replace("%WORKSPACE_INFO%", &info);
         } else {
@@ -259,7 +256,7 @@ pub async fn system_prompt_add_extra_instructions(
     if system_prompt.contains("%AGENT_WORKTREE%") {
         let worktree_info = if let Some(tm) = task_meta {
             if let Some(ref card_id) = tm.card_id {
-                match crate::tasks::storage::load_board(gcx.clone(), &tm.task_id).await {
+                match crate::tasks::storage::load_board(app.gcx.clone(), &tm.task_id).await {
                     Ok(board) => {
                         if let Some(card) = board.get_card(card_id) {
                             if let Some(ref worktree) = card.agent_worktree {
@@ -295,7 +292,7 @@ pub async fn system_prompt_add_extra_instructions(
         let has_deactivate = tool_names.contains("deactivate_skill");
         if has_activate || has_deactivate {
             let skills_text =
-                build_skills_prompt_text(gcx.clone(), has_activate, has_deactivate).await;
+                build_skills_prompt_text(app.gcx.clone(), has_activate, has_deactivate).await;
             system_prompt = system_prompt.replace("%SKILLS_INSTRUCTIONS%", &skills_text);
         } else {
             system_prompt = system_prompt.replace("%SKILLS_INSTRUCTIONS%", "");
@@ -367,8 +364,8 @@ pub async fn system_prompt_add_extra_instructions(
     system_prompt
 }
 
-async fn buddy_persona_block(gcx: Arc<ARwLock<GlobalContext>>, mode_id: &str) -> String {
-    let Some(snapshot) = crate::buddy::actor::buddy_snapshot(crate::app_state::AppState::from_gcx(gcx).await).await else {
+async fn buddy_persona_block(app: AppState, mode_id: &str) -> String {
+    let Some(snapshot) = crate::buddy::actor::buddy_snapshot(app).await else {
         return String::new();
     };
     let mode_id = buddy_persona_cache_mode_id(mode_id);
@@ -488,9 +485,10 @@ mod tests {
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
-    async fn make_gcx_with_buddy() -> Arc<ARwLock<GlobalContext>> {
+    async fn make_gcx_with_buddy() -> AppState {
         clear_buddy_persona_cache_for_tests();
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
         let (tx, _) = broadcast::channel(16);
         let mut state = crate::buddy::state::default_buddy_state();
         state.identity.name = "Pixel".to_string();
@@ -508,13 +506,13 @@ mod tests {
             tx,
             None,
         );
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = app.buddy.buddy.clone();
         *buddy_arc.lock().await = Some(service);
-        gcx
+        app
     }
 
-    async fn set_buddy_name(gcx: &Arc<ARwLock<GlobalContext>>, name: &str) {
-        let buddy_arc = gcx.read().await.buddy.clone();
+    async fn set_buddy_name(app: &AppState, name: &str) {
+        let buddy_arc = app.buddy.buddy.clone();
         let mut lock = buddy_arc.lock().await;
         let service = lock.as_mut().unwrap();
         service.state.identity.name = name.to_string();
@@ -533,17 +531,17 @@ mod tests {
     #[tokio::test]
     async fn every_specified_mode_substitutes_buddy_personality_marker() {
         let _guard = prompt_test_lock().lock().await;
-        let gcx = make_gcx_with_buddy().await;
+        let app = make_gcx_with_buddy().await;
 
         for case in SPECIFIED_MODES {
-            let prompt = get_mode_system_prompt(gcx.clone(), case.lookup_mode, case.model_id).await;
+            let prompt = get_mode_system_prompt(app.clone(), case.lookup_mode, case.model_id).await;
             assert!(
                 prompt.contains(BUDDY_PERSONALITY_MARKER),
                 "mode missing marker: {}",
                 case.label
             );
             let rendered = system_prompt_add_extra_instructions(
-                gcx.clone(),
+                app.clone(),
                 prompt,
                 HashSet::new(),
                 &ChatMeta {
@@ -564,11 +562,11 @@ mod tests {
     #[tokio::test]
     async fn personality_block_caches_per_archetype_and_mode() {
         let _guard = prompt_test_lock().lock().await;
-        let gcx = make_gcx_with_buddy().await;
+        let app = make_gcx_with_buddy().await;
         let prompt = format!("before\n{}\nafter", BUDDY_PERSONALITY_MARKER);
 
         let first = system_prompt_add_extra_instructions(
-            gcx.clone(),
+            app.clone(),
             prompt.clone(),
             HashSet::new(),
             &ChatMeta::default(),
@@ -576,9 +574,9 @@ mod tests {
             "agent",
         )
         .await;
-        set_buddy_name(&gcx, "Nova").await;
+        set_buddy_name(&app, "Nova").await;
         let cached_same_mode = system_prompt_add_extra_instructions(
-            gcx.clone(),
+            app.clone(),
             prompt.clone(),
             HashSet::new(),
             &ChatMeta::default(),
@@ -587,7 +585,7 @@ mod tests {
         )
         .await;
         let uncached_other_mode = system_prompt_add_extra_instructions(
-            gcx.clone(),
+            app.clone(),
             prompt,
             HashSet::new(),
             &ChatMeta::default(),
@@ -604,10 +602,10 @@ mod tests {
     #[tokio::test]
     async fn persona_cache_invalidates_on_identity_name_change() {
         let _guard = prompt_test_lock().lock().await;
-        let gcx = make_gcx_with_buddy().await;
+        let app = make_gcx_with_buddy().await;
         let prompt = format!("{}", BUDDY_PERSONALITY_MARKER);
         let first = system_prompt_add_extra_instructions(
-            gcx.clone(),
+            app.clone(),
             prompt.clone(),
             HashSet::new(),
             &ChatMeta::default(),
@@ -616,9 +614,9 @@ mod tests {
         )
         .await;
 
-        set_buddy_name(&gcx, "Nova").await;
+        set_buddy_name(&app, "Nova").await;
         let second = system_prompt_add_extra_instructions(
-            gcx.clone(),
+            app.clone(),
             prompt,
             HashSet::new(),
             &ChatMeta::default(),
@@ -634,10 +632,10 @@ mod tests {
     #[tokio::test]
     async fn personality_cache_invalidates_on_reroll() {
         let _guard = prompt_test_lock().lock().await;
-        let gcx = make_gcx_with_buddy().await;
+        let app = make_gcx_with_buddy().await;
         let prompt = format!("{}", BUDDY_PERSONALITY_MARKER);
         let first = system_prompt_add_extra_instructions(
-            gcx.clone(),
+            app.clone(),
             prompt.clone(),
             HashSet::new(),
             &ChatMeta::default(),
@@ -646,10 +644,10 @@ mod tests {
         )
         .await;
 
-        set_buddy_name(&gcx, "Nova").await;
+        set_buddy_name(&app, "Nova").await;
         crate::buddy::state::mark_persona_cache_dirty();
         let second = system_prompt_add_extra_instructions(
-            gcx.clone(),
+            app.clone(),
             prompt,
             HashSet::new(),
             &ChatMeta::default(),
@@ -667,8 +665,9 @@ mod tests {
         let _guard = prompt_test_lock().lock().await;
         clear_buddy_persona_cache_for_tests();
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
         let rendered = system_prompt_add_extra_instructions(
-            gcx,
+            app,
             format!("Alpha\n{}\nOmega", BUDDY_PERSONALITY_MARKER),
             HashSet::new(),
             &ChatMeta::default(),
@@ -684,7 +683,7 @@ mod tests {
     #[tokio::test]
     async fn gather_and_inject_includes_personality_in_system_prompt() {
         let _guard = prompt_test_lock().lock().await;
-        let gcx = make_gcx_with_buddy().await;
+        let app = make_gcx_with_buddy().await;
         let mut stream_back_to_user = HasRagResults::new();
         let messages = vec![ChatMessage {
             role: "user".to_string(),
@@ -693,7 +692,7 @@ mod tests {
         }];
 
         let (messages, _) = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
-            gcx,
+            app,
             messages,
             &ChatMeta {
                 chat_mode: "agent".to_string(),
@@ -715,7 +714,7 @@ mod tests {
 }
 
 pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     mut messages: Vec<call_validation::ChatMessage>,
     chat_meta: &call_validation::ChatMeta,
     task_meta: &Option<crate::chat::types::TaskMeta>,
@@ -743,7 +742,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         match canonical_mode.as_str() {
             "configurator" => {
                 crate::integrations::config_chat::mix_config_messages(
-                    gcx.clone(),
+                    app.gcx.clone(),
                     &chat_meta,
                     &mut messages,
                     stream_back_to_user,
@@ -752,7 +751,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
             }
             "setup" => {
                 crate::integrations::setup_chat::mix_setup_messages(
-                    gcx.clone(),
+                    app.gcx.clone(),
                     &chat_meta,
                     &mut messages,
                     stream_back_to_user,
@@ -761,9 +760,9 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
             }
             _ => {
                 let base_prompt =
-                    get_mode_system_prompt(gcx.clone(), mode_id, Some(model_id)).await;
+                    get_mode_system_prompt(app.clone(), mode_id, Some(model_id)).await;
                 let system_message_content = system_prompt_add_extra_instructions(
-                    gcx.clone(),
+                    app.clone(),
                     base_prompt,
                     tool_names,
                     chat_meta,
@@ -784,7 +783,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
 
     let mut skills_tracking = SkillsTrackingInfo::default();
     if chat_meta.include_project_info && !have_project_context {
-        match gather_and_inject_system_context(&gcx, &mut messages, stream_back_to_user).await {
+        match gather_and_inject_system_context(&app, &mut messages, stream_back_to_user).await {
             Ok(info) => {
                 skills_tracking = info;
             }
@@ -803,7 +802,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
             .as_ref()
             .map(|m| m.task_id.clone())
             .or_else(|| infer_task_id_from_chat_id(&chat_meta.chat_id));
-        match inject_task_memories(&gcx, &mut messages, stream_back_to_user, task_id_opt).await {
+        match inject_task_memories(&app, &mut messages, stream_back_to_user, task_id_opt).await {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!("Failed to inject task memories: {}", e);
@@ -823,11 +822,11 @@ const MAX_TASK_MEMORY_CONTENT_SIZE: usize = 3000;
 const MAX_TASK_MEMORIES_TOTAL_SIZE: usize = 80_000;
 
 async fn gather_and_inject_system_context(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    app: &AppState,
     messages: &mut Vec<ChatMessage>,
     stream_back_to_user: &mut HasRagResults,
 ) -> Result<SkillsTrackingInfo, String> {
-    let context = gather_system_context(gcx.clone(), false, 4).await?;
+    let context = gather_system_context(app.gcx.clone(), false, 4).await?;
 
     if !context.instruction_files.is_empty() {
         match create_instruction_files_message(&context.instruction_files).await {
@@ -879,7 +878,7 @@ async fn gather_and_inject_system_context(
         .iter()
         .any(|m| m.role == "context_file" && m.tool_call_id == BUDDY_PULSE_MARKER);
     if !have_buddy_pulse {
-        if let Some(pulse_msg) = build_buddy_pulse_message(crate::app_state::AppState::from_gcx(gcx.clone()).await).await {
+        if let Some(pulse_msg) = build_buddy_pulse_message(app.clone()).await {
             let insert_pos = messages
                 .iter()
                 .position(|m| m.role == "user" || m.role == "assistant")
@@ -916,7 +915,7 @@ async fn gather_and_inject_system_context(
             })
             .unwrap_or_default();
         let (skills_msgs, tracking) =
-            build_skills_context_messages_tracked(gcx.clone(), &last_user_text, None).await;
+            build_skills_context_messages_tracked(app.gcx.clone(), &last_user_text, None).await;
         for skills_msg in skills_msgs {
             let insert_pos = messages
                 .iter()
@@ -934,7 +933,7 @@ async fn gather_and_inject_system_context(
 }
 
 pub async fn inject_task_memories(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    app: &AppState,
     messages: &mut Vec<ChatMessage>,
     stream_back_to_user: &mut HasRagResults,
     task_id_opt: Option<String>,
@@ -944,7 +943,7 @@ pub async fn inject_task_memories(
         None => return Ok(()),
     };
 
-    let memories = load_task_memories(gcx.clone(), &task_id).await?;
+    let memories = load_task_memories(app.gcx.clone(), &task_id).await?;
     if memories.is_empty() {
         return Ok(());
     }

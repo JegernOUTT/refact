@@ -203,7 +203,7 @@ pub async fn mix_config_messages(
         role: "system".to_string(),
         content: ChatContent::SimpleText(
             crate::scratchpads::chat_utils_prompts::system_prompt_add_extra_instructions(
-                gcx.clone(),
+                crate::app_state::AppState::from_gcx(gcx.clone()).await,
                 sp_text,
                 get_tools_for_mode(gcx.clone(), "configurator", None)
                     .await

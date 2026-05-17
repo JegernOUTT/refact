@@ -1,20 +1,20 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock, Semaphore};
+use tokio::sync::{Mutex as AMutex, Semaphore};
 use tracing::info;
 use uuid::Uuid;
 use futures::future::join_all;
 
 use indexmap::IndexMap;
 
+use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::user_activity::UserAction;
 use crate::buddy::voice_service::{VoiceCtx, voice_service};
 use crate::call_validation::{
     ChatContent, ChatMessage, ChatToolCall, ContextFile, PostprocessSettings, SubchatParameters,
 };
-use crate::global_context::GlobalContext;
 use crate::constants::CHAT_TOP_N;
 use crate::postprocessing::pp_tool_results::{postprocess_tool_results, ToolBudget};
 use crate::yaml_configs::customization_registry::{
@@ -43,10 +43,10 @@ use super::trajectories::maybe_save_trajectory;
 
 use super::config::{limits, tokens};
 
-async fn get_effective_n_ctx(gcx: Arc<ARwLock<GlobalContext>>, thread: &ThreadParams) -> usize {
+async fn get_effective_n_ctx(app: AppState, thread: &ThreadParams) -> usize {
     let default_n_ctx = tokens().default_n_ctx;
     let model_n_ctx =
-        match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
+        match crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0).await {
             Ok(caps) => match crate::caps::resolve_chat_model(caps, &thread.model) {
                 Ok(model_rec) if model_rec.base.n_ctx > 0 => model_rec.base.n_ctx,
                 _ => default_n_ctx,
@@ -60,7 +60,7 @@ async fn get_effective_n_ctx(gcx: Arc<ARwLock<GlobalContext>>, thread: &ThreadPa
 }
 
 async fn build_tool_execution_context(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     n_ctx: usize,
     messages: &[ChatMessage],
     thread: &ThreadParams,
@@ -68,7 +68,7 @@ async fn build_tool_execution_context(
 ) -> Arc<AMutex<AtCommandsContext>> {
     Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
-            gcx,
+            app.gcx.clone(),
             n_ctx,
             CHAT_TOP_N,
             false,
@@ -156,12 +156,12 @@ fn rewrite_cc_native_stub_tool_call(tc: &mut ChatToolCall) {
 }
 
 pub async fn resolve_tool_call_aliases(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     tool_calls: Vec<ChatToolCall>,
     mode_id: &str,
     model_id: Option<&str>,
 ) -> Vec<ChatToolCall> {
-    let raw_tools = crate::tools::tools_list::get_tools_for_mode(gcx, mode_id, model_id).await;
+    let raw_tools = crate::tools::tools_list::get_tools_for_mode(app.gcx.clone(), mode_id, model_id).await;
     let available_tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
     let tool_names: Vec<String> = available_tools
         .iter()
@@ -248,7 +248,7 @@ fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> b
 }
 
 async fn record_tool_activity(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     tool_calls: &[ChatToolCall],
     chat_id: &str,
     approved_ids: &std::collections::HashSet<String>,
@@ -257,7 +257,7 @@ async fn record_tool_activity(
     if approved_ids.is_empty() && denied_ids.is_empty() {
         return;
     }
-    let user_activity = gcx.read().await.user_activity.clone();
+    let user_activity = app.buddy.user_activity.clone();
     if let Ok(mut ring) = user_activity.try_lock() {
         for tc in tool_calls {
             if denied_ids.contains(&tc.id) {
@@ -446,7 +446,7 @@ mod tests {
             ..Default::default()
         };
 
-        let ccx = build_tool_execution_context(gcx, 4096, &[], &thread, None).await;
+        let ccx = build_tool_execution_context(AppState::from_gcx(gcx).await, 4096, &[], &thread, None).await;
         let ccx = ccx.lock().await;
 
         assert_eq!(ccx.task_meta, Some(task_meta));
@@ -922,8 +922,9 @@ source:
     #[tokio::test]
     async fn tool_approved_pushed_on_decision() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
         {
-            let user_activity = gcx.read().await.user_activity.clone();
+            let user_activity = app.buddy.user_activity.clone();
             let mut ring = user_activity.lock().await;
             ring.push(UserAction::ToolApproved {
                 tool_name: "cat".to_string(),
@@ -932,7 +933,7 @@ source:
             });
         }
 
-        let user_activity = gcx.read().await.user_activity.clone();
+        let user_activity = app.buddy.user_activity.clone();
         let ring = user_activity.lock().await;
         assert!(ring.snapshot().iter().any(|action| matches!(
             action,
@@ -941,8 +942,9 @@ source:
         )));
     }
 
-    async fn make_gcx_with_buddy() -> Arc<ARwLock<GlobalContext>> {
+    async fn make_gcx_with_buddy() -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
         let (tx, _) = tokio::sync::broadcast::channel(16);
         let mut state = crate::buddy::state::default_buddy_state();
         state.identity.name = "Pixel".to_string();
@@ -955,9 +957,9 @@ source:
             tx,
             None,
         );
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = app.buddy.buddy.clone();
         *buddy_arc.lock().await = Some(service);
-        gcx
+        app
     }
 
     #[tokio::test]
@@ -1005,7 +1007,7 @@ source:
 }
 
 pub async fn process_tool_calls_once(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     mode_id: &str,
     model_id: Option<&str>,
@@ -1082,7 +1084,7 @@ pub async fn process_tool_calls_once(
         return ToolStepOutcome::NoToolCalls;
     }
 
-    let tool_calls = resolve_tool_call_aliases(gcx.clone(), tool_calls, mode_id, model_id).await;
+    let tool_calls = resolve_tool_call_aliases(app.clone(), tool_calls, mode_id, model_id).await;
 
     info!(
         "process_tool_calls_once: {} tool calls to process",
@@ -1090,7 +1092,7 @@ pub async fn process_tool_calls_once(
     );
 
     let (confirmations, denials) = check_tools_confirmation(
-        gcx.clone(),
+        app.clone(),
         &tool_calls,
         &messages,
         &thread,
@@ -1149,7 +1151,7 @@ pub async fn process_tool_calls_once(
             let approved_set: std::collections::HashSet<String> =
                 auto_approved_ids.iter().cloned().collect();
             record_tool_activity(
-                gcx.clone(),
+                app.clone(),
                 &tool_calls,
                 &thread.id,
                 &approved_set,
@@ -1173,7 +1175,7 @@ pub async fn process_tool_calls_once(
         }
     }
     record_tool_activity(
-        gcx.clone(),
+        app.clone(),
         &tool_calls,
         &thread.id,
         &approved_activity_ids,
@@ -1195,7 +1197,7 @@ pub async fn process_tool_calls_once(
         let session = session_arc.lock().await;
         let id = session.chat_id.clone();
         drop(session);
-        let pd = get_project_dir_string(gcx.clone()).await;
+        let pd = get_project_dir_string(app.gcx.clone()).await;
         (id, pd)
     };
 
@@ -1217,7 +1219,7 @@ pub async fn process_tool_calls_once(
             user_prompt: None,
             extra: std::collections::HashMap::new(),
         };
-        let results = run_hooks(gcx.clone(), HookEvent::PreToolUse, payload).await;
+        let results = run_hooks(app.gcx.clone(), HookEvent::PreToolUse, payload).await;
         if let Some(reason) = first_block_reason(&results) {
             pre_hook_blocked_ids.insert(tc.id.clone());
             let block_message = ChatMessage {
@@ -1250,7 +1252,7 @@ pub async fn process_tool_calls_once(
         session.user_interrupt_flag.clone()
     };
     let tool_execution = execute_tools_with_session(
-        gcx.clone(),
+        app.clone(),
         session_arc.clone(),
         &tools_to_execute,
         &messages,
@@ -1335,7 +1337,7 @@ pub async fn process_tool_calls_once(
         }
     }
 
-    maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
 
     if was_aborted || tool_initiated_stop {
         ToolStepOutcome::Stop
@@ -1399,7 +1401,7 @@ fn compute_final_action(
 }
 
 pub async fn check_tools_confirmation(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     tool_calls: &[crate::call_validation::ChatToolCall],
     messages: &[ChatMessage],
     thread: &ThreadParams,
@@ -1415,7 +1417,7 @@ pub async fn check_tools_confirmation(
 
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new(
-            gcx.clone(),
+            app.gcx.clone(),
             1000,
             1,
             false,
@@ -1430,7 +1432,7 @@ pub async fn check_tools_confirmation(
     ));
 
     let mode_id = map_legacy_mode_to_id(mode_id);
-    let mode_config = get_mode_config(gcx.clone(), mode_id, model_id).await;
+    let mode_config = get_mode_config(app.gcx.clone(), mode_id, model_id).await;
     let tool_confirm_rules = mode_config
         .as_ref()
         .map(|m| m.tool_confirm.rules.as_slice())
@@ -1442,7 +1444,7 @@ pub async fn check_tools_confirmation(
         .collect();
 
     let all_tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id).await,
+        crate::tools::tools_list::get_tools_for_mode(app.gcx.clone(), mode_id, model_id).await,
     )
     .tools
     .into_iter()
@@ -1581,7 +1583,7 @@ pub async fn check_tools_confirmation(
 }
 
 pub async fn execute_tools_with_session(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     tool_calls: &[ChatToolCall],
     messages: &[ChatMessage],
@@ -1611,7 +1613,7 @@ pub async fn execute_tools_with_session(
         options.allowed_tools = session_allowed_tools;
     }
 
-    let n_ctx = get_effective_n_ctx(gcx.clone(), thread).await;
+    let n_ctx = get_effective_n_ctx(app.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
         Ok(b) => b,
         Err(e) => {
@@ -1631,7 +1633,7 @@ pub async fn execute_tools_with_session(
     };
 
     let ccx = build_tool_execution_context(
-        gcx.clone(),
+        app.clone(),
         n_ctx,
         messages,
         thread,
@@ -1650,7 +1652,7 @@ pub async fn execute_tools_with_session(
     let cancel_flag = spawn_subchat_bridge(ccx.clone(), session_arc.clone());
 
     let result = execute_tools_inner(
-        gcx,
+        app.clone(),
         ccx,
         tool_calls,
         mode_id,
@@ -1699,12 +1701,12 @@ type SerialToolRegistry = std::collections::HashMap<
 >;
 
 async fn instantiate_tool_for_call(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     mode_id: &str,
     model_id: Option<&str>,
     tool_name: &str,
 ) -> Option<Box<dyn crate::tools::tools_description::Tool + Send>> {
-    let raw_tools = crate::tools::tools_list::get_tools_for_mode(gcx, mode_id, model_id).await;
+    let raw_tools = crate::tools::tools_list::get_tools_for_mode(app.gcx.clone(), mode_id, model_id).await;
     let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
     // Resolve CC-mode name (strips mcp_ prefix + reverses CC_TOOL_RENAMES) so that
     // "mcp_plan" dispatches to "strategic_planning", "mcp_cat" dispatches to "cat", etc.
@@ -1719,7 +1721,7 @@ async fn instantiate_tool_for_call(
 }
 
 async fn execute_single_tool(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     ccx: Arc<AMutex<AtCommandsContext>>,
     idx: usize,
     tool_call: ChatToolCall,
@@ -1762,13 +1764,13 @@ async fn execute_single_tool(
         let ccx_locked = ccx.lock().await;
         let sid = ccx_locked.chat_id.clone();
         drop(ccx_locked);
-        let pd = get_project_dir_string(gcx.clone()).await;
+        let pd = get_project_dir_string(app.gcx.clone()).await;
         (sid, pd)
     };
 
     let (idx, had_corrections, msgs, files) = if allow_parallel {
         let mut tool = match instantiate_tool_for_call(
-            gcx.clone(),
+            app.clone(),
             mode_id,
             model_id,
             &tool_call.function.name,
@@ -1928,7 +1930,7 @@ async fn execute_single_tool(
         user_prompt: None,
         extra: std::collections::HashMap::new(),
     };
-    let post_results = run_hooks(gcx.clone(), HookEvent::PostToolUse, post_payload).await;
+    let post_results = run_hooks(app.gcx.clone(), HookEvent::PostToolUse, post_payload).await;
     if let Some(reason) = first_block_reason(&post_results) {
         return (
             idx,
@@ -1949,7 +1951,7 @@ async fn execute_single_tool(
 }
 
 async fn execute_tools_inner(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     ccx: Arc<AMutex<AtCommandsContext>>,
     tool_calls: &[ChatToolCall],
     mode_id: &str,
@@ -1961,7 +1963,7 @@ async fn execute_tools_inner(
     let max_parallel = limits().max_parallel_tools.max(1);
 
     let raw_available_tools =
-        crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode_id, model_id).await;
+        crate::tools::tools_list::get_tools_for_mode(app.gcx.clone(), mode_id, model_id).await;
     let available_tools =
         crate::tools::tools_list::apply_mcp_lazy_filter(raw_available_tools).tools;
 
@@ -2052,7 +2054,7 @@ async fn execute_tools_inner(
         } else {
             if !current_parallel_batch.is_empty() {
                 let batch_results = execute_parallel_batch(
-                    gcx.clone(),
+                    app.clone(),
                     ccx.clone(),
                     &current_parallel_batch,
                     serial_registry.clone(),
@@ -2066,7 +2068,7 @@ async fn execute_tools_inner(
             }
 
             let result = execute_single_tool(
-                gcx.clone(),
+                app.clone(),
                 ccx.clone(),
                 idx,
                 tool_call.clone(),
@@ -2082,7 +2084,7 @@ async fn execute_tools_inner(
 
     if !current_parallel_batch.is_empty() {
         let batch_results = execute_parallel_batch(
-            gcx.clone(),
+            app.clone(),
             ccx.clone(),
             &current_parallel_batch,
             serial_registry.clone(),
@@ -2110,7 +2112,7 @@ async fn execute_tools_inner(
     let pp_settings = options.postprocess_settings.unwrap_or_default();
 
     let results = postprocess_tool_results(
-        gcx,
+        app.gcx.clone(),
         None,
         tool_messages,
         context_files,
@@ -2124,7 +2126,7 @@ async fn execute_tools_inner(
 }
 
 async fn execute_parallel_batch(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     ccx: Arc<AMutex<AtCommandsContext>>,
     batch: &[(usize, ChatToolCall)],
     serial_registry: Arc<SerialToolRegistry>,
@@ -2137,7 +2139,7 @@ async fn execute_parallel_batch(
     let futures: Vec<_> = batch
         .iter()
         .map(|(idx, tool_call)| {
-            let gcx = gcx.clone();
+            let gcx = app.clone();
             let ccx = ccx.clone();
             let semaphore = semaphore.clone();
             let serial_registry = serial_registry.clone();
@@ -2167,7 +2169,7 @@ async fn execute_parallel_batch(
 }
 
 async fn tool_runtime_event_lines(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     tool_name: &str,
     chat_label: &str,
 ) -> (String, Option<String>) {
@@ -2176,7 +2178,7 @@ async fn tool_runtime_event_lines(
         "Using {} to help with '{}'...",
         tool_name, chat_label
     ));
-    let Some(snapshot) = crate::buddy::actor::buddy_snapshot(crate::app_state::AppState::from_gcx(gcx.clone()).await).await else {
+    let Some(snapshot) = crate::buddy::actor::buddy_snapshot(app.clone()).await else {
         return (fallback_title, fallback_speech);
     };
     let pulse_one_liner = format!(
@@ -2193,7 +2195,7 @@ async fn tool_runtime_event_lines(
     };
     let (title, speech) = voice_service()
         .await
-        .render_runtime_event_fast(crate::app_state::AppState::from_gcx(gcx).await, voice_ctx, "started")
+        .render_runtime_event_fast(app, voice_ctx, "started")
         .await;
     runtime_event_lines_with_fallback(title, speech, fallback_title, fallback_speech)
 }
@@ -2217,7 +2219,7 @@ fn runtime_event_lines_with_fallback(
 }
 
 pub async fn execute_tools(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     tool_calls: &[ChatToolCall],
     messages: &[ChatMessage],
     thread: &ThreadParams,
@@ -2229,7 +2231,7 @@ pub async fn execute_tools(
         return (vec![], false);
     }
 
-    let n_ctx = get_effective_n_ctx(gcx.clone(), thread).await;
+    let n_ctx = get_effective_n_ctx(app.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
         Ok(b) => b,
         Err(e) => {
@@ -2248,7 +2250,7 @@ pub async fn execute_tools(
         }
     };
 
-    let ccx = build_tool_execution_context(gcx.clone(), n_ctx, messages, thread, None).await;
+    let ccx = build_tool_execution_context(app.clone(), n_ctx, messages, thread, None).await;
 
     {
         let mut ccx_locked = ccx.lock().await;
@@ -2258,7 +2260,7 @@ pub async fn execute_tools(
         }
     }
 
-    let gcx2 = gcx.clone();
+    let app2 = app.clone();
     let is_buddy = thread
         .buddy_meta
         .as_ref()
@@ -2283,7 +2285,7 @@ pub async fn execute_tools(
         .collect();
     for (tc, (_, dedupe_key)) in tool_calls.iter().zip(tool_meta.iter()) {
         let (title, speech_text) =
-            tool_runtime_event_lines(gcx.clone(), &tc.function.name, &chat_label).await;
+            tool_runtime_event_lines(app.clone(), &tc.function.name, &chat_label).await;
         let mut ev = crate::buddy::actor::make_runtime_event(
             "tool_used",
             &title,
@@ -2295,11 +2297,11 @@ pub async fn execute_tools(
         ev.speech_text = speech_text;
         ev.scene = Some("working".to_string());
         ev.chat_id = Some(chat_id.to_string());
-        crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+        crate::buddy::actor::buddy_enqueue_event(app.clone(), ev).await;
     }
 
     let (result_msgs, had_corrections) = execute_tools_inner(
-        gcx, ccx, tool_calls, mode_id, model_id, budget, options, messages,
+        app, ccx, tool_calls, mode_id, model_id, budget, options, messages,
     )
     .await;
 
@@ -2319,14 +2321,14 @@ pub async fn execute_tools(
                 None,
             );
             ev.chat_id = Some(chat_id.to_string());
-            crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx2.clone()).await, ev).await;
+            crate::buddy::actor::buddy_enqueue_event(app2.clone(), ev).await;
         } else {
-            crate::buddy::actor::buddy_complete_event(crate::app_state::AppState::from_gcx(gcx2.clone()).await, dedupe_key, "completed").await;
+            crate::buddy::actor::buddy_complete_event(app2.clone(), dedupe_key, "completed").await;
         }
     }
 
     if !is_buddy && result_msgs.iter().any(|m| m.tool_failed == Some(true)) {
-        let buddy_arc = gcx2.read().await.buddy.clone();
+        let buddy_arc = app2.buddy.buddy.clone();
         let mut buddy = buddy_arc.lock().await;
         if let Some(svc) = buddy.as_mut() {
             let suggestion = crate::buddy::types::BuddySuggestion {

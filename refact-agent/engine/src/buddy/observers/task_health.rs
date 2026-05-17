@@ -184,7 +184,7 @@ impl BuddyObserver for TaskHealthObserver {
                 if card.column == "doing" {
                     let live = if let Some(chat_id) = &card.agent_chat_id {
                         crate::chat::task_agent_monitor::get_last_agent_heartbeat(
-                            gcx.gcx.clone(),
+                            gcx.clone(),
                             chat_id,
                         )
                         .await

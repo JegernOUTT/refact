@@ -2,14 +2,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::{Mutex as AMutex};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 use crate::buddy::user_activity::UserAction;
 use crate::files_correction::get_project_dirs;
-use crate::global_context::GlobalContext;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
 
@@ -24,8 +24,8 @@ use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{WorktreeMeta, WorktreeReference};
 
-async fn push_user_activity(gcx: Arc<ARwLock<GlobalContext>>, action: UserAction) {
-    let user_activity = gcx.read().await.user_activity.clone();
+async fn push_user_activity(app: AppState, action: UserAction) {
+    let user_activity = app.buddy.user_activity.clone();
     if let Ok(mut ring) = user_activity.try_lock() {
         ring.push(action);
     };
@@ -72,7 +72,7 @@ fn command_triggers_generation(cmd: &ChatCommand) -> bool {
 }
 
 pub async fn inject_priority_messages_if_any(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
     let priority_requests = {
@@ -100,7 +100,7 @@ pub async fn inject_priority_messages_if_any(
                 let session = session_arc.lock().await;
                 let sid = session.chat_id.clone();
                 drop(session);
-                let pd = get_project_dir_string(gcx.clone()).await;
+                let pd = get_project_dir_string(app.gcx.clone()).await;
                 (sid, pd)
             };
             let prompt_text = match &content {
@@ -108,7 +108,7 @@ pub async fn inject_priority_messages_if_any(
                 other => serde_json::to_string(other).unwrap_or_default(),
             };
             let hook_results = run_hooks(
-                gcx.clone(),
+                app.gcx.clone(),
                 HookEvent::UserPromptSubmit,
                 HookPayload {
                     hook_event_name: "UserPromptSubmit".to_string(),
@@ -138,7 +138,7 @@ pub async fn inject_priority_messages_if_any(
 
             let checkpoints = if checkpoints_enabled {
                 create_checkpoint_async(
-                    gcx.clone(),
+                    app.clone(),
                     latest_checkpoint.as_ref(),
                     &chat_id,
                     worktree.as_ref(),
@@ -164,7 +164,7 @@ pub async fn inject_priority_messages_if_any(
         }
     }
 
-    maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
     true
 }
 
@@ -528,11 +528,11 @@ fn reference_for_thread(
 }
 
 async fn worktree_service_from_gcx(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     requested_source_root: Option<&std::path::Path>,
 ) -> Result<WorktreeService, String> {
-    let cache_dir = gcx.read().await.cache_dir.clone();
-    let project_dirs = get_project_dirs(gcx).await;
+    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let project_dirs = get_project_dirs(app.gcx.clone()).await;
     if project_dirs.is_empty() {
         return Err("No project root available".to_string());
     }
@@ -562,13 +562,13 @@ async fn worktree_service_from_gcx(
 }
 
 async fn remove_thread_reference(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     chat_id: &str,
     thread: &ThreadParams,
     worktree: &WorktreeMeta,
 ) {
     let reference = reference_for_thread(chat_id, thread, &worktree.kind);
-    let Ok(service) = worktree_service_from_gcx(gcx, Some(&worktree.source_workspace_root)).await
+    let Ok(service) = worktree_service_from_gcx(app, Some(&worktree.source_workspace_root)).await
     else {
         warn!(
             "Failed to resolve worktree service while detaching '{}'",
@@ -585,12 +585,12 @@ async fn remove_thread_reference(
 }
 
 async fn add_thread_worktree_reference(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     chat_id: &str,
     thread: &ThreadParams,
     worktree: &WorktreeMeta,
 ) -> Option<WorktreeMeta> {
-    let service = match worktree_service_from_gcx(gcx, Some(&worktree.source_workspace_root)).await
+    let service = match worktree_service_from_gcx(app, Some(&worktree.source_workspace_root)).await
     {
         Ok(service) => service,
         Err(e) => {
@@ -615,7 +615,7 @@ async fn add_thread_worktree_reference(
 }
 
 pub async fn resolve_worktree_setparams_update(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     chat_id: &str,
     thread: &ThreadParams,
     patch: &serde_json::Value,
@@ -625,7 +625,7 @@ pub async fn resolve_worktree_setparams_update(
             .as_str()
             .filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "worktree_id must be a non-empty string".to_string())?;
-        let service = worktree_service_from_gcx(gcx.clone(), None).await?;
+        let service = worktree_service_from_gcx(app.clone(), None).await?;
         let view = service.get_worktree(worktree_id).await?;
         let reference = reference_for_thread(chat_id, thread, &view.meta.kind);
         let view = service.add_reference(worktree_id, reference).await?;
@@ -634,7 +634,7 @@ pub async fn resolve_worktree_setparams_update(
             .as_ref()
             .filter(|old| old.id != view.meta.id)
         {
-            remove_thread_reference(gcx, chat_id, thread, old).await;
+            remove_thread_reference(app, chat_id, thread, old).await;
         }
         let changed = thread
             .worktree
@@ -650,7 +650,7 @@ pub async fn resolve_worktree_setparams_update(
 
     if patch.get("worktree").map_or(false, |value| value.is_null()) {
         if let Some(old) = thread.worktree.as_ref() {
-            remove_thread_reference(gcx, chat_id, thread, old).await;
+            remove_thread_reference(app, chat_id, thread, old).await;
         }
         return Ok(Some(WorktreeSetParamsUpdate {
             worktree: None,
@@ -663,7 +663,7 @@ pub async fn resolve_worktree_setparams_update(
 }
 
 pub async fn process_command_queue(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     processor_running: Arc<AtomicBool>,
 ) {
@@ -724,7 +724,7 @@ pub async fn process_command_queue(
                     return;
                 }
 
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
 
                 let session = session_arc.lock().await;
                 if session.closed {
@@ -763,7 +763,7 @@ pub async fn process_command_queue(
             } => {
                 let mut skill_activation_info = None;
                 if let Some(text) = content.as_str() {
-                    match expand_slash_command(gcx.clone(), text).await {
+                    match expand_slash_command(app.gcx.clone(), text).await {
                         Ok(Some(expanded)) => {
                             skill_activation_info = expanded.skill_to_activate;
                             content = serde_json::Value::String(expanded.expanded_text);
@@ -846,7 +846,7 @@ pub async fn process_command_queue(
 
                 let checkpoints = if checkpoints_enabled {
                     create_checkpoint_async(
-                        gcx.clone(),
+                        app.clone(),
                         latest_checkpoint.as_ref(),
                         &chat_id,
                         worktree.as_ref(),
@@ -867,7 +867,7 @@ pub async fn process_command_queue(
                 };
 
                 let browser_ctx_result = browser_context::maybe_insert_browser_context(
-                    gcx.clone(),
+                    app.gcx.clone(),
                     &browser_chat_id,
                     has_browser_meta,
                     attach_screenshot_on_send,
@@ -878,7 +878,7 @@ pub async fn process_command_queue(
                     let session = session_arc.lock().await;
                     let sid = session.chat_id.clone();
                     drop(session);
-                    let pd = get_project_dir_string(gcx.clone()).await;
+                    let pd = get_project_dir_string(app.gcx.clone()).await;
                     (sid, pd)
                 };
                 let prompt_text = match &content {
@@ -896,7 +896,7 @@ pub async fn process_command_queue(
                     extra: std::collections::HashMap::new(),
                 };
                 let prompt_results =
-                    run_hooks(gcx.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
+                    run_hooks(app.gcx.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
                 if let Some(reason) = first_block_reason(&prompt_results) {
                     let mut session = session_arc.lock().await;
                     session.emit(super::types::ChatEvent::RuntimeUpdated {
@@ -922,7 +922,7 @@ pub async fn process_command_queue(
                             continue;
                         };
                         let add_results = run_hooks(
-                            gcx.clone(),
+                            app.gcx.clone(),
                             HookEvent::UserPromptSubmit,
                             HookPayload {
                                 hook_event_name: "UserPromptSubmit".to_string(),
@@ -950,7 +950,7 @@ pub async fn process_command_queue(
                 if is_oversize {
                     if let Some((_, true)) = browser_ctx_result {
                         let snapshot = browser_context::get_browser_context_for_chat(
-                            gcx.clone(),
+                            app.gcx.clone(),
                             &browser_chat_id,
                         )
                         .await;
@@ -1040,7 +1040,7 @@ pub async fn process_command_queue(
                             .collect();
                         drop(session);
                         push_user_activity(
-                            gcx.clone(),
+                            app.clone(),
                             UserAction::ChatStarted {
                                 chat_id,
                                 first_user_text_preview,
@@ -1083,9 +1083,9 @@ pub async fn process_command_queue(
                     }
                 }
 
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
-                start_generation(gcx.clone(), session_arc.clone()).await;
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
+                start_generation(app.clone(), session_arc.clone()).await;
             }
             ChatCommand::RetryFromIndex {
                 index,
@@ -1104,9 +1104,9 @@ pub async fn process_command_queue(
                 session.add_message(user_message);
                 drop(session);
 
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
-                start_generation(gcx.clone(), session_arc.clone()).await;
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
+                start_generation(app.clone(), session_arc.clone()).await;
             }
             ChatCommand::SetParams { patch } => {
                 if !patch.is_object() {
@@ -1118,7 +1118,7 @@ pub async fn process_command_queue(
                     (session.chat_id.clone(), session.thread.clone())
                 };
                 let worktree_update = match resolve_worktree_setparams_update(
-                    gcx.clone(),
+                    app.clone(),
                     &chat_id,
                     &thread_before,
                     &patch,
@@ -1174,7 +1174,7 @@ pub async fn process_command_queue(
                 }
                 drop(session);
                 if changed {
-                    maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                 }
             }
             ChatCommand::Abort {} => {
@@ -1189,10 +1189,10 @@ pub async fn process_command_queue(
                     tool_call_id: tool_call_id.clone(),
                     accepted,
                 }];
-                handle_tool_decisions(gcx.clone(), session_arc.clone(), &decisions).await;
+                handle_tool_decisions(app.clone(), session_arc.clone(), &decisions).await;
             }
             ChatCommand::ToolDecisions { decisions } => {
-                handle_tool_decisions(gcx.clone(), session_arc.clone(), &decisions).await;
+                handle_tool_decisions(app.clone(), session_arc.clone(), &decisions).await;
             }
             ChatCommand::IdeToolResult {
                 tool_call_id,
@@ -1211,7 +1211,7 @@ pub async fn process_command_queue(
                 session.add_message(tool_message);
                 session.set_runtime_state(SessionState::Idle, None);
                 drop(session);
-                start_generation(gcx.clone(), session_arc.clone()).await;
+                start_generation(app.clone(), session_arc.clone()).await;
             }
             ChatCommand::UpdateMessage {
                 message_id,
@@ -1235,10 +1235,10 @@ pub async fn process_command_queue(
                     if regenerate && idx + 1 < session.messages.len() {
                         session.truncate_messages(idx + 1);
                         drop(session);
-                        maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone())
+                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
                             .await;
-                        start_generation(gcx.clone(), session_arc.clone()).await;
+                        start_generation(app.clone(), session_arc.clone()).await;
                     }
                 }
             }
@@ -1254,16 +1254,16 @@ pub async fn process_command_queue(
                     if regenerate && idx < session.messages.len() {
                         session.truncate_messages(idx);
                         drop(session);
-                        maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                        prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone())
+                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
                             .await;
-                        start_generation(gcx.clone(), session_arc.clone()).await;
+                        start_generation(app.clone(), session_arc.clone()).await;
                     }
                 }
             }
             ChatCommand::Regenerate {} => {
-                prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
-                start_generation(gcx.clone(), session_arc.clone()).await;
+                prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
+                start_generation(app.clone(), session_arc.clone()).await;
             }
             ChatCommand::RestoreMessages { messages } => {
                 let mut session = session_arc.lock().await;
@@ -1277,7 +1277,7 @@ pub async fn process_command_queue(
                     }
                 }
                 drop(session);
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
             }
             ChatCommand::BranchFromChat {
                 source_chat_id,
@@ -1288,13 +1288,10 @@ pub async fn process_command_queue(
                     continue;
                 }
 
-                let sessions = {
-                    let gcx_locked = gcx.read().await;
-                    gcx_locked.chat_sessions.clone()
-                };
+                let sessions = app.chat.sessions.clone();
 
                 let source_session_arc = super::session::get_or_create_session_with_trajectory(
-                    gcx.clone(),
+                    app.clone(),
                     &sessions,
                     &source_chat_id,
                 )
@@ -1340,7 +1337,7 @@ pub async fn process_command_queue(
                 drop(session);
                 if let Some(worktree) = source_worktree.as_ref() {
                     if let Some(validated) = add_thread_worktree_reference(
-                        gcx.clone(),
+                        app.clone(),
                         &target_thread.id,
                         &target_thread,
                         worktree,
@@ -1351,7 +1348,7 @@ pub async fn process_command_queue(
                         session.thread.worktree = Some(validated);
                     }
                 }
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
             }
             ChatCommand::BrowserContextDecision {
                 pending_message_id,
@@ -1387,7 +1384,7 @@ pub async fn process_command_queue(
                 };
 
                 let snapshot =
-                    browser_context::get_browser_context_for_chat(gcx.clone(), &browser_chat_id)
+                    browser_context::get_browser_context_for_chat(app.gcx.clone(), &browser_chat_id)
                         .await;
 
                 {
@@ -1441,10 +1438,10 @@ pub async fn process_command_queue(
                     }
                 }
 
-                browser_context::commit_browser_cursors(gcx.clone(), &browser_chat_id).await;
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
-                prepare_session_preamble_and_knowledge(gcx.clone(), session_arc.clone()).await;
-                start_generation(gcx.clone(), session_arc.clone()).await;
+                browser_context::commit_browser_cursors(app.gcx.clone(), &browser_chat_id).await;
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
+                start_generation(app.clone(), session_arc.clone()).await;
             }
         }
     }
@@ -1506,7 +1503,7 @@ fn is_allowed_role_for_branch(role: &str) -> bool {
 }
 
 async fn handle_tool_decisions(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     decisions: &[ToolDecisionItem],
 ) {
@@ -1535,9 +1532,9 @@ async fn handle_tool_decisions(
         }
 
         if accepted_any {
-            start_generation(gcx.clone(), session_arc.clone()).await;
+            start_generation(app.clone(), session_arc.clone()).await;
         } else {
-            maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+            maybe_save_trajectory(app.clone(), session_arc.clone()).await;
         }
         return;
     }
@@ -1658,7 +1655,7 @@ async fn handle_tool_decisions(
     let had_tool_calls = !tool_calls_to_execute.is_empty();
     if had_tool_calls {
         let tool_calls_to_execute = resolve_tool_call_aliases(
-            gcx.clone(),
+            app.clone(),
             tool_calls_to_execute,
             &thread.mode,
             Some(&thread.model),
@@ -1671,7 +1668,7 @@ async fn handle_tool_decisions(
         }
 
         let (tool_results, _) = execute_tools_with_session(
-            gcx.clone(),
+            app.clone(),
             session_arc.clone(),
             &tool_calls_to_execute,
             &messages,
@@ -1735,7 +1732,7 @@ async fn handle_tool_decisions(
             }
         }
 
-        maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
 
         if was_aborted || tool_initiated_stop {
             return;
@@ -1747,15 +1744,15 @@ async fn handle_tool_decisions(
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::Idle, None);
         }
-        maybe_save_trajectory(gcx, session_arc).await;
+        maybe_save_trajectory(app, session_arc).await;
     } else if had_tool_calls {
-        start_generation(gcx, session_arc).await;
+        start_generation(app, session_arc).await;
     } else {
         {
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::Idle, None);
         }
-        maybe_save_trajectory(gcx, session_arc).await;
+        maybe_save_trajectory(app, session_arc).await;
     }
 }
 
@@ -1770,7 +1767,7 @@ fn find_latest_checkpoint(session: &ChatSession) -> Option<crate::git::checkpoin
 }
 
 async fn create_checkpoint_async(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     latest_checkpoint: Option<&crate::git::checkpoints::Checkpoint>,
     chat_id: &str,
     worktree: Option<&crate::worktrees::types::WorktreeMeta>,
@@ -1778,9 +1775,9 @@ async fn create_checkpoint_async(
     use crate::git::checkpoints::{create_workspace_checkpoint, create_workspace_checkpoint_for_root};
 
     let result = if let Some(worktree) = worktree {
-        create_workspace_checkpoint_for_root(gcx, &worktree.root, latest_checkpoint, chat_id).await
+        create_workspace_checkpoint_for_root(app.gcx.clone(), &worktree.root, latest_checkpoint, chat_id).await
     } else {
-        create_workspace_checkpoint(gcx, latest_checkpoint, chat_id).await
+        create_workspace_checkpoint(app.gcx.clone(), latest_checkpoint, chat_id).await
     };
 
     match result {
@@ -1845,8 +1842,9 @@ mod tests {
     #[tokio::test]
     async fn chat_started_pushed_on_first_user_message() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         push_user_activity(
-            gcx.clone(),
+            app.clone(),
             UserAction::ChatStarted {
                 chat_id: "chat-1".to_string(),
                 first_user_text_preview: "hello from first user message".chars().take(80).collect(),
@@ -1855,7 +1853,7 @@ mod tests {
         )
         .await;
 
-        let user_activity = gcx.read().await.user_activity.clone();
+        let user_activity = app.buddy.user_activity.clone();
         let ring = user_activity.lock().await;
         assert!(ring.snapshot().iter().any(|action| matches!(
             action,
@@ -2135,11 +2133,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache.clone();
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *app.paths.cache_dir.write().unwrap() = cache.clone();
         }
         let service = WorktreeService::new(cache, source.clone()).unwrap();
         let created = service
@@ -2153,7 +2150,7 @@ mod tests {
         let mut thread = ThreadParams::default();
         thread.id = "chat-attach".to_string();
         let update = resolve_worktree_setparams_update(
-            gcx,
+            app,
             "chat-attach",
             &thread,
             &json!({"worktree_id": created.worktree.meta.id.clone()}),
@@ -2184,11 +2181,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache.clone();
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *app.paths.cache_dir.write().unwrap() = cache.clone();
         }
         let service = WorktreeService::new(cache, source.clone()).unwrap();
         let created = service
@@ -2203,7 +2199,7 @@ mod tests {
         let mut thread = ThreadParams::default();
         thread.worktree = Some(created.worktree.meta.clone());
         let update = resolve_worktree_setparams_update(
-            gcx,
+            app,
             "chat-detach",
             &thread,
             &json!({"worktree": null}),
@@ -2224,11 +2220,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache.clone();
+            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *app.paths.cache_dir.write().unwrap() = cache.clone();
         }
         let service = WorktreeService::new(cache, source).unwrap();
         let created = service
@@ -2244,7 +2239,7 @@ mod tests {
         let mut target = ThreadParams::default();
         target.id = "target-chat".to_string();
         let validated =
-            add_thread_worktree_reference(gcx, "target-chat", &target, &created.worktree.meta)
+            add_thread_worktree_reference(app, "target-chat", &target, &created.worktree.meta)
                 .await
                 .unwrap();
 

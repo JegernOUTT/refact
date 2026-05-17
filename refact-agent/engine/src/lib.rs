@@ -261,7 +261,7 @@ pub async fn run() {
         let _ = main_handle.unwrap().await;
     }
 
-    chat::close_all_chat_sessions(gcx.clone()).await;
+    chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
     background_tasks.abort().await;
     git::checkpoints::abort_init_shadow_repos(gcx.clone()).await;
     integrations::sessions::stop_sessions(gcx.clone()).await;

@@ -185,7 +185,7 @@ impl Tool for ToolHandoffToMode {
 
         let sessions = gcx.read().await.chat_sessions.clone();
         let session_arc =
-            get_or_create_session_with_trajectory(gcx.clone(), &sessions, &chat_id).await;
+            get_or_create_session_with_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
         let (messages, thread, task_meta, session_state) = {
             let session = session_arc.lock().await;

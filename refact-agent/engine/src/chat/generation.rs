@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::json;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::{Mutex as AMutex};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::app_state::AppState;
 use crate::subchat::{resolve_subchat_config_with_parent, run_subchat};
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -15,7 +16,6 @@ use crate::call_validation::{
 use crate::stats::event::{LlmCallEvent, canonicalize_mode_for_stats, split_model_provider};
 use crate::chat::tool_call_recovery;
 use crate::chat::tool_call_recovery_oss;
-use crate::global_context::GlobalContext;
 use crate::llm::LlmRequest;
 use crate::llm::params::CacheControl;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
@@ -144,9 +144,10 @@ fn build_mcp_index_message(index: &[(String, String)], total: usize) -> String {
 }
 
 pub async fn prepare_session_preamble_and_knowledge(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
+    let gcx = app.gcx.clone();
     let (thread, chat_id, has_system, has_project_context) = {
         let session = session_arc.lock().await;
         let has_sys = session
@@ -226,7 +227,7 @@ pub async fn prepare_session_preamble_and_knowledge(
         let mut has_rag_results = crate::scratchpads::scratchpad_utils::HasRagResults::new();
         let (messages_with_preamble, skills_info) =
             prepend_the_right_system_prompt_and_maybe_more_initial_messages(
-                gcx.clone(),
+                app.clone(),
                 messages,
                 &meta,
                 &thread.task_meta,
@@ -451,12 +452,13 @@ fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
 }
 
 async fn run_fork_subchat(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     agent_name: &str,
     user_content: &str,
     thread: &ThreadParams,
     parent_chat_id: &str,
 ) -> Result<String, String> {
+    let gcx = app.gcx.clone();
     let config = resolve_subchat_config_with_parent(
         gcx.clone(),
         agent_name,
@@ -495,10 +497,11 @@ async fn run_fork_subchat(
 }
 
 pub fn start_generation(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
+        let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
         loop {
             let (mut thread, chat_id) = {
@@ -554,7 +557,7 @@ pub fn start_generation(
                 };
 
                 let fork_result =
-                    run_fork_subchat(gcx.clone(), &agent_name, &user_content, &thread, &chat_id)
+                    run_fork_subchat(app.clone(), &agent_name, &user_content, &thread, &chat_id)
                         .await;
 
                 match fork_result {
@@ -567,7 +570,7 @@ pub fn start_generation(
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                         drop(session);
-                        maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                         break;
                     }
                     Err(e) => {
@@ -604,7 +607,7 @@ pub fn start_generation(
                     None,
                 );
                 ev.chat_id = Some(chat_id.to_string());
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(app.clone(), ev).await;
                 let mut ev = crate::buddy::actor::make_runtime_event(
                     "streaming",
                     &format!("Generating reply in '{}'", chat_label),
@@ -617,11 +620,11 @@ pub fn start_generation(
                 ev.scene = Some("working".to_string());
                 ev.persistent = true;
                 ev.chat_id = Some(chat_id.to_string());
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(app.clone(), ev).await;
             }
 
             let generation_result = run_llm_generation(
-                gcx.clone(),
+                app.clone(),
                 session_arc.clone(),
                 thread,
                 chat_id.clone(),
@@ -665,8 +668,8 @@ pub fn start_generation(
                 let task_meta_opt = {
                     let mut session = session_arc.lock().await;
                     if !session.abort_flag.load(Ordering::SeqCst) {
-                        let app2 = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-                        let buddy_svc = app2.buddy.buddy.clone();
+                        let app2 = app.clone();
+                        let buddy_svc = app.buddy.buddy.clone();
                         let err_clone = e.clone();
                         let chat_id2 = chat_id.clone();
                         let chat_label2 = chat_label.clone();
@@ -706,7 +709,7 @@ pub fn start_generation(
                     session.thread.task_meta.clone()
                 };
 
-                maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
 
                 if let Some(task_meta) = task_meta_opt {
                     let error_msg = {
@@ -715,7 +718,7 @@ pub fn start_generation(
                     };
                     if let Some(error) = error_msg {
                         super::task_agent_monitor::handle_agent_streaming_error(
-                            gcx.clone(),
+                            app.clone(),
                             &task_meta,
                             &error,
                         )
@@ -776,13 +779,13 @@ pub fn start_generation(
                 );
             }
 
-            maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+            maybe_save_trajectory(app.clone(), session_arc.clone()).await;
 
-            match process_tool_calls_once(gcx.clone(), session_arc.clone(), &mode_id, model_id_opt)
+            match process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt)
                 .await
             {
                 ToolStepOutcome::NoToolCalls => {
-                    if inject_priority_messages_if_any(gcx.clone(), session_arc.clone()).await {
+                    if inject_priority_messages_if_any(app.clone(), session_arc.clone()).await {
                         continue;
                     }
                     let should_continue = {
@@ -820,7 +823,7 @@ pub fn start_generation(
                         );
                         ev.chat_id = Some(chat_id.to_string());
                         crate::buddy::actor::buddy_apply(
-                            crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                            app.clone(),
                             crate::buddy::actor::BuddyMutation {
                                 runtime_event: Some(ev),
                                 xp: 4,
@@ -843,7 +846,7 @@ pub fn start_generation(
                     );
                     ev.chat_id = Some(chat_id.to_string());
                     ev.persistent = true;
-                    crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+                    crate::buddy::actor::buddy_enqueue_event(app.clone(), ev).await;
                     break;
                 }
                 ToolStepOutcome::Stop => {
@@ -857,7 +860,7 @@ pub fn start_generation(
                     );
                     ev.chat_id = Some(chat_id.to_string());
                     crate::buddy::actor::buddy_apply(
-                        crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                        app.clone(),
                         crate::buddy::actor::BuddyMutation {
                             runtime_event: Some(ev),
                             xp: 4,
@@ -869,7 +872,7 @@ pub fn start_generation(
                     break;
                 }
                 ToolStepOutcome::Continue => {
-                    inject_priority_messages_if_any(gcx.clone(), session_arc.clone()).await;
+                    inject_priority_messages_if_any(app.clone(), session_arc.clone()).await;
                 }
             }
         }
@@ -886,12 +889,13 @@ pub fn start_generation(
 }
 
 pub async fn run_llm_generation(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     thread: ThreadParams,
     chat_id: String,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let gcx = app.gcx.clone();
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
         .map_err(|e| e.message)?;
@@ -1039,7 +1043,7 @@ pub async fn run_llm_generation(
     }
 
     run_streaming_generation(
-        gcx,
+        app,
         session_arc,
         prepared.llm_request,
         &model_rec,
@@ -1049,16 +1053,16 @@ pub async fn run_llm_generation(
 }
 
 async fn generation_metering_usd(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    app: &AppState,
     model_id: &str,
     usage: &ChatUsage,
 ) -> Option<MeteringUsd> {
-    let pricing = crate::providers::pricing::lookup_model_pricing(gcx, model_id).await?;
+    let pricing = crate::providers::pricing::lookup_model_pricing(&app.gcx, model_id).await?;
     crate::providers::pricing::compute_cost(usage, &pricing)
 }
 
 async fn run_streaming_generation(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     mut llm_request: LlmRequest,
     model_rec: &crate::caps::ChatModelRecord,
@@ -1344,7 +1348,7 @@ async fn run_streaming_generation(
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
 
-        let results = run_llm_stream(gcx.clone(), params, &mut collector).await;
+        let results = run_llm_stream(app.clone(), params, &mut collector).await;
         drop(collector);
         let _ = emitter_task.await;
 
@@ -1399,7 +1403,7 @@ async fn run_streaming_generation(
                     total_tokens: 0,
                     cost_usd: None,
                 };
-                if let Some(sender) = &gcx.read().await.llm_stats_sender {
+                if let Some(sender) = &app.model.llm_stats_sender {
                     if sender.try_send(event).is_err() {
                         tracing::warn!("stats: channel full, dropping LLM call event");
                     }
@@ -1455,7 +1459,7 @@ async fn run_streaming_generation(
                     .and_then(|u| u.metering_usd.as_ref())
                     .map(|m| m.total_usd),
             };
-            if let Some(sender) = &gcx.read().await.llm_stats_sender {
+            if let Some(sender) = &app.model.llm_stats_sender {
                 if sender.try_send(event).is_err() {
                     tracing::warn!("stats: channel full, dropping LLM call event");
                 }
@@ -1644,7 +1648,7 @@ async fn run_streaming_generation(
         (model_rec.base.id.clone(), session.draft_usage.clone())
     };
     let metering_usd = if let Some(ref usage) = usage_for_pricing {
-        generation_metering_usd(&gcx, &model_id, usage).await
+        generation_metering_usd(&app, &model_id, usage).await
     } else {
         None
     };
@@ -1652,7 +1656,7 @@ async fn run_streaming_generation(
     {
         let mut success_event = pending_success_event;
         success_event.cost_usd = metering_usd.as_ref().map(|m| m.total_usd);
-        if let Some(sender) = &gcx.read().await.llm_stats_sender {
+        if let Some(sender) = &app.model.llm_stats_sender {
             if sender.try_send(success_event).is_err() {
                 tracing::warn!("stats: channel full, dropping LLM call event");
             }
@@ -2105,6 +2109,7 @@ mod tests {
     #[tokio::test]
     async fn test_models_dev_generation_metering_uses_central_pricing_lookup() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
         let mut model_caps = std::collections::HashMap::new();
         model_caps.insert(
             "openai/gpt-4o".to_string(),
@@ -2122,12 +2127,12 @@ mod tests {
             },
         );
         {
-            let mut gcx = gcx.write().await;
-            gcx.caps = Some(std::sync::Arc::new(crate::caps::CodeAssistantCaps {
+            let mut caps = app.model.caps.write().await;
+            caps.caps = Some(std::sync::Arc::new(crate::caps::CodeAssistantCaps {
                 model_caps: std::sync::Arc::new(model_caps),
                 ..Default::default()
             }));
-            gcx.caps_last_attempted_ts = std::time::SystemTime::now()
+            caps.last_attempted_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
@@ -2141,7 +2146,7 @@ mod tests {
             metering_usd: None,
         };
 
-        let metering = generation_metering_usd(&gcx, "openai/gpt-4o", &usage)
+        let metering = generation_metering_usd(&app, "openai/gpt-4o", &usage)
             .await
             .unwrap();
 

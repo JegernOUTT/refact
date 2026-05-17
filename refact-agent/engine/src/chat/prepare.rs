@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
+use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::execute_at::run_at_commands_locally;
 use crate::call_validation::{ChatMessage, ChatMeta, ReasoningEffort, SamplingParameters};
@@ -137,9 +138,10 @@ pub async fn prepare_chat_passthrough(
         HashSet::new()
     };
     let task_meta = ccx.lock().await.task_meta.clone();
+    let app = AppState::from_gcx(gcx.clone()).await;
     let messages = if options.prepend_system_prompt {
         let (msgs, _) = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
-            gcx.clone(),
+            app.clone(),
             messages,
             meta,
             &task_meta,
@@ -204,7 +206,7 @@ pub async fn prepare_chat_passthrough(
                         prerun_thread.context_tokens_cap = Some(effective_n_ctx);
                         prerun_thread.model = model_id.to_string();
                         let (tool_results, _) = execute_tools(
-                            gcx.clone(),
+                            app.clone(),
                             &unanswered_calls,
                             &messages,
                             &prerun_thread,

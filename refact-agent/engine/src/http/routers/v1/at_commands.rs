@@ -559,7 +559,7 @@ pub async fn handle_v1_at_command_execute(
     if !post.chat_id.is_empty() && any_context_produced {
         let sessions = global_context.read().await.chat_sessions.clone();
         let session_arc =
-            get_or_create_session_with_trajectory(global_context.clone(), &sessions, &post.chat_id)
+            get_or_create_session_with_trajectory(AppState::from_gcx(global_context.clone()).await, &sessions, &post.chat_id)
                 .await;
         let mut session = session_arc.lock().await;
         let original_len = post.messages.len();

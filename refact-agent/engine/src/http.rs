@@ -56,7 +56,7 @@ pub async fn start_server(
                 let shutdown = async move {
                     crate::global_context::block_until_signal(ask_shutdown_receiver, shutdown_flag)
                         .await;
-                    crate::chat::close_all_chat_sessions(gcx_for_shutdown).await;
+                    crate::chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx_for_shutdown).await).await;
                 };
                 let server = builder
                     .serve(router.into_make_service())

@@ -185,7 +185,7 @@ async fn merge_registered_task_worktree(
         .await?;
     if response.merged && !changed_files.is_empty() {
         let _ = crate::chat::task_agent_monitor::append_card_target_files(
-            gcx.clone(),
+            crate::app_state::AppState::from_gcx(gcx.clone()).await,
             task_id,
             card_id,
             changed_files,
@@ -640,7 +640,7 @@ Use `cat <file>` to see conflict markers in each file."#,
         drop(_guard);
 
         let _ = crate::chat::task_agent_monitor::append_card_target_files(
-            gcx.clone(),
+            crate::app_state::AppState::from_gcx(gcx.clone()).await,
             &task_id,
             card_id,
             changed_files,

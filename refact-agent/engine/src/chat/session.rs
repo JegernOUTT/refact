@@ -7,8 +7,8 @@ use tokio::sync::{broadcast, Mutex as AMutex, Notify, RwLock as ARwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage};
-use crate::global_context::GlobalContext;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
 
@@ -796,10 +796,11 @@ impl ChatSession {
 }
 
 pub async fn get_or_create_session_with_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    app: AppState,
     sessions: &SessionsMap,
     chat_id: &str,
 ) -> Arc<AMutex<ChatSession>> {
+    let gcx = app.gcx.clone();
     let maybe_existing = {
         let sessions_read = sessions.read().await;
         sessions_read.get(chat_id).cloned()
@@ -821,7 +822,7 @@ pub async fn get_or_create_session_with_trajectory(
         }
     }
 
-    let trajectory_events_tx = gcx.read().await.trajectory_events_tx.clone();
+    let trajectory_events_tx = app.chat.trajectory_events_tx.clone();
 
     let (mut session, is_new) = if let Some(mut loaded) =
         super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id).await
@@ -878,7 +879,7 @@ pub async fn get_or_create_session_with_trajectory(
         }
     }
 
-    session.trajectory_events_tx = trajectory_events_tx.clone();
+    session.trajectory_events_tx = Some(trajectory_events_tx.clone());
 
     let (session_arc, inserted) = {
         let mut sessions_write = sessions.write().await;
@@ -914,11 +915,8 @@ pub async fn get_or_create_session_with_trajectory(
     session_arc
 }
 
-pub async fn close_all_chat_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
-    let sessions = {
-        let gcx_locked = gcx.read().await;
-        gcx_locked.chat_sessions.clone()
-    };
+pub async fn close_all_chat_sessions(app: AppState) {
+    let sessions = app.chat.sessions.clone();
     let session_arcs: Vec<Arc<AMutex<ChatSession>>> = {
         let sessions_read = sessions.read().await;
         sessions_read.values().cloned().collect()
@@ -947,11 +945,11 @@ pub async fn close_all_chat_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
     }
 }
 
-pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
+pub fn start_session_cleanup_task(app: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(session_cleanup_interval());
+        let shutdown_flag = app.runtime.shutdown_flag.clone();
         loop {
-            let shutdown_flag = gcx.read().await.shutdown_flag.clone();
             tokio::select! {
                 _ = interval.tick() => {}
                 _ = async {
@@ -964,10 +962,7 @@ pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
                 }
             }
 
-            let sessions = {
-                let gcx_locked = gcx.read().await;
-                gcx_locked.chat_sessions.clone()
-            };
+            let sessions = app.chat.sessions.clone();
 
             let candidates: Vec<(String, Arc<AMutex<ChatSession>>)> = {
                 let sessions_read = sessions.read().await;
@@ -993,7 +988,7 @@ pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
             info!("Cleaning up {} idle sessions", to_cleanup.len());
 
             for (chat_id, session_arc) in &to_cleanup {
-                let gcx_hook = gcx.clone();
+                let gcx_hook = app.gcx.clone();
                 let chat_id_hook = chat_id.clone();
                 tokio::spawn(async move {
                     let project_dir = get_project_dir_string(gcx_hook.clone()).await;
@@ -1023,7 +1018,7 @@ pub fn start_session_cleanup_task(gcx: Arc<ARwLock<GlobalContext>>) {
                         }
                     }
                 }
-                super::trajectories::maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+                super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                 info!("Saved trajectory for closed session {}", chat_id);
             }
         }

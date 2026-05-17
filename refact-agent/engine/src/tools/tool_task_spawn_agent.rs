@@ -626,7 +626,7 @@ impl Tool for ToolTaskSpawnAgent {
         };
 
         let session_arc =
-            get_or_create_session_with_trajectory(gcx.clone(), &sessions, &agent_chat_id).await;
+            get_or_create_session_with_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, &sessions, &agent_chat_id).await;
 
         {
             let mut session = session_arc.lock().await;
@@ -699,7 +699,7 @@ impl Tool for ToolTaskSpawnAgent {
             session.increment_version();
         }
 
-        crate::chat::maybe_save_trajectory(gcx.clone(), session_arc.clone()).await;
+        crate::chat::maybe_save_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, session_arc.clone()).await;
 
         {
             let mut session = session_arc.lock().await;
@@ -719,7 +719,7 @@ impl Tool for ToolTaskSpawnAgent {
 
             if !processor_running.swap(true, Ordering::SeqCst) {
                 tokio::spawn(process_command_queue(
-                    gcx.clone(),
+                    crate::app_state::AppState::from_gcx(gcx.clone()).await,
                     session_arc.clone(),
                     processor_running,
                 ));

@@ -136,6 +136,18 @@ impl FromRef<AppState> for SharedGlobalContext {
     }
 }
 
+impl From<AppState> for SharedGlobalContext {
+    fn from(app: AppState) -> Self {
+        app.gcx.clone()
+    }
+}
+
+impl From<&AppState> for SharedGlobalContext {
+    fn from(app: &AppState) -> Self {
+        app.gcx.clone()
+    }
+}
+
 impl FromRef<AppState> for RuntimeServices {
     fn from_ref(app: &AppState) -> Self {
         app.runtime.clone()

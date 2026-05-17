@@ -305,7 +305,8 @@ async fn load_workspace_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebar
 }
 
 async fn load_chats_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart {
-    match timeout(SIDEBAR_BOOTSTRAP_TIMEOUT, list_all_trajectories_meta(gcx)).await {
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    match timeout(SIDEBAR_BOOTSTRAP_TIMEOUT, list_all_trajectories_meta(app)).await {
         Ok(Ok(trajectories)) => InitialSidebarPart::Chats {
             trajectories,
             status: SidebarSectionStatus::Ready,
