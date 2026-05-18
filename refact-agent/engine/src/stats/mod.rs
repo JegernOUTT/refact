@@ -4,7 +4,6 @@ pub mod writer;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 use crate::global_context::GlobalContext;
 
 pub async fn get_workspace_stats_dir(gcx: Arc<GlobalContext>) -> Option<PathBuf> {

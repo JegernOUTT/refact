@@ -6,7 +6,6 @@ use axum::http::{Response, StatusCode};
 use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
 use crate::app_state::AppState;

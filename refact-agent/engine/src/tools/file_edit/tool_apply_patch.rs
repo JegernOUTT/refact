@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
 use crate::knowledge_index::format_related_memories_section;
 
 pub struct ToolApplyPatch {

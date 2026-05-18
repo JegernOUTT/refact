@@ -15,7 +15,6 @@ use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::yaml_configs::customization_types::SubagentConfig;
 use crate::knowledge_index::format_related_memories_section;
-use tokio::sync::RwLock as ARwLock;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::memories::{memories_add_enriched, EnrichmentParams};
 use crate::postprocessing::pp_command_output::OutputFilter;

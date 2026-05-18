@@ -8,7 +8,6 @@ use serde_json::Value;
 use tokio::fs::File;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
 use crate::ast::ast_indexer_thread::ast_indexer_enqueue_files;

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use tokenizers::Tokenizer;
-use tokio::sync::RwLock as ARwLock;
 
 pub use refact_postprocessing::pp_tool_results::ToolBudget;
 use refact_core::chat_types::{ChatMessage, ContextFile, PostprocessSettings};

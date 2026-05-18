@@ -7,7 +7,7 @@ use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock, broadcast};
+use tokio::sync::{Mutex as AMutex, broadcast};
 use tokio::fs;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{info, warn};

@@ -19,7 +19,6 @@ use crate::tasks::storage::find_task_dir;
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
-use tokio::sync::RwLock as ARwLock;
 
 const MEMORIES_DIR: &str = "memories";
 const MAX_MEMORIES_CHARS: usize = 120_000;

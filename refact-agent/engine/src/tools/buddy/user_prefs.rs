@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::{OwnedMutexGuard, RwLock as ARwLock};
+use tokio::sync::OwnedMutexGuard;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;

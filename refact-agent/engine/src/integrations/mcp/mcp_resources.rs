@@ -1,5 +1,5 @@
 use std::sync::{Arc, Weak};
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 use tokio::time::{timeout, Duration};
 use rmcp::model::{Resource as McpResource, ReadResourceRequestParams, ResourceContents};
 use rmcp::service::Peer;

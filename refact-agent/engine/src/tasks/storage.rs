@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use git2::Repository;
-use tokio::sync::{RwLock as ARwLock, Mutex as AMutex};
+use tokio::sync::Mutex as AMutex;
 use tokio::fs;
 use tracing::warn;
 use uuid::Uuid;

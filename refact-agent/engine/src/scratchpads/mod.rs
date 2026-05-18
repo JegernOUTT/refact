@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
 
 pub mod multimodality;
 pub mod scratchpad_utils;

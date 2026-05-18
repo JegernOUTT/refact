@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use chrono::{DateTime, Utc};
 use git2::{IndexAddOption, Oid, Repository};
-use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::Instant;
 use std::path::{Path, PathBuf};

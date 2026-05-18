@@ -2,7 +2,6 @@ pub use refact_yaml_configs::project_information::*;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
 

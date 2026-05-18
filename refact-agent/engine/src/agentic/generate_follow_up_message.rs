@@ -1,7 +1,6 @@
 pub use refact_agentic::generate_follow_up_message::{FollowUpResponse, make_conversation};
 
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
 use crate::subchat::run_subchat_once;

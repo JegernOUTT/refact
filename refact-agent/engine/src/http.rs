@@ -7,7 +7,6 @@ use axum::{
     response::IntoResponse,
 };
 use hyper::Server;
-use tokio::sync::RwLock as ARwLock;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;

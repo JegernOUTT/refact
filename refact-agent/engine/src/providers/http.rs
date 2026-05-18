@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::app_state::AppState;
 use crate::buddy::drafts::{draft_kind_str, DraftTarget, DraftValidationError};

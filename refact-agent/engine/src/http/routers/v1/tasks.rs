@@ -7,7 +7,7 @@ use axum::extract::State;
 use hyper::Body;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::{RwLock as ARwLock, broadcast};
+use tokio::sync::broadcast;
 use chrono::Utc;
 
 use crate::app_state::AppState;

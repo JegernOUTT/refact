@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
 use crate::providers::traits::ModelPricing;

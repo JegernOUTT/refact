@@ -1,7 +1,6 @@
 pub use refact_chat_history::trajectory_ops::*;
 
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use refact_core::chat_types::ChatMessage;
 use crate::global_context::GlobalContext;

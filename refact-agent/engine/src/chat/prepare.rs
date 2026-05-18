@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;

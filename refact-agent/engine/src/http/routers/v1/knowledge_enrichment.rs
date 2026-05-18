@@ -3,7 +3,6 @@ use crate::global_context::GlobalContext;
 use std::collections::HashSet;
 use std::path::{Component, Path as FilePath, PathBuf};
 use std::sync::{Arc, OnceLock};
-use tokio::sync::RwLock as ARwLock;
 use regex::Regex;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;

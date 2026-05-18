@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::collections::HashSet;
-use tokio::sync::RwLock as ARwLock;
 
 pub use refact_postprocessing::pp_utils::{
     color_with_gradient_type, colorize_comments_up, colorize_if_more_useful, colorize_minus_one,

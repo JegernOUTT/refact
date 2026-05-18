@@ -4,7 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::process::Stdio;
 use tokio::io::BufReader;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 use process_wrap::tokio::*;
 

@@ -20,7 +20,6 @@ use std::path::PathBuf;
 use crate::worktrees::scope::ExecutionScope;
 use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
 use crate::knowledge_index::format_related_memories_section;
 
 pub struct ToolUpdateTextDocRegex {

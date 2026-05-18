@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use tokio::sync::RwLock as ARwLock;
 
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;

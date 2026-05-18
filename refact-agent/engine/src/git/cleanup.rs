@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::Duration;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::ast::chunk_utils::official_text_hashing_function;
 use crate::custom_error::{trace_and_default, MapErrToString};

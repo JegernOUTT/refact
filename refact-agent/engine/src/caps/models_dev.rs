@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use reqwest::header::USER_AGENT;
-use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
 use crate::global_context::GlobalContext;

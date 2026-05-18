@@ -5,7 +5,6 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tokio::sync::RwLock as ARwLock;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 

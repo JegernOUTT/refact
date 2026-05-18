@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 use tracing::{info, warn};
 
 use crate::global_context::GlobalContext;

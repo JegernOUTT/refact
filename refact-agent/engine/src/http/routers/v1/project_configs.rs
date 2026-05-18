@@ -3,7 +3,6 @@ use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;

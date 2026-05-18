@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 use tokio::time::{timeout, Duration};
 
 use crate::ext::config_dirs::CommandSource;

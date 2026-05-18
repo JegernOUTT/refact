@@ -2,7 +2,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
 

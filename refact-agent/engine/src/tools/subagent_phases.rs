@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent};

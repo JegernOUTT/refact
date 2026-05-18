@@ -8,7 +8,6 @@ use itertools::Itertools;
 use regex::Regex;
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
 use tracing::info;
 
 use crate::at_commands::at_commands::{vec_context_file_to_context_tools, AtCommandsContext};

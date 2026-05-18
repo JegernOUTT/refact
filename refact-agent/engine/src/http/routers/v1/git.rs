@@ -7,7 +7,6 @@ use axum::http::{Response, StatusCode};
 use git2::Repository;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 use url::Url;
 
 use crate::call_validation::ChatMeta;

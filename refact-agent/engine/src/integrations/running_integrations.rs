@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use indexmap::IndexMap;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::custom_error::YamlError;
 use crate::global_context::GlobalContext;

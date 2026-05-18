@@ -7,7 +7,7 @@ use std::process::Stdio;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 use process_wrap::tokio::*;
 
 use crate::at_commands::at_commands::AtCommandsContext;

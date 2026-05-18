@@ -8,7 +8,6 @@ use crate::subchat::run_subchat_once;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 use std::sync::Arc;
 use hashbrown::HashMap;
-use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 use crate::files_in_workspace::detect_vcs_for_a_file_path;
 

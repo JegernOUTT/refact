@@ -7,7 +7,6 @@ use hyper::StatusCode;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::RwLock as ARwLock;
 use tokio::time::{Duration, Instant};
 use std::sync::Mutex;
 

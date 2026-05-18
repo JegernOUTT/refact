@@ -6,7 +6,6 @@ use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock as ARwLock;
 use tokio::task::JoinHandle;
 use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
 use tower_lsp::lsp_types::*;

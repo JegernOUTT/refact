@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock, mpsc};
+use tokio::sync::{Mutex as AMutex, mpsc};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 use uuid::Uuid;

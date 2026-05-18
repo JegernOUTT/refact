@@ -3,7 +3,6 @@ use crate::global_context::GlobalContext;
 use crate::subchat::run_subchat_once;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 const SUBAGENT_ID: &str = "compress_trajectory";
 

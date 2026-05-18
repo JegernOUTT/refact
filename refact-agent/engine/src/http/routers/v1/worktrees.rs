@@ -6,7 +6,6 @@ use axum::response::Json;
 use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::RwLock as ARwLock;
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;

@@ -2,7 +2,6 @@ use tokio::io::AsyncWriteExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock as ARwLock;
 use tokio::sync::Mutex as AMutex;
 use tokenizers::Tokenizer;
 use reqwest::header::AUTHORIZATION;

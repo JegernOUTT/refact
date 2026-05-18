@@ -6,7 +6,7 @@ use std::process::Stdio;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use async_trait::async_trait;
 use tokio::process::Command;

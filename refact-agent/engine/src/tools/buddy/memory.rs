@@ -7,7 +7,6 @@ use chrono::{Local, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AMutex;
-use tokio::sync::RwLock as ARwLock;
 use walkdir::WalkDir;
 
 use crate::at_commands::at_commands::AtCommandsContext;

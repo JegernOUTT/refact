@@ -4,7 +4,6 @@ use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;

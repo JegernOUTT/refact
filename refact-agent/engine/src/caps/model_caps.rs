@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::RwLock as ARwLock;
 
 use crate::caps::models_dev::load_models_dev_catalog;
 use crate::global_context::GlobalContext;

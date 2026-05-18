@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::vec;
-use tokio::sync::RwLock as ARwLock;
 use tokio::task::JoinHandle;
 
 const ABORT_TIMEOUT: Duration = Duration::from_secs(10);

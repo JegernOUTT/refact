@@ -1,6 +1,5 @@
 use std::time::Duration;
 use tracing::info;
-use tokio::sync::RwLock as ARwLock;
 use std::sync::Arc;
 
 use crate::global_context::GlobalContext;

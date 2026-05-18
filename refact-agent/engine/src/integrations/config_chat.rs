@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::fs;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::files_correction::{get_active_project_path, canonical_path};
 use crate::global_context::GlobalContext;

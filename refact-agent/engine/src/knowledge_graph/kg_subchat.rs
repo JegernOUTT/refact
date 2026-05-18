@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock as ARwLock;
 
 use crate::call_validation::ChatMessage;
 use crate::global_context::GlobalContext;

@@ -1,5 +1,4 @@
 use std::sync::Weak;
-use tokio::sync::RwLock as ARwLock;
 use rmcp::model::{
     CreateMessageRequestParams, CreateMessageResult, Role, SamplingMessage, SamplingContent,
     SamplingMessageContent,

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 use url::Url;
 use tracing::{error, info, warn};
 

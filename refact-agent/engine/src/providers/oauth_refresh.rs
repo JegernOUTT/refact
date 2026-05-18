@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
 use crate::providers::create_provider;

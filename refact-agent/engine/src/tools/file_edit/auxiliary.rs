@@ -14,7 +14,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 use tracing::warn;
 
 pub use refact_file_edit_core::text_edit::{

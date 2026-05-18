@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 use tracing::{error, info};
 
 use refact_core::vecdb_types::VecdbSearch;

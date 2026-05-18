@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock as ARwLock;
 
 pub use refact_scope_utils::{
     dedup_notices, format_scope_notices, path_with_sep, scoped_path_notices, ScopedFiles,

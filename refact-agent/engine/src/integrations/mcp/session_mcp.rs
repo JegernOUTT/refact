@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::future::Future;
 use std::time::Instant;
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::Mutex as AMutex;
 use tokio::task::{AbortHandle, JoinHandle};
 use rmcp::{RoleClient, service::RunningService};
 use rmcp::transport::auth::AuthorizationManager;
