@@ -889,8 +889,8 @@ async fn investigation_log_tail_reads_bounded_and_redacts() {
     tokio::fs::write(&log_path, content).await.unwrap();
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
+    gcx.write().await.cmdline.logs_to_file = log_path.to_string_lossy().into_owned();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    app.runtime.cmdline.write().unwrap().logs_to_file = log_path.to_string_lossy().into_owned();
     let tail = read_recent_log_lines(&app, 5).await.unwrap();
     assert!(!tail.contains("old secret"));
     assert!(!tail.contains("recent-secret"));
@@ -4122,7 +4122,7 @@ async fn buddy_worktree_pulse_includes_worktree_stats() {
         .unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let service =
         crate::worktrees::service::WorktreeService::new(cache_dir, source.clone()).unwrap();
     let created = service
@@ -5059,7 +5059,7 @@ async fn add_draft_to_gcx(
 async fn draft_customization_change_reads_real_editor_storage() {
     let app = make_gcx_with_buddy().await;
     let gcx = app.gcx.clone();
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     tokio::fs::create_dir_all(config_dir.join("skills/real_skill"))
         .await
         .unwrap();
@@ -5235,7 +5235,7 @@ async fn registry_validation_error_does_not_consume_draft() {
 
     let app = make_gcx_with_buddy().await;
     let gcx = app.gcx.clone();
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     tokio::fs::create_dir_all(config_dir.join("modes"))
         .await
         .unwrap();
@@ -5287,7 +5287,7 @@ async fn customization_delegates_route_writes_subagent_storage_and_consumes() {
 
     let app = make_gcx_with_buddy().await;
     let gcx = app.gcx.clone();
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let draft_id = add_draft_to_gcx(
         &app,
         DraftKind::Delegate,
@@ -5353,7 +5353,7 @@ async fn customization_save_leaves_no_atomic_temp_file() {
 
     let app = make_gcx_with_buddy().await;
     let gcx = app.gcx.clone();
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let body = serde_json::to_vec(&serde_json::json!({
         "config": {
             "schema_version": 1,
@@ -6049,7 +6049,7 @@ async fn pulse_populates_all_subpulse_counts() {
         app.model.caps.write().await.caps = Some(Arc::new(caps));
     }
 
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let skill_dir = config_dir.join("skills/pulse_skill");
     tokio::fs::create_dir_all(&skill_dir).await.unwrap();
     tokio::fs::write(
@@ -6307,8 +6307,8 @@ async fn defaults_update_with_valid_draft_consumes_after_save() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    *app.paths.config_dir.write().unwrap() = dir.path().to_path_buf();
+    gcx.write().await.config_dir = dir.path().to_path_buf();
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
     let draft = svc
@@ -6353,8 +6353,8 @@ async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    *app.paths.config_dir.write().unwrap() = dir.path().to_path_buf();
+    gcx.write().await.config_dir = dir.path().to_path_buf();
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
     let draft = svc
@@ -6393,8 +6393,8 @@ async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    *app.paths.config_dir.write().unwrap() = dir.path().to_path_buf();
+    gcx.write().await.config_dir = dir.path().to_path_buf();
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
     let draft = svc
@@ -6434,8 +6434,8 @@ async fn defaults_update_without_draft_id_still_saves() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    *app.paths.config_dir.write().unwrap() = dir.path().to_path_buf();
+    gcx.write().await.config_dir = dir.path().to_path_buf();
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let body = serde_json::json!({
         "chat": { "model": "openai/gpt-4o" },
@@ -7540,18 +7540,19 @@ async fn launch_investigation_action_writes_static_prompt_and_envelope() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     {
-        app.model.caps.write().await.caps = None;
-        *app.paths.cache_dir.write().unwrap() = dir.path().join("cache");
-        app.runtime.cmdline.write().unwrap().logs_to_file = dir
+        let mut gcx_locked = gcx.write().await;
+        gcx_locked.cache_dir = dir.path().join("cache");
+        gcx_locked.cmdline.logs_to_file = dir
             .path()
             .join("missing.log")
             .to_string_lossy()
             .into_owned();
-        *app.workspace.documents_state.workspace_folders.lock().unwrap() =
+        *gcx_locked.documents_state.workspace_folders.lock().unwrap() =
             vec![dir.path().to_path_buf()];
+        gcx_locked.caps_state.write().await.caps = None;
     }
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let outcome = dispatch_action(
         app.clone(),
@@ -7721,14 +7722,18 @@ async fn investigation_enrich_context_caps_log_excerpt_to_4000_chars() {
     use crate::http::routers::v1::buddy_opportunities::enrich_investigation_context;
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("refact.log");
     std::fs::write(&log_path, "x".repeat(10000)).unwrap();
     {
-        app.runtime.cmdline.write().unwrap().logs_to_file = log_path.to_string_lossy().to_string();
-        app.model.caps.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        let caps_state = {
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cmdline.logs_to_file = log_path.to_string_lossy().to_string();
+            gcx_locked.caps_state.clone()
+        };
+        caps_state.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
     }
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut ctx = InvestigationContext {
         fact_keys: vec![],

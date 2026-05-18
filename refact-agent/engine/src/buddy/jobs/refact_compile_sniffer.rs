@@ -88,7 +88,7 @@ impl BuddyJob for RefactCompileSnifferJob {
     }
 
     async fn should_run(&self, gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-        let logs_dir = gcx.paths.cache_dir.read().unwrap().join("logs");
+        let logs_dir = gcx.paths.cache_dir.join("logs");
         tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir).is_some())
             .await
             .unwrap_or(false)
@@ -99,7 +99,7 @@ impl BuddyJob for RefactCompileSnifferJob {
         gcx: AppState,
         ctx: BuddyJobContext,
     ) -> BuddyJobResult {
-        let logs_dir = gcx.paths.cache_dir.read().unwrap().join("logs");
+        let logs_dir = gcx.paths.cache_dir.join("logs");
         let evidence = tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir))
             .await
             .unwrap_or(None);
@@ -137,8 +137,8 @@ mod tests {
 
     async fn gcx_with_cache(cache_dir: &Path) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut app = AppState::from_gcx(gcx).await;
-        *app.paths.cache_dir.write().unwrap() = cache_dir.to_path_buf();
+        gcx.write().await.cache_dir = cache_dir.to_path_buf();
+        let app = AppState::from_gcx(gcx).await;
         app
     }
 

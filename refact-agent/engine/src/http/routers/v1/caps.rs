@@ -60,9 +60,10 @@ pub async fn handle_v1_model_capabilities(
         .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
     if query.refresh {
-        let mut gcx_locked = gcx.write().await;
-        gcx_locked.caps = None;
-        gcx_locked.caps_last_attempted_ts = 0;
+        let caps_state = gcx.read().await.caps_state.clone();
+        let mut caps_state = caps_state.write().await;
+        caps_state.caps = None;
+        caps_state.last_attempted_ts = 0;
     }
 
     let body = if let Some(model_name) = query.model {

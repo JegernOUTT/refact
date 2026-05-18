@@ -34,7 +34,7 @@ use refact_core::vecdb_types::VecdbSearch;
 #[derive(Clone)]
 pub struct RuntimeServices {
     pub shutdown_flag: Arc<AtomicBool>,
-    pub cmdline: Arc<StdRwLock<CommandLine>>,
+    pub cmdline: Arc<CommandLine>,
     pub http_client: reqwest::Client,
     pub http_client_slowdown: Arc<Semaphore>,
     pub ask_shutdown_sender: Arc<StdMutex<std::sync::mpsc::Sender<String>>>,
@@ -42,8 +42,8 @@ pub struct RuntimeServices {
 
 #[derive(Clone)]
 pub struct PathServices {
-    pub cache_dir: Arc<StdRwLock<PathBuf>>,
-    pub config_dir: Arc<StdRwLock<PathBuf>>,
+    pub cache_dir: PathBuf,
+    pub config_dir: PathBuf,
     pub app_searchable_id: String,
 }
 

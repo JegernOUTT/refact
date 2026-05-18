@@ -843,8 +843,8 @@ pub(crate) async fn read_recent_log_lines(
     app: &AppState,
     max_lines: usize,
 ) -> Result<String, String> {
-    let logs_to_file = app.runtime.cmdline.read().unwrap().logs_to_file.clone();
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let logs_to_file = app.runtime.cmdline.logs_to_file.clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let log_path = if !logs_to_file.is_empty() {
         PathBuf::from(logs_to_file)
     } else {

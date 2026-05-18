@@ -6,7 +6,7 @@ pub use refact_ext::config_dirs::{
 };
 
 pub async fn get_ext_dirs(app: AppState) -> ExtDirs {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let workspace_dirs = get_project_dirs(app.gcx.clone()).await;
 
     let mut global_dirs = Vec::new();

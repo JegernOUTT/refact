@@ -17,7 +17,8 @@ pub async fn lookup_model_pricing(
         return Some(custom_pricing);
     }
 
-    if let Some(pricing) = gcx
+    let caps_state = gcx.read().await.caps_state.clone();
+    if let Some(pricing) = caps_state
         .read()
         .await
         .caps
@@ -92,10 +93,11 @@ mod tests {
         );
         let providers = { gcx.read().await.providers.clone() };
         providers.write().await.add(provider);
+        let caps_state = gcx.read().await.caps_state.clone();
         {
-            let mut gcx = gcx.write().await;
-            gcx.caps = Some(caps_with_model_caps(model_caps));
-            gcx.caps_last_attempted_ts = now_secs();
+            let mut caps_state = caps_state.write().await;
+            caps_state.caps = Some(caps_with_model_caps(model_caps));
+            caps_state.last_attempted_ts = now_secs();
         }
 
         let pricing = lookup_model_pricing(&gcx, "openai/gpt-4o").await.unwrap();
@@ -111,10 +113,11 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let catalog = load_models_dev_snapshot_catalog().unwrap();
         let model_caps = model_caps_from_models_dev_catalog(&catalog).unwrap();
+        let caps_state = gcx.read().await.caps_state.clone();
         {
-            let mut gcx = gcx.write().await;
-            gcx.caps = Some(caps_with_model_caps(model_caps));
-            gcx.caps_last_attempted_ts = now_secs();
+            let mut caps_state = caps_state.write().await;
+            caps_state.caps = Some(caps_with_model_caps(model_caps));
+            caps_state.last_attempted_ts = now_secs();
         }
 
         let pricing = lookup_model_pricing(&gcx, "openai/gpt-4o").await.unwrap();

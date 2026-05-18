@@ -139,21 +139,27 @@ pub async fn cached_tokenizer(
     model_rec: &BaseModelRecord,
 ) -> Result<Option<Arc<Tokenizer>>, String> {
     let model_id = strip_model_from_finetune(&model_rec.id);
+    let tokenizer_state = global_context.read().await.tokenizer_state.clone();
     let tokenizer_download_lock: Arc<AMutex<bool>> =
-        global_context.read().await.tokenizer_download_lock.clone();
+        tokenizer_state.read().unwrap().download_lock.clone();
     let _tokenizer_download_locked = tokenizer_download_lock.lock().await;
 
     let (client2, cache_dir, tokenizer_in_gcx, hf_tokenizer_template) = {
-        let cx_locked = global_context.read().await;
-        let template = cx_locked
-            .caps
-            .clone()
+        let (client, cache_dir, caps_state) = {
+            let cx_locked = global_context.read().await;
+            (
+                cx_locked.http_client.clone(),
+                cx_locked.cache_dir.clone(),
+                cx_locked.caps_state.clone(),
+            )
+        };
+        let template = caps_state.read().await.caps.clone()
             .map(|caps| caps.hf_tokenizer_template.clone())
             .unwrap_or_else(default_hf_tokenizer_template);
         (
-            cx_locked.http_client.clone(),
-            cx_locked.cache_dir.clone(),
-            cx_locked.tokenizer_map.clone().get(&model_id).cloned(),
+            client,
+            cache_dir,
+            tokenizer_state.read().unwrap().map.get(&model_id).cloned(),
             template,
         )
     };
@@ -216,10 +222,10 @@ pub async fn cached_tokenizer(
     tokenizer.with_padding(None);
     let arc = Some(Arc::new(tokenizer));
 
-    global_context
+    tokenizer_state
         .write()
-        .await
-        .tokenizer_map
+        .unwrap()
+        .map
         .insert(model_id, arc.clone());
     Ok(arc)
 }

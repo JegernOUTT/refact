@@ -25,7 +25,7 @@ pub use refact_ext::competitor_import::{
 use types::{ImportIssue, ImportPrivacyFilter, ImportReport, ImportStatus, ImportSummary};
 
 pub async fn run_global_import(app: AppState) -> ImportSummary {
-    let refact_config_dir = app.paths.config_dir.read().unwrap().clone();
+    let refact_config_dir = app.paths.config_dir.clone();
     let privacy_settings = app.workspace.privacy_settings.clone();
     let home_dir = home::home_dir();
     let filter = privacy_filter_from_settings(privacy_settings);
@@ -319,7 +319,7 @@ mod tests {
 
     async fn set_allow_all_privacy(gcx: crate::global_context::SharedGlobalContext) -> AppState {
         let app = AppState::from_gcx(gcx.clone()).await;
-        let config_dir = app.paths.config_dir.read().unwrap().clone();
+        let config_dir = app.paths.config_dir.clone();
         tokio::fs::write(
             config_dir.join("privacy.yaml"),
             "privacy_rules:\n  only_send_to_servers_I_control: []\n  blocked: []\n",

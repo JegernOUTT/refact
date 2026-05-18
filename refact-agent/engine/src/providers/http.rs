@@ -37,9 +37,10 @@ fn json_response(
 }
 
 async fn invalidate_caps(gcx: Arc<ARwLock<GlobalContext>>) {
-    let mut gcx_locked = gcx.write().await;
-    gcx_locked.caps = None;
-    gcx_locked.caps_last_attempted_ts = 0;
+    let caps_state = gcx.read().await.caps_state.clone();
+    let mut caps_state = caps_state.write().await;
+    caps_state.caps = None;
+    caps_state.last_attempted_ts = 0;
 }
 use crate::providers::config::ProviderDefaults;
 use crate::providers::config_store;
@@ -1037,7 +1038,7 @@ pub async fn handle_v1_defaults_update(
         validate_defaults_draft(gcx.clone(), draft_id).await?;
     }
 
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     req.defaults
         .save(&config_dir)
         .await

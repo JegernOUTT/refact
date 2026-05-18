@@ -159,7 +159,7 @@ async fn build_customization_pulse(gcx: AppState) -> CustomizationPulse {
 }
 
 async fn competitor_import_roots(gcx: AppState) -> (PathBuf, Vec<PathBuf>) {
-    let config_dir = gcx.paths.config_dir.read().unwrap().clone();
+    let config_dir = gcx.paths.config_dir.clone();
     let project_roots = crate::files_correction::get_project_dirs(gcx.gcx.clone()).await;
     (config_dir, project_roots)
 }
@@ -290,7 +290,7 @@ async fn build_worktree_pulse(
     gcx: AppState,
     project_root: &std::path::Path,
 ) -> WorktreePulse {
-    let cache_dir = gcx.paths.cache_dir.read().unwrap().clone();
+    let cache_dir = gcx.paths.cache_dir.clone();
     let Ok(service) =
         crate::worktrees::service::WorktreeService::new(cache_dir, project_root.to_path_buf())
     else {

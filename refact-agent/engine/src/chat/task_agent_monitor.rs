@@ -355,7 +355,7 @@ pub(crate) async fn remove_agent_worktree_and_branch(
     agent_worktree_name: Option<&str>,
 ) -> (bool, bool) {
     if let Some(worktree_id) = agent_worktree_name {
-        let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+        let cache_dir = app.paths.cache_dir.clone();
         let project_dirs = crate::files_correction::get_project_dirs(app.gcx.clone()).await;
         if let Some(source_root) = project_dirs.first() {
             if let Ok(service) = WorktreeService::new(cache_dir, source_root.clone()) {

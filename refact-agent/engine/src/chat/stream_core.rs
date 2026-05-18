@@ -143,7 +143,7 @@ async fn force_refresh_openai_codex_for_retry(
                     .downcast_ref::<crate::providers::openai_codex::OpenAICodexProvider>()
             })
             .cloned();
-        let config_dir = app.paths.config_dir.read().unwrap().clone();
+        let config_dir = app.paths.config_dir.clone();
         (config_dir, provider)
     };
 

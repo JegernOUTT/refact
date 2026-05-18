@@ -7,7 +7,6 @@ use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use hyper::StatusCode;
 use structopt::StructOpt;
-use tokenizers::Tokenizer;
 use tokio::signal;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock, Semaphore};
 use tracing::{error, info};
@@ -222,13 +221,8 @@ pub struct GlobalContext {
     pub http_client_slowdown: Arc<Semaphore>,
     pub cache_dir: PathBuf,
     pub config_dir: PathBuf,
-    pub caps: Option<Arc<CodeAssistantCaps>>,
-    pub caps_reading_lock: Arc<AMutex<bool>>,
-    pub caps_last_error: String,
-    pub caps_last_attempted_ts: u64,
-    pub models_dev_startup_refresh_attempted: bool,
-    pub tokenizer_map: HashMap<String, Option<Arc<Tokenizer>>>,
-    pub tokenizer_download_lock: Arc<AMutex<bool>>,
+    pub caps_state: Arc<ARwLock<CapsState>>,
+    pub tokenizer_state: Arc<StdRwLock<TokenizerState>>,
     pub completions_cache: Arc<StdRwLock<CompletionCache>>,
     pub vec_db: Arc<AMutex<Option<Arc<dyn refact_core::vecdb_types::VecdbSearch>>>>,
     pub vec_db_error: Arc<StdMutex<String>>,
@@ -273,29 +267,19 @@ impl GlobalContext {
             gcx,
             runtime: RuntimeServices {
                 shutdown_flag: self.shutdown_flag.clone(),
-                cmdline: Arc::new(StdRwLock::new(self.cmdline.clone())),
+                cmdline: Arc::new(self.cmdline.clone()),
                 http_client: self.http_client.clone(),
                 http_client_slowdown: self.http_client_slowdown.clone(),
                 ask_shutdown_sender: self.ask_shutdown_sender.clone(),
             },
             paths: PathServices {
-                cache_dir: Arc::new(StdRwLock::new(self.cache_dir.clone())),
-                config_dir: Arc::new(StdRwLock::new(self.config_dir.clone())),
+                cache_dir: self.cache_dir.clone(),
+                config_dir: self.config_dir.clone(),
                 app_searchable_id: self.app_searchable_id.clone(),
             },
             model: ModelServices {
-                caps: Arc::new(ARwLock::new(CapsState {
-                    caps: self.caps.clone(),
-                    reading_lock: self.caps_reading_lock.clone(),
-                    last_error: self.caps_last_error.clone(),
-                    last_attempted_ts: self.caps_last_attempted_ts,
-                    models_dev_startup_refresh_attempted: self
-                        .models_dev_startup_refresh_attempted,
-                })),
-                tokenizers: Arc::new(StdRwLock::new(TokenizerState {
-                    map: self.tokenizer_map.clone(),
-                    download_lock: self.tokenizer_download_lock.clone(),
-                })),
+                caps: self.caps_state.clone(),
+                tokenizers: self.tokenizer_state.clone(),
                 providers: self.providers.clone(),
                 llm_stats_sender: self.llm_stats_sender.clone(),
             },
@@ -463,13 +447,11 @@ pub async fn try_load_caps_quickly_if_not_present(
     max_age_seconds: u64,
 ) -> Result<Arc<CodeAssistantCaps>, ScratchError> {
     let cmdline = CommandLine::from_args(); // XXX make it Arc and don't reload all the time
-    let (caps_reading_lock, config_dir) = {
+    let (caps_state, config_dir) = {
         let gcx_locked = gcx.read().await;
-        (
-            gcx_locked.caps_reading_lock.clone(),
-            gcx_locked.config_dir.clone(),
-        )
+        (gcx_locked.caps_state.clone(), gcx_locked.config_dir.clone())
     };
+    let caps_reading_lock = caps_state.read().await.reading_lock.clone();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -488,45 +470,45 @@ pub async fn try_load_caps_quickly_if_not_present(
             CAPS_BACKGROUND_RELOAD
         };
         {
-            let mut cx_locked = gcx.write().await;
-            if cx_locked.caps_last_attempted_ts + max_age < now
-                || latest_provider_mtime >= cx_locked.caps_last_attempted_ts
+            let mut caps_state = caps_state.write().await;
+            if caps_state.last_attempted_ts + max_age < now
+                || latest_provider_mtime >= caps_state.last_attempted_ts
             {
-                cx_locked.caps = None;
-                cx_locked.caps_last_attempted_ts = 0;
+                caps_state.caps = None;
+                caps_state.last_attempted_ts = 0;
                 caps_last_attempted_ts = 0;
             } else {
-                if let Some(caps_arc) = cx_locked.caps.clone() {
+                if let Some(caps_arc) = caps_state.caps.clone() {
                     return Ok(caps_arc.clone());
                 }
-                caps_last_attempted_ts = cx_locked.caps_last_attempted_ts;
+                caps_last_attempted_ts = caps_state.last_attempted_ts;
             }
         }
         if caps_last_attempted_ts + CAPS_RELOAD_BACKOFF > now {
-            let gcx_locked = gcx.write().await;
+            let caps_state = caps_state.read().await;
             return Err(ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                gcx_locked.caps_last_error.clone(),
+                caps_state.last_error.clone(),
             ));
         }
 
         let caps_result = crate::caps::load_caps(cmdline, gcx.clone()).await;
 
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.caps_last_attempted_ts = now;
+            let mut caps_state = caps_state.write().await;
+            caps_state.last_attempted_ts = now;
             match caps_result {
                 Ok(caps) => {
-                    gcx_locked.caps = Some(caps.clone());
-                    gcx_locked.caps_last_error = "".to_string();
+                    caps_state.caps = Some(caps.clone());
+                    caps_state.last_error = "".to_string();
                     Ok(caps)
                 }
                 Err(e) => {
                     error!("caps fetch failed: {:?}", e);
-                    gcx_locked.caps_last_error = format!("caps fetch failed: {}", e);
+                    caps_state.last_error = format!("caps fetch failed: {}", e);
                     return Err(ScratchError::new(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        gcx_locked.caps_last_error.clone(),
+                        caps_state.last_error.clone(),
                     ));
                 }
             }
@@ -538,21 +520,22 @@ pub async fn look_for_piggyback_fields(
     gcx: Arc<ARwLock<GlobalContext>>,
     anything_from_server: &serde_json::Value,
 ) {
-    let mut gcx_locked = gcx.write().await;
+    let caps_state = gcx.read().await.caps_state.clone();
+    let mut caps_state = caps_state.write().await;
     if let Some(dict) = anything_from_server.as_object() {
         let new_caps_version = dict
             .get("caps_version")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         if new_caps_version > 0 {
-            if let Some(caps) = gcx_locked.caps.clone() {
+            if let Some(caps) = caps_state.caps.clone() {
                 if caps.caps_version < new_caps_version {
                     info!(
                         "detected biggyback caps version {} is newer than the current version {}",
                         new_caps_version, caps.caps_version
                     );
-                    gcx_locked.caps = None;
-                    gcx_locked.caps_last_attempted_ts = 0;
+                    caps_state.caps = None;
+                    caps_state.last_attempted_ts = 0;
                 }
             }
         }
@@ -646,13 +629,17 @@ pub async fn create_global_context(
         http_client_slowdown: Arc::new(Semaphore::new(2)),
         cache_dir,
         config_dir: config_dir.clone(),
-        caps: None,
-        caps_reading_lock: Arc::new(AMutex::<bool>::new(false)),
-        caps_last_error: String::new(),
-        caps_last_attempted_ts: 0,
-        models_dev_startup_refresh_attempted: false,
-        tokenizer_map: HashMap::new(),
-        tokenizer_download_lock: Arc::new(AMutex::<bool>::new(false)),
+        caps_state: Arc::new(ARwLock::new(CapsState {
+            caps: None,
+            reading_lock: Arc::new(AMutex::<bool>::new(false)),
+            last_error: String::new(),
+            last_attempted_ts: 0,
+            models_dev_startup_refresh_attempted: false,
+        })),
+        tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
+            map: HashMap::new(),
+            download_lock: Arc::new(AMutex::<bool>::new(false)),
+        })),
         completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
         vec_db: Arc::new(AMutex::new(None)),
         vec_db_error: Arc::new(StdMutex::new(String::new())),
@@ -707,12 +694,21 @@ pub mod tests {
     async fn app_state_from_test_gcx_clones() {
         let gcx = make_test_gcx().await;
         let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let second_app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
         let cloned = app_state.clone();
 
         assert_eq!(cloned.paths.app_searchable_id, "test");
         assert!(Arc::ptr_eq(
             &app_state.runtime.shutdown_flag,
             &cloned.runtime.shutdown_flag
+        ));
+        assert!(Arc::ptr_eq(
+            &app_state.model.caps,
+            &second_app_state.model.caps
+        ));
+        assert!(Arc::ptr_eq(
+            &app_state.model.tokenizers,
+            &second_app_state.model.tokenizers
         ));
     }
 
@@ -767,13 +763,17 @@ pub mod tests {
             http_client_slowdown: Arc::new(Semaphore::new(2)),
             cache_dir,
             config_dir,
-            caps: None,
-            caps_reading_lock: Arc::new(AMutex::<bool>::new(false)),
-            caps_last_error: String::new(),
-            caps_last_attempted_ts: 0,
-            models_dev_startup_refresh_attempted: true,
-            tokenizer_map: HashMap::new(),
-            tokenizer_download_lock: Arc::new(AMutex::<bool>::new(false)),
+            caps_state: Arc::new(ARwLock::new(CapsState {
+                caps: None,
+                reading_lock: Arc::new(AMutex::<bool>::new(false)),
+                last_error: String::new(),
+                last_attempted_ts: 0,
+                models_dev_startup_refresh_attempted: true,
+            })),
+            tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
+                map: HashMap::new(),
+                download_lock: Arc::new(AMutex::<bool>::new(false)),
+            })),
             completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
             vec_db: Arc::new(AMutex::new(None)),
             vec_db_error: Arc::new(StdMutex::new(String::new())),

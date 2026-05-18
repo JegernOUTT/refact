@@ -1898,9 +1898,10 @@ mod subchat_tests {
             .unwrap()
             .as_secs()
             .saturating_add(60);
-        let mut gcx_locked = gcx.write().await;
-        gcx_locked.caps = Some(Arc::new(caps));
-        gcx_locked.caps_last_attempted_ts = now;
+        let caps_state = gcx.read().await.caps_state.clone();
+        let mut caps_state = caps_state.write().await;
+        caps_state.caps = Some(Arc::new(caps));
+        caps_state.last_attempted_ts = now;
     }
 
     #[test]

@@ -100,7 +100,7 @@ async fn knowledge_dirs(gcx: AppState) -> Vec<PathBuf> {
         .map(|d| d.join(KNOWLEDGE_FOLDER_NAME))
         .filter(|d| d.exists())
         .collect();
-    let global_dir = gcx.paths.config_dir.read().unwrap().join("knowledge");
+    let global_dir = gcx.paths.config_dir.join("knowledge");
     if global_dir.exists() {
         dirs.push(global_dir);
     }

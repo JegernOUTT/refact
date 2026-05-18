@@ -622,7 +622,7 @@ pub struct ExtRegistryResponse {
 pub async fn handle_v1_ext_registry(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let ext_dirs = get_ext_dirs(app.clone()).await;
 
     let skill_indices = load_skill_indices(&ext_dirs).await;
@@ -781,7 +781,7 @@ pub async fn handle_v1_ext_skill_get(
         };
     }
 
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let ext_dirs = match query.scope.as_deref() {
         Some(s @ "global") | Some(s @ "local") => {
             match resolve_scope_dir(gcx.clone(), Some(s), true).await {

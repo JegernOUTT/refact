@@ -75,8 +75,9 @@ impl Tool for ToolMCP {
         let (session_maybe, caps_maybe) = {
             let gcx_locked = gcx.read().await;
             let integration_sessions = gcx_locked.integration_sessions.clone();
-            let caps = gcx_locked.caps.clone();
+            let caps_state = gcx_locked.caps_state.clone();
             drop(gcx_locked);
+            let caps = caps_state.read().await.caps.clone();
             let integration_sessions = integration_sessions.lock().await;
             (integration_sessions.get(&session_key).cloned(), caps)
         };

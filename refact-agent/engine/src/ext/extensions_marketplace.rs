@@ -1326,8 +1326,8 @@ pub async fn list_marketplace_items(
     app: AppState,
     kind: MarketplaceKind,
 ) -> Result<(Vec<MarketplaceItem>, Vec<ListedMarketplaceSource>), String> {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let sources = load_all_sources(&config_dir).await?;
     let installed = installed_scopes_by_kind(app.clone(), kind).await?;
 
@@ -1414,7 +1414,7 @@ pub async fn installed_scopes_by_kind(
             }
         }
         MarketplaceKind::Subagent => {
-            let config_dir = app.paths.config_dir.read().unwrap().clone();
+            let config_dir = app.paths.config_dir.clone();
             let locals = get_project_dirs(app.gcx.clone()).await;
             if let Some(registry) =
                 crate::yaml_configs::customization_registry::get_project_registry(app.gcx.clone()).await
@@ -1451,8 +1451,8 @@ pub async fn resolve_marketplace_item(
     source_id: &str,
     item_id: &str,
 ) -> Result<ResolvedMarketplaceItem, String> {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let sources = load_all_sources(&config_dir).await?;
     let source = sources
         .into_iter()
@@ -1476,7 +1476,7 @@ async fn resolve_scope_dir(
     app: AppState,
     scope: &str,
 ) -> Result<(PathBuf, String), String> {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let project_root = get_project_dirs(app.gcx.clone()).await.into_iter().next();
     match scope {
         "global" => Ok((config_dir, "global".to_string())),

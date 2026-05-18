@@ -301,7 +301,7 @@ pub async fn get_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Pa
 
 pub async fn get_global_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
     let app = AppState::from_gcx(gcx).await;
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     config_dir.join("trajectories")
 }
 
@@ -443,7 +443,7 @@ async fn worktree_service_from_gcx(
     app: AppState,
     requested_source_root: Option<&Path>,
 ) -> Result<WorktreeService, String> {
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let project_dirs = get_project_dirs(app.gcx.clone()).await;
     if project_dirs.is_empty() {
         return Err("No project root available".to_string());
@@ -3619,11 +3619,12 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            *app.paths.cache_dir.write().unwrap() = cache.clone();
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cache_dir = cache.clone();
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
+        let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source.clone()).unwrap();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
@@ -3812,11 +3813,12 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            *app.paths.cache_dir.write().unwrap() = cache.clone();
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cache_dir = cache.clone();
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
+        let app = AppState::from_gcx(gcx.clone()).await;
         let traj_dir = source.join(".refact").join("trajectories");
         tokio::fs::create_dir_all(&traj_dir).await.unwrap();
         let untrusted = json!({
@@ -3866,11 +3868,12 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            *app.paths.cache_dir.write().unwrap() = cache.clone();
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cache_dir = cache.clone();
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
+        let app = AppState::from_gcx(gcx.clone()).await;
 
         let task_id = "task-legacy";
         let agent_id = "agent-1";
@@ -3996,11 +3999,12 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            *app.paths.cache_dir.write().unwrap() = cache.clone();
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cache_dir = cache.clone();
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
+        let app = AppState::from_gcx(gcx.clone()).await;
 
         let task_id = "task-legacy-mismatch";
         let agent_id = "agent-1";

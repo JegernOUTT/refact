@@ -531,7 +531,7 @@ async fn worktree_service_from_gcx(
     app: AppState,
     requested_source_root: Option<&std::path::Path>,
 ) -> Result<WorktreeService, String> {
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let project_dirs = get_project_dirs(app.gcx.clone()).await;
     if project_dirs.is_empty() {
         return Err("No project root available".to_string());
@@ -2133,11 +2133,12 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            *app.paths.cache_dir.write().unwrap() = cache.clone();
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cache_dir = cache.clone();
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
+        let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source.clone()).unwrap();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
@@ -2181,11 +2182,12 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            *app.paths.cache_dir.write().unwrap() = cache.clone();
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cache_dir = cache.clone();
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
+        let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source.clone()).unwrap();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
@@ -2220,11 +2222,12 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            *app.paths.cache_dir.write().unwrap() = cache.clone();
+            let mut gcx_locked = gcx.write().await;
+            gcx_locked.cache_dir = cache.clone();
+            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
+        let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source).unwrap();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {

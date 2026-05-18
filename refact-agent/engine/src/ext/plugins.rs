@@ -324,8 +324,8 @@ pub async fn add_marketplace(
     app: AppState,
     source: &str,
 ) -> Result<MarketplaceJson, String> {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
+    let cache_dir = app.paths.cache_dir.clone();
     add_marketplace_impl(&config_dir, &cache_dir, source).await
 }
 
@@ -347,8 +347,8 @@ async fn ensure_default_marketplaces_with_source(
 }
 
 pub async fn ensure_default_marketplaces(app: AppState) -> Result<(), String> {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
+    let cache_dir = app.paths.cache_dir.clone();
     ensure_default_marketplaces_with_source(
         &config_dir,
         &cache_dir,
@@ -371,7 +371,7 @@ pub async fn remove_marketplace(
     name: &str,
 ) -> Result<(), String> {
     validate_plugin_name(name)?;
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let mut db = load_plugins_db(&config_dir).await?;
     db.marketplaces.retain(|m| m.name != name);
     save_plugins_db(&config_dir, &db).await
@@ -382,8 +382,8 @@ pub async fn list_marketplace_plugins(
     name: &str,
 ) -> Result<Vec<MarketplacePluginEntry>, String> {
     validate_plugin_name(name)?;
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let db = load_plugins_db(&config_dir).await?;
     let entry = db
         .marketplaces
@@ -406,8 +406,8 @@ pub async fn install_plugin(
 ) -> Result<InstalledPluginEntry, String> {
     validate_plugin_name(plugin_name)?;
     validate_plugin_name(marketplace_name)?;
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
-    let cache_dir = app.paths.cache_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
+    let cache_dir = app.paths.cache_dir.clone();
     let db = load_plugins_db(&config_dir).await?;
     let market_entry = db
         .marketplaces
@@ -535,7 +535,7 @@ pub async fn uninstall_plugin(
     plugin_name: &str,
 ) -> Result<(), String> {
     validate_plugin_name(plugin_name)?;
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let mut db = load_plugins_db(&config_dir).await?;
     let was_installed = db.installed.iter().any(|i| i.name == plugin_name);
     db.installed.retain(|i| i.name != plugin_name);

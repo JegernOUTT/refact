@@ -27,7 +27,7 @@ pub async fn handle_list_marketplaces(
     State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let _ = ensure_default_marketplaces(app.clone()).await;
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let db = load_plugins_db(&config_dir)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -143,7 +143,7 @@ pub async fn handle_install_plugin(
 pub async fn handle_list_installed(
     State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let config_dir = app.paths.config_dir.read().unwrap().clone();
+    let config_dir = app.paths.config_dir.clone();
     let db = load_plugins_db(&config_dir)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;

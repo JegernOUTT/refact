@@ -608,11 +608,12 @@ fn remove_legacy_refact_models_from_caps(caps: &mut CodeAssistantCaps) {
 }
 
 async fn take_models_dev_startup_refresh_flag(gcx: Arc<ARwLock<GlobalContext>>) -> bool {
-    let mut gcx_locked = gcx.write().await;
-    if gcx_locked.models_dev_startup_refresh_attempted {
+    let caps_state = gcx.read().await.caps_state.clone();
+    let mut caps_state = caps_state.write().await;
+    if caps_state.models_dev_startup_refresh_attempted {
         false
     } else {
-        gcx_locked.models_dev_startup_refresh_attempted = true;
+        caps_state.models_dev_startup_refresh_attempted = true;
         true
     }
 }
@@ -1082,7 +1083,8 @@ mod tests {
     #[tokio::test]
     async fn test_models_dev_startup_refresh_flag_is_consumed_once() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        gcx.write().await.models_dev_startup_refresh_attempted = false;
+        let caps_state = gcx.read().await.caps_state.clone();
+        caps_state.write().await.models_dev_startup_refresh_attempted = false;
 
         assert!(take_models_dev_startup_refresh_flag(gcx.clone()).await);
         assert!(!take_models_dev_startup_refresh_flag(gcx).await);
