@@ -643,12 +643,14 @@ mod tests {
     #[tokio::test]
     async fn save_transition_snapshot_preserves_worktree_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![dir.path().to_path_buf()];
-            drop(gcx);
-            gcx.cache_dir = dir.path().join("cache");
         }
         let snapshot = TrajectorySnapshot {
             chat_id: "transition-chat".to_string(),

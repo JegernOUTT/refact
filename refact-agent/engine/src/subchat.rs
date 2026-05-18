@@ -1890,7 +1890,7 @@ mod subchat_tests {
     }
 
     async fn install_caps(
-        gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+        gcx: Arc<crate::global_context::GlobalContext>,
         caps: CodeAssistantCaps,
     ) {
         let now = SystemTime::now()
@@ -2099,11 +2099,9 @@ mod subchat_tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = make_test_gcx().await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx);
-            gcx.cache_dir = cache.clone();
         }
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
@@ -2140,11 +2138,9 @@ mod subchat_tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = make_test_gcx().await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx);
-            gcx.cache_dir = cache.clone();
         }
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
@@ -2187,10 +2183,7 @@ mod subchat_tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = make_test_gcx().await;
-        {
-            gcx.cache_dir = cache.clone();
-        }
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {

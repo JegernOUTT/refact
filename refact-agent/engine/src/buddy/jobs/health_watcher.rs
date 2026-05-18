@@ -199,7 +199,7 @@ mod tests {
         let job = HealthWatcherJob;
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
-        app.model.caps.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        app.model.caps.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
 
         let result = job.execute(app, test_context(None)).await;
 
@@ -213,7 +213,7 @@ mod tests {
         let job = HealthWatcherJob;
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
-        app.model.caps.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        app.model.caps.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
 
         let result = job.execute(app, test_context(Some("healthy"))).await;
 
@@ -227,7 +227,7 @@ mod tests {
         let job = HealthWatcherJob;
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
-        app.model.caps.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        app.model.caps.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
         let mut ctx = test_context(Some("healthy"));
         ctx.settings.proactive_enabled = false;
 
@@ -245,7 +245,7 @@ mod tests {
         let job = HealthWatcherJob;
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
-        app.model.caps.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        app.model.caps.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
         let mut ctx = test_context(Some("healthy"));
         ctx.suggestion_state = (0..crate::buddy::scheduler::MAX_UNREAD_SUGGESTIONS)
             .map(active_suggestion)
@@ -271,14 +271,14 @@ mod tests {
             Arc::new(ChatModelRecord::default()),
         );
 
-        app.model.caps.caps = Some(Arc::new(healthy_caps));
+        app.model.caps.write().await.caps = Some(Arc::new(healthy_caps));
         assert!(job.should_run(app.clone(), &test_context(None)).await);
         assert!(
             !job.should_run(app.clone(), &test_context(Some("healthy")))
                 .await
         );
 
-        app.model.caps.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        app.model.caps.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
         assert!(job.should_run(app, &test_context(Some("healthy"))).await);
     }
 }

@@ -889,8 +889,8 @@ async fn investigation_log_tail_reads_bounded_and_redacts() {
     tokio::fs::write(&log_path, content).await.unwrap();
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.cmdline.logs_to_file = log_path.to_string_lossy().into_owned();
-    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    app.runtime.cmdline = Arc::new(crate::global_context::CommandLine { logs_to_file: log_path.to_string_lossy().into_owned(), ..(*app.runtime.cmdline).clone() });
     let tail = read_recent_log_lines(&app, 5).await.unwrap();
     assert!(!tail.contains("old secret"));
     assert!(!tail.contains("recent-secret"));
@@ -6046,7 +6046,7 @@ async fn pulse_populates_all_subpulse_counts() {
         caps.defaults.chat_light_model = "openai/gpt-4o-mini".to_string();
         caps.defaults.chat_thinking_model = "openai/o1".to_string();
         caps.defaults.chat_buddy_model = "openai/gpt-4o-mini".to_string();
-        app.model.caps.caps = Some(Arc::new(caps));
+        app.model.caps.write().await.caps = Some(Arc::new(caps));
     }
 
     let config_dir = app.paths.config_dir.clone();
@@ -6304,8 +6304,7 @@ async fn defaults_update_with_valid_draft_consumes_after_save() {
     use hyper::StatusCode;
 
     let dir = tempfile::tempdir().unwrap();
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.config_dir = dir.path().to_path_buf();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())), dir.path().to_path_buf()).await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
@@ -6350,8 +6349,7 @@ async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
     use hyper::StatusCode;
 
     let dir = tempfile::tempdir().unwrap();
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.config_dir = dir.path().to_path_buf();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())), dir.path().to_path_buf()).await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
@@ -6390,8 +6388,7 @@ async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
     use hyper::StatusCode;
 
     let dir = tempfile::tempdir().unwrap();
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.config_dir = dir.path().to_path_buf();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())), dir.path().to_path_buf()).await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
@@ -6431,8 +6428,7 @@ async fn defaults_update_without_draft_id_still_saves() {
     use hyper::StatusCode;
 
     let dir = tempfile::tempdir().unwrap();
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.config_dir = dir.path().to_path_buf();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())), dir.path().to_path_buf()).await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let body = serde_json::json!({
@@ -7537,17 +7533,16 @@ async fn launch_investigation_action_writes_static_prompt_and_envelope() {
     use crate::http::routers::v1::buddy_opportunities::{dispatch_action, INVESTIGATION_SYSTEM_PROMPT};
 
     let dir = tempfile::tempdir().unwrap();
-    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(dir.path().join("cache"), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
     {
-        gcx.cache_dir = dir.path().join("cache");
-        gcx.cmdline.logs_to_file = dir
+        let _log_path = dir
             .path()
             .join("missing.log")
             .to_string_lossy()
             .into_owned();
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![dir.path().to_path_buf()];
-        gcx.caps_state.caps = None;
+        gcx.caps_state.write().await.caps = None;
     }
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
@@ -7723,13 +7718,10 @@ async fn investigation_enrich_context_caps_log_excerpt_to_4000_chars() {
     let log_path = dir.path().join("refact.log");
     std::fs::write(&log_path, "x".repeat(10000)).unwrap();
     {
-        let caps_state = {
-            gcx.cmdline.logs_to_file = log_path.to_string_lossy().to_string();
-            gcx.caps_state.clone()
-        };
-        caps_state.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        gcx.caps_state.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
     }
-    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    app.runtime.cmdline = Arc::new(crate::global_context::CommandLine { logs_to_file: log_path.to_string_lossy().into_owned(), ..(*app.runtime.cmdline).clone() });
 
     let mut ctx = InvestigationContext {
         fact_keys: vec![],

@@ -2132,9 +2132,8 @@ mod tests {
         let cache = temp.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
         {
-            gcx.cache_dir = cache.clone();
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
@@ -2180,9 +2179,8 @@ mod tests {
         let cache = temp.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
         {
-            gcx.cache_dir = cache.clone();
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
@@ -2219,9 +2217,8 @@ mod tests {
         let cache = temp.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
         {
-            gcx.cache_dir = cache.clone();
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;

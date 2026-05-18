@@ -136,8 +136,7 @@ mod tests {
     }
 
     async fn gcx_with_cache(cache_dir: &Path) -> AppState {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        gcx.cache_dir = cache_dir.to_path_buf();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache_dir.to_path_buf(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
         let app = AppState::from_gcx(gcx).await;
         app
     }

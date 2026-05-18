@@ -712,10 +712,14 @@ pub mod tests {
     }
 
     pub async fn make_test_gcx() -> Arc<GlobalContext> {
-        let (ask_shutdown_sender, _) = std::sync::mpsc::channel::<String>();
-
         let cache_dir = std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4()));
         let config_dir = std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()));
+        make_test_gcx_with_dirs(cache_dir, config_dir).await
+    }
+
+    pub async fn make_test_gcx_with_dirs(cache_dir: PathBuf, config_dir: PathBuf) -> Arc<GlobalContext> {
+        let (ask_shutdown_sender, _) = std::sync::mpsc::channel::<String>();
+
         let _ = std::fs::create_dir_all(&cache_dir);
         let _ = std::fs::create_dir_all(&config_dir);
         let user_activity = crate::buddy::user_activity::UserActivityRing::load(&cache_dir).await;

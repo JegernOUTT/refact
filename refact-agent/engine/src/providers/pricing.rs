@@ -91,7 +91,7 @@ mod tests {
             },
         );
         let providers = { gcx.providers.clone() };
-        providers.add(provider);
+        providers.write().await.add(provider);
         let caps_state = gcx.caps_state.clone();
         {
             let mut caps_state = caps_state.write().await;

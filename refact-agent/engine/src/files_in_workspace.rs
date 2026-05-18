@@ -1369,7 +1369,7 @@ mod tests {
         on_did_open(gcx.clone(), &path, &text, &language_id).await;
 
         let (mdm3, afp3) = {
-            (g.documents_state.memory_document_map.clone(), g.documents_state.active_file_path.clone())
+            (gcx.documents_state.memory_document_map.clone(), gcx.documents_state.active_file_path.clone())
         };
         let has_doc = mdm3.lock().await.contains_key(&path);
         let active_file_path = afp3.lock().await.clone();
