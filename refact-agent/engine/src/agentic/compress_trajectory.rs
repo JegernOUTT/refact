@@ -8,7 +8,7 @@ use tokio::sync::RwLock as ARwLock;
 const SUBAGENT_ID: &str = "compress_trajectory";
 
 pub async fn compress_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     messages: &Vec<ChatMessage>,
 ) -> Result<String, String> {
     if messages.is_empty() {

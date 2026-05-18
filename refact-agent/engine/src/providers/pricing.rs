@@ -10,14 +10,14 @@ pub use refact_pricing_core::{
 };
 
 pub async fn lookup_model_pricing(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     model_id: &str,
 ) -> Option<ModelPricing> {
     if let Some(custom_pricing) = lookup_provider_custom_pricing(gcx, model_id).await {
         return Some(custom_pricing);
     }
 
-    let caps_state = gcx.read().await.caps_state.clone();
+    let caps_state = gcx.caps_state.clone();
     if let Some(pricing) = caps_state
         .read()
         .await
@@ -35,12 +35,11 @@ pub async fn lookup_model_pricing(
 }
 
 async fn lookup_provider_custom_pricing(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     model_id: &str,
 ) -> Option<ModelPricing> {
     let (provider_name, model_name) = model_id.split_once('/')?;
-    let gcx_locked = gcx.read().await;
-    let registry = gcx_locked.providers.read().await;
+    let registry = gcx.providers.read().await;
     registry
         .get(provider_name)
         .and_then(|provider| provider.custom_model_pricing(model_name))
@@ -91,9 +90,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let providers = { gcx.read().await.providers.clone() };
-        providers.write().await.add(provider);
-        let caps_state = gcx.read().await.caps_state.clone();
+        let providers = { gcx.providers.clone() };
+        providers.add(provider);
+        let caps_state = gcx.caps_state.clone();
         {
             let mut caps_state = caps_state.write().await;
             caps_state.caps = Some(caps_with_model_caps(model_caps));
@@ -113,7 +112,7 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let catalog = load_models_dev_snapshot_catalog().unwrap();
         let model_caps = model_caps_from_models_dev_catalog(&catalog).unwrap();
-        let caps_state = gcx.read().await.caps_state.clone();
+        let caps_state = gcx.caps_state.clone();
         {
             let mut caps_state = caps_state.write().await;
             caps_state.caps = Some(caps_with_model_caps(model_caps));

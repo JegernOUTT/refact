@@ -142,7 +142,7 @@ impl Tool for ToolBuddySay {
         };
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = gcx.buddy.clone();
         let mut lock = buddy_arc.lock().await;
         let svc = lock
             .as_mut()
@@ -305,7 +305,7 @@ impl Tool for ToolBuddyRenderControls {
         };
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = gcx.buddy.clone();
         let mut lock = buddy_arc.lock().await;
         let svc = lock
             .as_mut()

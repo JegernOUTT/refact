@@ -26,7 +26,7 @@ use crate::at_commands::execute_at::AtCommandMember;
 pub const MAX_SUBCHAT_DEPTH: usize = 5;
 
 pub struct AtCommandsContext {
-    pub global_context: Arc<ARwLock<GlobalContext>>,
+    pub global_context: Arc<GlobalContext>,
     pub app: AppState,
     pub n_ctx: usize,
     pub top_n: usize,
@@ -55,7 +55,7 @@ pub struct AtCommandsContext {
 
 impl AtCommandsContext {
     pub async fn new(
-        global_context: Arc<ARwLock<GlobalContext>>,
+        global_context: Arc<GlobalContext>,
         n_ctx: usize,
         top_n: usize,
         is_preview: bool,

@@ -98,12 +98,11 @@ pub async fn load_indexing_yaml(
         .map_err(|e| format!("load {} failed\n{}", indexing_yaml_path.display(), e))
 }
 
-pub async fn reload_global_indexing_only(gcx: Arc<ARwLock<GlobalContext>>) -> IndexingEverywhere {
+pub async fn reload_global_indexing_only(gcx: Arc<GlobalContext>) -> IndexingEverywhere {
     let (config_dir, indexing_yaml) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.config_dir.clone(),
-            gcx_locked.cmdline.indexing_yaml.clone(),
+            gcx.config_dir.clone(),
+            gcx.cmdline.indexing_yaml.clone(),
         )
     };
     let global_indexing_path = if indexing_yaml.is_empty() {
@@ -121,7 +120,7 @@ pub async fn reload_global_indexing_only(gcx: Arc<ARwLock<GlobalContext>>) -> In
 }
 
 pub async fn reload_indexing_everywhere_if_needed(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Arc<IndexingEverywhere> {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -129,14 +128,13 @@ pub async fn reload_indexing_everywhere_if_needed(
         .as_secs();
     // Initially this is loaded in _ls_files_under_version_control_recursive()
     let (config_dir, indexing_yaml, workspace_vcs_roots) = {
-        let gcx_locked = gcx.read().await;
-        if gcx_locked.indexing_everywhere.loaded_ts + INDEXING_TOO_OLD.as_secs() > now {
-            return gcx_locked.indexing_everywhere.clone();
+        if gcx.indexing_everywhere.loaded_ts + INDEXING_TOO_OLD.as_secs() > now {
+            return gcx.indexing_everywhere.clone();
         }
         (
-            gcx_locked.config_dir.clone(),
-            gcx_locked.cmdline.indexing_yaml.clone(),
-            gcx_locked.documents_state.workspace_vcs_roots.clone(),
+            gcx.config_dir.clone(),
+            gcx.cmdline.indexing_yaml.clone(),
+            gcx.documents_state.workspace_vcs_roots.clone(),
         )
     };
 
@@ -186,9 +184,7 @@ pub async fn reload_indexing_everywhere_if_needed(
     };
 
     {
-        let mut gcx_locked = gcx.write().await;
-        gcx_locked.indexing_everywhere = Arc::new(indexing_everywhere);
-        gcx_locked.indexing_everywhere.clone()
+        Arc::new(indexing_everywhere)
     }
 }
 

@@ -349,7 +349,7 @@ pub fn format_related_memories_section(
     )
 }
 
-pub async fn build_knowledge_index(gcx: Arc<ARwLock<GlobalContext>>) -> KnowledgeIndex {
+pub async fn build_knowledge_index(gcx: Arc<GlobalContext>) -> KnowledgeIndex {
     let mut index = KnowledgeIndex::empty();
 
     let project_dirs = get_project_dirs(gcx.clone()).await;
@@ -363,7 +363,7 @@ pub async fn build_knowledge_index(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
 
     // Global knowledge dir lives under the config dir.
     // This keeps KG/index behavior aligned with memories_search().
-    let global_dir = gcx.read().await.config_dir.join("knowledge");
+    let global_dir = gcx.config_dir.join("knowledge");
     if global_dir.exists() {
         knowledge_dirs.push(global_dir);
     }
@@ -438,8 +438,7 @@ mod tests {
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![dir.path().to_path_buf()];
         }
 

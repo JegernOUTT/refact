@@ -229,7 +229,7 @@ pub fn compute_context_size(
 }
 
 pub async fn get_browser_context_for_chat(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Option<BrowserContextSnapshot> {
     let (_, runtime_arc) =
@@ -273,7 +273,7 @@ pub async fn get_browser_context_for_chat(
     })
 }
 
-pub async fn commit_browser_cursors(gcx: Arc<ARwLock<GlobalContext>>, chat_id: &str) {
+pub async fn commit_browser_cursors(gcx: Arc<GlobalContext>, chat_id: &str) {
     if let Some((_, runtime_arc)) =
         crate::integrations::browser_runtime::find_runtime_by_chat_id(crate::app_state::AppState::from_gcx(gcx).await, chat_id).await
     {
@@ -283,7 +283,7 @@ pub async fn commit_browser_cursors(gcx: Arc<ARwLock<GlobalContext>>, chat_id: &
 }
 
 pub async fn maybe_insert_browser_context(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
     has_browser_meta: bool,
     attach_screenshot_on_send: bool,

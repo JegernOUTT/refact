@@ -23,12 +23,12 @@ pub async fn run_at_commands_locally(
     stream_back_to_user: &mut HasRagResults,
 ) -> (Vec<ChatMessage>, bool) {
     let (n_ctx, top_n, is_preview, app) = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         (
-            ccx_locked.n_ctx,
-            ccx_locked.top_n,
-            ccx_locked.is_preview,
-            ccx_locked.app.clone(),
+            cgcx.n_ctx,
+            cgcx.top_n,
+            cgcx.is_preview,
+            cgcx.app.clone(),
         )
     };
     if !is_preview {
@@ -145,11 +145,11 @@ pub async fn run_at_commands_locally(
             tokens_limit_files += non_used_plain;
             info!("tokens_limit_files {}", tokens_limit_files);
             let (gcx, mut pp_settings, pp_skeleton) = {
-                let ccx_locked = ccx.lock().await;
+                let cgcx = ccx.lock().await;
                 (
-                    ccx_locked.global_context.clone(),
-                    ccx_locked.postprocess_parameters.clone(),
-                    ccx_locked.pp_skeleton,
+                    cgcx.global_context.clone(),
+                    cgcx.postprocess_parameters.clone(),
+                    cgcx.pp_skeleton,
                 )
             };
             pp_settings.use_ast_based_pp = false;

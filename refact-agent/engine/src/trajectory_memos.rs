@@ -29,9 +29,9 @@ const MAX_TRAJECTORY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MEMO_CONTENT_CHARS: usize = 4_000;
 const MAX_MEMO_EVIDENCE_CHARS: usize = 1_000;
 
-pub async fn trajectory_memos_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn trajectory_memos_background_task(gcx: Arc<GlobalContext>) {
     loop {
-        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        let shutdown_flag = gcx.shutdown_flag.clone();
         tokio::select! {
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS)) => {}
             _ = async {
@@ -50,7 +50,7 @@ pub async fn trajectory_memos_background_task(gcx: Arc<ARwLock<GlobalContext>>) 
     }
 }
 
-async fn process_abandoned_trajectories(gcx: Arc<ARwLock<GlobalContext>>) -> Result<(), String> {
+async fn process_abandoned_trajectories(gcx: Arc<GlobalContext>) -> Result<(), String> {
     let project_dirs = get_project_dirs(gcx.clone()).await;
     if project_dirs.is_empty() {
         return Ok(());
@@ -91,7 +91,7 @@ async fn process_abandoned_trajectories(gcx: Arc<ARwLock<GlobalContext>>) -> Res
 }
 
 async fn process_single_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: PathBuf,
     threshold: &DateTime<Utc>,
 ) -> Result<bool, String> {
@@ -345,7 +345,7 @@ struct ExtractionResult {
 }
 
 async fn extract_memos_and_meta(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     mut messages: Vec<ChatMessage>,
     current_title: &str,
     is_title_generated: bool,

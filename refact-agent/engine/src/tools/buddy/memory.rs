@@ -173,7 +173,7 @@ fn op_id(tool_name: &str, parts: &[&str]) -> String {
     format!("memop_buddy_{}_{}", tool_name, &hash_parts(parts)[..16])
 }
 
-async fn knowledge_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+async fn knowledge_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
         .await
         .into_iter()
@@ -196,7 +196,7 @@ fn reject_dotdot(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn project_root(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+async fn project_root(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     get_project_dirs(gcx)
         .await
         .into_iter()
@@ -205,7 +205,7 @@ async fn project_root(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, Strin
 }
 
 async fn resolve_memory_path(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     raw: &str,
 ) -> Result<PathBuf, String> {
     let raw = raw.trim();
@@ -222,7 +222,7 @@ async fn resolve_memory_path(
 }
 
 async fn checked_existing_memory_path(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &Path,
 ) -> Result<PathBuf, String> {
     reject_dotdot(path)?;
@@ -262,7 +262,7 @@ fn parse_memory_text(text: &str) -> (KnowledgeFrontmatter, String) {
     (frontmatter, body)
 }
 
-async fn scan_cards(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<KnowledgeCard> {
+async fn scan_cards(gcx: Arc<GlobalContext>) -> Vec<KnowledgeCard> {
     scan_cards_in_dirs(knowledge_dirs(gcx).await).await
 }
 
@@ -351,8 +351,8 @@ fn dedup_cards(cards: Vec<KnowledgeCard>) -> Vec<KnowledgeCard> {
     out
 }
 
-async fn all_index_cards(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<KnowledgeCard> {
-    let gcx_read = gcx.read().await;
+async fn all_index_cards(gcx: Arc<GlobalContext>) -> Vec<KnowledgeCard> {
+    let gcx_read = gcx.clone();
     let index = gcx_read.knowledge_index.lock().await;
     if !index.is_empty() {
         return dedup_cards(index.all_cards());
@@ -431,7 +431,7 @@ fn markdown_table(cards: &[KnowledgeCard]) -> String {
 }
 
 async fn append_audit_op(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     mut op: MemoryLifecycleOp,
 ) -> Result<(), String> {
     let root = project_root(gcx).await?;
@@ -443,7 +443,7 @@ async fn append_audit_op(
     Ok(())
 }
 
-async fn find_duplicate_content(gcx: Arc<ARwLock<GlobalContext>>, hash: &str) -> Option<PathBuf> {
+async fn find_duplicate_content(gcx: Arc<GlobalContext>, hash: &str) -> Option<PathBuf> {
     for dir in knowledge_dirs(gcx).await {
         for entry in WalkDir::new(&dir).into_iter().filter_map(Result::ok) {
             let path = entry.path();
@@ -472,7 +472,7 @@ async fn find_duplicate_content(gcx: Arc<ARwLock<GlobalContext>>, hash: &str) ->
 }
 
 async fn create_memory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     title: &str,
     content: &str,
     tags: Vec<String>,
@@ -902,10 +902,10 @@ mod tests {
     use crate::worktrees::types::WorktreeMeta;
     use std::collections::HashMap;
 
-    async fn test_gcx(root: &Path) -> Arc<ARwLock<GlobalContext>> {
+    async fn test_gcx(root: &Path) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_read = gcx.read().await;
+            let gcx_read = gcx.clone();
             *gcx_read.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
         }
         gcx
@@ -1034,7 +1034,7 @@ mod tests {
             .count();
         assert_eq!(files, 1);
         let gcx = ccx.lock().await.app.gcx.clone();
-        let cards = gcx.read().await.knowledge_index.lock().await.all_cards();
+        let cards = gcx.knowledge_index.lock().await.all_cards();
         assert!(cards.iter().any(|card| card.title == "Create Test"));
         let state = load_memory_ops(dir.path()).await;
         assert_eq!(state.applied_count, 1);

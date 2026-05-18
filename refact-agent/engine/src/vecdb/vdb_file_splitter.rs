@@ -26,7 +26,7 @@ impl FileSplitter {
         doc: &Document,
         tokenizer: Option<Arc<Tokenizer>>,
         tokens_limit: usize,
-        global_context: Arc<ARwLock<GlobalContext>>,
+        global_context: Arc<GlobalContext>,
     ) -> Result<Vec<SplitResult>, String> {
         let path = doc.doc_path.clone();
         let text = match crate::files_in_workspace::get_document_text_or_read_from_disk(&mut doc.clone(), app.gcx.clone())

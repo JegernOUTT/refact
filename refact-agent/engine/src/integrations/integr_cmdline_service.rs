@@ -38,7 +38,7 @@ pub struct ToolService {
 impl IntegrationTrait for ToolService {
     async fn integr_settings_apply(
         &mut self,
-        _gcx: Arc<ARwLock<GlobalContext>>,
+        _gcx: Arc<GlobalContext>,
         config_path: String,
         value: &serde_json::Value,
     ) -> Result<(), serde_json::Error> {
@@ -142,7 +142,7 @@ async fn get_stdout_and_stderr(
 }
 
 async fn execute_background_command(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     service_name: &str,
     command_str: &str,
     cmdline_workdir: &String,
@@ -151,7 +151,7 @@ async fn execute_background_command(
     env_variables: &HashMap<String, String>,
 ) -> Result<String, String> {
     let session_key = format!("custom_service_{service_name}");
-    let integration_sessions = gcx.read().await.integration_sessions.clone();
+    let integration_sessions = gcx.integration_sessions.clone();
     let mut session_mb = {
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions.get(&session_key).cloned()

@@ -25,7 +25,7 @@ const MEMORIES_DIR: &str = "memories";
 const MAX_MEMORIES_CHARS: usize = 120_000;
 
 pub async fn get_task_memories_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
@@ -92,10 +92,10 @@ impl Tool for ToolTaskMemorySave {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, task_meta) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.task_meta.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.task_meta.clone(),
             )
         };
 
@@ -233,10 +233,10 @@ impl Tool for ToolTaskMemoriesGet {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, task_meta) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.task_meta.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.task_meta.clone(),
             )
         };
 
@@ -389,7 +389,7 @@ impl Tool for ToolTaskMemoriesGet {
 }
 
 pub async fn load_task_memories(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<Vec<(PathBuf, String)>, String> {
     let memories_dir = get_task_memories_dir(gcx, task_id).await?;

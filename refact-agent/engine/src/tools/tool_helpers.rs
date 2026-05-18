@@ -45,7 +45,7 @@ impl Default for CodeSubagentConfig {
 }
 
 pub async fn load_code_subagent_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     subagent_id: &str,
     model_id: Option<&str>,
 ) -> Result<CodeSubagentConfig, String> {

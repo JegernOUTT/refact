@@ -10,7 +10,7 @@ use tokio::sync::RwLock as ARwLock;
 const SUBAGENT_ID: &str = "code_edit";
 
 pub async fn generate_code_edit(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     code: &str,
     instruction: &str,
     cursor_file: &str,

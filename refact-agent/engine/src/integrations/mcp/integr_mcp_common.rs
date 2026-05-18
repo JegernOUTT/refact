@@ -102,7 +102,7 @@ pub trait MCPTransportInitializer: Send + Sync {
 }
 
 pub async fn mcp_integr_tools(
-    gcx_option: Option<Weak<ARwLock<GlobalContext>>>,
+    gcx_option: Option<Weak<GlobalContext>>,
     config_path: &str,
     common: &IntegrationCommon,
     request_timeout: u64,
@@ -124,7 +124,7 @@ pub async fn mcp_integr_tools(
     };
 
     let session_maybe = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions.get(&session_key).cloned()
     };
@@ -358,7 +358,7 @@ macro_rules! impl_mcp_integration_trait {
         impl crate::integrations::integr_abstract::IntegrationTrait for $struct_name {
             async fn integr_settings_apply(
                 &mut self,
-                gcx: std::sync::Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+                gcx: std::sync::Arc<crate::global_context::GlobalContext>,
                 config_path: String,
                 value: &serde_json::Value,
             ) -> Result<(), serde_json::Error> {
@@ -411,7 +411,7 @@ macro_rules! impl_mcp_integration_trait {
 pub(crate) use impl_mcp_integration_trait;
 
 pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync + 'static>(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     config_path: String,
     new_cfg_value: Value,
     transport_initializer: T,
@@ -424,7 +424,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
     let session_key = format!("{}", config_path);
 
     let session_arc = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let mut integration_sessions = integration_sessions.lock().await;
         let session = integration_sessions.get(&session_key).cloned();
         if session.is_none() {
@@ -787,13 +787,13 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
     request_timeout: u64,
     health_check_interval: u64,
     reconnect_max_attempts: u64,
-    gcx_weak: std::sync::Weak<ARwLock<GlobalContext>>,
+    gcx_weak: std::sync::Weak<GlobalContext>,
 ) {
     let backoff_delays: Vec<u64> = vec![1, 2, 4, 8, 16, 30, 60];
 
     loop {
         let shutdown_flag = match gcx_weak.upgrade() {
-            Some(gcx) => gcx.read().await.shutdown_flag.clone(),
+            Some(gcx) => gcx.shutdown_flag.clone(),
             None => return,
         };
         tokio::select! {
@@ -882,13 +882,13 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
     request_timeout: u64,
     reconnect_max_attempts: u64,
     backoff_delays: &[u64],
-    gcx_weak: std::sync::Weak<ARwLock<GlobalContext>>,
+    gcx_weak: std::sync::Weak<GlobalContext>,
 ) -> bool {
     let max_attempts = reconnect_max_attempts.min(backoff_delays.len() as u64) as usize;
 
     for attempt in 0..max_attempts {
         let shutdown_flag = match gcx_weak.upgrade() {
-            Some(gcx) => gcx.read().await.shutdown_flag.clone(),
+            Some(gcx) => gcx.shutdown_flag.clone(),
             None => Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {

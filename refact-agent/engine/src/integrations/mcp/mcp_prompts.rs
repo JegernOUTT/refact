@@ -44,11 +44,11 @@ pub fn mcp_prompt_command_name(server_name: &str, prompt_name: &str) -> String {
     )
 }
 
-pub async fn mcp_prompts_as_slash_commands(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<SlashCommand> {
+pub async fn mcp_prompts_as_slash_commands(gcx: Arc<GlobalContext>) -> Vec<SlashCommand> {
     let sessions: Vec<
         Arc<tokio::sync::Mutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
     > = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions.values().cloned().collect()
     };
@@ -108,7 +108,7 @@ pub struct McpPromptParsed {
 }
 
 pub async fn parse_mcp_prompt_command(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     cmd_name: &str,
     args_str: &str,
 ) -> Option<McpPromptParsed> {
@@ -119,7 +119,7 @@ pub async fn parse_mcp_prompt_command(
         String,
         Arc<tokio::sync::Mutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
     )> = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions
             .iter()
@@ -163,7 +163,7 @@ fn build_args_map(prompt: &rmcp::model::Prompt, args_str: &str) -> HashMap<Strin
 }
 
 pub async fn execute_mcp_prompt(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     cmd_name: &str,
     args_str: &str,
     request_timeout: u64,
@@ -174,7 +174,7 @@ pub async fn execute_mcp_prompt(
     };
 
     let session_arc = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions
             .get(&parsed.server_config_path)

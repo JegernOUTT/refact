@@ -25,7 +25,7 @@ use crate::http::routers::v1::code_completion::handle_v1_code_completion;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct LspBackend {
-    pub gcx: Arc<ARwLock<GlobalContext>>,
+    pub gcx: Arc<GlobalContext>,
     pub client: tower_lsp::Client,
 }
 
@@ -67,8 +67,8 @@ fn invalid_params<E: Display>(err: E) -> Error {
     }
 }
 
-async fn notify_workspace_changed(gcx: &Arc<ARwLock<GlobalContext>>) {
-    let tx = gcx.read().await.workspace_changed_tx.clone();
+async fn notify_workspace_changed(gcx: &Arc<GlobalContext>) {
+    let tx = gcx.workspace_changed_tx.clone();
     if let Some(tx) = tx {
         let _ = tx.send(());
     }
@@ -181,8 +181,7 @@ impl LspBackend {
             "text_document.uri",
         )?;
         let memory_document_map = {
-            let gcx_locked = self.gcx.read().await;
-            gcx_locked.documents_state.memory_document_map.clone()
+            self.gcx.documents_state.memory_document_map.clone()
         };
         let doc = memory_document_map
             .lock()
@@ -190,7 +189,7 @@ impl LspBackend {
             .get(&path)
             .cloned()
             .ok_or_else(|| internal_error("document not found"))?;
-        let mut doc_snapshot = doc.read().await.clone();
+        let mut doc_snapshot = doc.write().await;
         let txt = crate::files_in_workspace::get_document_text_or_read_from_disk(&mut doc_snapshot, self.gcx.clone())
             .await
             .map_err(internal_error)?;
@@ -244,14 +243,13 @@ impl LspBackend {
             "ACTIVE_DOC {:?}",
             crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
         );
-        *self.gcx.read().await.documents_state.active_file_path.lock().await = Some(path);
+        *self.gcx.documents_state.active_file_path.lock().await = Some(path);
         Ok(SuccessRes { success: true })
     }
 
     async fn ping_http_server(&self) -> Result<()> {
         let (port, http_client) = {
-            let gcx_locked = self.gcx.write().await;
-            (gcx_locked.cmdline.http_port, gcx_locked.http_client.clone())
+            (self.gcx.cmdline.http_port, self.gcx.http_client.clone())
         };
 
         let url = "http://127.0.0.1:".to_string() + &port.to_string() + &"/v1/ping".to_string();
@@ -300,9 +298,8 @@ impl LanguageServer for LspBackend {
         }
         let folders = canonical_workspace_roots(&folders);
         let changed = {
-            let gcx_locked = self.gcx.write().await;
             let mut workspace_folders =
-                gcx_locked.documents_state.workspace_folders.lock().unwrap();
+                self.gcx.documents_state.workspace_folders.lock().unwrap();
             if workspace_roots_changed(&workspace_folders, &folders) {
                 *workspace_folders = folders.clone();
                 info!("LSP workspace_folders {:?}", folders);
@@ -438,10 +435,7 @@ impl LanguageServer for LspBackend {
 
     async fn shutdown(&self) -> Result<()> {
         info!("shutdown");
-        self.gcx
-            .write()
-            .await
-            .ask_shutdown_sender
+        self.gcx.ask_shutdown_sender
             .lock()
             .unwrap()
             .send("LSP SHUTDOWN".to_string())
@@ -480,9 +474,8 @@ impl LanguageServer for LspBackend {
             removed.push(path);
         }
         let changed = {
-            let gcx_locked = self.gcx.write().await;
             let mut workspace_folders =
-                gcx_locked.documents_state.workspace_folders.lock().unwrap();
+                self.gcx.documents_state.workspace_folders.lock().unwrap();
             apply_workspace_root_changes(&mut workspace_folders, &added, &removed)
         };
         if changed {
@@ -678,7 +671,7 @@ mod tests {
 }
 
 async fn build_lsp_service(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> (LspService<LspBackend>, ClientSocket) {
     let (lsp_service, socket) = LspService::build(|client| LspBackend { gcx, client })
         .custom_method("refact/getCompletions", LspBackend::get_completions)
@@ -688,7 +681,7 @@ async fn build_lsp_service(
 }
 
 pub async fn spawn_lsp_task(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     cmdline: CommandLine,
 ) -> Option<JoinHandle<()>> {
     if cmdline.lsp_stdin_stdout == 0 && cmdline.lsp_port > 0 {
@@ -703,10 +696,7 @@ pub async fn spawn_lsp_task(
                     addr,
                     listener_maybe.unwrap_err()
                 );
-                gcx_t
-                    .write()
-                    .await
-                    .ask_shutdown_sender
+                gcx_t.ask_shutdown_sender
                     .lock()
                     .unwrap()
                     .send("LSP PORT_BUSY".to_string())
@@ -745,7 +735,7 @@ pub async fn spawn_lsp_task(
                 .serve(lsp_service)
                 .await;
             info!("LSP loop exit");
-            match gcx_t.write().await.ask_shutdown_sender.lock() {
+            match gcx_t.ask_shutdown_sender.lock() {
                 Ok(sender) => {
                     if let Err(err) = sender.send("going-down-because-lsp-exited".to_string()) {
                         error!("Failed to send shutdown message: {}", err);

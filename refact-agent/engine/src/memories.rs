@@ -77,7 +77,7 @@ fn generate_filename(content: &str) -> String {
 }
 
 async fn load_parent_id_from_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &PathBuf,
 ) -> Option<String> {
     let text = get_file_text_from_memory_or_disk(gcx, path).await.ok()?;
@@ -88,7 +88,7 @@ async fn load_parent_id_from_trajectory(
 }
 
 async fn load_root_chat_id_from_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &PathBuf,
 ) -> Option<String> {
     let text = get_file_text_from_memory_or_disk(gcx, path).await.ok()?;
@@ -99,7 +99,7 @@ async fn load_root_chat_id_from_trajectory(
 }
 
 async fn resolve_root_chat_id(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     start_id: &str,
     cache: &mut HashMap<String, String>,
 ) -> String {
@@ -585,12 +585,12 @@ fn extract_fallback_tags(
     tags
 }
 
-pub async fn get_global_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
-    let config_dir = gcx.read().await.config_dir.clone();
+pub async fn get_global_knowledge_dir(gcx: Arc<GlobalContext>) -> PathBuf {
+    let config_dir = gcx.config_dir.clone();
     config_dir.join("knowledge")
 }
 
-async fn get_all_knowledge_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+async fn get_all_knowledge_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
         .await
         .into_iter()
@@ -606,7 +606,7 @@ async fn get_all_knowledge_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf
     dirs
 }
 
-async fn get_first_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+async fn get_first_knowledge_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
     Ok(workspace_root.join(KNOWLEDGE_FOLDER_NAME))
@@ -614,7 +614,7 @@ async fn get_first_knowledge_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Pat
 
 #[allow(dead_code)]
 pub async fn get_knowledge_dir_for_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     scope: StorageScope,
 ) -> Result<PathBuf, String> {
     match scope {
@@ -624,7 +624,7 @@ pub async fn get_knowledge_dir_for_scope(
 }
 
 pub async fn memories_add(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     frontmatter: &KnowledgeFrontmatter,
     content: &str,
 ) -> Result<PathBuf, String> {
@@ -647,12 +647,12 @@ pub async fn memories_add(
 
     // Update fast in-memory knowledge index (best-effort, new docs going forward).
     {
-        let gcx_read = gcx.read().await;
+        let gcx_read = gcx.clone();
         let mut idx = gcx_read.knowledge_index.lock().await;
         idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
     }
 
-    let vec_db = gcx.read().await.vec_db.clone();
+    let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         vecdb
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true)
@@ -663,7 +663,7 @@ pub async fn memories_add(
 }
 
 pub async fn load_memories_by_tags(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     allowed_tags: &[&str],
     max_items: usize,
 ) -> Result<Vec<MemoRecord>, String> {
@@ -924,7 +924,7 @@ fn preference_file_already_exists(knowledge_dirs: &[PathBuf], normalized_stateme
 
 #[cfg(test)]
 pub async fn memories_add_preference_if_new(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     statement: &str,
     evidence: &str,
     confidence: f32,
@@ -980,7 +980,7 @@ pub async fn memories_add_preference_if_new(
 }
 
 pub async fn memories_search(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     query: &str,
     top_n_memories: usize,
     top_n_trajectories: usize,
@@ -999,7 +999,7 @@ pub async fn memories_search(
     let trajectory_dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.clone()).await;
 
     let vecdb_arc = {
-        let gcx_read = gcx.read().await;
+        let gcx_read = gcx.clone();
         gcx_read.vec_db.clone()
     };
 
@@ -1319,7 +1319,7 @@ pub async fn memories_search(
 }
 
 async fn memories_search_fallback(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     query: &str,
     top_n: usize,
     knowledge_dirs: &[PathBuf],
@@ -1435,7 +1435,7 @@ async fn memories_search_fallback(
 }
 
 pub async fn deprecate_document(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     doc_path: &PathBuf,
     superseded_by: Option<&str>,
     _reason: &str,
@@ -1454,7 +1454,7 @@ pub async fn deprecate_document(
 }
 
 pub async fn update_memory_document_frontmatter<F>(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     doc_path: &Path,
     update: F,
 ) -> Result<bool, String>
@@ -1478,7 +1478,7 @@ where
 }
 
 pub async fn rewrite_memory_document(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     doc_path: &Path,
     frontmatter: &KnowledgeFrontmatter,
     body: &str,
@@ -1488,7 +1488,7 @@ pub async fn rewrite_memory_document(
 
     let path_buf = doc_path.to_path_buf();
     {
-        let gcx_read = gcx.read().await;
+        let gcx_read = gcx.clone();
         let mut idx = gcx_read.knowledge_index.lock().await;
         idx.remove_path(&path_buf);
         if !frontmatter.is_archived() && !frontmatter.is_deprecated() {
@@ -1496,7 +1496,7 @@ pub async fn rewrite_memory_document(
         }
     }
 
-    let vec_db = gcx.read().await.vec_db.clone();
+    let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         if frontmatter.is_archived() || frontmatter.is_deprecated() {
             let _ = vecdb.remove_file(&path_buf).await;
@@ -1507,9 +1507,7 @@ pub async fn rewrite_memory_document(
         }
     }
 
-    gcx.write()
-        .await
-        .documents_state
+    gcx.documents_state
         .memory_document_map.lock().await
         .remove(&path_buf);
 
@@ -1557,7 +1555,7 @@ async fn atomic_write_text(path: &Path, content: &str) -> Result<(), String> {
 }
 
 pub async fn delete_document_from_disk(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     doc_path: &PathBuf,
 ) -> Result<(), String> {
     match fs::remove_file(doc_path).await {
@@ -1568,14 +1566,12 @@ pub async fn delete_document_from_disk(
 
     info!("Deleted document from disk: {}", doc_path.display());
 
-    let vec_db = gcx.read().await.vec_db.clone();
+    let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.as_ref() {
         let _ = vecdb.remove_file(doc_path).await;
     }
 
-    gcx.write()
-        .await
-        .documents_state
+    gcx.documents_state
         .memory_document_map.lock().await
         .remove(doc_path);
 
@@ -1938,8 +1934,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![dir.path().to_path_buf()];
         }
 
@@ -1984,8 +1979,7 @@ mod tests {
             .unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![dir.path().to_path_buf()];
         }
 

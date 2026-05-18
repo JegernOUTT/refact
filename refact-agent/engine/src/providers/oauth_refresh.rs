@@ -120,9 +120,9 @@ struct OAuthRefreshCandidate<T> {
     oauth_tokens: T,
 }
 
-pub async fn oauth_token_refresh_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn oauth_token_refresh_background_task(gcx: Arc<GlobalContext>) {
     loop {
-        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        let shutdown_flag = gcx.shutdown_flag.clone();
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(REFRESH_CHECK_INTERVAL_SECS)) => {}
             _ = async {
@@ -138,12 +138,11 @@ pub async fn oauth_token_refresh_background_task(gcx: Arc<ARwLock<GlobalContext>
     }
 }
 
-async fn try_refresh_all_providers(gcx: &Arc<ARwLock<GlobalContext>>) -> () {
+async fn try_refresh_all_providers(gcx: &Arc<GlobalContext>) -> () {
     let (http_client, config_dir) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.http_client.clone(),
-            gcx_locked.config_dir.clone(),
+            gcx.http_client.clone(),
+            gcx.config_dir.clone(),
         )
     };
 
@@ -152,13 +151,12 @@ async fn try_refresh_all_providers(gcx: &Arc<ARwLock<GlobalContext>>) -> () {
 }
 
 async fn try_refresh_claude_code_instances(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     http_client: &reqwest::Client,
     config_dir: &std::path::Path,
 ) {
     let candidates = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         registry
             .iter()
             .filter(|(_, provider)| provider.base_provider_name() == "claude_code")
@@ -183,7 +181,7 @@ async fn try_refresh_claude_code_instances(
 }
 
 async fn try_refresh_claude_code(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     http_client: &reqwest::Client,
     config_dir: &std::path::Path,
     candidate: OAuthRefreshCandidate<crate::providers::claude_code_oauth::OAuthTokens>,
@@ -311,13 +309,12 @@ async fn try_refresh_claude_code(
 }
 
 async fn try_refresh_openai_codex_instances(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     http_client: &reqwest::Client,
     config_dir: &std::path::Path,
 ) {
     let candidates = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         registry
             .iter()
             .filter(|(_, provider)| provider.base_provider_name() == "openai_codex")
@@ -342,7 +339,7 @@ async fn try_refresh_openai_codex_instances(
 }
 
 async fn try_refresh_openai_codex(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     http_client: &reqwest::Client,
     config_dir: &std::path::Path,
     candidate: OAuthRefreshCandidate<crate::providers::openai_codex_oauth::OAuthTokens>,
@@ -481,7 +478,7 @@ fn needs_refresh(expires_at: i64) -> bool {
 }
 
 pub(crate) async fn save_refreshed_tokens(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     config_dir: &std::path::Path,
     provider_name: &str,
     base_provider: &str,
@@ -536,8 +533,7 @@ pub(crate) async fn save_refreshed_tokens(
     .await?;
 
     {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
 
         let mut provider = create_provider(base_provider)
             .ok_or_else(|| format!("Failed to create provider '{}'", base_provider))?;
@@ -557,7 +553,7 @@ pub(crate) async fn save_refreshed_tokens(
     }
 
     {
-        let caps_state = gcx.read().await.caps_state.clone();
+        let caps_state = gcx.caps_state.clone();
         let mut caps_state = caps_state.write().await;
         caps_state.caps = None;
         caps_state.last_attempted_ts = 0;

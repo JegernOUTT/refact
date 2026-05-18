@@ -314,8 +314,8 @@ fn spawn_subchat_bridge(
 
     tokio::spawn(async move {
         let (subchat_rx, abort_flag) = {
-            let ccx_locked = ccx.lock().await;
-            (ccx_locked.subchat_rx.clone(), ccx_locked.abort_flag.clone())
+            let cgcx = ccx.lock().await;
+            (cgcx.subchat_rx.clone(), cgcx.abort_flag.clone())
         };
         info!("spawn_subchat_bridge: started listening for subchat messages");
 
@@ -1642,10 +1642,10 @@ pub async fn execute_tools_with_session(
     .await;
 
     {
-        let mut ccx_locked = ccx.lock().await;
-        ccx_locked.tokens_for_rag = (n_ctx / 2).max(4096);
+        let mut cgcx = ccx.lock().await;
+        cgcx.tokens_for_rag = (n_ctx / 2).max(4096);
         if let Some(ref params) = options.subchat_tool_parameters {
-            ccx_locked.subchat_tool_parameters = params.clone();
+            cgcx.subchat_tool_parameters = params.clone();
         }
     }
 
@@ -1731,8 +1731,8 @@ async fn execute_single_tool(
     model_id: Option<&str>,
 ) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
     let abort_flag = {
-        let ccx_locked = ccx.lock().await;
-        ccx_locked.abort_flag.clone()
+        let cgcx = ccx.lock().await;
+        cgcx.abort_flag.clone()
     };
     if abort_flag.load(Ordering::Relaxed) {
         return (idx, false, Vec::new(), Vec::new());
@@ -1761,9 +1761,9 @@ async fn execute_single_tool(
     info!("Executing tool: {}({:?})", tool_call.function.name, args);
 
     let (session_id, project_dir) = {
-        let ccx_locked = ccx.lock().await;
-        let sid = ccx_locked.chat_id.clone();
-        drop(ccx_locked);
+        let cgcx = ccx.lock().await;
+        let sid = cgcx.chat_id.clone();
+        drop(cgcx);
         let pd = get_project_dir_string(app.clone()).await;
         (sid, pd)
     };
@@ -2003,8 +2003,8 @@ async fn execute_tools_inner(
 
     for (idx, tool_call) in tool_calls.iter().enumerate() {
         let is_aborted = {
-            let ccx_locked = ccx.lock().await;
-            ccx_locked.abort_flag.load(Ordering::Relaxed)
+            let cgcx = ccx.lock().await;
+            cgcx.abort_flag.load(Ordering::Relaxed)
         };
         if is_aborted {
             break;
@@ -2253,10 +2253,10 @@ pub async fn execute_tools(
     let ccx = build_tool_execution_context(app.clone(), n_ctx, messages, thread, None).await;
 
     {
-        let mut ccx_locked = ccx.lock().await;
-        ccx_locked.tokens_for_rag = (n_ctx / 2).max(4096);
+        let mut cgcx = ccx.lock().await;
+        cgcx.tokens_for_rag = (n_ctx / 2).max(4096);
         if let Some(params) = options.subchat_tool_parameters.clone() {
-            ccx_locked.subchat_tool_parameters = params;
+            cgcx.subchat_tool_parameters = params;
         }
     }
 

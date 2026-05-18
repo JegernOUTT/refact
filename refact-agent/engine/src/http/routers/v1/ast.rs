@@ -111,7 +111,7 @@ pub async fn handle_v1_ast_file_symbols(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     doc.update_text(&file_text);
 
-    let ast_service_opt = global_context.read().await.ast_service.lock().unwrap().clone();
+    let ast_service_opt = global_context.ast_service.lock().unwrap().clone();
     let search_res = match &ast_service_opt {
         Some(ast_service) => {
             let ast_index = ast_service.lock().await.ast_index.clone();
@@ -144,7 +144,7 @@ pub async fn handle_v1_ast_status(
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let global_context = app.gcx.clone();
-    let ast_service_opt = global_context.read().await.ast_service.lock().unwrap().clone();
+    let ast_service_opt = global_context.ast_service.lock().unwrap().clone();
     match &ast_service_opt {
         Some(ast_service) => {
             let ast_status: std::sync::Arc<tokio::sync::Mutex<crate::ast::ast_structs::AstStatus>> =

@@ -77,12 +77,12 @@ fn draft_error_response(err: DraftValidationError) -> Result<Response<Body>, Scr
 }
 
 async fn validate_draft_for_target(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     draft_id: &str,
     expected_kind: DraftKind,
     target_id: &str,
 ) -> std::result::Result<(), DraftValidationError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let Some(svc) = lock.as_ref() else {
         return Err(DraftValidationError::NotFound);
@@ -93,12 +93,12 @@ async fn validate_draft_for_target(
 }
 
 async fn consume_draft_for_target(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     draft_id: &str,
     expected_kind: DraftKind,
     target_id: &str,
 ) -> std::result::Result<ConsumedDraft, DraftValidationError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let Some(svc) = lock.as_mut() else {
         return Err(DraftValidationError::NotFound);
@@ -132,7 +132,7 @@ async fn write_file_atomic(path: &std::path::Path, content: &str) -> std::io::Re
     write_result
 }
 
-async fn invalidate_registry_cache(gcx: Arc<ARwLock<GlobalContext>>, scope: ConfigScope) {
+async fn invalidate_registry_cache(gcx: Arc<GlobalContext>, scope: ConfigScope) {
     match scope {
         ConfigScope::Global => {
             invalidate_all_registry_caches(gcx).await;
@@ -214,7 +214,7 @@ pub async fn handle_v1_customization_registry(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
@@ -372,7 +372,7 @@ pub async fn handle_v1_customization_get(
             return json_error(StatusCode::BAD_REQUEST, "drafts_not_supported_for_kind");
         };
         let draft_data = {
-            let buddy_arc = gcx.read().await.buddy.clone();
+            let buddy_arc = gcx.buddy.clone();
             let lock = buddy_arc.lock().await;
             match lock.as_ref() {
                 Some(svc) => match svc.draft_store.get_validated(
@@ -423,7 +423,7 @@ pub async fn handle_v1_customization_get(
         };
     }
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
@@ -510,7 +510,7 @@ pub async fn handle_v1_customization_save(
     }
     let storage_kind = normalize_kind(&kind).to_string();
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
@@ -652,7 +652,7 @@ pub async fn handle_v1_customization_create(
     }
     let storage_kind = normalize_kind(&kind).to_string();
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
@@ -781,7 +781,7 @@ pub async fn handle_v1_customization_delete(
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let storage_kind = normalize_kind(&kind).to_string();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();

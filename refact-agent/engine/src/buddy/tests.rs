@@ -889,7 +889,7 @@ async fn investigation_log_tail_reads_bounded_and_redacts() {
     tokio::fs::write(&log_path, content).await.unwrap();
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.write().await.cmdline.logs_to_file = log_path.to_string_lossy().into_owned();
+    gcx.cmdline.logs_to_file = log_path.to_string_lossy().into_owned();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let tail = read_recent_log_lines(&app, 5).await.unwrap();
     assert!(!tail.contains("old secret"));
@@ -6046,7 +6046,7 @@ async fn pulse_populates_all_subpulse_counts() {
         caps.defaults.chat_light_model = "openai/gpt-4o-mini".to_string();
         caps.defaults.chat_thinking_model = "openai/o1".to_string();
         caps.defaults.chat_buddy_model = "openai/gpt-4o-mini".to_string();
-        app.model.caps.write().await.caps = Some(Arc::new(caps));
+        app.model.caps.caps = Some(Arc::new(caps));
     }
 
     let config_dir = app.paths.config_dir.clone();
@@ -6084,9 +6084,7 @@ async fn pulse_populates_all_subpulse_counts() {
     );
     assert_eq!(
         pulse.mcp.total,
-        gcx.read()
-            .await
-            .integration_sessions
+        gcx.integration_sessions
             .lock()
             .await
             .len() as u32,
@@ -6307,7 +6305,7 @@ async fn defaults_update_with_valid_draft_consumes_after_save() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.write().await.config_dir = dir.path().to_path_buf();
+    gcx.config_dir = dir.path().to_path_buf();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
@@ -6353,7 +6351,7 @@ async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.write().await.config_dir = dir.path().to_path_buf();
+    gcx.config_dir = dir.path().to_path_buf();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
@@ -6393,7 +6391,7 @@ async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.write().await.config_dir = dir.path().to_path_buf();
+    gcx.config_dir = dir.path().to_path_buf();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let mut svc = make_service();
@@ -6434,7 +6432,7 @@ async fn defaults_update_without_draft_id_still_saves() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    gcx.write().await.config_dir = dir.path().to_path_buf();
+    gcx.config_dir = dir.path().to_path_buf();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
     let body = serde_json::json!({
@@ -7541,16 +7539,15 @@ async fn launch_investigation_action_writes_static_prompt_and_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
     {
-        let mut gcx_locked = gcx.write().await;
-        gcx_locked.cache_dir = dir.path().join("cache");
-        gcx_locked.cmdline.logs_to_file = dir
+        gcx.cache_dir = dir.path().join("cache");
+        gcx.cmdline.logs_to_file = dir
             .path()
             .join("missing.log")
             .to_string_lossy()
             .into_owned();
-        *gcx_locked.documents_state.workspace_folders.lock().unwrap() =
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![dir.path().to_path_buf()];
-        gcx_locked.caps_state.write().await.caps = None;
+        gcx.caps_state.caps = None;
     }
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 
@@ -7727,11 +7724,10 @@ async fn investigation_enrich_context_caps_log_excerpt_to_4000_chars() {
     std::fs::write(&log_path, "x".repeat(10000)).unwrap();
     {
         let caps_state = {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cmdline.logs_to_file = log_path.to_string_lossy().to_string();
-            gcx_locked.caps_state.clone()
+            gcx.cmdline.logs_to_file = log_path.to_string_lossy().to_string();
+            gcx.caps_state.clone()
         };
-        caps_state.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        caps_state.caps = Some(Arc::new(CodeAssistantCaps::default()));
     }
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
 

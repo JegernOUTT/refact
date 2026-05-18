@@ -34,7 +34,7 @@ struct Args {
 }
 
 async fn parse_args(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     execution_scope: Option<&ExecutionScope>,
 ) -> Result<Args, String> {
@@ -57,7 +57,7 @@ async fn parse_args(
 }
 
 pub async fn tool_undo_text_doc_exec(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     execution_scope: Option<&ExecutionScope>,
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
@@ -104,9 +104,7 @@ pub async fn tool_undo_text_doc_exec(
         }
     }
 
-    gcx.write()
-        .await
-        .documents_state
+    gcx.documents_state
         .memory_document_map.lock().await
         .remove(&a.path);
 
@@ -139,17 +137,17 @@ impl Tool for ToolUndoTextDoc {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
         let (_, _, chunks, summary) =
             tool_undo_text_doc_exec(gcx.clone(), args, execution_scope.as_ref()).await?;
 
         let related_section = {
-            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;
             let mut paths: Vec<String> = Vec::new();
             for c in chunks.iter() {
@@ -202,10 +200,10 @@ impl Tool for ToolUndoTextDoc {
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
         let can_exec = parse_args(gcx, args, execution_scope.as_ref())

@@ -43,18 +43,18 @@ async fn get_board_lock(task_id: &str) -> Arc<AMutex<()>> {
         .clone()
 }
 
-pub async fn get_tasks_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+pub async fn get_tasks_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
     Ok(workspace_root.join(".refact").join(TASKS_DIR))
 }
 
-pub async fn get_global_tasks_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
-    let config_dir = gcx.read().await.config_dir.clone();
+pub async fn get_global_tasks_dir(gcx: Arc<GlobalContext>) -> PathBuf {
+    let config_dir = gcx.config_dir.clone();
     config_dir.join(TASKS_DIR)
 }
 
-pub async fn get_all_tasks_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+pub async fn get_all_tasks_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
         .await
         .into_iter()
@@ -71,7 +71,7 @@ pub async fn get_all_tasks_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf
 }
 
 pub async fn find_task_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
     validate_task_id(task_id)?;
@@ -84,7 +84,7 @@ pub async fn find_task_dir(
     Err(format!("Task not found: {}", task_id))
 }
 
-pub async fn ensure_tasks_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+pub async fn ensure_tasks_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let dir = get_tasks_dir(gcx).await?;
     if !dir.exists() {
         fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
@@ -110,7 +110,7 @@ pub fn validate_task_id(task_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn list_tasks(gcx: Arc<ARwLock<GlobalContext>>) -> Result<Vec<TaskMeta>, String> {
+pub async fn list_tasks(gcx: Arc<GlobalContext>) -> Result<Vec<TaskMeta>, String> {
     let tasks_dirs = get_all_tasks_dirs(gcx.clone()).await;
 
     let mut tasks = vec![];
@@ -154,7 +154,7 @@ async fn load_task_meta_from_path(path: &PathBuf) -> Result<TaskMeta, String> {
 }
 
 pub async fn load_task_meta(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<TaskMeta, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
@@ -163,7 +163,7 @@ pub async fn load_task_meta(
 }
 
 pub async fn save_task_meta(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     meta: &TaskMeta,
 ) -> Result<(), String> {
@@ -176,7 +176,7 @@ pub async fn save_task_meta(
 }
 
 pub async fn load_board(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<TaskBoard, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
@@ -191,7 +191,7 @@ pub async fn load_board(
 }
 
 pub async fn save_board(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     board: &TaskBoard,
 ) -> Result<(), String> {
@@ -206,7 +206,7 @@ pub async fn save_board(
 }
 
 pub async fn update_board_atomic<F, T>(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     mut updater: F,
 ) -> Result<(TaskBoard, T), String>
@@ -253,7 +253,7 @@ where
     board.rev += 1;
     save_board(gcx.clone(), task_id, &board).await?;
     if !new_failed.is_empty() {
-        let user_activity = gcx.read().await.user_activity.clone();
+        let user_activity = gcx.user_activity.clone();
         if let Ok(mut ring) = user_activity.try_lock() {
             for action in new_failed {
                 ring.push(action);
@@ -273,7 +273,7 @@ where
 }
 
 pub async fn load_planner_instructions(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<String, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
@@ -285,7 +285,7 @@ pub async fn load_planner_instructions(
 }
 
 pub async fn save_planner_instructions(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     content: &str,
 ) -> Result<(), String> {
@@ -316,7 +316,7 @@ fn detect_git_branch_and_commit(workspace_root: &Path) -> (Option<String>, Optio
     (branch, commit)
 }
 
-pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result<TaskMeta, String> {
+pub async fn create_task(gcx: Arc<GlobalContext>, name: &str) -> Result<TaskMeta, String> {
     let tasks_dir = ensure_tasks_dir(gcx.clone()).await?;
     let task_id = Uuid::new_v4().to_string();
     let task_dir = tasks_dir.join(&task_id);
@@ -389,7 +389,7 @@ pub async fn create_task(gcx: Arc<ARwLock<GlobalContext>>, name: &str) -> Result
     Ok(meta)
 }
 
-pub async fn delete_task(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str) -> Result<(), String> {
+pub async fn delete_task(gcx: Arc<GlobalContext>, task_id: &str) -> Result<(), String> {
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
     fs::remove_dir_all(&task_dir)
         .await
@@ -405,7 +405,7 @@ pub async fn delete_task(gcx: Arc<ARwLock<GlobalContext>>, task_id: &str) -> Res
 }
 
 pub async fn update_task_name(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     name: &str,
 ) -> Result<TaskMeta, String> {
@@ -426,7 +426,7 @@ pub async fn update_task_name(
 }
 
 pub async fn update_task_stats(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<TaskMeta, String> {
     let mut meta = load_task_meta(gcx.clone(), task_id).await?;
@@ -477,7 +477,7 @@ fn should_list_task_trajectory(role: &str, data: &serde_json::Value) -> bool {
 /// NOTE: this is not strictly atomic — concurrent callers can pick the same
 /// number. Callers that care about uniqueness must serialize themselves.
 pub async fn next_planner_chat_id(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<String, String> {
     let existing = list_task_trajectories(gcx, task_id, "planner", None).await?;
@@ -494,7 +494,7 @@ pub async fn next_planner_chat_id(
 }
 
 pub async fn list_task_trajectories(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     role: &str,
     agent_id: Option<&str>,
@@ -549,8 +549,7 @@ pub async fn list_task_trajectories(
 
     trajectories.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
-    let gcx_locked = gcx.read().await;
-    let sessions = gcx_locked.chat_sessions.read().await;
+    let sessions = gcx.chat_sessions.read().await;
     for traj in &mut trajectories {
         if let Some(session_arc) = sessions.get(&traj.id) {
             let session = session_arc.lock().await;
@@ -595,8 +594,7 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
         {
-            let gcx_locked = gcx.read().await;
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() =
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![temp.path().to_path_buf()];
         }
         let task_id = "task-failed-ring";
@@ -662,7 +660,7 @@ mod tests {
         .await
         .unwrap();
 
-        let user_activity = gcx.read().await.user_activity.clone();
+        let user_activity = gcx.user_activity.clone();
         let ring = user_activity.lock().await;
         assert!(ring.snapshot().iter().any(|action| matches!(
             action,

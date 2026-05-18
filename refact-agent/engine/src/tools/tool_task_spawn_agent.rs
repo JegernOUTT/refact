@@ -36,7 +36,7 @@ async fn get_task_id(
 }
 
 async fn resolve_agent_model(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_default_model: Option<&str>,
     current_model: &str,
 ) -> Result<String, String> {
@@ -89,8 +89,8 @@ impl PreparedWorktree {
         self.meta.source_workspace_root.clone()
     }
 
-    async fn cleanup(&self, gcx: Arc<ARwLock<GlobalContext>>) {
-        let cache_dir = gcx.read().await.cache_dir.clone();
+    async fn cleanup(&self, gcx: Arc<GlobalContext>) {
+        let cache_dir = gcx.cache_dir.clone();
         if let Ok(service) =
             WorktreeService::new(cache_dir, self.meta.source_workspace_root.clone())
         {
@@ -127,7 +127,7 @@ fn find_abandoned_worktrees(board: &crate::tasks::types::TaskBoard) -> Vec<Strin
 }
 
 async fn prepare_agent_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     agent_id: &str,
     card_id: &str,
@@ -143,7 +143,7 @@ async fn prepare_agent_worktree(
         "refact/task/{}/card/{}/{}",
         task_id, card_id, agent_id_short
     );
-    let cache_dir = gcx.read().await.cache_dir.clone();
+    let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new(cache_dir, workspace_root.clone())?;
     let created = service
         .create_worktree(CreateWorktreeRequest {
@@ -529,7 +529,7 @@ impl Tool for ToolTaskSpawnAgent {
         let (original_card, starting_new_run) = commit_info.unwrap();
 
         async fn rollback(
-            gcx: Arc<ARwLock<GlobalContext>>,
+            gcx: Arc<GlobalContext>,
             task_id: &str,
             original_card: crate::tasks::types::BoardCard,
             guard_chat_id: String,
@@ -621,8 +621,7 @@ impl Tool for ToolTaskSpawnAgent {
             .join("\n\n");
 
         let sessions = {
-            let gcx_locked = gcx.read().await;
-            gcx_locked.chat_sessions.clone()
+            gcx.chat_sessions.clone()
         };
 
         let session_arc =
@@ -804,10 +803,9 @@ mod tests {
         run_git(root, &["commit", "-m", "initial"]);
     }
 
-    async fn set_workspace(gcx: Arc<ARwLock<GlobalContext>>, root: &Path) {
+    async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
         let root = root.canonicalize().unwrap();
-        let gcx_locked = gcx.read().await;
-        *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![root];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
     }
 
     fn sample_worktree_meta(temp: &Path) -> WorktreeMeta {
@@ -923,7 +921,7 @@ mod tests {
         let id = prepared.meta.id.clone();
         let branch = prepared.meta.branch.clone().unwrap();
         let root = prepared.meta.root.clone();
-        let cache_dir = gcx.read().await.cache_dir.clone();
+        let cache_dir = gcx.cache_dir.clone();
         let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
         assert!(service.get_worktree(&id).await.is_ok());
 

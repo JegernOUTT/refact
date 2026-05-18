@@ -14,8 +14,7 @@ mod tests {
     async fn command_run_pushed_from_tool_cmdline() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_locked = gcx.read().await;
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() =
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![std::env::temp_dir()];
         }
         let ccx = Arc::new(AMutex::new(
@@ -47,7 +46,7 @@ mod tests {
             .await
             .unwrap();
 
-        let user_activity = gcx.read().await.user_activity.clone();
+        let user_activity = gcx.user_activity.clone();
         let ring = user_activity.lock().await;
         assert!(ring.snapshot().iter().any(|action| matches!(
             action,

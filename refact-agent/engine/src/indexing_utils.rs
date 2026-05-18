@@ -7,10 +7,9 @@ use crate::global_context::GlobalContext;
 use crate::http::routers::v1::status::get_rag_status;
 
 /// Waits for both AST and VecDB indexing to complete based on --wait-ast and --wait-vecdb.
-pub async fn wait_for_indexing_if_needed(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn wait_for_indexing_if_needed(gcx: Arc<GlobalContext>) {
     let cmdline = {
-        let gcx_locked = gcx.read().await;
-        gcx_locked.cmdline.clone()
+        gcx.cmdline.clone()
     };
 
     let ast_done = async || {

@@ -126,7 +126,7 @@ pub struct AppState {
 
 impl AppState {
     pub async fn from_gcx(gcx: SharedGlobalContext) -> Self {
-        gcx.read().await.app_state(gcx.clone())
+        gcx.app_state(gcx.clone())
     }
 }
 

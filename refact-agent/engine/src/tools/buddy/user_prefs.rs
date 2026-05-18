@@ -124,7 +124,7 @@ fn top_k_arg(args: &HashMap<String, Value>) -> Result<usize, String> {
     }
 }
 
-async fn project_root(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+async fn project_root(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     get_project_dirs(gcx)
         .await
         .into_iter()
@@ -132,7 +132,7 @@ async fn project_root(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, Strin
         .ok_or_else(|| "No workspace folder found".to_string())
 }
 
-async fn profile_path(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+async fn profile_path(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     Ok(project_root(gcx)
         .await?
         .join(".refact")

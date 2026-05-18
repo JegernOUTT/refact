@@ -60,7 +60,7 @@ fn server_name_for_path(config_path: &str) -> String {
 }
 
 pub async fn index_mcp_resources(
-    gcx_weak: Weak<ARwLock<GlobalContext>>,
+    gcx_weak: Weak<GlobalContext>,
     config_path: String,
     peer: Peer<RoleClient>,
     resources: Vec<McpResource>,
@@ -72,8 +72,7 @@ pub async fn index_mcp_resources(
     };
 
     let (cache_dir, vec_db) = {
-        let gcx_locked = gcx.read().await;
-        (gcx_locked.cache_dir.clone(), gcx_locked.vec_db.clone())
+        (gcx.cache_dir.clone(), gcx.vec_db.clone())
     };
 
     if vec_db.lock().await.is_none() {
@@ -189,15 +188,14 @@ pub async fn index_mcp_resources(
     }
 }
 
-pub async fn remove_indexed_resources(gcx_weak: Weak<ARwLock<GlobalContext>>, config_path: String) {
+pub async fn remove_indexed_resources(gcx_weak: Weak<GlobalContext>, config_path: String) {
     let gcx = match gcx_weak.upgrade() {
         Some(g) => g,
         None => return,
     };
 
     let (cache_dir, vec_db) = {
-        let gcx_locked = gcx.read().await;
-        (gcx_locked.cache_dir.clone(), gcx_locked.vec_db.clone())
+        (gcx.cache_dir.clone(), gcx.vec_db.clone())
     };
 
     let server_name = server_name_for_path(&config_path);

@@ -252,14 +252,14 @@ pub struct GlobalContext {
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
     pub providers: Arc<ARwLock<ProviderRegistry>>,
     pub knowledge_index: Arc<AMutex<KnowledgeIndex>>,
-    pub llm_stats_sender: Option<tokio::sync::mpsc::Sender<crate::stats::event::LlmCallEvent>>,
+    pub llm_stats_sender: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<crate::stats::event::LlmCallEvent>>>>,
     pub ext_cache_generation: Arc<std::sync::atomic::AtomicU64>,
     pub buddy: Arc<AMutex<Option<crate::buddy::actor::BuddyService>>>,
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
 }
 
-pub type SharedGlobalContext = Arc<ARwLock<GlobalContext>>; // TODO: remove this type alias, confusing
+pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type alias, confusing
 
 impl GlobalContext {
     pub fn app_state(&self, gcx: SharedGlobalContext) -> AppState {
@@ -281,7 +281,7 @@ impl GlobalContext {
                 caps: self.caps_state.clone(),
                 tokenizers: self.tokenizer_state.clone(),
                 providers: self.providers.clone(),
-                llm_stats_sender: self.llm_stats_sender.clone(),
+                llm_stats_sender: self.llm_stats_sender.lock().unwrap().clone(),
             },
             workspace: WorkspaceServices {
                 documents_state: self.documents_state.clone(),
@@ -443,13 +443,12 @@ pub fn get_app_searchable_id(workspace_folders: &[PathBuf]) -> String {
 }
 
 pub async fn try_load_caps_quickly_if_not_present(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     max_age_seconds: u64,
 ) -> Result<Arc<CodeAssistantCaps>, ScratchError> {
     let cmdline = CommandLine::from_args(); // XXX make it Arc and don't reload all the time
     let (caps_state, config_dir) = {
-        let gcx_locked = gcx.read().await;
-        (gcx_locked.caps_state.clone(), gcx_locked.config_dir.clone())
+        (gcx.caps_state.clone(), gcx.config_dir.clone())
     };
     let caps_reading_lock = caps_state.read().await.reading_lock.clone();
 
@@ -517,10 +516,10 @@ pub async fn try_load_caps_quickly_if_not_present(
 }
 
 pub async fn look_for_piggyback_fields(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     anything_from_server: &serde_json::Value,
 ) {
-    let caps_state = gcx.read().await.caps_state.clone();
+    let caps_state = gcx.caps_state.clone();
     let mut caps_state = caps_state.write().await;
     if let Some(dict) = anything_from_server.as_object() {
         let new_caps_version = dict
@@ -598,7 +597,7 @@ pub async fn create_global_context(
     cache_dir: PathBuf,
     config_dir: PathBuf,
 ) -> (
-    Arc<ARwLock<GlobalContext>>,
+    Arc<GlobalContext>,
     std::sync::mpsc::Receiver<String>,
     CommandLine,
 ) {
@@ -672,13 +671,13 @@ pub async fn create_global_context(
                 .unwrap_or_default(),
         )),
         knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
-        llm_stats_sender: None,
+        llm_stats_sender: Arc::new(StdMutex::new(None)),
         ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         buddy: Arc::new(AMutex::new(None)),
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         user_activity: Arc::new(AMutex::new(user_activity)),
     };
-    let gcx = Arc::new(ARwLock::new(cx));
+    let gcx = Arc::new(cx);
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     crate::chat::start_session_cleanup_task(app_state);
@@ -712,7 +711,7 @@ pub mod tests {
         ));
     }
 
-    pub async fn make_test_gcx() -> Arc<ARwLock<GlobalContext>> {
+    pub async fn make_test_gcx() -> Arc<GlobalContext> {
         let (ask_shutdown_sender, _) = std::sync::mpsc::channel::<String>();
 
         let cache_dir = std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4()));
@@ -802,12 +801,12 @@ pub mod tests {
             project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
             providers: Arc::new(ARwLock::new(ProviderRegistry::default())),
             knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
-            llm_stats_sender: None,
+            llm_stats_sender: Arc::new(StdMutex::new(None)),
             ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             buddy: Arc::new(AMutex::new(None)),
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             user_activity: Arc::new(AMutex::new(user_activity)),
         };
-        Arc::new(ARwLock::new(cx))
+        Arc::new(cx)
     }
 }

@@ -169,17 +169,16 @@ fn all_receivers_closed(
         && buddy_rx.is_none()
 }
 
-async fn fetch_workspace_roots(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<String> {
-    let gcx_locked = gcx.read().await;
-    let folders = gcx_locked.documents_state.workspace_folders.lock().unwrap();
+async fn fetch_workspace_roots(gcx: Arc<GlobalContext>) -> Vec<String> {
+    let folders = gcx.documents_state.workspace_folders.lock().unwrap();
     folders
         .iter()
         .map(|path| path.to_string_lossy().to_string())
         .collect()
 }
 
-async fn fetch_buddy_snapshot(gcx: Arc<ARwLock<GlobalContext>>) -> serde_json::Value {
-    let buddy_arc = gcx.read().await.buddy.clone();
+async fn fetch_buddy_snapshot(gcx: Arc<GlobalContext>) -> serde_json::Value {
+    let buddy_arc = gcx.buddy.clone();
     let locked = buddy_arc.lock().await;
     match locked.as_ref() {
         Some(svc) => serde_json::to_value(&svc.snapshot()).unwrap_or(serde_json::Value::Null),
@@ -289,7 +288,7 @@ impl InitialSidebarPart {
     }
 }
 
-async fn load_workspace_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart {
+async fn load_workspace_part(gcx: Arc<GlobalContext>) -> InitialSidebarPart {
     match timeout(SIDEBAR_BOOTSTRAP_TIMEOUT, fetch_workspace_roots(gcx)).await {
         Ok(workspace_roots) => InitialSidebarPart::Workspace {
             workspace_roots,
@@ -304,7 +303,7 @@ async fn load_workspace_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebar
     }
 }
 
-async fn load_chats_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart {
+async fn load_chats_part(gcx: Arc<GlobalContext>) -> InitialSidebarPart {
     let app = crate::app_state::AppState::from_gcx(gcx).await;
     match timeout(SIDEBAR_BOOTSTRAP_TIMEOUT, list_all_trajectories_meta(app)).await {
         Ok(Ok(trajectories)) => InitialSidebarPart::Chats {
@@ -325,7 +324,7 @@ async fn load_chats_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart
     }
 }
 
-async fn load_tasks_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart {
+async fn load_tasks_part(gcx: Arc<GlobalContext>) -> InitialSidebarPart {
     match timeout(
         SIDEBAR_BOOTSTRAP_TIMEOUT,
         list_tasks_with_session_state(gcx),
@@ -350,7 +349,7 @@ async fn load_tasks_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart
     }
 }
 
-async fn load_buddy_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart {
+async fn load_buddy_part(gcx: Arc<GlobalContext>) -> InitialSidebarPart {
     match timeout(SIDEBAR_BOOTSTRAP_TIMEOUT, fetch_buddy_snapshot(gcx)).await {
         Ok(buddy) => InitialSidebarPart::Buddy {
             buddy,
@@ -366,7 +365,7 @@ async fn load_buddy_part(gcx: Arc<ARwLock<GlobalContext>>) -> InitialSidebarPart
 }
 
 fn load_section_part(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     section: SidebarSection,
 ) -> impl std::future::Future<Output = InitialSidebarPart> {
     async move {
@@ -380,7 +379,7 @@ fn load_section_part(
 }
 
 fn spawn_sidebar_section_retry(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     section: SidebarSection,
     generation: u64,
     tx: mpsc::UnboundedSender<InitialSidebarPartMessage>,
@@ -393,7 +392,7 @@ fn spawn_sidebar_section_retry(
 }
 
 fn spawn_initial_sidebar_loads(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     generation: u64,
 ) -> mpsc::UnboundedReceiver<InitialSidebarPartMessage> {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -440,15 +439,15 @@ fn spawn_initial_sidebar_loads(
     rx
 }
 
-async fn chats_snapshot_event(gcx: Arc<ARwLock<GlobalContext>>) -> SidebarEvent {
+async fn chats_snapshot_event(gcx: Arc<GlobalContext>) -> SidebarEvent {
     load_chats_part(gcx).await.into_event(0)
 }
 
-async fn tasks_snapshot_event(gcx: Arc<ARwLock<GlobalContext>>) -> SidebarEvent {
+async fn tasks_snapshot_event(gcx: Arc<GlobalContext>) -> SidebarEvent {
     load_tasks_part(gcx).await.into_event(0)
 }
 
-async fn buddy_snapshot_event(gcx: Arc<ARwLock<GlobalContext>>) -> SidebarEvent {
+async fn buddy_snapshot_event(gcx: Arc<GlobalContext>) -> SidebarEvent {
     load_buddy_part(gcx).await.into_event(0)
 }
 
@@ -514,26 +513,25 @@ pub async fn handle_sidebar_subscribe(
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     let (trajectory_rx, workspace_changed_rx, task_rx, notification_rx, buddy_rx, seq_counter) = {
-        let gcx_locked = gcx.read().await;
 
-        let trajectory_rx = gcx_locked
+        let trajectory_rx = gcx
             .trajectory_events_tx
             .as_ref()
             .map(|tx| tx.subscribe());
 
-        let workspace_changed_rx = gcx_locked
+        let workspace_changed_rx = gcx
             .workspace_changed_tx
             .as_ref()
             .map(|tx| tx.subscribe());
 
-        let task_rx = gcx_locked.task_events_tx.as_ref().map(|tx| tx.subscribe());
+        let task_rx = gcx.task_events_tx.as_ref().map(|tx| tx.subscribe());
 
-        let notification_rx = gcx_locked
+        let notification_rx = gcx
             .notification_events_tx
             .as_ref()
             .map(|tx| tx.subscribe());
 
-        let buddy_rx = gcx_locked.buddy_events_tx.as_ref().map(|tx| tx.subscribe());
+        let buddy_rx = gcx.buddy_events_tx.as_ref().map(|tx| tx.subscribe());
 
         if trajectory_rx.is_none()
             && workspace_changed_rx.is_none()
@@ -579,7 +577,7 @@ pub async fn handle_sidebar_subscribe(
         let mut bootstrap_complete = false;
         let mut buffered_live_events = VecDeque::new();
         let mut initial_started_at = Instant::now();
-        let shutdown_flag = gcx_for_stream.read().await.shutdown_flag.clone();
+        let shutdown_flag = gcx_for_stream.shutdown_flag.clone();
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

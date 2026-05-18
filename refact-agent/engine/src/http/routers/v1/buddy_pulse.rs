@@ -9,7 +9,7 @@ pub async fn handle_v1_buddy_pulse(
     State(app): State<AppState>,
 ) -> Result<axum::Json<BuddyPulse>, ScratchError> {
     let gcx = app.gcx.clone();
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let pulse = lock
         .as_ref()

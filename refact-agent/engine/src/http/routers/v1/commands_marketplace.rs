@@ -78,7 +78,7 @@ mod tests {
     async fn test_install_command_conflict_maps_to_conflict_status() {
         let gcx = make_test_gcx().await;
         {
-            let config_dir = gcx.read().await.config_dir.clone();
+            let config_dir = gcx.config_dir.clone();
             configure_source(&config_dir, "refact-starter-commands", Some(true))
                 .await
                 .unwrap();

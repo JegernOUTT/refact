@@ -46,7 +46,7 @@ pub fn default_headers() -> HashMap<String, String> {
 
 #[derive(Default, Clone)]
 pub struct IntegrationMCPSse {
-    pub gcx_option: Option<Weak<ARwLock<GlobalContext>>>,
+    pub gcx_option: Option<Weak<GlobalContext>>,
     pub cfg: SettingsMCPSse,
     pub common: IntegrationCommon,
     pub config_path: String,

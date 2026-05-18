@@ -13,7 +13,7 @@ pub use refact_core::model_caps::{
 };
 
 pub async fn get_model_caps(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     force_refresh: bool,
 ) -> Result<HashMap<String, ModelCapabilities>, String> {
     let catalog = load_models_dev_catalog(gcx, force_refresh)

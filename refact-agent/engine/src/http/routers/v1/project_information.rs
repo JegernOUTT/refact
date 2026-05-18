@@ -20,7 +20,7 @@ pub use crate::yaml_configs::project_information::{
     to_relative_path, sanitize_overrides,
 };
 
-async fn get_project_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+async fn get_project_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     crate::files_correction::get_project_dirs(gcx).await
 }
 

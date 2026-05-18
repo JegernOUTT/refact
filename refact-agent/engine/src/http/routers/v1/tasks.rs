@@ -83,7 +83,7 @@ pub enum BoardPatch {
     },
 }
 
-async fn enrich_task_with_session_state(gcx: Arc<ARwLock<GlobalContext>>, task: &mut TaskMeta) {
+async fn enrich_task_with_session_state(gcx: Arc<GlobalContext>, task: &mut TaskMeta) {
     let planner_chat_ids = storage::list_task_trajectories(gcx.clone(), &task.id, "planner", None)
         .await
         .map(|trajectories| {
@@ -100,8 +100,7 @@ async fn enrich_task_with_session_state(gcx: Arc<ARwLock<GlobalContext>>, task: 
     }
 
     let session_arcs = {
-        let gcx_locked = gcx.read().await;
-        let sessions = gcx_locked.chat_sessions.read().await;
+        let sessions = gcx.chat_sessions.read().await;
         planner_chat_ids
             .iter()
             .filter_map(|planner_chat_id| sessions.get(planner_chat_id).cloned())
@@ -145,7 +144,7 @@ async fn enrich_task_with_session_state(gcx: Arc<ARwLock<GlobalContext>>, task: 
 }
 
 pub async fn list_tasks_with_session_state(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Result<Vec<TaskMeta>, String> {
     let mut tasks = storage::list_tasks(gcx.clone()).await?;
     for task in &mut tasks {
@@ -616,7 +615,7 @@ pub async fn handle_create_planner_chat(
 }
 
 async fn planner_agent_refs(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     planner_chat_id: &str,
 ) -> Result<Vec<String>, (StatusCode, String)> {
@@ -624,8 +623,7 @@ async fn planner_agent_refs(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let sessions = {
-        let gcx_locked = gcx.read().await;
-        gcx_locked.chat_sessions.clone()
+        gcx.chat_sessions.clone()
     };
     let mut refs = Vec::new();
     for agent_chat_id in board
@@ -690,9 +688,7 @@ pub async fn handle_delete_planner_chat(
     }
 
     let removed_session = {
-        let gcx_locked = gcx.read().await;
-        let sessions = gcx_locked.chat_sessions.clone();
-        drop(gcx_locked);
+        let sessions = gcx.chat_sessions.clone();
         let mut sessions_guard = sessions.write().await;
         sessions_guard.remove(&chat_id)
     };
@@ -710,7 +706,7 @@ pub async fn handle_delete_planner_chat(
         }
     }
 
-    if let Some(tx) = &gcx.read().await.trajectory_events_tx {
+    if let Some(tx) = &gcx.trajectory_events_tx {
         let _ = tx.send(TrajectoryEvent {
             event_type: "deleted".to_string(),
             id: chat_id,
@@ -748,8 +744,7 @@ pub async fn handle_tasks_subscribe(
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     let (rx, seq_counter, tasks) = {
-        let gcx_locked = gcx.read().await;
-        let rx = match &gcx_locked.task_events_tx {
+        let rx = match &gcx.task_events_tx {
             Some(tx) => tx.subscribe(),
             None => {
                 return Err(ScratchError::new(
@@ -758,13 +753,12 @@ pub async fn handle_tasks_subscribe(
                 ))
             }
         };
-        let seq_counter = gcx_locked.task_events_seq.clone().ok_or_else(|| {
+        let seq_counter = gcx.task_events_seq.clone().ok_or_else(|| {
             ScratchError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Task events seq not available".to_string(),
             )
         })?;
-        drop(gcx_locked);
         let tasks = list_tasks_with_session_state(gcx.clone())
             .await
             .unwrap_or_default();
@@ -808,7 +802,7 @@ pub async fn handle_tasks_subscribe(
                 }
 
                 _ = async {
-                    let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+                    let shutdown_flag = gcx.shutdown_flag.clone();
                     while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }

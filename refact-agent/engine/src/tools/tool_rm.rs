@@ -141,11 +141,11 @@ impl Tool for ToolRm {
 
         let (recursive, _max_depth, dry_run) = Self::parse_recursive(args)?;
         let (gcx, execution_scope, top_n) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
-                ccx_locked.top_n,
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                cgcx.top_n,
             )
         };
 
@@ -211,7 +211,7 @@ impl Tool for ToolRm {
                 }
 
                 let is_within_project = project_dirs.iter().any(|p| true_path.starts_with(p));
-                if !is_within_project && !gcx.read().await.cmdline.inside_container {
+                if !is_within_project && !gcx.cmdline.inside_container {
                     return Err(format!(
                     "⚠️ '{}' is outside project directories. 💡 rm() only works within workspace",
                     path_str
@@ -290,7 +290,7 @@ impl Tool for ToolRm {
                 .map_err(|e| format!("Failed to remove directory '{}': {}", corrected_path, e))?;
             // Invalidate cache entries for all files under the deleted directory
             {
-                let mut gcx_write = gcx.write().await;
+                let gcx_write = gcx.clone();
                 let paths_to_remove: Vec<_> = gcx_write
                     .documents_state
                     .memory_document_map.lock().await
@@ -327,9 +327,7 @@ impl Tool for ToolRm {
                 .await
                 .map_err(|e| format!("Failed to remove file '{}': {}", corrected_path, e))?;
             // Invalidate cache entry for the deleted file
-            gcx.write()
-                .await
-                .documents_state
+            gcx.documents_state
                 .memory_document_map.lock().await
                 .remove(&true_path);
             if !file_content.is_empty() {

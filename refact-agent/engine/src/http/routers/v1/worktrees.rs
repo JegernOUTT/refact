@@ -81,7 +81,7 @@ fn map_service_error(error: String) -> (StatusCode, Json<Value>) {
 }
 
 async fn resolve_source_root(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     requested: Option<String>,
 ) -> Result<PathBuf, (StatusCode, Json<Value>)> {
     let project_dirs = get_project_dirs(gcx).await;
@@ -133,10 +133,10 @@ async fn resolve_source_root(
 }
 
 async fn service_for_request(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     requested: Option<String>,
 ) -> Result<WorktreeService, (StatusCode, Json<Value>)> {
-    let cache_dir = gcx.read().await.cache_dir.clone();
+    let cache_dir = gcx.cache_dir.clone();
     let source_root = resolve_source_root(gcx, requested).await?;
     WorktreeService::new(cache_dir, source_root).map_err(map_service_error)
 }

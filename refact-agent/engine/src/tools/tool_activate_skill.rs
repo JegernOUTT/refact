@@ -105,17 +105,16 @@ impl Tool for ToolActivateSkill {
         }
 
         let (gcx, chat_id) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.chat_id.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.chat_id.clone(),
             )
         };
 
         {
             let session_arc_opt = {
-                let gcx_locked = gcx.read().await;
-                let sessions = gcx_locked.chat_sessions.read().await;
+                let sessions = gcx.chat_sessions.read().await;
                 sessions.get(&chat_id).cloned()
             };
             if let Some(session_arc) = session_arc_opt {
@@ -149,8 +148,7 @@ impl Tool for ToolActivateSkill {
 
         {
             let session_arc_opt = {
-                let gcx_locked = gcx.read().await;
-                let sessions = gcx_locked.chat_sessions.read().await;
+                let sessions = gcx.chat_sessions.read().await;
                 sessions.get(&chat_id).cloned()
             };
             if let Some(session_arc) = session_arc_opt {
@@ -228,17 +226,16 @@ impl Tool for ToolDeactivateSkill {
             };
 
         let (gcx, chat_id) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.chat_id.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.chat_id.clone(),
             )
         };
 
         {
             let session_arc_opt = {
-                let gcx_locked = gcx.read().await;
-                let sessions = gcx_locked.chat_sessions.read().await;
+                let sessions = gcx.chat_sessions.read().await;
                 sessions.get(&chat_id).cloned()
             };
             if let Some(session_arc) = session_arc_opt {

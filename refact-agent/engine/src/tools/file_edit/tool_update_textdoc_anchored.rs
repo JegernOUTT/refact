@@ -37,7 +37,7 @@ struct Args {
 }
 
 async fn parse_args(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     execution_scope: Option<&ExecutionScope>,
 ) -> Result<Args, String> {
@@ -98,7 +98,7 @@ async fn parse_args(
 }
 
 pub async fn tool_update_text_doc_anchored_exec(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     dry: bool,
     execution_scope: Option<&ExecutionScope>,
@@ -134,10 +134,10 @@ impl Tool for ToolUpdateTextDocAnchored {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
         let (_, _, chunks, summary) =
@@ -145,7 +145,7 @@ impl Tool for ToolUpdateTextDocAnchored {
                 .await?;
 
         let related_section = {
-            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;
             let mut paths: Vec<String> = Vec::new();
             for c in chunks.iter() {
@@ -198,11 +198,11 @@ impl Tool for ToolUpdateTextDocAnchored {
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
         let (gcx, execution_scope, msgs_len) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
-                ccx_locked.messages.len(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                cgcx.messages.len(),
             )
         };
         let can_exec = parse_args(gcx.clone(), args, execution_scope.as_ref())

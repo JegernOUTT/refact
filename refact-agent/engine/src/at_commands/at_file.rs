@@ -18,7 +18,7 @@ use crate::tools::scope_utils::{format_scope_notices, resolve_existing_path_with
 use crate::worktrees::scope::ExecutionScope;
 
 pub async fn resolve_file_path_directly(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path_with_colon: &str,
 ) -> Option<String> {
     let mut path_str = path_with_colon.to_string();
@@ -55,7 +55,7 @@ pub async fn resolve_file_path_directly(
 }
 
 pub async fn resolve_file_path_directly_with_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
     path_with_colon: &str,
 ) -> Result<Option<(String, Vec<String>)>, String> {
@@ -181,7 +181,7 @@ fn put_colon_back_to_arg(value: &mut String, colon: &Option<ColonLinesRange>) {
 }
 
 pub async fn file_repair_candidates(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     value: &String,
     top_n: usize,
     fuzzy: bool,
@@ -203,7 +203,7 @@ pub async fn file_repair_candidates(
 }
 
 pub async fn return_one_candidate_or_a_good_error(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     file_path: &String,
     candidates: &Vec<String>,
     project_paths: &Vec<PathBuf>,
@@ -362,7 +362,7 @@ impl AtParam for AtParamFilePath {
 }
 
 pub async fn context_file_from_file_path(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     file_path_hopefully_corrected: String,
 ) -> Result<ContextFile, String> {
     let mut line1 = 0;

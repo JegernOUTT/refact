@@ -77,12 +77,12 @@ fn draft_validation_error(err: DraftValidationError) -> ScratchError {
 }
 
 async fn validate_existing_draft(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     draft_id: &str,
     expected_kind: DraftKind,
     target: DraftTarget<'_>,
 ) -> Result<(), ScratchError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let svc = lock.as_ref().ok_or_else(|| {
         ScratchError::new(
@@ -101,7 +101,7 @@ pub async fn handle_v1_buddy_opportunities_list(
     Query(query): Query<OpportunitiesQuery>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
     let gcx = app.gcx.clone();
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let mut opps = match lock.as_ref() {
         Some(svc) => svc.opportunity_queue.snapshot(),
@@ -128,7 +128,7 @@ pub async fn handle_v1_buddy_opportunity_accept(
     let gcx = app.gcx.clone();
     let req = body.map(|b| b.0).unwrap_or_default();
 
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let action = {
         let mut lock = buddy_arc.lock().await;
         let svc = lock.as_mut().ok_or_else(|| {
@@ -182,7 +182,7 @@ pub async fn handle_v1_buddy_opportunity_accept(
         }
     };
 
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
         ScratchError::new(
@@ -206,8 +206,8 @@ pub async fn handle_v1_buddy_opportunity_accept(
     })))
 }
 
-async fn clear_accept_claim(gcx: Arc<ARwLock<GlobalContext>>, id: &str) {
-    let buddy_arc = gcx.read().await.buddy.clone();
+async fn clear_accept_claim(gcx: Arc<GlobalContext>, id: &str) {
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     if let Some(svc) = lock.as_mut() {
         svc.clear_opportunity_accept_claim(id);
@@ -460,7 +460,7 @@ fn customization_url_kind(kind: CustomizationKind) -> &'static str {
 }
 
 async fn read_effective_ext_file<F>(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     relative_path: F,
 ) -> Option<String>
 where
@@ -478,11 +478,11 @@ where
 }
 
 async fn read_effective_config_file(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     dir_name: &str,
     file_name: &str,
 ) -> Option<String> {
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let mut found = tokio::fs::read_to_string(config_dir.join(dir_name).join(file_name))
         .await
         .ok();
@@ -498,7 +498,7 @@ async fn read_effective_config_file(
 }
 
 async fn read_existing_customization(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     kind: CustomizationKind,
     id: &str,
 ) -> Option<String> {
@@ -752,12 +752,12 @@ async fn install_marketplace_action(
 }
 
 async fn synthesize_draft(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     kind: DraftKind,
     title: String,
     content: String,
 ) -> Result<BuddyDraft, ScratchError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
         ScratchError::new(
@@ -985,7 +985,7 @@ pub(crate) fn build_investigation_data_envelope(ctx: &InvestigationContext) -> S
 }
 
 async fn create_investigation_chat(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     ctx: &InvestigationContext,
 ) -> Result<String, ScratchError> {
     let chat_id = Uuid::new_v4().to_string();
@@ -1063,7 +1063,7 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
     Path(id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
     let gcx = app.gcx.clone();
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
         ScratchError::new(

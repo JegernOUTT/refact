@@ -181,7 +181,7 @@ impl Tool for ToolChrome {
         };
 
         let command_session = {
-            let integration_sessions = gcx.read().await.integration_sessions.clone();
+            let integration_sessions = gcx.integration_sessions.clone();
             let integration_sessions = integration_sessions.lock().await;
             integration_sessions
                 .get(&session_hashmap_key)
@@ -217,7 +217,7 @@ impl Tool for ToolChrome {
                 cs.runtime_id.clone()
             };
             let runtime_arc = {
-                let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+                let browser_runtimes = gcx.browser_runtimes.clone();
                 let browser_runtimes = browser_runtimes.lock().await;
                 browser_runtimes
                     .get(&runtime_id)
@@ -478,7 +478,7 @@ impl Tool for ToolChrome {
 }
 
 async fn setup_chrome_session(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &SettingsChrome,
     session_hashmap_key: &String,
     chat_id: &str,
@@ -486,7 +486,7 @@ async fn setup_chrome_session(
     let mut setup_log = vec![];
 
     let session_entry = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions
             .get(session_hashmap_key)
@@ -505,7 +505,7 @@ async fn setup_chrome_session(
 
         let runtime_healthy = {
             let runtime_arc = {
-                let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+                let browser_runtimes = gcx.browser_runtimes.clone();
                 let browser_runtimes = browser_runtimes.lock().await;
                 browser_runtimes.get(&runtime_id).cloned()
             };
@@ -521,7 +521,7 @@ async fn setup_chrome_session(
             return Ok(setup_log);
         } else {
             setup_log.push("Browser session is disconnected. Trying to reconnect.".to_string());
-            let integration_sessions = gcx.read().await.integration_sessions.clone();
+            let integration_sessions = gcx.integration_sessions.clone();
             let mut integration_sessions = integration_sessions.lock().await;
             let should_remove = integration_sessions
                 .get(session_hashmap_key)
@@ -546,7 +546,7 @@ async fn setup_chrome_session(
             idle_timeout: idle_browser_timeout,
             last_activity: Instant::now(),
         });
-        gcx.read().await.integration_sessions.lock().await.insert(
+        gcx.integration_sessions.lock().await.insert(
             session_hashmap_key.clone(),
             Arc::new(AMutex::new(command_session)),
         );
@@ -592,7 +592,7 @@ async fn setup_chrome_session(
         } else {
             Some(PathBuf::from(args.chrome_path.clone()))
         };
-        let cache_dir = gcx.read().await.cache_dir.clone();
+        let cache_dir = gcx.cache_dir.clone();
         let profile_dir = get_browser_profile_dir(&cache_dir, chat_id);
         let headless = args.headless.parse::<bool>().unwrap_or(false);
 
@@ -625,7 +625,7 @@ async fn setup_chrome_session(
         idle_timeout: idle_browser_timeout,
         last_activity: Instant::now(),
     });
-    gcx.read().await.integration_sessions.lock().await.insert(
+    gcx.integration_sessions.lock().await.insert(
         session_hashmap_key.clone(),
         Arc::new(AMutex::new(command_session)),
     );
@@ -658,7 +658,7 @@ fn set_device_metrics_method(
 
 async fn session_open_tab(
     chrome_session: &mut ChromeSession,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tab_id: &String,
     device: &DeviceType,
     settings_chrome: &SettingsChrome,
@@ -674,7 +674,7 @@ async fn session_open_tab(
         None => {
             let headless_tab = {
                 let runtime_arc = {
-                    let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+                    let browser_runtimes = gcx.browser_runtimes.clone();
                     let browser_runtimes = browser_runtimes.lock().await;
                     browser_runtimes
                         .get(&chrome_session.runtime_id)
@@ -771,7 +771,7 @@ async fn session_open_tab(
             let runtime_tab = tab_lock.headless_tab.clone();
             drop(tab_lock);
             {
-                let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+                let browser_runtimes = gcx.browser_runtimes.clone();
                 let browser_runtimes = browser_runtimes.lock().await;
                 if let Some(rt_arc) = browser_runtimes
                     .get(&chrome_session.runtime_id)
@@ -814,7 +814,7 @@ async fn session_get_tab_arc(
 async fn execute_via_controller(
     action: &BrowserAction,
     chrome_session: Arc<AMutex<Box<dyn IntegrationSession>>>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Result<(Vec<String>, Vec<MultimodalElement>), String> {
     let tab_id = browser_actions::get_tab_id(action)
         .ok_or("Action has no tab_id for controller execution")?;
@@ -865,7 +865,7 @@ async fn execute_via_controller(
             cs.runtime_id.clone()
         };
         let runtime_arc = {
-            let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+            let browser_runtimes = gcx.browser_runtimes.clone();
             let browser_runtimes = browser_runtimes.lock().await;
             browser_runtimes.get(&runtime_id).cloned()
         };
@@ -888,7 +888,7 @@ async fn execute_via_controller(
             cs.runtime_id.clone()
         };
         let runtime_arc = {
-            let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+            let browser_runtimes = gcx.browser_runtimes.clone();
             let browser_runtimes = browser_runtimes.lock().await;
             browser_runtimes.get(&runtime_id).cloned()
         };
@@ -1136,7 +1136,7 @@ fn format_step_data(data: &serde_json::Value, log: &mut Vec<String>) {
 async fn chrome_command_exec(
     action: &BrowserAction,
     chrome_session: Arc<AMutex<Box<dyn IntegrationSession>>>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     settings_chrome: &SettingsChrome,
 ) -> Result<(Vec<String>, Vec<MultimodalElement>), String> {
     if browser_actions::to_browser_steps(action).is_some() {
@@ -1234,7 +1234,7 @@ async fn chrome_command_exec(
                 (tabs, cs.runtime_id.clone())
             };
             let runtime_tabs = {
-                let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+                let browser_runtimes = gcx.browser_runtimes.clone();
                 let browser_runtimes = browser_runtimes.lock().await;
                 if let Some(rt_arc) = browser_runtimes.get(&runtime_id).cloned() {
                     let rt = rt_arc.lock().await;
@@ -1324,7 +1324,7 @@ async fn chrome_command_exec(
                                 }
                             }
                             let runtime_arc = {
-                                let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+                                let browser_runtimes = gcx.browser_runtimes.clone();
                                 let browser_runtimes = browser_runtimes.lock().await;
                                 browser_runtimes.get(&runtime_id).cloned()
                             };

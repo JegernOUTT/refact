@@ -280,7 +280,7 @@ fn parse_output_params(args: &HashMap<String, Value>) -> OutputFilter {
 }
 
 async fn resolve_workdir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     workdir_str: Option<String>,
 ) -> Result<String, String> {
     if let Some(wd) = workdir_str {
@@ -315,7 +315,7 @@ async fn resolve_workdir(
 }
 
 async fn execute_start_action(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     service_name: &str,
     command: &str,
     workdir: &str,
@@ -327,7 +327,7 @@ async fn execute_start_action(
 ) -> Result<String, String> {
     let session_key = format!("builtin_shell_service_{}", service_name);
 
-    let integration_sessions = gcx.read().await.integration_sessions.clone();
+    let integration_sessions = gcx.integration_sessions.clone();
     let session_exists = integration_sessions.lock().await.contains_key(&session_key);
     if session_exists {
         return Err(format!(
@@ -453,12 +453,12 @@ async fn execute_start_action(
 }
 
 async fn execute_stop_action(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     service_name: &str,
 ) -> Result<String, String> {
     let session_key = format!("builtin_shell_service_{}", service_name);
 
-    let integration_sessions = gcx.read().await.integration_sessions.clone();
+    let integration_sessions = gcx.integration_sessions.clone();
     let session_arc = {
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions.get(&session_key).cloned()
@@ -482,13 +482,13 @@ async fn execute_stop_action(
 }
 
 async fn execute_status_action(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     service_name: &str,
     output_filter: &OutputFilter,
 ) -> Result<String, String> {
     let session_key = format!("builtin_shell_service_{}", service_name);
 
-    let integration_sessions = gcx.read().await.integration_sessions.clone();
+    let integration_sessions = gcx.integration_sessions.clone();
     let session_arc = {
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions.get(&session_key).cloned()
@@ -541,7 +541,7 @@ async fn execute_status_action(
 }
 
 async fn execute_logs_action(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     service_name: &str,
     output_filter: &OutputFilter,
 ) -> Result<String, String> {
@@ -549,7 +549,7 @@ async fn execute_logs_action(
 }
 
 async fn execute_restart_action(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     service_name: &str,
     command: &str,
     workdir: &str,
@@ -562,7 +562,7 @@ async fn execute_restart_action(
     let mut result = String::new();
 
     let session_key = format!("builtin_shell_service_{}", service_name);
-    let integration_sessions = gcx.read().await.integration_sessions.clone();
+    let integration_sessions = gcx.integration_sessions.clone();
     let session_exists = integration_sessions.lock().await.contains_key(&session_key);
 
     if session_exists {

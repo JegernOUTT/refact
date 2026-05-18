@@ -2134,9 +2134,8 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cache_dir = cache.clone();
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            gcx.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source.clone()).unwrap();
@@ -2183,9 +2182,8 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cache_dir = cache.clone();
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            gcx.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source.clone()).unwrap();
@@ -2223,9 +2221,8 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cache_dir = cache.clone();
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            gcx.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source).unwrap();

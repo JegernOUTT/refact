@@ -11,7 +11,7 @@ use crate::integrations::integr_abstract::IntegrationTrait;
 /// If `include_paths_matching` is `None`, all integrations are loaded,
 /// otherwise only those matching `include_paths_matching` glob patterns.
 pub async fn load_integrations(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     include_paths_matching: &[String],
 ) -> (
     IndexMap<String, Box<dyn IntegrationTrait + Send + Sync>>,
@@ -25,11 +25,10 @@ pub async fn load_integrations(
         )
         .await;
     let (integrations_yaml_path, is_inside_container, allow_experimental) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.cmdline.integrations_yaml.clone(),
-            gcx_locked.cmdline.inside_container,
-            gcx_locked.cmdline.experimental,
+            gcx.cmdline.integrations_yaml.clone(),
+            gcx.cmdline.inside_container,
+            gcx.cmdline.experimental,
         )
     };
 

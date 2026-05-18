@@ -33,10 +33,9 @@ pub async fn scratchpad_interaction_not_stream_json(
     let t2 = std::time::SystemTime::now();
     let gcx = ccx.lock().await.global_context.clone();
     let (client, slowdown_arc) = {
-        let gcx_locked = gcx.write().await;
         (
-            gcx_locked.http_client.clone(),
-            gcx_locked.http_client_slowdown.clone(),
+            gcx.http_client.clone(),
+            gcx.http_client_slowdown.clone(),
         )
     };
 
@@ -200,10 +199,10 @@ pub async fn scratchpad_interaction_not_stream(
 ) -> Result<Response<Body>, ScratchError> {
     let t1 = std::time::Instant::now();
     let prompt_input = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         ScratchpadPromptInput {
-            n_ctx: ccx_locked.n_ctx,
-            postprocess_parameters: ccx_locked.postprocess_parameters.clone(),
+            n_ctx: cgcx.n_ctx,
+            postprocess_parameters: cgcx.postprocess_parameters.clone(),
         }
     };
     let prompt = scratchpad
@@ -261,10 +260,9 @@ pub async fn scratchpad_interaction_stream(
 
         let gcx = ccx.lock().await.global_context.clone();
         let (client, slowdown_arc) = {
-            let gcx_locked = gcx.write().await;
             (
-                gcx_locked.http_client.clone(),
-                gcx_locked.http_client_slowdown.clone()
+                gcx.http_client.clone(),
+                gcx.http_client_slowdown.clone()
             )
         };
 
@@ -274,10 +272,10 @@ pub async fn scratchpad_interaction_stream(
             let subchat_tx: Arc<AMutex<mpsc::UnboundedSender<serde_json::Value>>> = my_ccx.lock().await.subchat_tx.clone();
             let subchat_rx: Arc<AMutex<mpsc::UnboundedReceiver<serde_json::Value>>> = my_ccx.lock().await.subchat_rx.clone();
             let prompt_input = {
-                let ccx_locked = my_ccx.lock().await;
+                let cgcx = my_ccx.lock().await;
                 ScratchpadPromptInput {
-                    n_ctx: ccx_locked.n_ctx,
-                    postprocess_parameters: ccx_locked.postprocess_parameters.clone(),
+                    n_ctx: cgcx.n_ctx,
+                    postprocess_parameters: cgcx.postprocess_parameters.clone(),
                 }
             };
             let mut prompt_future = Some(Box::pin(my_scratchpad.prompt(

@@ -51,10 +51,10 @@ async fn execute_att_search(
     scope: &String,
 ) -> Result<(Vec<ContextFile>, Vec<String>), String> {
     let (gcx, execution_scope) = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         (
-            ccx_locked.app.gcx.clone(),
-            ccx_locked.execution_scope.clone(),
+            cgcx.app.gcx.clone(),
+            cgcx.execution_scope.clone(),
         )
     };
 
@@ -259,7 +259,7 @@ impl Tool for ToolSearch {
         // This does not require VecDB and is <50ms (in-memory index).
         let related_section = {
             let gcx = ccx.lock().await.app.gcx.clone();
-            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;
             let mut files: Vec<String> = all_context_files
                 .iter()

@@ -42,7 +42,7 @@ fn get_gather_files_params(config: &CodeSubagentConfig) -> GatherFilesParams<'_>
 }
 
 async fn make_review_prompt(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     subchat_params: &SubchatParameters,
     important_paths: &[PathBuf],
     previous_messages: &[ChatMessage],
@@ -166,7 +166,7 @@ async fn make_review_prompt(
 }
 
 async fn execute_code_review(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     important_paths: Vec<PathBuf>,
     external_messages: Vec<ChatMessage>,

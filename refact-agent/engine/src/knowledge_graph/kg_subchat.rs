@@ -47,7 +47,7 @@ pub struct DeprecationResult {
 }
 
 pub async fn enrich_knowledge_metadata(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     content: &str,
     entities: &[String],
     candidate_files: &[String],
@@ -123,7 +123,7 @@ pub async fn enrich_knowledge_metadata(
 }
 
 pub async fn check_deprecation(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     new_doc_title: &str,
     new_doc_tags: &[String],
     new_doc_files: &[String],

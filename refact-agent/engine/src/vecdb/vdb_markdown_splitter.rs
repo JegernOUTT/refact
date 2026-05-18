@@ -34,7 +34,7 @@ impl MarkdownFileSplitter {
     pub async fn split(
         &self,
         doc: &Document,
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
     ) -> Result<Vec<SplitResult>, String> {
         let text = crate::files_in_workspace::get_document_text_or_read_from_disk(&mut doc.clone(), gcx)
             .await

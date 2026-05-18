@@ -61,7 +61,7 @@ fn format_preview(
 }
 
 async fn search_single_file(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     file_path: String,
     regex: &Regex,
     context_lines: usize,
@@ -98,7 +98,7 @@ async fn search_single_file(
 const MAX_CONCURRENT_FILE_READS: usize = 32;
 
 async fn search_files_with_regex(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     pattern: &str,
     files_to_search: &[String],
     context_lines: usize,
@@ -137,7 +137,7 @@ fn path_depth(path: &str) -> usize {
 async fn smart_compress_results(
     search_results: &[RegexMatch],
     file_results: &HashMap<String, Vec<&RegexMatch>>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     pattern: &str,
     max_matches_per_file: usize,
     max_output_bytes: usize,
@@ -294,10 +294,10 @@ impl Tool for ToolRegexSearch {
             parse_usize_arg(args, "max_total_matches")?.unwrap_or(DEFAULT_MAX_TOTAL_MATCHES);
 
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
 
@@ -428,7 +428,7 @@ impl Tool for ToolRegexSearch {
 
         // Append related memories (short form) based on the matched file paths.
         let related_section = {
-            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;
             let matched_files: Vec<String> = all_search_results
                 .iter()

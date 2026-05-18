@@ -23,7 +23,7 @@ pub struct AstIndexService {
 }
 
 async fn ast_indexer_thread(
-    gcx_weak: Weak<ARwLock<GlobalContext>>,
+    gcx_weak: Weak<GlobalContext>,
     ast_service: Arc<AMutex<AstIndexService>>,
 ) {
     let t0 = tokio::time::Instant::now();
@@ -48,7 +48,7 @@ async fn ast_indexer_thread(
     };
     let ast_max_files = ast_index.ast_max_files; // cannot change
     let shutdown_flag = match gcx_weak.upgrade() {
-        Some(gcx) => gcx.read().await.shutdown_flag.clone(),
+        Some(gcx) => gcx.shutdown_flag.clone(),
         None => return,
     };
 
@@ -423,7 +423,7 @@ pub async fn ast_service_init(
 
 pub async fn ast_indexer_start(
     ast_service: Arc<AMutex<AstIndexService>>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Vec<JoinHandle<()>> {
     let indexer_handle = tokio::spawn(ast_indexer_thread(
         Arc::downgrade(&gcx),

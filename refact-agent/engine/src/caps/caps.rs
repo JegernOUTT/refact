@@ -359,16 +359,15 @@ fn build_chat_model_record(
 
 pub async fn populate_chat_models_from_providers(
     caps: &mut CodeAssistantCaps,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) {
     let model_caps = &*caps.model_caps;
 
     let (http_client, providers_snapshot) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         let snapshot: Vec<Box<dyn crate::providers::traits::ProviderTrait>> =
             registry.iter().map(|(_, p)| p.clone_box()).collect();
-        (gcx_locked.http_client.clone(), snapshot)
+        (gcx.http_client.clone(), snapshot)
     };
 
     let mut pricing_map = caps.metadata.pricing.as_object_mut();
@@ -607,8 +606,8 @@ fn remove_legacy_refact_models_from_caps(caps: &mut CodeAssistantCaps) {
     }
 }
 
-async fn take_models_dev_startup_refresh_flag(gcx: Arc<ARwLock<GlobalContext>>) -> bool {
-    let caps_state = gcx.read().await.caps_state.clone();
+async fn take_models_dev_startup_refresh_flag(gcx: Arc<GlobalContext>) -> bool {
+    let caps_state = gcx.caps_state.clone();
     let mut caps_state = caps_state.write().await;
     if caps_state.models_dev_startup_refresh_attempted {
         false
@@ -620,14 +619,13 @@ async fn take_models_dev_startup_refresh_flag(gcx: Arc<ARwLock<GlobalContext>>) 
 
 pub async fn load_caps(
     _cmdline: crate::global_context::CommandLine,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Result<Arc<CodeAssistantCaps>, String> {
     let (config_dir, cmdline_api_key, experimental) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.config_dir.clone(),
+            gcx.config_dir.clone(),
             String::new(),
-            gcx_locked.cmdline.experimental,
+            gcx.cmdline.experimental,
         )
     };
 
@@ -671,8 +669,7 @@ pub async fn load_caps(
     // Only chat_models are cleared; completion_models and embedding_model are preserved
     // since the new system doesn't handle those yet.
     {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         for p in &mut providers {
             if registry.get(&p.name).is_some() {
                 p.chat_models.clear();
@@ -1083,8 +1080,8 @@ mod tests {
     #[tokio::test]
     async fn test_models_dev_startup_refresh_flag_is_consumed_once() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let caps_state = gcx.read().await.caps_state.clone();
-        caps_state.write().await.models_dev_startup_refresh_attempted = false;
+        let caps_state = gcx.caps_state.clone();
+        caps_state.models_dev_startup_refresh_attempted = false;
 
         assert!(take_models_dev_startup_refresh_flag(gcx.clone()).await);
         assert!(!take_models_dev_startup_refresh_flag(gcx).await);

@@ -19,11 +19,10 @@ pub struct RagStatus {
 
 pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
     let (vec_db_module, vec_db_error, ast_module) = {
-        let gcx_locked = gcx.read().await;
         let status = (
-            gcx_locked.vec_db.clone(),
-            gcx_locked.vec_db_error.lock().unwrap().clone(),
-            gcx_locked.ast_service.lock().unwrap().clone(),
+            gcx.vec_db.clone(),
+            gcx.vec_db_error.lock().unwrap().clone(),
+            gcx.ast_service.lock().unwrap().clone(),
         );
         status
     };

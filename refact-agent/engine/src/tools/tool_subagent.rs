@@ -400,7 +400,7 @@ impl Tool for ToolSubagent {
             files.dedup();
 
             let gcx = ccx.lock().await.app.gcx.clone();
-            let gcx_read = gcx.read().await;
+            let gcx_read = gcx.clone();
             let idx_guard = gcx_read.knowledge_index.lock().await;
             let mut cards = idx_guard.related_for_files(&files, 5);
             if cards.is_empty() {

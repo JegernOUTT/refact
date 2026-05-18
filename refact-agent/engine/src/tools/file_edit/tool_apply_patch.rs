@@ -75,7 +75,7 @@ fn absolute_path_inside_workspace(path: &str, project_dirs: &[PathBuf]) -> Optio
 }
 
 async fn resolve_patch_path(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     rel_path: &str,
     must_exist: bool,
     execution_scope: Option<&ExecutionScope>,
@@ -158,7 +158,7 @@ async fn resolve_patch_path(
 
     check_if_its_inside_a_workspace_or_config(gcx.clone(), &canonical).await?;
 
-    let privacy_settings = gcx.read().await.privacy_settings.read().unwrap().clone();
+    let privacy_settings = gcx.privacy_settings.read().unwrap().clone();
     if check_file_privacy(
         privacy_settings,
         &canonical,
@@ -184,7 +184,7 @@ enum OverlayState {
 }
 
 pub async fn tool_apply_patch_exec(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     dry: bool,
     execution_scope: Option<&ExecutionScope>,
@@ -259,9 +259,7 @@ pub async fn tool_apply_patch_exec(
                     tokio::fs::remove_file(&full_path)
                         .await
                         .map_err(|e| format!("Failed to delete: {}", e))?;
-                    gcx.write()
-                        .await
-                        .documents_state
+                    gcx.documents_state
                         .memory_document_map.lock().await
                         .remove(&full_path);
                 }
@@ -343,9 +341,7 @@ pub async fn tool_apply_patch_exec(
                         tokio::fs::remove_file(&full_path)
                             .await
                             .map_err(|e| format!("Failed to remove: {}", e))?;
-                        gcx.write()
-                            .await
-                            .documents_state
+                        gcx.documents_state
                             .memory_document_map.lock().await
                             .remove(&full_path);
                         sync_documents_ast(gcx.clone(), &dest_path).await?;
@@ -415,10 +411,10 @@ impl Tool for ToolApplyPatch {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
 
@@ -426,7 +422,7 @@ impl Tool for ToolApplyPatch {
             tool_apply_patch_exec(gcx.clone(), args, false, execution_scope.as_ref()).await?;
 
         let related_section = {
-            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;
             let mut files: Vec<String> = result
                 .file_results

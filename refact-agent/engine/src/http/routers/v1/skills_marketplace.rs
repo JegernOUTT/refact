@@ -77,7 +77,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_skills_marketplace_includes_embedded_source() {
         let gcx = make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         configure_source(&config_dir, "refact-starter-skills", Some(true))
             .await
             .unwrap();

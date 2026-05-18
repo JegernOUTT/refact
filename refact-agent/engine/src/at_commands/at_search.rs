@@ -69,8 +69,8 @@ pub async fn execute_at_search(
     vecdb_scope_filter_mb: Option<String>,
 ) -> Result<Vec<ContextFile>, String> {
     let (vec_db, top_n) = {
-        let ccx_locked = ccx.lock().await;
-        (ccx_locked.app.workspace.vec_db.clone(), ccx_locked.top_n)
+        let cgcx = ccx.lock().await;
+        (cgcx.app.workspace.vec_db.clone(), cgcx.top_n)
     };
 
     let r = match *vec_db.lock().await {

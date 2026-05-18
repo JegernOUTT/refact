@@ -167,7 +167,7 @@ async fn from_splits_to_vecdb_records_applying_cache(
 async fn vectorize_thread(
     client: Arc<AMutex<reqwest::Client>>,
     vservice: Arc<AMutex<FileVectorizerService>>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) {
     let mut files_total: usize = 0;
     let mut files_unprocessed: usize;
@@ -186,7 +186,7 @@ async fn vectorize_thread(
         )
     };
 
-    let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+    let shutdown_flag = gcx.shutdown_flag.clone();
     let mut last_updated: HashMap<String, SystemTime> = HashMap::new();
     let mut reported_vecdb_started = false;
     loop {
@@ -553,7 +553,7 @@ impl FileVectorizerService {
 pub async fn vecdb_start_background_tasks(
     vecdb_client: Arc<AMutex<reqwest::Client>>,
     vservice: Arc<AMutex<FileVectorizerService>>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Vec<JoinHandle<()>> {
     let retrieve_thread_handle = tokio::spawn(vectorize_thread(
         vecdb_client.clone(),

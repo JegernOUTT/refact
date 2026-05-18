@@ -47,13 +47,13 @@ impl Tool for ToolAstDefinition {
         }
 
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
-        let ast_service_opt = gcx.read().await.ast_service.lock().unwrap().clone();
+        let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
         if let Some(ast_service) = ast_service_opt {
             let ast_index = ast_service.lock().await.ast_index.clone();
 
@@ -148,7 +148,7 @@ impl Tool for ToolAstDefinition {
 
             // Append related memories based on involved file paths.
             let related_section = {
-                let idx_arc = { gcx.read().await.knowledge_index.clone() };
+                let idx_arc = { gcx.knowledge_index.clone() };
                 let idx_guard = idx_arc.lock().await;
                 let mut files: Vec<String> = all_context_files
                     .iter()

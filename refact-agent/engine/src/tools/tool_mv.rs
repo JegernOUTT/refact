@@ -76,11 +76,11 @@ impl Tool for ToolMv {
         let overwrite = Self::parse_overwrite(args)?;
 
         let (gcx, execution_scope, top_n) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
-                ccx_locked.top_n,
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                cgcx.top_n,
             )
         };
 
@@ -221,13 +221,13 @@ impl Tool for ToolMv {
 
             let src_within_project = project_dirs.iter().any(|p| src_true_path.starts_with(p));
             let dst_within_project = project_dirs.iter().any(|p| dst_true_path.starts_with(p));
-            if !src_within_project && !gcx.read().await.cmdline.inside_container {
+            if !src_within_project && !gcx.cmdline.inside_container {
                 return Err(format!(
                     "⚠️ Source '{}' is outside project. 💡 mv() only works within workspace",
                     src_str
                 ));
             }
-            if !dst_within_project && !gcx.read().await.cmdline.inside_container {
+            if !dst_within_project && !gcx.cmdline.inside_container {
                 return Err(format!(
                     "⚠️ Destination '{}' is outside project. 💡 mv() only works within workspace",
                     dst_str
@@ -269,7 +269,7 @@ impl Tool for ToolMv {
                 })?;
                 // Invalidate cache entries for all files under the removed directory
                 {
-                    let mut gcx_write = gcx.write().await;
+                    let gcx_write = gcx.clone();
                     let paths_to_remove: Vec<_> = gcx_write
                         .documents_state
                         .memory_document_map.lock().await
@@ -291,9 +291,7 @@ impl Tool for ToolMv {
                     .await
                     .map_err(|e| format!("Failed to remove existing file '{}': {}", dst_str, e))?;
                 // Invalidate cache entry for the removed file
-                gcx.write()
-                    .await
-                    .documents_state
+                gcx.documents_state
                     .memory_document_map.lock().await
                     .remove(&dst_true_path);
             }
@@ -326,7 +324,7 @@ impl Tool for ToolMv {
             })?;
 
         {
-            let mut gcx_write = gcx.write().await;
+            let gcx_write = gcx.clone();
             gcx_write
                 .documents_state
                 .memory_document_map.lock().await

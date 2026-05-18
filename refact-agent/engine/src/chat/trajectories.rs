@@ -264,7 +264,7 @@ impl TrajectorySnapshot {
 }
 
 pub async fn apply_mode_defaults_to_thread(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     thread: &mut ThreadParams,
     auto_approve_editing_present: bool,
     auto_approve_dangerous_present: bool,
@@ -293,19 +293,19 @@ pub async fn apply_mode_defaults_to_thread(
     }
 }
 
-pub async fn get_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, String> {
+pub async fn get_trajectories_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
     Ok(workspace_root.join(".refact").join("trajectories"))
 }
 
-pub async fn get_global_trajectories_dir(gcx: Arc<ARwLock<GlobalContext>>) -> PathBuf {
+pub async fn get_global_trajectories_dir(gcx: Arc<GlobalContext>) -> PathBuf {
     let app = AppState::from_gcx(gcx).await;
     let config_dir = app.paths.config_dir.clone();
     config_dir.join("trajectories")
 }
 
-pub async fn get_all_trajectories_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+pub async fn get_all_trajectories_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
         .await
         .into_iter()
@@ -322,7 +322,7 @@ pub async fn get_all_trajectories_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<
 }
 
 async fn get_all_trajectories_dirs_from_weak(
-    gcx_weak: &Weak<ARwLock<GlobalContext>>,
+    gcx_weak: &Weak<GlobalContext>,
 ) -> Vec<PathBuf> {
     match gcx_weak.upgrade() {
         Some(gcx) => get_all_trajectories_dirs(gcx).await,
@@ -331,7 +331,7 @@ async fn get_all_trajectories_dirs_from_weak(
 }
 
 pub async fn get_buddy_conversations_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
@@ -351,7 +351,7 @@ fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
 }
 
 pub async fn find_trajectory_path(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Option<PathBuf> {
     if let Ok(buddy_dir) = get_buddy_conversations_dir(gcx.clone()).await {
@@ -533,7 +533,7 @@ async fn validate_loaded_legacy_task_agent_worktree(
 }
 
 async fn synthesize_legacy_task_agent_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
     task_meta: Option<&super::types::TaskMeta>,
 ) -> Option<WorktreeMeta> {
@@ -600,7 +600,7 @@ async fn synthesize_legacy_task_agent_worktree(
 }
 
 pub async fn load_trajectory_for_chat(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Option<LoadedTrajectory> {
     let app = AppState::from_gcx(gcx.clone()).await;
@@ -795,7 +795,7 @@ pub async fn load_trajectory_for_chat(
 }
 
 pub async fn save_initial_planner_trajectory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     chat_id: &str,
 ) -> Result<(), String> {
@@ -887,7 +887,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
 }
 
 pub async fn save_trajectory_as(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     thread: &ThreadParams,
     messages: &[ChatMessage],
 ) {
@@ -933,7 +933,7 @@ pub async fn save_trajectory_as(
 }
 
 pub async fn save_trajectory_snapshot(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     snapshot: TrajectorySnapshot,
 ) -> Result<(), String> {
     let app = AppState::from_gcx(gcx.clone()).await;
@@ -1193,7 +1193,7 @@ pub async fn maybe_save_trajectory(
 }
 
 pub async fn check_external_reload_pending(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
     let (chat_id, should_reload) = {
@@ -1230,7 +1230,7 @@ pub async fn check_external_reload_pending(
 }
 
 async fn process_trajectory_change(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
     is_remove: bool,
 ) {
@@ -1411,7 +1411,7 @@ async fn process_trajectory_change(
     }
 }
 
-pub fn start_trajectory_watcher(gcx: Arc<ARwLock<GlobalContext>>) {
+pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
     let gcx_weak = Arc::downgrade(&gcx);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
 
@@ -1676,7 +1676,7 @@ fn clean_generated_title(raw_title: &str) -> String {
 }
 
 async fn generate_title_llm(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     messages: &[serde_json::Value],
 ) -> Option<String> {
     let context = build_title_generation_context(messages);
@@ -1730,7 +1730,7 @@ async fn generate_title_llm(
 }
 
 fn spawn_title_generation_task(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     id: String,
     messages: Vec<serde_json::Value>,
     trajectories_dir: PathBuf,
@@ -1858,7 +1858,7 @@ fn spawn_title_generation_task(
 }
 
 fn spawn_task_name_generation_task(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: String,
     messages: Vec<serde_json::Value>,
 ) {
@@ -3620,9 +3620,8 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cache_dir = cache.clone();
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            gcx.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
         let service = WorktreeService::new(cache, source.clone()).unwrap();
@@ -3814,9 +3813,8 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cache_dir = cache.clone();
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            gcx.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
         let traj_dir = source.join(".refact").join("trajectories");
@@ -3869,9 +3867,8 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cache_dir = cache.clone();
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            gcx.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
 
@@ -4000,9 +3997,8 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let mut gcx_locked = gcx.write().await;
-            gcx_locked.cache_dir = cache.clone();
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            gcx.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let app = AppState::from_gcx(gcx.clone()).await;
 

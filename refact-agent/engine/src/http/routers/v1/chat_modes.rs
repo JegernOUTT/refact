@@ -73,7 +73,7 @@ pub async fn handle_v1_chat_modes(
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let _ = global_configs_try_create_all(&config_dir).await;
     if let Some(ref root) = project_root {
         let _ = project_configs_ensure_dirs(root).await;

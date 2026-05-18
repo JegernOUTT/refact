@@ -14,7 +14,7 @@ use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use refact_knowledge_graph::kg_structs::KnowledgeGraph;
 
-pub async fn build_knowledge_graph(gcx: Arc<ARwLock<GlobalContext>>) -> KnowledgeGraph {
+pub async fn build_knowledge_graph(gcx: Arc<GlobalContext>) -> KnowledgeGraph {
     let project_dirs = get_project_dirs(gcx.clone()).await;
     let mut knowledge_dirs: Vec<PathBuf> = project_dirs
         .iter()
@@ -29,9 +29,9 @@ pub async fn build_knowledge_graph(gcx: Arc<ARwLock<GlobalContext>>) -> Knowledg
     refact_knowledge_graph::kg_builder::build_knowledge_graph(knowledge_dirs, workspace_files).await
 }
 
-pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
-    let shutdown_flag = gcx.read().await.shutdown_flag.clone();
-    let cache_dir = gcx.read().await.cache_dir.clone();
+pub async fn knowledge_cleanup_background_task(gcx: Arc<GlobalContext>) {
+    let shutdown_flag = gcx.shutdown_flag.clone();
+    let cache_dir = gcx.cache_dir.clone();
     let gcx_for_build = gcx.clone();
     let build_graph: KgGraphBuilder = Arc::new(move || {
         let gcx = gcx_for_build.clone();
@@ -51,7 +51,7 @@ pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>)
     .await
 }
 
-async fn collect_workspace_files(gcx: Arc<ARwLock<GlobalContext>>) -> HashSet<String> {
+async fn collect_workspace_files(gcx: Arc<GlobalContext>) -> HashSet<String> {
     let project_dirs = get_project_dirs(gcx.clone()).await;
     let mut files = HashSet::new();
     for dir in project_dirs {

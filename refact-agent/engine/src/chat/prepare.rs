@@ -91,7 +91,7 @@ impl Default for ChatPrepareOptions {
 }
 
 pub async fn prepare_chat_passthrough(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     t: &HasTokenizerAndEot,
     messages: Vec<ChatMessage>,

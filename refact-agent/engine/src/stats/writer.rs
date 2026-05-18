@@ -5,7 +5,7 @@ use crate::global_context::GlobalContext;
 use crate::stats::event::LlmCallEvent;
 
 pub async fn stats_writer_task(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     receiver: tokio::sync::mpsc::Receiver<LlmCallEvent>,
 ) {
     let stats_dir_fn = Arc::new(move || {
@@ -62,7 +62,7 @@ mod tests {
     #[tokio::test]
     async fn test_writer_uses_workspace_dir_when_workspace_appears_after_startup() {
         let gcx = make_test_gcx().await;
-        let config_stats_dir = gcx.read().await.config_dir.join("stats");
+        let config_stats_dir = gcx.config_dir.join("stats");
         let workspace = tempfile::tempdir().unwrap();
         let workspace_stats_dir = workspace.path().join(".refact").join("stats");
 
@@ -70,8 +70,7 @@ mod tests {
         let handle = tokio::spawn(stats_writer_task(gcx.clone(), rx));
 
         {
-            let gcx_locked = gcx.write().await;
-            *gcx_locked.documents_state.workspace_folders.lock().unwrap() =
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![workspace.path().to_path_buf()];
         }
 

@@ -11,9 +11,9 @@ use crate::global_context::GlobalContext;
 
 const DEFAULT_CHECKSUM_FILE: &str = "default-checksums.yaml";
 
-pub async fn yaml_configs_try_create_all(gcx: Arc<ARwLock<GlobalContext>>) -> String {
+pub async fn yaml_configs_try_create_all(gcx: Arc<GlobalContext>) -> String {
     let mut results = Vec::new();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
 
     let dirs_to_create = [
         config_dir.join("integrations.d"),
@@ -50,11 +50,11 @@ pub async fn yaml_configs_try_create_all(gcx: Arc<ARwLock<GlobalContext>>) -> St
 }
 
 async fn _yaml_file_exists_or_create(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     config_path: &PathBuf,
     the_default: &str,
 ) -> Result<String, String> {
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let config_path_str = config_path.to_string_lossy().to_string();
     let config_name = config_path
         .file_name()

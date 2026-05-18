@@ -425,10 +425,10 @@ pub async fn handle_v1_command_preview(
 
     if !context_files.is_empty() {
         let (gcx, mut pp_settings) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.global_context.clone(),
-                ccx_locked.postprocess_parameters.clone(),
+                cgcx.global_context.clone(),
+                cgcx.postprocess_parameters.clone(),
             )
         };
 
@@ -554,7 +554,7 @@ pub async fn handle_v1_at_command_execute(
     let messages_to_stream_back = has_rag_results.in_json;
 
     if !post.chat_id.is_empty() && any_context_produced {
-        let sessions = global_context.read().await.chat_sessions.clone();
+        let sessions = global_context.chat_sessions.clone();
         let session_arc =
             get_or_create_session_with_trajectory(AppState::from_gcx(global_context.clone()).await, &sessions, &post.chat_id)
                 .await;

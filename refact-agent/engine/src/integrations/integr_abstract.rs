@@ -13,7 +13,7 @@ pub trait IntegrationTrait: Send + Sync {
     fn integr_schema(&self) -> &str;
     async fn integr_settings_apply(
         &mut self,
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
         config_path: String,
         value: &serde_json::Value,
     ) -> Result<(), serde_json::Error>;

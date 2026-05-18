@@ -88,7 +88,7 @@ pub async fn handle_v1_buddy_frontend_error(
         severity,
     };
 
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     if let Some(svc) = lock.as_mut() {
         svc.add_diagnostic(ctx);

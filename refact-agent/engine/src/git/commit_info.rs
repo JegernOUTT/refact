@@ -9,11 +9,11 @@ use crate::git::CommitInfo;
 use crate::git::operations::{get_diff_statuses, git_diff_head_to_workdir_as_string};
 
 pub async fn get_commit_information_from_current_changes(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Vec<CommitInfo> {
     let mut commits = Vec::new();
 
-    let workspace_vcs_roots_arc = gcx.read().await.documents_state.workspace_vcs_roots.clone();
+    let workspace_vcs_roots_arc = gcx.documents_state.workspace_vcs_roots.clone();
     let workspace_vcs_roots = workspace_vcs_roots_arc.lock().unwrap().clone();
 
     info!(
@@ -55,7 +55,7 @@ pub async fn get_commit_information_from_current_changes(
 }
 
 pub async fn generate_commit_messages(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     commits: Vec<CommitInfo>,
 ) -> Vec<CommitInfo> {
     const MAX_DIFF_SIZE: usize = 4096;

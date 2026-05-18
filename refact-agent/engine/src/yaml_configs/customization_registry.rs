@@ -552,16 +552,15 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     pattern == name
 }
 
-pub async fn get_project_registry(gcx: Arc<ARwLock<GlobalContext>>) -> Option<ProjectRegistry> {
-    let config_dir = gcx.read().await.config_dir.clone();
+pub async fn get_project_registry(gcx: Arc<GlobalContext>) -> Option<ProjectRegistry> {
+    let config_dir = gcx.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
     let cache_key = project_root.clone().unwrap_or_else(|| config_dir.clone());
 
     {
-        let gcx_locked = gcx.read().await;
-        let cache_result = gcx_locked.project_registry_cache.read();
+        let cache_result = gcx.project_registry_cache.read();
         if let Ok(cache) = cache_result {
             if let Some(cached) = cache.get(&cache_key) {
                 return Some(cached.registry.clone());
@@ -577,8 +576,7 @@ pub async fn get_project_registry(gcx: Arc<ARwLock<GlobalContext>>) -> Option<Pr
     let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
 
     {
-        let gcx_locked = gcx.read().await;
-        let cache_result = gcx_locked.project_registry_cache.write();
+        let cache_result = gcx.project_registry_cache.write();
         if let Ok(mut cache) = cache_result {
             cache.insert(cache_key, registry.clone());
         }
@@ -588,21 +586,21 @@ pub async fn get_project_registry(gcx: Arc<ARwLock<GlobalContext>>) -> Option<Pr
 }
 
 #[allow(dead_code)]
-pub async fn get_global_registry(gcx: Arc<ARwLock<GlobalContext>>) -> ProjectRegistry {
-    let config_dir = gcx.read().await.config_dir.clone();
+pub async fn get_global_registry(gcx: Arc<GlobalContext>) -> ProjectRegistry {
+    let config_dir = gcx.config_dir.clone();
     let _ = global_configs_try_create_all(&config_dir).await;
     load_registry_from_dir(&config_dir).await
 }
 
-pub async fn invalidate_all_registry_caches(gcx: Arc<ARwLock<GlobalContext>>) {
-    let cache_arc = gcx.read().await.project_registry_cache.clone();
+pub async fn invalidate_all_registry_caches(gcx: Arc<GlobalContext>) {
+    let cache_arc = gcx.project_registry_cache.clone();
     if let Ok(mut cache) = cache_arc.write() {
         cache.cache.clear();
     };
 }
 
 pub async fn get_mode_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     mode_id: &str,
     model_id: Option<&str>,
 ) -> Option<ModeConfig> {
@@ -611,7 +609,7 @@ pub async fn get_mode_config(
 }
 
 pub async fn get_subagent_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     subagent_id: &str,
     model_id: Option<&str>,
 ) -> Option<SubagentConfig> {

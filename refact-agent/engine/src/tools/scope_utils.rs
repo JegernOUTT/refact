@@ -15,10 +15,8 @@ use crate::files_in_workspace::{check_file_privacy_for_send, filter_privacy_allo
 use crate::global_context::GlobalContext;
 use crate::worktrees::scope::ExecutionScope;
 
-async fn get_workspace_files(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
-    gcx.read()
-        .await
-        .documents_state
+async fn get_workspace_files(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    gcx.documents_state
         .workspace_files
         .lock()
         .unwrap()
@@ -26,7 +24,7 @@ async fn get_workspace_files(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
 }
 
 pub async fn resolve_existing_path_with_execution_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
     raw: &str,
 ) -> Result<Option<ScopedResolvedPath>, String> {
@@ -48,7 +46,7 @@ pub async fn resolve_existing_path_with_execution_scope(
 }
 
 async fn list_files_under_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     dir: &PathBuf,
     recursive: bool,
     privacy_filter: bool,
@@ -64,7 +62,7 @@ async fn list_files_under_dir(
 }
 
 pub async fn list_scoped_files_under_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     dir: &PathBuf,
     recursive: bool,
     privacy_filter: bool,
@@ -73,7 +71,7 @@ pub async fn list_scoped_files_under_dir(
 }
 
 async fn resolve_scope_legacy(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     scope: &str,
 ) -> Result<Vec<String>, String> {
     if scope == "workspace" {
@@ -158,14 +156,14 @@ async fn resolve_scope_legacy(
 
 #[allow(dead_code)]
 pub async fn resolve_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     scope: &str,
 ) -> Result<Vec<String>, String> {
     resolve_scope_legacy(gcx, scope).await
 }
 
 pub async fn resolve_scope_with_execution_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
     scope: &str,
 ) -> Result<ScopedFiles, String> {
@@ -236,7 +234,7 @@ pub async fn resolve_scope_with_execution_scope(
 }
 
 async fn create_scope_filter_legacy(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     scope: &str,
 ) -> Result<Option<String>, String> {
     if scope == "workspace" {
@@ -301,7 +299,7 @@ async fn create_scope_filter_legacy(
 
 #[allow(dead_code)]
 pub async fn create_scope_filter(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     scope: &str,
 ) -> Result<Option<String>, String> {
     create_scope_filter_legacy(gcx, scope).await
@@ -317,7 +315,7 @@ fn indexed_path_for_scoped_path(execution_scope: &ExecutionScope, path: &Path) -
 }
 
 pub async fn create_scope_filter_with_execution_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
     scope: &str,
 ) -> Result<ScopedScopeFilter, String> {
@@ -362,7 +360,7 @@ pub async fn create_scope_filter_with_execution_scope(
 }
 
 pub async fn remap_context_file_for_execution_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
     mut context_file: ContextFile,
 ) -> Result<Option<(ContextFile, Vec<String>)>, String> {
@@ -422,7 +420,7 @@ pub async fn remap_context_file_for_execution_scope(
 }
 
 pub async fn remap_context_files_for_execution_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
     context_files: Vec<ContextFile>,
 ) -> Result<(Vec<ContextFile>, Vec<String>), String> {
@@ -547,14 +545,14 @@ mod worktree_scope_read_tools {
         }
     }
 
-    async fn make_gcx(fixture: &Fixture, blocked: Vec<String>) -> Arc<ARwLock<GlobalContext>> {
+    async fn make_gcx(fixture: &Fixture, blocked: Vec<String>) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let workspace_files = vec![
             fixture.source.join("src").join("lib.rs"),
             fixture.source.join("src").join("source_only.rs"),
         ];
         {
-            let locked = gcx.read().await;
+            let locked = gcx.clone();
             let privacy_settings = locked.privacy_settings.clone();
             let workspace_folders = locked.documents_state.workspace_folders.clone();
             let workspace_files_lock = locked.documents_state.workspace_files.clone();
@@ -573,7 +571,7 @@ mod worktree_scope_read_tools {
     }
 
     async fn make_ccx(
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
         worktree: WorktreeMeta,
     ) -> Arc<AMutex<AtCommandsContext>> {
         Arc::new(AMutex::new(

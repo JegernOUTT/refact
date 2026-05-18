@@ -93,12 +93,12 @@ fn draft_error_response(err: DraftValidationError) -> Result<Response<Body>, Scr
 }
 
 async fn validate_draft_for_target(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     draft_id: &str,
     expected_kind: DraftKind,
     target: DraftTarget<'_>,
 ) -> std::result::Result<(), DraftValidationError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let Some(svc) = lock.as_ref() else {
         return Err(DraftValidationError::NotFound);
@@ -109,12 +109,12 @@ async fn validate_draft_for_target(
 }
 
 async fn consume_draft_for_target(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     draft_id: &str,
     expected_kind: DraftKind,
     target: DraftTarget<'_>,
 ) -> std::result::Result<ConsumedDraft, DraftValidationError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let Some(svc) = lock.as_mut() else {
         return Err(DraftValidationError::NotFound);
@@ -243,11 +243,11 @@ pub(crate) async fn write_file_atomic(
 }
 
 async fn resolve_scope_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     scope: Option<&str>,
     require_local: bool,
 ) -> std::result::Result<(PathBuf, String), String> {
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let project_dirs = get_project_dirs(gcx.clone()).await;
     let project_root = project_dirs.into_iter().next();
 
@@ -730,7 +730,7 @@ pub async fn handle_v1_ext_skill_get(
 
     if let Some(ref draft_id) = query.draft_id {
         let draft_data = {
-            let buddy_arc = gcx.read().await.buddy.clone();
+            let buddy_arc = gcx.buddy.clone();
             let lock = buddy_arc.lock().await;
             match lock.as_ref() {
                 Some(svc) => match svc.draft_store.get_validated(
@@ -1133,7 +1133,7 @@ pub async fn handle_v1_ext_command_get(
 
     if let Some(ref draft_id) = query.draft_id {
         let draft_data = {
-            let buddy_arc = gcx.read().await.buddy.clone();
+            let buddy_arc = gcx.buddy.clone();
             let lock = buddy_arc.lock().await;
             lock.as_ref().and_then(|svc| {
                 let draft = svc.draft_store.get(draft_id)?;
@@ -1470,7 +1470,7 @@ pub async fn handle_v1_ext_hooks_get(
     let gcx = app.gcx.clone();
     if let Some(ref draft_id) = query.draft_id {
         let draft_data = {
-            let buddy_arc = gcx.read().await.buddy.clone();
+            let buddy_arc = gcx.buddy.clone();
             let lock = buddy_arc.lock().await;
             lock.as_ref().and_then(|svc| {
                 let draft = svc.draft_store.get(draft_id)?;

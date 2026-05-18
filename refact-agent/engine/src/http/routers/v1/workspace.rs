@@ -14,7 +14,7 @@ pub async fn handle_v1_get_app_searchable_id(
         .status(StatusCode::OK)
         .body(Body::from(
             serde_json::to_string(
-                &serde_json::json!({ "app_searchable_id": gcx.read().await.app_searchable_id }),
+                &serde_json::json!({ "app_searchable_id": gcx.app_searchable_id }),
             )
             .unwrap(),
         ))

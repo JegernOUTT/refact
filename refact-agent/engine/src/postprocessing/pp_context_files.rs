@@ -11,7 +11,7 @@ use crate::global_context::GlobalContext;
 use super::gcx_pp_context::GcxPPContext;
 
 pub async fn postprocess_context_files(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     context_file_vec: &mut Vec<ContextFile>,
     tokenizer: Option<Arc<Tokenizer>>,
     tokens_limit: usize,

@@ -16,12 +16,11 @@ pub use refact_core::models_dev::{
 };
 
 pub async fn load_models_dev_catalog(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     force_refresh: bool,
 ) -> Result<ModelsDevCatalog, String> {
     let (cache_dir, http_client) = {
-        let gcx_locked = gcx.read().await;
-        (gcx_locked.cache_dir.clone(), gcx_locked.http_client.clone())
+        (gcx.cache_dir.clone(), gcx.http_client.clone())
     };
 
     if force_refresh {

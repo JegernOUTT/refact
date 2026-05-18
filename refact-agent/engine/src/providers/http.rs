@@ -36,8 +36,8 @@ fn json_response(
         })
 }
 
-async fn invalidate_caps(gcx: Arc<ARwLock<GlobalContext>>) {
-    let caps_state = gcx.read().await.caps_state.clone();
+async fn invalidate_caps(gcx: Arc<GlobalContext>) {
+    let caps_state = gcx.caps_state.clone();
     let mut caps_state = caps_state.write().await;
     caps_state.caps = None;
     caps_state.last_attempted_ts = 0;
@@ -185,13 +185,12 @@ async fn resolve_config_identity(
 }
 
 async fn resolve_provider_identity(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     instance_id: &str,
 ) -> Result<HttpProviderIdentity, ScratchError> {
     validate_instance_id_for_http(instance_id)?;
     let (config_dir, registry_identity) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         let registry_identity = registry
             .get(instance_id)
             .map(|provider| HttpProviderIdentity {
@@ -199,7 +198,7 @@ async fn resolve_provider_identity(
                 base_provider: provider.base_provider_name().to_string(),
                 display_name: provider.display_name().to_string(),
             });
-        (gcx_locked.config_dir.clone(), registry_identity)
+        (gcx.config_dir.clone(), registry_identity)
     };
     if let Some(identity) = registry_identity {
         return Ok(identity);
@@ -220,7 +219,7 @@ fn downcast_provider<'a, T: 'static>(
 }
 
 async fn resolve_provider_for_base(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     provider_name: &str,
     expected_base: &str,
 ) -> Result<(Box<dyn ProviderTrait>, reqwest::Client), ScratchError> {
@@ -235,19 +234,18 @@ async fn resolve_provider_for_base(
         ));
     }
     let (provider, http_client) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         (
             registry
                 .get(provider_name)
                 .map(|provider| provider.clone_box()),
-            gcx_locked.http_client.clone(),
+            gcx.http_client.clone(),
         )
     };
     let provider = if let Some(provider) = provider {
         provider
     } else {
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         if provider_file_exists(&config_dir, provider_name) {
             let settings = read_existing_provider_settings(&config_dir, provider_name)
                 .await?
@@ -294,14 +292,13 @@ async fn identity_for_model_management(
 }
 
 async fn ensure_provider_for_model_management(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<(), ScratchError> {
     let (config_dir, already_registered) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         (
-            gcx_locked.config_dir.clone(),
+            gcx.config_dir.clone(),
             registry.get(provider_name).is_some(),
         )
     };
@@ -328,8 +325,7 @@ async fn ensure_provider_for_model_management(
                 provider,
             ))
         };
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
         registry.add(provider);
         Ok(())
     }
@@ -563,8 +559,7 @@ pub async fn handle_v1_providers_list(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let gcx_locked = gcx.read().await;
-    let registry = gcx_locked.providers.read().await;
+    let registry = gcx.providers.read().await;
 
     let mut providers = Vec::new();
     let mut seen = HashSet::new();
@@ -628,13 +623,12 @@ pub async fn handle_v1_provider_get(
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let (registry_provider, config_dir) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         (
             registry
                 .get(&params.name)
                 .map(|provider| provider.clone_box()),
-            gcx_locked.config_dir.clone(),
+            gcx.config_dir.clone(),
         )
     };
     let provider: Box<dyn ProviderTrait> = if let Some(provider) = registry_provider {
@@ -692,8 +686,7 @@ pub async fn handle_v1_provider_schema(
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let schema = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
 
         if let Some(provider) = registry.get(&params.name) {
             provider.provider_schema().to_string()
@@ -740,8 +733,7 @@ pub async fn handle_v1_provider_update(
         };
 
     let (config_dir, registry_identity) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         let registry_identity = if let Some(provider) = registry.get(&params.name) {
             if provider.is_readonly() {
                 return Err(ScratchError::new(
@@ -757,7 +749,7 @@ pub async fn handle_v1_provider_update(
         } else {
             None
         };
-        (gcx_locked.config_dir.clone(), registry_identity)
+        (gcx.config_dir.clone(), registry_identity)
     };
 
     let settings = strip_derived_fields(settings);
@@ -822,8 +814,7 @@ pub async fn handle_v1_provider_delete(
     validate_instance_id_for_http(&params.name)?;
 
     let config_dir = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         if let Some(provider) = registry.get(&params.name) {
             if provider.is_readonly() {
                 return Err(ScratchError::new(
@@ -832,14 +823,14 @@ pub async fn handle_v1_provider_delete(
                 ));
             }
         } else if create_provider(&params.name).is_none() {
-            if !provider_file_exists(&gcx_locked.config_dir, &params.name) {
+            if !provider_file_exists(&gcx.config_dir, &params.name) {
                 return Err(ScratchError::new(
                     StatusCode::NOT_FOUND,
                     format!("Provider '{}' not found", params.name),
                 ));
             }
         }
-        gcx_locked.config_dir.clone()
+        gcx.config_dir.clone()
     };
 
     delete_provider_config(&config_dir, &params.name)
@@ -847,8 +838,7 @@ pub async fn handle_v1_provider_delete(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
         registry.remove(&params.name);
     }
 
@@ -868,8 +858,7 @@ pub async fn handle_v1_provider_models(
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
-    let gcx_locked = gcx.read().await;
-    let registry = gcx_locked.providers.read().await;
+    let registry = gcx.providers.read().await;
 
     let provider: Box<dyn crate::providers::traits::ProviderTrait> =
         if let Some(p) = registry.get(&params.name) {
@@ -902,7 +891,7 @@ pub async fn handle_v1_defaults_get(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let defaults = ProviderDefaults::load(&config_dir)
         .await
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
@@ -984,10 +973,10 @@ fn validate_defaults_draft_shape(content: &str) -> Result<(), ScratchError> {
 }
 
 async fn validate_defaults_draft(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     draft_id: &str,
 ) -> Result<(), ScratchError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let svc = lock.as_ref().ok_or_else(|| {
         ScratchError::new(
@@ -1006,10 +995,10 @@ async fn validate_defaults_draft(
 }
 
 async fn consume_defaults_draft(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     draft_id: &str,
 ) -> Result<(), ScratchError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
         ScratchError::new(
@@ -1092,8 +1081,7 @@ pub async fn handle_v1_models(
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.provider_name)?;
-    let gcx_locked = gcx.read().await;
-    let registry = gcx_locked.providers.read().await;
+    let registry = gcx.providers.read().await;
 
     let provider: Box<dyn crate::providers::traits::ProviderTrait> =
         if let Some(p) = registry.get(&params.provider_name) {
@@ -1165,9 +1153,8 @@ pub async fn handle_v1_provider_available_models(
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let (provider, http_client) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
-        let http_client = gcx_locked.http_client.clone();
+        let registry = gcx.providers.read().await;
+        let http_client = gcx.http_client.clone();
 
         let provider: Box<dyn crate::providers::traits::ProviderTrait> =
             if let Some(p) = registry.get(&params.name) {
@@ -1337,7 +1324,7 @@ pub async fn handle_v1_openrouter_model_endpoints(
 }
 
 async fn openrouter_account_info_response(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
     let (provider, http_client) =
@@ -1377,7 +1364,7 @@ pub async fn handle_v1_provider_account_info(
 }
 
 async fn openrouter_health_response(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
     let (provider, http_client) =
@@ -1405,7 +1392,7 @@ async fn openrouter_health_response(
 }
 
 async fn google_gemini_health_response(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
     let (provider, http_client) =
@@ -1472,7 +1459,7 @@ pub async fn handle_v1_provider_health(
 }
 
 async fn update_model_enabled_state(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
     model_id: &str,
     enabled: bool,
@@ -1480,8 +1467,7 @@ async fn update_model_enabled_state(
     ensure_provider_for_model_management(gcx.clone(), provider_name).await?;
     // Capture previous state for rollback
     let (config_dir, previous_enabled_models, previous_disabled_models) = {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
 
         let provider = registry.get_mut(provider_name).ok_or_else(|| {
             ScratchError::new(
@@ -1503,7 +1489,7 @@ async fn update_model_enabled_state(
 
         provider.set_model_enabled(model_id, enabled);
         (
-            gcx_locked.config_dir.clone(),
+            gcx.config_dir.clone(),
             previous_enabled,
             previous_disabled,
         )
@@ -1512,8 +1498,7 @@ async fn update_model_enabled_state(
     // Try to save updated config
     if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, provider_name).await {
         // Rollback in-memory state on persistence failure
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
         if let Some(provider) = registry.get_mut(provider_name) {
             for model in provider.enabled_models().to_vec() {
                 provider.set_model_enabled(&model, false);
@@ -1542,15 +1527,14 @@ async fn update_model_enabled_state(
 }
 
 async fn update_model_selected_provider_state(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
     model_id: &str,
     selected_provider: Option<String>,
 ) -> Result<Response<Body>, ScratchError> {
     ensure_provider_for_model_management(gcx.clone(), provider_name).await?;
     let (config_dir, previous_selected_provider) = {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
 
         let provider = registry.get_mut(provider_name).ok_or_else(|| {
             ScratchError::new(
@@ -1568,12 +1552,11 @@ async fn update_model_selected_provider_state(
 
         let prev = provider.selected_providers().get(model_id).cloned();
         provider.set_selected_provider(model_id, selected_provider.clone());
-        (gcx_locked.config_dir.clone(), prev)
+        (gcx.config_dir.clone(), prev)
     };
 
     if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, provider_name).await {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
         if let Some(provider) = registry.get_mut(provider_name) {
             provider.set_selected_provider(model_id, previous_selected_provider);
         }
@@ -1627,8 +1610,7 @@ pub async fn handle_v1_provider_add_custom_model(
 
     ensure_provider_for_model_management(gcx.clone(), &params.name).await?;
     let (config_dir, previous_config) = {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
 
         let provider = registry.get_mut(&params.name).ok_or_else(|| {
             ScratchError::new(
@@ -1646,12 +1628,11 @@ pub async fn handle_v1_provider_add_custom_model(
 
         let previous_config = provider.custom_models().get(&request.id).cloned();
         provider.add_custom_model(request.id.clone(), request.config.clone());
-        (gcx_locked.config_dir.clone(), previous_config)
+        (gcx.config_dir.clone(), previous_config)
     };
 
     if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, &params.name).await {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
         if let Some(provider) = registry.get_mut(&params.name) {
             if let Some(previous) = previous_config {
                 provider.add_custom_model(request.id.clone(), previous);
@@ -1703,7 +1684,7 @@ pub async fn handle_v1_provider_remove_custom_model(
 }
 
 async fn handle_v1_provider_remove_custom_model_impl(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
@@ -1723,8 +1704,7 @@ async fn handle_v1_provider_remove_custom_model_impl(
     }
 
     let (config_dir, previous_custom_models, previous_enabled_models, previous_disabled_models) = {
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
 
         let provider = registry.get_mut(provider_name).ok_or_else(|| {
             ScratchError::new(
@@ -1753,7 +1733,7 @@ async fn handle_v1_provider_remove_custom_model_impl(
         provider.set_model_enabled(&request.model_id, false);
 
         (
-            gcx_locked.config_dir.clone(),
+            gcx.config_dir.clone(),
             previous,
             previous_enabled,
             previous_disabled,
@@ -1763,8 +1743,7 @@ async fn handle_v1_provider_remove_custom_model_impl(
     // Try to save updated config, rollback on failure
     if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, provider_name).await {
         // Rollback in-memory state
-        let gcx_locked = gcx.read().await;
-        let mut registry = gcx_locked.providers.write().await;
+        let mut registry = gcx.providers.write().await;
         if let Some(provider) = registry.get_mut(provider_name) {
             if let Some(config) = previous_custom_models.get(&request.model_id) {
                 provider.add_custom_model(request.model_id.clone(), config.clone());
@@ -1961,14 +1940,13 @@ fn ensure_yaml_identity_fields(
 /// SAFETY: This function will NOT write if the existing config is invalid YAML,
 /// to prevent destroying secrets and other settings.
 async fn patch_provider_model_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     config_dir: &std::path::Path,
     provider_name: &str,
 ) -> Result<(), ScratchError> {
     validate_instance_id_for_http(provider_name)?;
     let (identity, enabled_models, disabled_models, custom_models, selected_providers) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         let provider = registry.get(provider_name).ok_or_else(|| {
             ScratchError::new(
                 StatusCode::NOT_FOUND,
@@ -2061,7 +2039,7 @@ async fn patch_provider_model_config(
 }
 
 async fn reload_provider_from_disk(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
     config_dir: &std::path::Path,
 ) -> Result<(), ScratchError> {
@@ -2087,8 +2065,7 @@ async fn reload_provider_from_disk(
         )
     })?;
 
-    let gcx_locked = gcx.read().await;
-    let mut registry = gcx_locked.providers.write().await;
+    let mut registry = gcx.providers.write().await;
 
     let provider = provider_from_yaml(provider_name, yaml)?;
     registry.add(provider);
@@ -2143,7 +2120,7 @@ struct GitHubCopilotOAuthStartRequest {
 }
 
 async fn oauth_base_provider_for_instance(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<String, ScratchError> {
     let identity = resolve_provider_identity(gcx, provider_name).await?;
@@ -2179,7 +2156,7 @@ pub async fn handle_v1_provider_oauth_start(
             )
         }
         "openai_codex" => {
-            let fallback_port = gcx.read().await.cmdline.http_port;
+            let fallback_port = gcx.cmdline.http_port;
             let (session_id, authorize_url, callback_port) =
                 crate::providers::openai_codex_oauth::start_oauth_session(
                     fallback_port,
@@ -2188,7 +2165,7 @@ pub async fn handle_v1_provider_oauth_start(
                 .await;
 
             if callback_port != fallback_port {
-                let http_client = gcx.read().await.http_client.clone();
+                let http_client = gcx.http_client.clone();
                 match crate::providers::openai_codex_oauth::start_callback_listener(
                     callback_port,
                     http_client,
@@ -2201,7 +2178,7 @@ pub async fn handle_v1_provider_oauth_start(
                             if let Some((tokens, provider_instance_id)) =
                                 listener_handle.await.ok().flatten()
                             {
-                                let config_dir = gcx_clone.read().await.config_dir.clone();
+                                let config_dir = gcx_clone.config_dir.clone();
                                 if let Ok(tokens_value) = serde_yaml::to_value(&tokens) {
                                     if let Err(e) = save_provider_oauth_tokens(
                                         &gcx_clone,
@@ -2263,7 +2240,7 @@ pub async fn handle_v1_provider_oauth_start(
                     "GitHub Enterprise login requires enterprise_url".to_string(),
                 ));
             }
-            let http_client = gcx.read().await.http_client.clone();
+            let http_client = gcx.http_client.clone();
             let start = crate::providers::github_copilot_oauth::start_oauth_session(
                 &http_client,
                 request.enterprise_url.as_deref(),
@@ -2301,8 +2278,8 @@ pub async fn handle_v1_provider_oauth_exchange(
 
     validate_instance_id_for_http(&params.name)?;
     let base_provider = oauth_base_provider_for_instance(&gcx, &params.name).await?;
-    let http_client = gcx.read().await.http_client.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let http_client = gcx.http_client.clone();
+    let config_dir = gcx.config_dir.clone();
 
     match base_provider.as_str() {
         "claude_code" => {
@@ -2454,7 +2431,7 @@ pub async fn handle_v1_provider_oauth_logout(
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let base_provider = oauth_base_provider_for_instance(&gcx, &params.name).await?;
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
 
     match base_provider.as_str() {
         "claude_code" => {
@@ -2561,7 +2538,7 @@ fn html_response(
 }
 
 async fn handle_openai_codex_oauth_callback_impl(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     query: OAuthCallbackParams,
     expected_provider_name: Option<String>,
 ) -> Result<Response<Body>, ScratchError> {
@@ -2603,8 +2580,8 @@ async fn handle_openai_codex_oauth_callback_impl(
         }
     };
 
-    let http_client = gcx.read().await.http_client.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let http_client = gcx.http_client.clone();
+    let config_dir = gcx.config_dir.clone();
 
     let (tokens, provider_instance_id) =
         match crate::providers::openai_codex_oauth::exchange_code_for_session(
@@ -2700,7 +2677,7 @@ pub async fn handle_openai_codex_auth_callback(
 }
 
 async fn claude_code_usage_response(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
     let (provider, http_client) =
@@ -2714,7 +2691,7 @@ async fn claude_code_usage_response(
 }
 
 async fn openai_codex_usage_response(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
     let result = fetch_openai_codex_usage_with_refresh(gcx, provider_name).await;
@@ -2765,18 +2742,17 @@ pub async fn handle_v1_provider_usage(
 }
 
 async fn current_openai_codex_provider(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<(OpenAICodexProvider, reqwest::Client, std::path::PathBuf), String> {
     let (provider, http_client, config_dir) = {
-        let gcx_locked = gcx.read().await;
-        let registry = gcx_locked.providers.read().await;
+        let registry = gcx.providers.read().await;
         (
             registry
                 .get(provider_name)
                 .map(|provider| provider.clone_box()),
-            gcx_locked.http_client.clone(),
-            gcx_locked.config_dir.clone(),
+            gcx.http_client.clone(),
+            gcx.config_dir.clone(),
         )
     };
     let provider = if let Some(provider) = provider {
@@ -2809,7 +2785,7 @@ async fn current_openai_codex_provider(
 }
 
 async fn force_refresh_openai_codex_usage_for_retry(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     http_client: &reqwest::Client,
     provider_name: &str,
     rejected_access_token: &str,
@@ -2862,7 +2838,7 @@ async fn force_refresh_openai_codex_usage_for_retry(
 }
 
 async fn fetch_openai_codex_usage_with_refresh(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<crate::providers::openai_codex::OpenAICodexUsage, String> {
     let (mut request_provider, http_client, _) =
@@ -2944,7 +2920,7 @@ async fn fetch_openai_codex_usage_with_refresh(
 }
 
 async fn sync_openai_codex_auth_state(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     provider_name: &str,
     source: &OpenAICodexProvider,
     previous_tokens: &crate::providers::openai_codex_oauth::OAuthTokens,
@@ -2954,8 +2930,7 @@ async fn sync_openai_codex_auth_state(
         return Ok(false);
     }
 
-    let gcx_locked = gcx.read().await;
-    let mut registry = gcx_locked.providers.write().await;
+    let mut registry = gcx.providers.write().await;
     let provider = registry.get_mut(provider_name).ok_or_else(|| {
         ScratchError::new(
             StatusCode::NOT_FOUND,
@@ -2986,7 +2961,7 @@ fn ensure_openai_codex_session_id(yaml_map: &mut serde_yaml::Mapping) -> String 
 }
 
 async fn save_provider_oauth_tokens(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     config_dir: &std::path::Path,
     provider_name: &str,
     base_provider: &str,
@@ -3256,7 +3231,7 @@ oauth_tokens:
     #[tokio::test]
     async fn provider_update_openai_alias_writes_instance_file_with_identity() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let response = handle_v1_provider_update(
             axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
@@ -3285,8 +3260,7 @@ oauth_tokens:
         assert_eq!(saved["api_key"], "sk-two");
 
         let (name, base, display, enabled_models) = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             let provider = registry.get("openai_2").unwrap();
             (
                 provider.name().to_string(),
@@ -3342,7 +3316,7 @@ oauth_tokens:
     #[tokio::test]
     async fn provider_model_toggle_updates_only_alias_file_and_preserves_identity() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3394,7 +3368,7 @@ oauth_tokens:
     #[tokio::test]
     async fn custom_alias_update_preserves_masked_api_key_and_replaces_extra_headers() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3450,8 +3424,7 @@ extra_headers:
         assert!(saved["extra_headers"].get("X-Remove").is_none());
 
         let runtime = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             registry.get("custom_2").unwrap().build_runtime().unwrap()
         };
         assert_eq!(runtime.name, "custom_2");
@@ -3471,7 +3444,7 @@ extra_headers:
     #[tokio::test]
     async fn provider_delete_instance_removes_only_that_instance() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3515,8 +3488,7 @@ extra_headers:
         let main = provider_config_json(&config_dir, "openai").await;
         assert_eq!(main["api_key"], "sk-main");
         let (has_main, has_alias) = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             (
                 registry.get("openai").is_some(),
                 registry.get("openai_2").is_some(),
@@ -3529,7 +3501,7 @@ extra_headers:
     #[tokio::test]
     async fn custom_provider_update_removes_deleted_extra_headers_on_disk_and_runtime() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3583,8 +3555,7 @@ extra_headers:
         assert!(saved["extra_headers"].get("X-Remove").is_none());
 
         let runtime = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             registry.get("custom").unwrap().build_runtime().unwrap()
         };
         assert_eq!(
@@ -3601,7 +3572,7 @@ extra_headers:
     #[tokio::test]
     async fn custom_provider_update_invalid_extra_headers_string_returns_422_and_preserves_file() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         let config_path = providers_dir.join("custom.yaml");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
@@ -3697,7 +3668,7 @@ extra_headers:
     #[tokio::test]
     async fn openai_codex_oauth_logout_removes_top_level_api_key() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3730,7 +3701,7 @@ extra_headers:
     #[tokio::test]
     async fn openai_codex_oauth_save_syncs_top_level_api_key() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let tokens = crate::providers::openai_codex_oauth::OAuthTokens {
             openai_api_key: "sk-new".to_string(),
             access_token: "access".to_string(),
@@ -3768,7 +3739,7 @@ extra_headers:
     #[tokio::test]
     async fn github_copilot_oauth_save_writes_redactable_yaml() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let tokens = crate::providers::github_copilot_oauth::OAuthTokens {
             access_token: "gho-secret".to_string(),
             expires_at: 0,
@@ -3805,8 +3776,7 @@ extra_headers:
         );
 
         let stored = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             registry
                 .get("github_copilot")
                 .unwrap()
@@ -3819,7 +3789,7 @@ extra_headers:
     #[tokio::test]
     async fn github_copilot_oauth_logout_clears_token_fields() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3863,7 +3833,7 @@ extra_headers:
     #[tokio::test]
     async fn save_oauth_tokens_writes_alias_config_and_preserves_identity() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3898,8 +3868,7 @@ extra_headers:
         assert_eq!(saved["OPENAI_API_KEY"], "sk-alias");
         assert_eq!(saved["oauth_tokens"]["access_token"], "alias-access");
         let identity = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             let provider = registry.get("openai_codex_2").unwrap();
             (
                 provider.name().to_string(),
@@ -3920,7 +3889,7 @@ extra_headers:
     #[tokio::test]
     async fn concurrent_oauth_save_and_model_toggle_preserve_auth_and_models() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3968,7 +3937,7 @@ extra_headers:
     #[tokio::test]
     async fn concurrent_refresh_save_and_custom_model_update_preserve_auth_and_models() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -3981,8 +3950,7 @@ extra_headers:
             .await
             .unwrap();
         {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = gcx.providers.write().await;
             registry.get_mut("claude_code_2").unwrap().add_custom_model(
                 "claude-custom".to_string(),
                 CustomModelConfig {
@@ -4016,7 +3984,7 @@ extra_headers:
     #[tokio::test]
     async fn concurrent_token_save_and_custom_model_update_preserve_auth_and_models() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         handle_v1_provider_update(
             axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
             Path(ProviderPathParams {
@@ -4037,8 +4005,7 @@ extra_headers:
         .await
         .unwrap();
         {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = gcx.providers.write().await;
             registry.get_mut("custom_2").unwrap().add_custom_model(
                 "my-custom".to_string(),
                 CustomModelConfig {
@@ -4078,7 +4045,7 @@ extra_headers:
         use std::os::unix::fs::PermissionsExt;
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let tokens = crate::providers::openai_codex_oauth::OAuthTokens {
             access_token: "access".to_string(),
             refresh_token: "refresh".to_string(),
@@ -4104,7 +4071,7 @@ extra_headers:
     #[tokio::test]
     async fn github_copilot_oauth_alias_redacts_settings() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let tokens = crate::providers::github_copilot_oauth::OAuthTokens {
             access_token: "gho-alias-secret".to_string(),
             expires_at: i64::MAX,
@@ -4125,8 +4092,7 @@ extra_headers:
         assert_eq!(saved["base_provider"], "github_copilot");
         assert_eq!(saved["oauth_tokens"]["access_token"], "gho-alias-secret");
         let settings = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             registry
                 .get("github_copilot_2")
                 .unwrap()
@@ -4140,7 +4106,7 @@ extra_headers:
     #[tokio::test]
     async fn instance_aware_route_resolution_rejects_unsupported_base() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -4174,7 +4140,7 @@ extra_headers:
     #[tokio::test]
     async fn openrouter_model_endpoints_accepts_provider_instances() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
         tokio::fs::write(
@@ -4203,10 +4169,9 @@ extra_headers:
         provider: Box<dyn crate::providers::traits::ProviderTrait>,
     ) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = gcx.providers.write().await;
             registry.add(provider);
         }
 
@@ -4219,8 +4184,7 @@ extra_headers:
         .unwrap();
 
         let (enabled_models, has_custom_model) = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             let provider = registry.get(provider_name).unwrap();
             (
                 provider.enabled_models().to_vec(),
@@ -4295,8 +4259,7 @@ extra_headers:
         let previous_tokens = current.oauth_tokens.clone();
         let previous_session_id = current.session_id.clone();
         {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = gcx.providers.write().await;
             registry.add(Box::new(current.clone()));
         }
         let mut source = OpenAICodexProvider::default();
@@ -4315,8 +4278,7 @@ extra_headers:
         .unwrap();
 
         let stored = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             registry
                 .get("openai_codex")
                 .unwrap()
@@ -4344,8 +4306,7 @@ extra_headers:
         };
         let previous_session_id = "old-session".to_string();
         {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = gcx.providers.write().await;
             registry.add(Box::new(current));
         }
         let mut source = OpenAICodexProvider::default();
@@ -4364,8 +4325,7 @@ extra_headers:
         .unwrap();
 
         let stored = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             registry
                 .get("openai_codex")
                 .unwrap()
@@ -4388,11 +4348,10 @@ extra_headers:
         current.oauth_tokens.refresh_token = "refresh".to_string();
         current.oauth_tokens.expires_at = i64::MAX;
         {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = gcx.providers.write().await;
             registry.add(Box::new(current));
         }
-        let http_client = gcx.read().await.http_client.clone();
+        let http_client = gcx.http_client.clone();
 
         let refreshed = force_refresh_openai_codex_usage_for_retry(
             gcx,
@@ -4425,8 +4384,7 @@ extra_headers:
         let previous_tokens = current.oauth_tokens.clone();
         let previous_session_id = current.session_id.clone();
         {
-            let gcx_locked = gcx.read().await;
-            let mut registry = gcx_locked.providers.write().await;
+            let mut registry = gcx.providers.write().await;
             registry.add(Box::new(current));
         }
         let mut source = OpenAICodexProvider::default();
@@ -4447,8 +4405,7 @@ extra_headers:
         .unwrap();
 
         let stored = {
-            let gcx_locked = gcx.read().await;
-            let registry = gcx_locked.providers.read().await;
+            let registry = gcx.providers.read().await;
             registry
                 .get("openai_codex")
                 .unwrap()

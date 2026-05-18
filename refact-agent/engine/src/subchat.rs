@@ -365,7 +365,7 @@ fn normalize_subchat_params_for_model(
 }
 
 pub async fn resolve_subchat_params(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tool_name: &str,
 ) -> Result<SubchatParameters, String> {
     use crate::yaml_configs::customization_registry::get_subagent_config;
@@ -440,14 +440,14 @@ pub async fn resolve_subchat_params(
 }
 
 pub async fn resolve_subchat_model(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     params: &SubchatParameters,
 ) -> Result<String, String> {
     resolve_subchat_model_inner(gcx, params, None).await
 }
 
 async fn resolve_subchat_model_for_tool(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tool_name: &str,
     params: &SubchatParameters,
 ) -> Result<String, String> {
@@ -455,7 +455,7 @@ async fn resolve_subchat_model_for_tool(
 }
 
 async fn resolve_subchat_model_inner(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     params: &SubchatParameters,
     tool_name: Option<&str>,
 ) -> Result<String, String> {
@@ -583,7 +583,7 @@ fn llm_endpoint_unusable_reason(endpoint: &str) -> Option<String> {
 }
 
 pub async fn resolve_subchat_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tool_name: &str,
     stateful: bool,
     chat_id: Option<String>,
@@ -622,10 +622,10 @@ pub async fn resolve_subchat_config(
 }
 
 async fn parent_thread_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     parent_id: &str,
 ) -> Option<WorktreeMeta> {
-    let sessions = { gcx.read().await.chat_sessions.clone() };
+    let sessions = { gcx.chat_sessions.clone() };
     let session_arc = {
         let sessions_read = sessions.read().await;
         sessions_read.get(parent_id).cloned()
@@ -641,7 +641,7 @@ async fn parent_thread_worktree(
 }
 
 async fn resolve_subchat_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     parent_id: Option<&str>,
     worktree: Option<WorktreeMeta>,
 ) -> Option<WorktreeMeta> {
@@ -670,7 +670,7 @@ fn worktree_reference_for_thread(
 }
 
 async fn register_stateful_subchat_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: &str,
     thread: &mut ThreadParams,
 ) {
@@ -681,7 +681,7 @@ async fn register_stateful_subchat_worktree(
         return;
     };
 
-    let cache_dir = { gcx.read().await.cache_dir.clone() };
+    let cache_dir = { gcx.cache_dir.clone() };
     let service = match WorktreeService::new(cache_dir, worktree.source_workspace_root.clone()) {
         Ok(service) => service,
         Err(e) => {
@@ -703,7 +703,7 @@ async fn register_stateful_subchat_worktree(
 }
 
 pub async fn resolve_subchat_config_with_parent(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tool_name: &str,
     stateful: bool,
     chat_id: Option<String>,
@@ -820,7 +820,7 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
 }
 
 async fn resolve_subagent_autonomous_no_confirm(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tool_name: &str,
 ) -> bool {
     crate::yaml_configs::customization_registry::get_subagent_config(gcx, tool_name, None)
@@ -848,7 +848,7 @@ fn task_meta_for_stateful_subchat(config: &SubchatConfig) -> Option<TaskMeta> {
 }
 
 pub async fn run_subchat(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
     config: SubchatConfig,
 ) -> Result<SubchatResult, String> {
@@ -926,7 +926,7 @@ pub async fn run_subchat(
 }
 
 pub async fn run_subchat_once(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tool_name: &str,
     messages: Vec<ChatMessage>,
 ) -> Result<SubchatResult, String> {
@@ -994,7 +994,7 @@ pub async fn run_subchat_once(
 }
 
 pub async fn run_subchat_once_with_parent(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tool_name: &str,
     messages: Vec<ChatMessage>,
     parent_tool_call_id: String,
@@ -1269,12 +1269,12 @@ async fn execute_pending_tool_calls(
     autonomous_no_confirm: bool,
 ) -> Result<Vec<ChatMessage>, String> {
     let (gcx, n_ctx, task_meta, worktree) = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         (
-            ccx_locked.global_context.clone(),
-            ccx_locked.n_ctx,
-            ccx_locked.task_meta.clone(),
-            ccx_locked.execution_scope_worktree(),
+            cgcx.global_context.clone(),
+            cgcx.n_ctx,
+            cgcx.task_meta.clone(),
+            cgcx.execution_scope_worktree(),
         )
     };
     let app = AppState::from_gcx(gcx.clone()).await;
@@ -1403,13 +1403,13 @@ async fn subchat_stream(
     progress_tool_call_id: Option<&str>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let (gcx, effective_n_ctx, abort_flag, task_meta, worktree) = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         (
-            ccx_locked.global_context.clone(),
-            ccx_locked.n_ctx,
-            ccx_locked.abort_flag.clone(),
-            ccx_locked.task_meta.clone(),
-            ccx_locked.execution_scope_worktree(),
+            cgcx.global_context.clone(),
+            cgcx.n_ctx,
+            cgcx.abort_flag.clone(),
+            cgcx.task_meta.clone(),
+            cgcx.execution_scope_worktree(),
         )
     };
 
@@ -1481,11 +1481,11 @@ async fn subchat_stream(
         stats_agent_id,
         stats_card_id,
     ) = {
-        let ccx_locked = ccx.lock().await;
-        let tm = ccx_locked.task_meta.as_ref();
+        let cgcx = ccx.lock().await;
+        let tm = cgcx.task_meta.as_ref();
         (
-            ccx_locked.chat_id.clone(),
-            ccx_locked.root_chat_id.clone(),
+            cgcx.chat_id.clone(),
+            cgcx.root_chat_id.clone(),
             tm.map(|t| t.task_id.clone()),
             tm.map(|t| t.role.clone()),
             tm.and_then(|t| t.agent_id.clone()),
@@ -1585,7 +1585,7 @@ async fn subchat_stream(
                     total_tokens: 0,
                     cost_usd: None,
                 };
-                if let Some(sender) = &gcx.read().await.llm_stats_sender {
+                if let Some(sender) = &*gcx.llm_stats_sender.lock().unwrap() {
                     if sender.try_send(event).is_err() {
                         tracing::warn!("stats: channel full, dropping LLM call event");
                     }
@@ -1653,7 +1653,7 @@ async fn subchat_stream(
                         .and_then(|u| u.metering_usd.as_ref())
                         .map(|m| m.total_usd),
                 };
-                if let Some(sender) = &gcx.read().await.llm_stats_sender {
+                if let Some(sender) = &*gcx.llm_stats_sender.lock().unwrap() {
                     if sender.try_send(event).is_err() {
                         tracing::warn!("stats: channel full, dropping LLM call event");
                     }
@@ -1765,8 +1765,8 @@ async fn subchat_single_internal(
     progress_tool_call_id: Option<&str>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let gcx = {
-        let ccx_locked = ccx.lock().await;
-        ccx_locked.global_context.clone()
+        let cgcx = ccx.lock().await;
+        cgcx.global_context.clone()
     };
 
     let tools_desclist: Vec<ToolDesc> = {
@@ -1898,7 +1898,7 @@ mod subchat_tests {
             .unwrap()
             .as_secs()
             .saturating_add(60);
-        let caps_state = gcx.read().await.caps_state.clone();
+        let caps_state = gcx.caps_state.clone();
         let mut caps_state = caps_state.write().await;
         caps_state.caps = Some(Arc::new(caps));
         caps_state.last_attempted_ts = now;
@@ -2051,7 +2051,7 @@ mod subchat_tests {
         let gcx = make_test_gcx().await;
         let (_temp, worktree) = sample_worktree();
         let parent_chat_id = "parent-session-chat".to_string();
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = gcx.chat_sessions.clone();
         {
             let mut sessions_write = sessions.write().await;
             let mut parent_session = crate::chat::types::ChatSession::new(parent_chat_id.clone());
@@ -2074,7 +2074,7 @@ mod subchat_tests {
         let (_explicit_temp, mut explicit_worktree) = sample_worktree();
         explicit_worktree.id = "wt-explicit-subchat".to_string();
         let parent_chat_id = "parent-explicit-chat".to_string();
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = gcx.chat_sessions.clone();
         {
             let mut sessions_write = sessions.write().await;
             let mut parent_session = crate::chat::types::ChatSession::new(parent_chat_id.clone());
@@ -2101,10 +2101,9 @@ mod subchat_tests {
         init_repo(&source);
         let gcx = make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            drop(gcx);
+            gcx.cache_dir = cache.clone();
         }
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
@@ -2143,10 +2142,9 @@ mod subchat_tests {
         init_repo(&source);
         let gcx = make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = cache.clone();
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            drop(gcx);
+            gcx.cache_dir = cache.clone();
         }
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
@@ -2168,7 +2166,7 @@ mod subchat_tests {
         };
         let messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
         save_trajectory_as(gcx.clone(), &persisted_thread, &messages).await;
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = gcx.chat_sessions.clone();
         {
             let mut sessions_write = sessions.write().await;
             sessions_write.insert(
@@ -2191,7 +2189,7 @@ mod subchat_tests {
         init_repo(&source);
         let gcx = make_test_gcx().await;
         {
-            gcx.write().await.cache_dir = cache.clone();
+            gcx.cache_dir = cache.clone();
         }
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
@@ -2253,7 +2251,7 @@ mod subchat_tests {
     #[tokio::test]
     async fn test_resolve_subchat_params_normalizes_code_review_for_smaller_model() {
         let gcx = make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         global_configs_try_create_all(&config_dir).await.unwrap();
 
         let thinking_model_id = "claude_code/claude-opus-4-6".to_string();
@@ -2400,7 +2398,7 @@ mod subchat_tests {
     #[tokio::test]
     async fn test_resolve_subchat_params_names_gather_files_light_model_requirement() {
         let gcx = make_test_gcx().await;
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         global_configs_try_create_all(&config_dir).await.unwrap();
 
         let thinking_model_id = "openai/gpt-5".to_string();

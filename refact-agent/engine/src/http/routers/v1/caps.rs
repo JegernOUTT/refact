@@ -12,7 +12,7 @@ pub async fn handle_v1_ping(
     State(app): State<AppState>,
 ) -> Response<Body> {
     let gcx = app.gcx.clone();
-    let ping_message: String = gcx.read().await.cmdline.ping_message.clone();
+    let ping_message: String = gcx.cmdline.ping_message.clone();
     Response::builder()
         .header("Content-Type", "application/json")
         .body(Body::from(ping_message + "\n"))
@@ -60,7 +60,7 @@ pub async fn handle_v1_model_capabilities(
         .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
     if query.refresh {
-        let caps_state = gcx.read().await.caps_state.clone();
+        let caps_state = gcx.caps_state.clone();
         let mut caps_state = caps_state.write().await;
         caps_state.caps = None;
         caps_state.last_attempted_ts = 0;

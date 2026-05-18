@@ -88,7 +88,7 @@ fn merge_response_message(card_id: &str, response: &MergeWorktreeResponse) -> St
 }
 
 async fn clear_board_mirrors_after_registered_merge(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     task_id: &str,
     card_id: &str,
     response: &MergeWorktreeResponse,
@@ -119,7 +119,7 @@ async fn clear_board_mirrors_after_registered_merge(
 }
 
 async fn merge_registered_task_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     workspace_root: &std::path::Path,
     task_id: &str,
     card_id: &str,
@@ -139,7 +139,7 @@ async fn merge_registered_task_worktree(
         .base_branch
         .clone()
         .ok_or("Task has no base branch set")?;
-    let cache_dir = gcx.read().await.cache_dir.clone();
+    let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new(cache_dir, workspace_root.to_path_buf())?;
     let diff = service.diff_worktree(&worktree_id).await.ok();
     let changed_files = diff
@@ -747,10 +747,9 @@ mod worktree_merge_tool_tests {
         run_git(root, &["commit", "-m", message]);
     }
 
-    async fn set_workspace(gcx: Arc<ARwLock<GlobalContext>>, root: &Path) {
+    async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
         let root = root.canonicalize().unwrap();
-        let gcx_locked = gcx.read().await;
-        *gcx_locked.documents_state.workspace_folders.lock().unwrap() = vec![root];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
     }
 
     fn test_card(worktree_id: &str, branch: &str, root: &Path) -> BoardCard {
@@ -776,7 +775,7 @@ mod worktree_merge_tool_tests {
         }
     }
 
-    async fn write_task(gcx: Arc<ARwLock<GlobalContext>>, source: &Path, card: BoardCard) {
+    async fn write_task(gcx: Arc<GlobalContext>, source: &Path, card: BoardCard) {
         let task_dir = source.join(".refact").join("tasks").join("task-1");
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -823,7 +822,7 @@ mod worktree_merge_tool_tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;
-        let cache_dir = gcx.read().await.cache_dir.clone();
+        let cache_dir = gcx.cache_dir.clone();
         let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
         let created = service
             .create_worktree(CreateWorktreeRequest {

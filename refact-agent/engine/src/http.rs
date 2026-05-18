@@ -23,20 +23,19 @@ async fn handler_404(path: Uri) -> impl IntoResponse {
 }
 
 pub async fn start_server(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     ask_shutdown_receiver: std::sync::mpsc::Receiver<String>,
 ) -> Option<JoinHandle<()>> {
     let (port, is_inside_container) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.cmdline.http_port,
-            gcx_locked.cmdline.inside_container,
+            gcx.cmdline.http_port,
+            gcx.cmdline.inside_container,
         )
     };
     if port == 0 {
         return None;
     }
-    let shutdown_flag: Arc<AtomicBool> = gcx.read().await.shutdown_flag.clone();
+    let shutdown_flag: Arc<AtomicBool> = gcx.shutdown_flag.clone();
     Some(tokio::spawn(async move {
         let addr = if is_inside_container {
             ([0, 0, 0, 0], port).into()

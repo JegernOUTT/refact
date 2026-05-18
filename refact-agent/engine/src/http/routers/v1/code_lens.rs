@@ -57,7 +57,7 @@ pub async fn handle_v1_code_lens(
         tracing::info!("chat handler cannot parse input:\n{:?}", body_bytes);
         ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e))
     })?;
-    let codelens_cache = global_context.read().await.codelens_cache.clone();
+    let codelens_cache = global_context.codelens_cache.clone();
 
     let cpath = crate::files_correction::canonical_path(
         &post
@@ -69,7 +69,7 @@ pub async fn handle_v1_code_lens(
     );
     let cpath_str = cpath.to_string_lossy().to_string();
 
-    let ast_service_opt = global_context.read().await.ast_service.lock().unwrap().clone();
+    let ast_service_opt = global_context.ast_service.lock().unwrap().clone();
     let defs: Vec<Arc<AstDefinition>> = if let Some(ast_service) = ast_service_opt {
         let indexing_finished = crate::ast::ast_indexer_thread::ast_indexer_block_until_finished(
             ast_service.clone(),

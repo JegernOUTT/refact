@@ -21,7 +21,7 @@ pub async fn handle_v1_skills_status(
     Path(chat_id): Path<String>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let session_arc = {
         let sessions_read = sessions.read().await;
         sessions_read.get(&chat_id).cloned()

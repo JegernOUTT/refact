@@ -71,13 +71,13 @@ fn ok_message(tool_call_id: &String, content: impl Into<String>) -> Result<(bool
     })]))
 }
 
-async fn context(ccx: Arc<AMutex<AtCommandsContext>>) -> (Arc<ARwLock<GlobalContext>>, String) {
+async fn context(ccx: Arc<AMutex<AtCommandsContext>>) -> (Arc<GlobalContext>, String) {
     let lock = ccx.lock().await;
     (lock.app.gcx.clone(), lock.chat_id.clone())
 }
 
-async fn buddy_initialized(gcx: Arc<ARwLock<GlobalContext>>) -> bool {
-    let buddy_arc = gcx.read().await.buddy.clone();
+async fn buddy_initialized(gcx: Arc<GlobalContext>) -> bool {
+    let buddy_arc = gcx.buddy.clone();
     let initialized = buddy_arc.lock().await.is_some();
     initialized
 }
@@ -117,7 +117,7 @@ impl Tool for ToolBuddySpeak {
         validate(&mood, VALID_MOODS, "mood")?;
         validate(required_str(args, "intent")?, VALID_INTENTS, "intent")?;
         let (gcx, _) = context(ccx).await;
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = gcx.buddy.clone();
         let mut lock = buddy_arc.lock().await;
         let Some(svc) = lock.as_mut() else {
             return ok_message(tool_call_id, "Buddy service not initialized; speech ignored");
@@ -177,15 +177,15 @@ mod tests {
     use crate::buddy::runtime_queue::RuntimeQueue;
     use crate::buddy::settings::BuddySettings;
 
-    async fn ccx(gcx: Arc<ARwLock<GlobalContext>>) -> Arc<AMutex<AtCommandsContext>> {
+    async fn ccx(gcx: Arc<GlobalContext>) -> Arc<AMutex<AtCommandsContext>> {
         Arc::new(AMutex::new(AtCommandsContext::new_from_app(crate::app_state::AppState::from_gcx(gcx).await, 4000, 20, false, vec![], "test-chat".to_string(), None, "test-model".to_string(), None, None).await))
     }
 
-    async fn gcx_with_buddy() -> (tempfile::TempDir, Arc<ARwLock<GlobalContext>>) {
+    async fn gcx_with_buddy() -> (tempfile::TempDir, Arc<GlobalContext>) {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let service = BuddyService::new(dir.path().to_path_buf(), crate::buddy::state::default_buddy_state(), BuddySettings::default(), Vec::new(), RuntimeQueue::new(), tokio::sync::broadcast::channel(16).0, None);
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = gcx.buddy.clone();
         *buddy_arc.lock().await = Some(service);
         (dir, gcx)
     }
@@ -217,7 +217,7 @@ mod tests {
         let tool_call_id = "call".to_string();
         let call_args = args(vec![("title", json!("Workflow started")), ("status", json!("started")), ("dedupe_key", json!("same-key"))]);
         tool.tool_execute(ccx(gcx.clone()).await, &tool_call_id, &call_args).await.unwrap();
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = gcx.buddy.clone();
         let first_len = buddy_arc.lock().await.as_ref().unwrap().runtime_queue.items.len();
         tool.tool_execute(ccx(gcx.clone()).await, &tool_call_id, &call_args).await.unwrap();
         let second_len = buddy_arc.lock().await.as_ref().unwrap().runtime_queue.items.len();

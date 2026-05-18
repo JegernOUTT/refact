@@ -15,7 +15,7 @@ use crate::files_in_workspace::detect_vcs_for_a_file_path;
 const SUBAGENT_ID: &str = "commit_message";
 
 pub async fn generate_commit_message_by_diff(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     diff: &String,
     commit_message_prompt: &Option<String>,
 ) -> Result<String, String> {
@@ -111,12 +111,9 @@ pub async fn generate_commit_message_by_diff(
 }
 
 pub async fn _generate_commit_message_for_projects(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Result<HashMap<PathBuf, String>, String> {
-    let project_folders = gcx
-        .read()
-        .await
-        .documents_state
+    let project_folders = gcx.documents_state
         .workspace_folders
         .lock()
         .unwrap()

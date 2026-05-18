@@ -86,7 +86,7 @@ fn build_deep_research_messages(
 }
 
 async fn execute_deep_research(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     subchat_tx: Arc<AMutex<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>>,
     research_query: String,
     tool_call_id: String,
@@ -250,7 +250,7 @@ impl Tool for ToolDeepResearch {
         };
         let related_memories_note = {
             let gcx = ccx.lock().await.app.gcx.clone();
-            let gcx_read = gcx.read().await;
+            let gcx_read = gcx.clone();
             let idx_guard = gcx_read.knowledge_index.lock().await;
             let cards = idx_guard.related_for_tags(
                 &vec!["deep-research".to_string(), "research".to_string()],

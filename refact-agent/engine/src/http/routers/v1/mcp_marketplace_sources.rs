@@ -162,7 +162,7 @@ pub async fn handle_v1_mcp_marketplace_sources_get(
     State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let cfg = load_sources(&config_dir).await;
 
     let mut sources_json = vec![source_to_api_json(&bundled_source(), false)];
@@ -219,7 +219,7 @@ pub async fn handle_v1_mcp_marketplace_sources_post(
         ));
     }
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let mut cfg = load_sources(&config_dir).await;
 
     let new_source = MarketplaceSource {
@@ -256,7 +256,7 @@ pub async fn handle_v1_mcp_marketplace_sources_delete(
         ));
     }
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let mut cfg = load_sources(&config_dir).await;
 
     let before = cfg.sources.len();
@@ -299,7 +299,7 @@ pub async fn handle_v1_mcp_marketplace_sources_configure(
         ));
     }
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let mut cfg = load_sources(&config_dir).await;
 
     let source = cfg

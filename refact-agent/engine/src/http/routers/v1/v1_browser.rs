@@ -150,7 +150,7 @@ pub async fn handle_browser_start(
             rt.reattach(&post.chat_id);
             let runtime_id = register_browser_runtime(app.clone(), rt).await;
 
-            let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+            let browser_runtimes = gcx.browser_runtimes.clone();
             let runtime_arc = {
                 let browser_runtimes = browser_runtimes.lock().await;
                 browser_runtimes.get(&runtime_id).cloned()
@@ -211,7 +211,7 @@ pub async fn handle_browser_start(
         ));
     }
 
-    let cache_dir = gcx.read().await.cache_dir.clone();
+    let cache_dir = gcx.cache_dir.clone();
     let profile_dir = get_browser_profile_dir(&cache_dir, &post.chat_id);
 
     let runtime =
@@ -226,7 +226,7 @@ pub async fn handle_browser_start(
     rt.reattach(&post.chat_id);
     let runtime_id = register_browser_runtime(app.clone(), rt).await;
 
-    let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+    let browser_runtimes = gcx.browser_runtimes.clone();
     let runtime_arc = {
         let browser_runtimes = browser_runtimes.lock().await;
         browser_runtimes.get(&runtime_id).cloned()
@@ -1860,18 +1860,18 @@ fn recorder_events_to_timeline(
 }
 
 async fn browser_frame_emission_task(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_id: String,
     runtime_id: String,
 ) {
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let mut last_status_json: Option<String> = None;
 
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let runtime_arc = {
-            let browser_runtimes = gcx.read().await.browser_runtimes.clone();
+            let browser_runtimes = gcx.browser_runtimes.clone();
             let browser_runtimes = browser_runtimes.lock().await;
             browser_runtimes.get(&runtime_id).cloned()
         };

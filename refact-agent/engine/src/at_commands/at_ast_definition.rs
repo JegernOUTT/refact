@@ -63,8 +63,8 @@ impl AtParam for AtParamSymbolPathQuery {
             return vec![];
         }
         let (app, top_n) = {
-            let ccx_locked = ccx.lock().await;
-            (ccx_locked.app.clone(), ccx_locked.top_n)
+            let cgcx = ccx.lock().await;
+            (cgcx.app.clone(), cgcx.top_n)
         };
 
         let ast_service_opt = app.workspace.ast_service.clone();

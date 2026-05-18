@@ -337,15 +337,14 @@ pub fn read_integrations_d(
 }
 
 pub async fn get_vars_for_replacements(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     error_log: &mut Vec<YamlError>,
 ) -> HashMap<String, String> {
     let (config_dir, variables_yaml, secrets_yaml) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.config_dir.clone(),
-            gcx_locked.cmdline.variables_yaml.clone(),
-            gcx_locked.cmdline.secrets_yaml.clone(),
+            gcx.config_dir.clone(),
+            gcx.cmdline.variables_yaml.clone(),
+            gcx.cmdline.secrets_yaml.clone(),
         )
     };
     let variables_yaml_path = if variables_yaml.is_empty() {
@@ -416,16 +415,15 @@ pub fn join_config_path(config_dir: &PathBuf, integr_name: &str) -> String {
 }
 
 pub async fn get_config_dirs(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     current_project_path: &Option<PathBuf>,
 ) -> (Vec<PathBuf>, PathBuf) {
     let (global_config_dir, workspace_folders_arc, workspace_vcs_roots_arc, _integrations_yaml) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.config_dir.clone(),
-            gcx_locked.documents_state.workspace_folders.clone(),
-            gcx_locked.documents_state.workspace_vcs_roots.clone(),
-            gcx_locked.cmdline.integrations_yaml.clone(),
+            gcx.config_dir.clone(),
+            gcx.documents_state.workspace_folders.clone(),
+            gcx.documents_state.workspace_vcs_roots.clone(),
+            gcx.cmdline.integrations_yaml.clone(),
         )
     };
 
@@ -492,15 +490,14 @@ pub fn split_path_into_project_and_integration(
 }
 
 pub async fn integrations_all(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     include_non_existent_records: bool,
 ) -> IntegrationResult {
     let (config_dirs, global_config_dir) = get_config_dirs(gcx.clone(), &None).await;
     let (allow_experimental, integrations_yaml_path) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.cmdline.experimental,
-            gcx_locked.cmdline.integrations_yaml.clone(),
+            gcx.cmdline.experimental,
+            gcx.cmdline.integrations_yaml.clone(),
         )
     };
     let lst: Vec<&str> = crate::integrations::integrations_list(allow_experimental);
@@ -534,7 +531,7 @@ pub struct IntegrationGetResult {
 }
 
 pub async fn integration_config_get(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     integr_config_path: String,
 ) -> Result<IntegrationGetResult, String> {
     let sanitized_path = crate::files_correction::canonical_path(&integr_config_path);
@@ -617,7 +614,7 @@ pub async fn integration_config_get(
 }
 
 pub async fn integration_config_save(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     integr_config_path: &String,
     integr_values: &serde_json::Value,
 ) -> Result<(), String> {

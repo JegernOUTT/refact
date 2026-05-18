@@ -90,9 +90,8 @@ impl Tool for ToolBuddyGetContext {
 
         let gcx = ccx.lock().await.app.gcx.clone();
         let (config_dir, project_dirs) = {
-            let lock = gcx.read().await;
             (
-                lock.config_dir.clone(),
+                gcx.config_dir.clone(),
                 crate::files_correction::get_project_dirs(gcx.clone()),
             )
         };
@@ -195,9 +194,9 @@ async fn read_dir_summary(dir: &std::path::Path, depth: usize) -> String {
 }
 
 async fn read_integrations_summary(
-    gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    gcx: Arc<crate::global_context::GlobalContext>,
 ) -> String {
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let integr_dir = config_dir.join("integrations.d");
     if !integr_dir.exists() {
         return "no integrations.d directory found".to_string();
@@ -234,7 +233,7 @@ async fn read_mcp_summary(config_dir: &std::path::Path) -> String {
 }
 
 async fn read_modes_summary(
-    gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    gcx: Arc<crate::global_context::GlobalContext>,
 ) -> String {
     use crate::yaml_configs::customization_registry::get_project_registry;
     let Some(registry) = get_project_registry(gcx).await else {
@@ -246,7 +245,7 @@ async fn read_modes_summary(
 }
 
 async fn read_setup_status(
-    gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    gcx: Arc<crate::global_context::GlobalContext>,
     project_root: &Option<std::path::PathBuf>,
 ) -> String {
     let Some(root) = project_root else {
@@ -255,7 +254,7 @@ async fn read_setup_status(
     let agents_md = root.join("AGENTS.md");
     let has_agents_md = tokio::fs::try_exists(&agents_md).await.unwrap_or(false);
 
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let stage = lock
         .as_ref()

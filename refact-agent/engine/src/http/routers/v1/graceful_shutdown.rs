@@ -11,8 +11,7 @@ pub async fn handle_v1_graceful_shutdown(
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let global_context = app.gcx.clone();
-    let gcx_locked = global_context.read().await;
-    gcx_locked
+    global_context
         .ask_shutdown_sender
         .lock()
         .unwrap()

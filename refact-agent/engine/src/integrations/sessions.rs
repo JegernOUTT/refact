@@ -9,9 +9,9 @@ use crate::global_context::GlobalContext;
 
 const STOP_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn remove_expired_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
+async fn remove_expired_sessions(gcx: Arc<GlobalContext>) {
     let sessions = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions
             .iter()
@@ -31,7 +31,7 @@ async fn remove_expired_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
     }
 
     if !expired_entries.is_empty() {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let mut integration_sessions = integration_sessions.lock().await;
         for (key, expired_session) in &expired_entries {
             let should_remove = integration_sessions
@@ -56,9 +56,9 @@ async fn remove_expired_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
     futures::future::join_all(futures).await;
 }
 
-pub async fn remove_expired_sessions_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn remove_expired_sessions_background_task(gcx: Arc<GlobalContext>) {
     loop {
-        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        let shutdown_flag = gcx.shutdown_flag.clone();
         tokio::select! {
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {}
             _ = async {
@@ -74,9 +74,9 @@ pub async fn remove_expired_sessions_background_task(gcx: Arc<ARwLock<GlobalCont
     }
 }
 
-pub async fn stop_sessions(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn stop_sessions(gcx: Arc<GlobalContext>) {
     let sessions = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let mut integration_sessions = integration_sessions.lock().await;
         let sessions = integration_sessions
             .iter()

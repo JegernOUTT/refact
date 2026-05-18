@@ -140,7 +140,7 @@ pub async fn handle_transform_preview(
     let req: TransformRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let mut messages = {
@@ -174,7 +174,7 @@ pub async fn handle_transform_apply(
     let req: TransformRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let stats = {
@@ -224,7 +224,7 @@ pub async fn handle_handoff_preview(
     let req: HandoffRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let messages = {
@@ -260,7 +260,7 @@ pub async fn handle_handoff_apply(
     let req: HandoffRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let (messages, thread, task_meta) = {
@@ -352,7 +352,7 @@ pub async fn handle_handoff_apply(
 }
 
 async fn save_trajectory_snapshot_with_parent(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     mut snapshot: TrajectorySnapshot,
     parent_id: &str,
     link_type: &str,
@@ -381,7 +381,7 @@ pub async fn handle_mode_transition_apply(
     let req: ModeTransitionApplyRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
     let (messages, thread, task_meta, session_state) = {
@@ -419,8 +419,7 @@ pub async fn handle_mode_transition_apply(
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let path_context = {
-        let gcx_lock = gcx.read().await;
-        AgenticPathContext::from_context(&*gcx_lock)
+        AgenticPathContext::from_context(&*gcx)
     };
     let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
@@ -499,7 +498,7 @@ pub async fn handle_planner_from_transition(
         .await
         .map_err(|e| ScratchError::new(StatusCode::NOT_FOUND, e))?;
 
-    let sessions = gcx.read().await.chat_sessions.clone();
+    let sessions = gcx.chat_sessions.clone();
     let session_arc =
         get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &req.source_chat_id).await;
 
@@ -538,8 +537,7 @@ pub async fn handle_planner_from_transition(
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let path_context = {
-        let gcx_lock = gcx.read().await;
-        AgenticPathContext::from_context(&*gcx_lock)
+        AgenticPathContext::from_context(&*gcx)
     };
     let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
@@ -647,11 +645,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() =
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
                 vec![dir.path().to_path_buf()];
-            drop(gcx_lock);
-            gcx.write().await.cache_dir = dir.path().join("cache");
+            drop(gcx);
+            gcx.cache_dir = dir.path().join("cache");
         }
         let snapshot = TrajectorySnapshot {
             chat_id: "transition-chat".to_string(),

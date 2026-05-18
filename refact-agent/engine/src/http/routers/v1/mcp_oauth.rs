@@ -91,11 +91,11 @@ fn reject_path_traversal(config_path: &str) -> Result<(), ScratchError> {
 }
 
 async fn validate_mcp_config_path(
-    gcx: &Arc<ARwLock<GlobalContext>>,
+    gcx: &Arc<GlobalContext>,
     config_path: &str,
 ) -> Result<String, ScratchError> {
     reject_path_traversal(config_path)?;
-    let integration_sessions = gcx.read().await.integration_sessions.clone();
+    let integration_sessions = gcx.integration_sessions.clone();
     let exists = integration_sessions.lock().await.contains_key(config_path);
     if !exists {
         return Err(ScratchError::new(
@@ -106,7 +106,7 @@ async fn validate_mcp_config_path(
     Ok(config_path.to_string())
 }
 
-async fn reload_mcp_integration(gcx: Arc<ARwLock<GlobalContext>>, config_path: &str) {
+async fn reload_mcp_integration(gcx: Arc<GlobalContext>, config_path: &str) {
     let config_filename = std::path::Path::new(config_path)
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
@@ -145,7 +145,7 @@ pub async fn handle_v1_mcp_oauth_start(
 
     validate_mcp_config_path(&gcx, &req.config_path).await?;
 
-    let http_port = gcx.read().await.cmdline.http_port;
+    let http_port = gcx.cmdline.http_port;
     let redirect_uri = format!("http://127.0.0.1:{}/v1/mcp/oauth/callback", http_port);
 
     let config_content = tokio::fs::read_to_string(&req.config_path)

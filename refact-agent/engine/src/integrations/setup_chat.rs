@@ -9,7 +9,7 @@ use crate::scratchpads::scratchpad_utils::HasRagResults;
 use crate::tools::tools_list::get_tools_for_mode;
 
 pub async fn mix_setup_messages(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_meta: &ChatMeta,
     messages: &mut Vec<ChatMessage>,
     stream_back_to_user: &mut HasRagResults,
@@ -31,7 +31,7 @@ pub async fn mix_setup_messages(
     };
 
     if sp_text.contains("%ALL_INTEGRATIONS%") {
-        let allow_experimental = gcx.read().await.cmdline.experimental;
+        let allow_experimental = gcx.cmdline.experimental;
         let all_integrations = crate::integrations::integrations_list(allow_experimental);
         sp_text = sp_text.replace("%ALL_INTEGRATIONS%", &all_integrations.join(", "));
     }

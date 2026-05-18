@@ -268,7 +268,7 @@ pub async fn handle_v1_integrations_mcp_logs(
 
     let session_key = post.config_path;
     let session = {
-        let integration_sessions = gcx.read().await.integration_sessions.clone();
+        let integration_sessions = gcx.integration_sessions.clone();
         let integration_sessions = integration_sessions.lock().await;
         integration_sessions.get(&session_key).cloned()
     }

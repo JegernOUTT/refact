@@ -137,7 +137,7 @@ mod tests {
 
     async fn gcx_with_cache(cache_dir: &Path) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        gcx.write().await.cache_dir = cache_dir.to_path_buf();
+        gcx.cache_dir = cache_dir.to_path_buf();
         let app = AppState::from_gcx(gcx).await;
         app
     }

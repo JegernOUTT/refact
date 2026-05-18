@@ -228,8 +228,7 @@ pub async fn run() {
             )
             .await,
         );
-        let gcx_locked = gcx.read().await;
-        *gcx_locked.ast_service.lock().unwrap() = tmp;
+        *gcx.ast_service.lock().unwrap() = tmp;
     }
 
     // Start or connect to mcp servers

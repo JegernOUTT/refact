@@ -59,10 +59,10 @@ impl Tool for ToolTree {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
         let scoped_enforced = execution_scope
@@ -159,7 +159,7 @@ impl Tool for ToolTree {
                     let is_within_project_dirs =
                         all_project_dirs.iter().any(|p| true_path.starts_with(&p))
                             || project_dirs.iter().any(|p| true_path.starts_with(&p));
-                    if !is_within_project_dirs && !gcx.read().await.cmdline.inside_container {
+                    if !is_within_project_dirs && !gcx.cmdline.inside_container {
                         return Err(format!("⚠️ '{}' is outside project directories. 💡 Use tree() without path to see project root", path));
                     }
 
@@ -192,7 +192,7 @@ impl Tool for ToolTree {
         // we try to surface memories that reference the directory itself via related_files.
         // This keeps the lookup fast (in-memory index) and doesn't require VecDB.
         let related_section = {
-            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;
             let path_key = path_mb_for_related.clone();
             let mut keys: Vec<String> = Vec::new();

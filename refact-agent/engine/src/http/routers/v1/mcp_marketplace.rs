@@ -434,7 +434,7 @@ async fn fetch_official_registry_servers(
 }
 
 async fn load_source_servers(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     source: &MarketplaceSource,
     query: Option<&str>,
     page: u32,
@@ -470,7 +470,7 @@ async fn load_source_servers(
                 if source.id == BUNDLED_SOURCE_ID {
                     (bundled_index(), "bundled")
                 } else {
-                    let http_client = gcx.read().await.http_client.clone();
+                    let http_client = gcx.http_client.clone();
                     match source.url.as_deref() {
                         Some(url) => match fetch_refact_index(&http_client, url).await {
                             Some(idx) => (idx, "remote"),
@@ -525,14 +525,14 @@ async fn load_source_servers(
             (page_items, total, status)
         }
         SourceType::Smithery => {
-            let config_dir = gcx.read().await.config_dir.clone();
+            let config_dir = gcx.config_dir.clone();
             let sources_cfg = load_sources(&config_dir).await;
             let api_key = match smithery_api_key(&sources_cfg.sources) {
                 Some(k) => k,
                 None => return (vec![], 0, "no_api_key"),
             };
 
-            let http_client = gcx.read().await.http_client.clone();
+            let http_client = gcx.http_client.clone();
             match fetch_smithery_servers(&http_client, &api_key, query, page, page_size).await {
                 Ok((servers, total)) => {
                     let source_id = source.id.clone();
@@ -549,7 +549,7 @@ async fn load_source_servers(
             }
         }
         SourceType::OfficialMcp => {
-            let http_client = gcx.read().await.http_client.clone();
+            let http_client = gcx.http_client.clone();
             let query_str = query.unwrap_or("");
             match fetch_official_registry_servers(&http_client, query_str, page, page_size).await {
                 Ok((servers, _)) => {
@@ -605,7 +605,7 @@ pub async fn handle_v1_mcp_marketplace_get(
     let page_size = params.page_size.unwrap_or(50).min(100).max(1);
     let query = params.q.as_deref();
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let (bundled, user_sources) = get_all_sources(&config_dir).await;
 
     let bundled_removable = false;
@@ -744,11 +744,11 @@ pub struct ConfigOverrides {
 }
 
 async fn find_server_in_sources(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     server_id: &str,
     source_id: Option<&str>,
 ) -> Option<(MarketplaceServer, String)> {
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let (bundled, user_sources) = get_all_sources(&config_dir).await;
 
     let mut all_sources: Vec<MarketplaceSource> = vec![bundled];
@@ -765,7 +765,7 @@ async fn find_server_in_sources(
             let index = if source.id == BUNDLED_SOURCE_ID {
                 bundled_index()
             } else {
-                let http_client = gcx.read().await.http_client.clone();
+                let http_client = gcx.http_client.clone();
                 match source.url.as_deref() {
                     Some(url) => match fetch_refact_index(&http_client, url).await {
                         Some(idx) => idx,
@@ -783,12 +783,12 @@ async fn find_server_in_sources(
                 Some(k) => k,
                 None => continue,
             };
-            let http_client = gcx.read().await.http_client.clone();
+            let http_client = gcx.http_client.clone();
             if let Some(server) = fetch_smithery_detail(&http_client, server_id, &api_key).await {
                 return Some((server, source.id.clone()));
             }
         } else if source.source_type == SourceType::OfficialMcp {
-            let http_client = gcx.read().await.http_client.clone();
+            let http_client = gcx.http_client.clone();
             if let Ok((servers, _)) =
                 fetch_official_registry_servers(&http_client, "", 1, 100).await
             {
@@ -850,7 +850,7 @@ pub async fn install_mcp_marketplace_server(
         }
     }
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
     tokio::fs::create_dir_all(&integrations_dir)
         .await
@@ -1118,7 +1118,7 @@ pub async fn handle_v1_mcp_marketplace_installed(
     State(app): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
 
     let bundled = bundled_index();

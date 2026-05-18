@@ -79,7 +79,7 @@ pub fn resolve_path_with_scope(
 }
 
 pub async fn parse_path_for_update(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     privacy_settings: Arc<PrivacySettings>,
     execution_scope: Option<&ExecutionScope>,
@@ -131,7 +131,7 @@ pub async fn parse_path_for_update(
 }
 
 pub async fn parse_path_for_create(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     privacy_settings: Arc<PrivacySettings>,
     execution_scope: Option<&ExecutionScope>,
@@ -296,8 +296,8 @@ pub fn convert_edit_to_diffchunks(
     Ok(diff_chunks)
 }
 
-pub async fn await_ast_indexing(gcx: Arc<ARwLock<GlobalContext>>) -> Result<(), String> {
-    let ast_service_mb = gcx.read().await.ast_service.lock().unwrap().clone();
+pub async fn await_ast_indexing(gcx: Arc<GlobalContext>) -> Result<(), String> {
+    let ast_service_mb = gcx.ast_service.lock().unwrap().clone();
     if let Some(ast_service) = &ast_service_mb {
         ast_indexer_block_until_finished(ast_service.clone(), 20_000, true).await;
     }
@@ -305,10 +305,10 @@ pub async fn await_ast_indexing(gcx: Arc<ARwLock<GlobalContext>>) -> Result<(), 
 }
 
 pub async fn sync_documents_ast(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     doc: &PathBuf,
 ) -> Result<(), String> {
-    let ast_service_mb = gcx.read().await.ast_service.lock().unwrap().clone();
+    let ast_service_mb = gcx.ast_service.lock().unwrap().clone();
     if let Some(ast_service) = &ast_service_mb {
         ast_indexer_enqueue_files(
             ast_service.clone(),
@@ -321,7 +321,7 @@ pub async fn sync_documents_ast(
 }
 
 pub async fn write_file(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &PathBuf,
     file_text: &String,
     dry: bool,
@@ -366,9 +366,7 @@ pub async fn write_file(
             warn!("{err}");
             err
         })?;
-        gcx.write()
-            .await
-            .documents_state
+        gcx.documents_state
             .memory_document_map.lock().await
             .remove(path);
     }
@@ -377,7 +375,7 @@ pub async fn write_file(
 }
 
 pub async fn str_replace(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &PathBuf,
     old_str: &String,
     new_str: &String,
@@ -434,7 +432,7 @@ pub async fn str_replace(
 }
 
 pub async fn str_replace_anchored(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &PathBuf,
     mode: AnchorMode,
     anchor1: &str,
@@ -485,7 +483,7 @@ pub async fn str_replace_anchored(
 }
 
 pub async fn str_replace_lines(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &PathBuf,
     new_content: &String,
     ranges_str: &str,
@@ -569,7 +567,7 @@ pub async fn str_replace_lines(
 }
 
 pub async fn str_replace_regex(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &PathBuf,
     pattern: &Regex,
     replacement: &String,
@@ -703,7 +701,7 @@ mod tests {
             outside: PathBuf,
             scope: ExecutionScope,
             worktree: WorktreeMeta,
-            gcx: Arc<ARwLock<GlobalContext>>,
+            gcx: Arc<GlobalContext>,
         }
 
         fn now_plus_hour() -> u64 {
@@ -714,9 +712,8 @@ mod tests {
                 + 3600
         }
 
-        async fn set_privacy(gcx: Arc<ARwLock<GlobalContext>>, blocked: Vec<String>) {
-            let gcx_locked = gcx.read().await;
-            *gcx_locked.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+        async fn set_privacy(gcx: Arc<GlobalContext>, blocked: Vec<String>) {
+            *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
                 privacy_rules: FilePrivacySettings {
                     only_send_to_servers_I_control: Vec::new(),
                     blocked,

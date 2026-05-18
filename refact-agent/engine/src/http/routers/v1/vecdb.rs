@@ -23,7 +23,7 @@ pub async fn handle_v1_vecdb_search(
     let post = serde_json::from_slice::<VecDBPost>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("JSON problem: {}", e)))?;
 
-    let vec_db = gcx.read().await.vec_db.clone();
+    let vec_db = gcx.vec_db.clone();
     let search_res = match *vec_db.lock().await {
         Some(ref db) => {
             db.vecdb_search(post.query.to_string(), post.top_n, None)
@@ -59,7 +59,7 @@ pub async fn handle_v1_vecdb_status(
     _: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let vec_db = gcx.read().await.vec_db.clone();
+    let vec_db = gcx.vec_db.clone();
     let status_str = match crate::vecdb::vdb_highlev::get_status(vec_db).await {
         Ok(Some(status)) => serde_json::to_string_pretty(&status).unwrap(),
         Ok(None) => "{\"success\": 0, \"detail\": \"turned_off\"}".to_string(),

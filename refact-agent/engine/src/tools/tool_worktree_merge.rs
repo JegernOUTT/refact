@@ -101,10 +101,10 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
 }
 
 async fn service_from_gcx(
-    gcx: Arc<tokio::sync::RwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     requested_source_root: Option<String>,
 ) -> Result<WorktreeService, String> {
-    let cache_dir = gcx.read().await.cache_dir.clone();
+    let cache_dir = gcx.cache_dir.clone();
     let project_dirs = crate::files_correction::get_project_dirs(gcx).await;
     if project_dirs.is_empty() {
         return Err("No project root available".to_string());

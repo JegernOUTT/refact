@@ -42,7 +42,7 @@ fn sampling_message_to_chat_message(msg: &SamplingMessage) -> ChatMessage {
 }
 
 pub async fn mcp_sampling_create_message(
-    gcx_weak: Weak<ARwLock<GlobalContext>>,
+    gcx_weak: Weak<GlobalContext>,
     params: CreateMessageRequestParams,
     debug_name: &str,
 ) -> Result<CreateMessageResult, McpError> {

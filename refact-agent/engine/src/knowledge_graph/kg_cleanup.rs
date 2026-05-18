@@ -19,8 +19,8 @@ struct CleanupState {
     last_run: i64,
 }
 
-async fn load_cleanup_state(gcx: Arc<ARwLock<GlobalContext>>) -> CleanupState {
-    let cache_dir = gcx.read().await.cache_dir.clone();
+async fn load_cleanup_state(gcx: Arc<GlobalContext>) -> CleanupState {
+    let cache_dir = gcx.cache_dir.clone();
     let state_file = cache_dir.join("knowledge_cleanup_state.json");
 
     match fs::read_to_string(&state_file).await {
@@ -29,8 +29,8 @@ async fn load_cleanup_state(gcx: Arc<ARwLock<GlobalContext>>) -> CleanupState {
     }
 }
 
-async fn save_cleanup_state(gcx: Arc<ARwLock<GlobalContext>>, state: &CleanupState) {
-    let cache_dir = gcx.read().await.cache_dir.clone();
+async fn save_cleanup_state(gcx: Arc<GlobalContext>, state: &CleanupState) {
+    let cache_dir = gcx.cache_dir.clone();
     let state_file = cache_dir.join("knowledge_cleanup_state.json");
 
     if let Ok(content) = serde_json::to_string(state) {
@@ -38,7 +38,7 @@ async fn save_cleanup_state(gcx: Arc<ARwLock<GlobalContext>>, state: &CleanupSta
     }
 }
 
-pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn knowledge_cleanup_background_task(gcx: Arc<GlobalContext>) {
     loop {
         let state = load_cleanup_state(gcx.clone()).await;
         let now = Utc::now().timestamp();
@@ -64,7 +64,7 @@ pub async fn knowledge_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>)
             save_cleanup_state(gcx.clone(), &new_state).await;
         }
 
-        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        let shutdown_flag = gcx.shutdown_flag.clone();
         tokio::select! {
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(24 * 60 * 60)) => {}
             _ = async {
@@ -87,7 +87,7 @@ struct CleanupReport {
     orphan_warnings: usize,
 }
 
-async fn run_cleanup(gcx: Arc<ARwLock<GlobalContext>>) -> Result<CleanupReport, String> {
+async fn run_cleanup(gcx: Arc<GlobalContext>) -> Result<CleanupReport, String> {
     let kg = build_knowledge_graph(gcx.clone()).await;
     let staleness = kg.check_staleness(STALE_DOC_AGE_DAYS, TRAJECTORY_MAX_AGE_DAYS);
     let mut report = CleanupReport::default();

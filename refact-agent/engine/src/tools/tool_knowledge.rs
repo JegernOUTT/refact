@@ -134,7 +134,7 @@ impl Tool for ToolGetKnowledge {
 
             // Add a short-form related memories section (fast, in-memory).
             let related = {
-                let gcx_read = gcx.read().await;
+                let gcx_read = gcx.clone();
                 let idx_guard = gcx_read.knowledge_index.lock().await;
                 let mut tags: Vec<String> = unique_memories
                     .iter()

@@ -20,9 +20,7 @@ pub async fn handle_v1_voice_transcribe(
     let req: TranscribeRequest = serde_json::from_slice(&body)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let gcx_locked = gcx.read().await;
-    let voice_service = gcx_locked.voice_service.clone();
-    drop(gcx_locked);
+    let voice_service = gcx.voice_service.clone();
 
     let result = voice_service
         .transcribe(req)
@@ -92,9 +90,8 @@ pub async fn handle_v1_voice_download(
         WhisperModel::from_name(&req.model)
             .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
-        let gcx_locked = gcx.read().await;
-        let voice_service = gcx_locked.voice_service.clone();
-        drop(gcx_locked);
+        let voice_service = gcx.voice_service.clone();
+        drop(gcx);
 
         let voice_service_clone = voice_service.clone();
         let model_name = req.model.clone();
@@ -119,9 +116,7 @@ pub async fn handle_v1_voice_status(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let gcx_locked = gcx.read().await;
-    let voice_service = gcx_locked.voice_service.clone();
-    drop(gcx_locked);
+    let voice_service = gcx.voice_service.clone();
 
     let response = VoiceStatusResponse {
         enabled: crate::voice::VoiceService::is_enabled(),
@@ -146,9 +141,7 @@ pub async fn handle_v1_voice_stream_subscribe(
     let gcx = app.gcx.clone();
     let language = params.get("language").cloned();
 
-    let gcx_locked = gcx.read().await;
-    let voice_service = gcx_locked.voice_service.clone();
-    drop(gcx_locked);
+    let voice_service = gcx.voice_service.clone();
 
     let session_arc = voice_service
         .get_or_create_session(&session_id, language)
@@ -191,9 +184,7 @@ pub async fn handle_v1_voice_stream_chunk(
     let req: StreamingChunkRequest = serde_json::from_slice(&body)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    let gcx_locked = gcx.read().await;
-    let voice_service = gcx_locked.voice_service.clone();
-    drop(gcx_locked);
+    let voice_service = gcx.voice_service.clone();
 
     let session_arc = voice_service
         .get_or_create_session(&session_id, req.language.clone())

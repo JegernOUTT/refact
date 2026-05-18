@@ -47,15 +47,12 @@ pub(crate) struct AgentStatus {
 }
 
 pub(crate) async fn get_agent_statuses(
-    gcx: Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    gcx: Arc<crate::global_context::GlobalContext>,
     task_id: &str,
 ) -> Result<Vec<AgentStatus>, String> {
     let board = storage::load_board(gcx.clone(), task_id).await?;
 
-    let sessions = {
-        let gcx_locked = gcx.read().await;
-        gcx_locked.chat_sessions.clone()
-    };
+    let sessions = gcx.chat_sessions.clone();
 
     let mut statuses = Vec::new();
 

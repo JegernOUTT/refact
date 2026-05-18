@@ -28,7 +28,7 @@ pub async fn handle_v1_config_path(
     _body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let global_context = app.gcx.clone();
-    let config_dir = global_context.read().await.config_dir.clone();
+    let config_dir = global_context.config_dir.clone();
     Ok(Response::builder()
         .status(StatusCode::OK)
         .body(Body::from(config_dir.to_string_lossy().to_string()))

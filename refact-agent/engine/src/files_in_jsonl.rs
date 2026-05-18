@@ -14,7 +14,7 @@ use crate::global_context::GlobalContext;
 use crate::ast::ast_indexer_thread::ast_indexer_enqueue_files;
 
 pub async fn enqueue_all_docs_from_jsonl(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     paths: Vec<PathBuf>,
     force: bool,
     vecdb_only: bool,
@@ -31,13 +31,12 @@ pub async fn enqueue_all_docs_from_jsonl(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let gcx_locked = gcx.write().await;
-        *gcx_locked.documents_state.cache_dirty.lock().await = now;
-        let jsonl_files = &mut gcx_locked.documents_state.jsonl_files.lock().unwrap();
+        *gcx.documents_state.cache_dirty.lock().await = now;
+        let jsonl_files = &mut gcx.documents_state.jsonl_files.lock().unwrap();
         jsonl_files.clear();
         jsonl_files.extend(paths);
-        let vec_db_module = gcx_locked.vec_db.clone();
-        let ast_service = gcx_locked.ast_service.lock().unwrap().clone();
+        let vec_db_module = gcx.vec_db.clone();
+        let ast_service = gcx.ast_service.lock().unwrap().clone();
         (vec_db_module, ast_service)
     };
     if let Some(ast) = &ast_service {
@@ -52,7 +51,7 @@ pub async fn enqueue_all_docs_from_jsonl(
 }
 
 pub async fn enqueue_all_docs_from_jsonl_but_read_first(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     force: bool,
     vecdb_only: bool,
 ) {
@@ -92,8 +91,8 @@ async fn parse_jsonl(jsonl_path: &String) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
-pub async fn read_the_jsonl(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
-    let files_jsonl_path = gcx.read().await.cmdline.files_jsonl_path.clone();
+pub async fn read_the_jsonl(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    let files_jsonl_path = gcx.cmdline.files_jsonl_path.clone();
     match parse_jsonl(&files_jsonl_path).await {
         Ok(docs) => docs,
         Err(e) => {
@@ -118,12 +117,12 @@ fn make_async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::
     Ok((watcher, rx))
 }
 
-pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
-    async fn on_modify(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<GlobalContext>) {
+    async fn on_modify(gcx: Arc<GlobalContext>) {
         enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false, false).await;
     }
     let (mut watcher, mut rx) = make_async_watcher().expect("Failed to make file watcher");
-    let files_jsonl_path = gcx.read().await.cmdline.files_jsonl_path.clone();
+    let files_jsonl_path = gcx.cmdline.files_jsonl_path.clone();
     on_modify(gcx.clone()).await;
     if watcher
         .watch(

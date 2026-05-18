@@ -14,9 +14,9 @@ const MAX_INACTIVE_REPO_DURATION: Duration = Duration::from_secs(7 * SECONDS_PER
 pub const RECENT_COMMITS_DURATION: Duration = Duration::from_secs(3 * SECONDS_PER_DAY); // 3 days
 const CLEANUP_INTERVAL_DURATION: Duration = Duration::from_secs(SECONDS_PER_DAY); // 1 day
 
-pub async fn git_shadow_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn git_shadow_cleanup_background_task(gcx: Arc<GlobalContext>) {
     loop {
-        let shutdown_flag = gcx.read().await.shutdown_flag.clone();
+        let shutdown_flag = gcx.shutdown_flag.clone();
         // wait 2 mins before cleanup; lower priority than other startup tasks
         tokio::select! {
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(2 * 60)) => {}
@@ -31,8 +31,7 @@ pub async fn git_shadow_cleanup_background_task(gcx: Arc<ARwLock<GlobalContext>>
         }
 
         let cache_dir = {
-            let gcx_locked = gcx.read().await;
-            gcx_locked.cache_dir.clone()
+            gcx.cache_dir.clone()
         };
         let workspace_folders = get_project_dirs(gcx.clone()).await;
         let workspace_folder_hashes: Vec<_> = workspace_folders

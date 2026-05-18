@@ -141,7 +141,7 @@ impl Tool for ToolAskQuestions {
 
         {
             let ccx_lock = ccx.lock().await;
-            let gcx = ccx_lock.global_context.read().await;
+            let gcx = ccx_lock.global_context.clone();
             if let Some(ref tx) = gcx.notification_events_tx {
                 let notification_questions: Vec<NotificationQuestion> = questions
                     .iter()

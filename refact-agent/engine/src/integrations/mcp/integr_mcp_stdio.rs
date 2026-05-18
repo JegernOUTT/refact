@@ -30,7 +30,7 @@ pub struct SettingsMCPStdio {
 
 #[derive(Default, Clone)]
 pub struct IntegrationMCPStdio {
-    pub gcx_option: Option<Weak<ARwLock<GlobalContext>>>,
+    pub gcx_option: Option<Weak<GlobalContext>>,
     pub cfg: SettingsMCPStdio,
     pub common: IntegrationCommon,
     pub config_path: String,
@@ -203,7 +203,7 @@ pub struct IntegrationMCPUnified {
 impl IntegrationTrait for IntegrationMCPUnified {
     async fn integr_settings_apply(
         &mut self,
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
         config_path: String,
         value: &serde_json::Value,
     ) -> Result<(), serde_json::Error> {

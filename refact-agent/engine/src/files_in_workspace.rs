@@ -51,7 +51,7 @@ pub use refact_files::correction_cache::CacheCorrection;
 pub use refact_ast::Document;
 
 pub async fn get_file_text_from_memory_or_disk(
-    global_context: Arc<ARwLock<GlobalContext>>,
+    global_context: Arc<GlobalContext>,
     file_path: &PathBuf,
 ) -> Result<String, String> {
     check_file_privacy(
@@ -60,10 +60,7 @@ pub async fn get_file_text_from_memory_or_disk(
         &FilePrivacyLevel::AllowToSendAnywhere,
     )?;
 
-    if let Some(doc) = global_context
-        .read()
-        .await
-        .documents_state
+    if let Some(doc) = global_context.documents_state
         .memory_document_map.lock().await
         .get(file_path)
     {
@@ -79,7 +76,7 @@ pub async fn get_file_text_from_memory_or_disk(
 }
 
 pub async fn check_file_privacy_for_send(
-    global_context: Arc<ARwLock<GlobalContext>>,
+    global_context: Arc<GlobalContext>,
     file_path: &PathBuf,
 ) -> Result<(), String> {
     check_file_privacy(
@@ -90,7 +87,7 @@ pub async fn check_file_privacy_for_send(
 }
 
 pub async fn filter_privacy_allowed_files(
-    global_context: Arc<ARwLock<GlobalContext>>,
+    global_context: Arc<GlobalContext>,
     files: Vec<PathBuf>,
 ) -> Vec<PathBuf> {
     let privacy = load_privacy_if_needed(global_context).await;
@@ -109,7 +106,7 @@ pub async fn filter_privacy_allowed_files(
 
 pub async fn update_document_text_from_disk(
     doc: &mut Document,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Result<(), String> {
     match read_file_from_disk(load_privacy_if_needed(gcx.clone()).await, &doc.doc_path).await {
         Ok(res) => {
@@ -122,7 +119,7 @@ pub async fn update_document_text_from_disk(
 
 pub async fn get_document_text_or_read_from_disk(
     doc: &mut Document,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> Result<String, String> {
     if doc.doc_text.is_some() {
         return Ok(doc.doc_text.as_ref().unwrap().to_string());
@@ -144,15 +141,15 @@ pub struct DocumentsState {
     // query on windows: C:/Users/user/Documents/file.ext
     pub memory_document_map: Arc<AMutex<HashMap<PathBuf, Arc<ARwLock<Document>>>>>, // if a file is open in IDE, and it's outside workspace dirs, it will be in this map and not in workspace_files
     pub cache_dirty: Arc<AMutex<f64>>,
-    pub cache_correction: Arc<CacheCorrection>,
-    pub fs_watcher: Option<Arc<ARwLock<RecommendedWatcher>>>,
+    pub cache_correction: Arc<StdMutex<Arc<CacheCorrection>>>,
+    pub fs_watcher: Arc<StdMutex<Option<Arc<ARwLock<RecommendedWatcher>>>>>,
 }
 
 async fn mem_overwrite_or_create_document(
-    global_context: Arc<ARwLock<GlobalContext>>,
+    global_context: Arc<GlobalContext>,
     document: Document,
 ) -> (Arc<ARwLock<Document>>, Arc<AMutex<f64>>, bool) {
-    let cx = global_context.read().await;
+    let cx = global_context.clone();
     let mut doc_map = cx.documents_state.memory_document_map.lock().await;
     if let Some(existing_doc) = doc_map.get_mut(&document.doc_path) {
         *existing_doc.write().await = document;
@@ -180,13 +177,13 @@ impl DocumentsState {
             jsonl_files: Arc::new(StdMutex::new(Vec::new())),
             memory_document_map: Arc::new(AMutex::new(HashMap::new())),
             cache_dirty: Arc::new(AMutex::<f64>::new(0.0)),
-            cache_correction: Arc::new(CacheCorrection::new()),
-            fs_watcher: None,
+            cache_correction: Arc::new(StdMutex::new(Arc::new(CacheCorrection::new()))),
+            fs_watcher: Arc::new(StdMutex::new(None)),
         }
     }
 }
 
-pub async fn watcher_init(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn watcher_init(gcx: Arc<GlobalContext>) {
     let gcx_weak = Arc::downgrade(&gcx);
     let rt = tokio::runtime::Handle::current();
     let event_callback = move |res| {
@@ -205,7 +202,7 @@ pub async fn watcher_init(gcx: Arc<ARwLock<GlobalContext>>) {
     };
 
     let workspace_folders: Arc<StdMutex<Vec<PathBuf>>> =
-        gcx.read().await.documents_state.workspace_folders.clone();
+        gcx.documents_state.workspace_folders.clone();
 
     for folder in workspace_folders.lock().unwrap().iter() {
         info!("ADD WATCHER (1): {}", folder.display());
@@ -214,8 +211,7 @@ pub async fn watcher_init(gcx: Arc<ARwLock<GlobalContext>>) {
 
     let new_watcher = Some(Arc::new(ARwLock::new(watcher)));
     let old_watcher = {
-        let mut gcx_locked = gcx.write().await;
-        std::mem::replace(&mut gcx_locked.documents_state.fs_watcher, new_watcher)
+        std::mem::replace(&mut *gcx.documents_state.fs_watcher.lock().unwrap(), new_watcher)
     };
     drop(old_watcher);
 }
@@ -679,7 +675,7 @@ pub fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-async fn enqueue_some_docs(gcx: Arc<ARwLock<GlobalContext>>, paths: &Vec<String>, force: bool) {
+async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: bool) {
     info!("detected {} modified/added/removed files", paths.len());
     for d in paths.iter().take(5) {
         info!("    {}", crate::nicer_logs::last_n_chars(&d, 30));
@@ -688,7 +684,7 @@ async fn enqueue_some_docs(gcx: Arc<ARwLock<GlobalContext>>, paths: &Vec<String>
         info!("    ...");
     }
     let (vec_db_module, ast_service) = {
-        let cx = gcx.read().await;
+        let cx = gcx.clone();
         let ast_service = cx.ast_service.lock().unwrap().clone();
         (cx.vec_db.clone(), ast_service)
     };
@@ -714,14 +710,13 @@ async fn enqueue_some_docs(gcx: Arc<ARwLock<GlobalContext>>, paths: &Vec<String>
     if moar_files.len() > 0 {
         info!("this made file cache dirty");
         let dirty_arc = {
-            let gcx_locked = gcx.read().await;
-            gcx_locked
+            gcx
                 .documents_state
                 .workspace_files
                 .lock()
                 .unwrap()
                 .extend(moar_files);
-            gcx_locked.documents_state.cache_dirty.clone()
+            gcx.documents_state.cache_dirty.clone()
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -732,14 +727,11 @@ async fn enqueue_some_docs(gcx: Arc<ARwLock<GlobalContext>>, paths: &Vec<String>
 }
 
 pub async fn enqueue_all_files_from_workspace_folders(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     wake_up_indexers: bool,
     vecdb_only: bool,
 ) -> i32 {
-    let folders = gcx
-        .read()
-        .await
-        .documents_state
+    let folders = gcx.documents_state
         .workspace_folders
         .lock()
         .unwrap()
@@ -757,25 +749,21 @@ pub async fn enqueue_all_files_from_workspace_folders(
         "enqueue_all_files_from_workspace_folders found {} files => workspace_files",
         all_files.len()
     );
-    let mut workspace_vcs_roots: Arc<StdMutex<Vec<PathBuf>>> =
-        Arc::new(StdMutex::new(vcs_folders.clone()));
+    let workspace_vcs_roots = vcs_folders.clone();
 
     let mut old_workspace_files = Vec::new();
     let cache_dirty = {
-        let mut gcx_locked = gcx.write().await;
         {
-            let mut workspace_files = gcx_locked.documents_state.workspace_files.lock().unwrap();
+            let mut workspace_files = gcx.documents_state.workspace_files.lock().unwrap();
             std::mem::swap(&mut *workspace_files, &mut old_workspace_files);
             workspace_files.extend(all_files.clone());
         }
         {
-            std::mem::swap(
-                &mut gcx_locked.documents_state.workspace_vcs_roots,
-                &mut workspace_vcs_roots,
-            );
+            let mut roots = gcx.documents_state.workspace_vcs_roots.lock().unwrap();
+            *roots = workspace_vcs_roots;
         }
-        gcx_locked.indexing_everywhere = Arc::new(indexing_everywhere);
-        gcx_locked.documents_state.cache_dirty.clone()
+        // indexing_everywhere is immutable in shared GlobalContext; callers will reload as needed.
+        gcx.documents_state.cache_dirty.clone()
     };
 
     *cache_dirty.lock().await = std::time::SystemTime::now()
@@ -784,9 +772,8 @@ pub async fn enqueue_all_files_from_workspace_folders(
         .as_secs_f64();
 
     let (vec_db_module, ast_service) = {
-        let cx_locked = gcx.read().await;
-        let ast_service = cx_locked.ast_service.lock().unwrap().clone();
-        (cx_locked.vec_db.clone(), ast_service)
+        let ast_service = gcx.ast_service.lock().unwrap().clone();
+        (gcx.vec_db.clone(), ast_service)
     };
 
     // Both vecdb and ast support paths to non-existant files (possibly previously existing files) as a way to remove them from index
@@ -817,21 +804,18 @@ pub async fn enqueue_all_files_from_workspace_folders(
     all_files.len() as i32
 }
 
-pub async fn on_workspaces_init(gcx: Arc<ARwLock<GlobalContext>>) -> i32 {
+pub async fn on_workspaces_init(gcx: Arc<GlobalContext>) -> i32 {
     // Called from lsp and lsp_like
     // Not called from main.rs as part of initialization
-    let folders = gcx
-        .read()
-        .await
-        .documents_state
+    let folders = gcx.documents_state
         .workspace_folders
         .lock()
         .unwrap()
         .clone();
-    let old_app_searchable_id = gcx.read().await.app_searchable_id.lock().unwrap().clone();
+    let old_app_searchable_id = gcx.app_searchable_id.lock().unwrap().clone();
     let new_app_searchable_id = get_app_searchable_id(&folders);
     if old_app_searchable_id != new_app_searchable_id {
-        *gcx.read().await.app_searchable_id.lock().unwrap() = get_app_searchable_id(&folders);
+        *gcx.app_searchable_id.lock().unwrap() = get_app_searchable_id(&folders);
     }
     // Project competitor import runs only here for normal startup and workspace add/remove changes.
     let _ = crate::ext::competitor_import::run_project_import(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
@@ -848,7 +832,7 @@ pub async fn on_workspaces_init(gcx: Arc<ARwLock<GlobalContext>>) -> i32 {
 }
 
 pub async fn on_did_open(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     cpath: &PathBuf,
     text: &String,
     _language_id: &String,
@@ -871,16 +855,16 @@ pub async fn on_did_open(
             .as_secs_f64();
         *dirty_arc.lock().await = now;
     }
-    *gcx.read().await.documents_state.active_file_path.lock().await = Some(cpath.clone());
+    *gcx.documents_state.active_file_path.lock().await = Some(cpath.clone());
 }
 
-pub async fn on_did_close(gcx: Arc<ARwLock<GlobalContext>>, cpath: &PathBuf) {
+pub async fn on_did_close(gcx: Arc<GlobalContext>, cpath: &PathBuf) {
     info!(
         "on_did_close {}",
         crate::nicer_logs::last_n_chars(&cpath.display().to_string(), 30)
     );
     {
-        let cx = gcx.read().await;
+        let cx = gcx.clone();
         if cx
             .documents_state
             .memory_document_map.lock().await
@@ -895,7 +879,7 @@ pub async fn on_did_close(gcx: Arc<ARwLock<GlobalContext>>, cpath: &PathBuf) {
     }
 }
 
-pub async fn on_did_change(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf, text: &String) {
+pub async fn on_did_change(gcx: Arc<GlobalContext>, path: &PathBuf, text: &String) {
     if path_is_refact_import_internal(path) {
         return;
     }
@@ -916,7 +900,7 @@ pub async fn on_did_change(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf, tex
         *dirty_arc.lock().await = now;
     }
 
-    *gcx.read().await.documents_state.active_file_path.lock().await = Some(path.clone());
+    *gcx.documents_state.active_file_path.lock().await = Some(path.clone());
 
     let mut go_ahead = true;
     {
@@ -945,7 +929,7 @@ pub async fn on_did_change(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf, tex
     );
 }
 
-pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
+pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
     if path_is_refact_import_internal(path) {
         return;
     }
@@ -955,7 +939,7 @@ pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
     );
 
     let (vec_db_module, ast_service, dirty_arc) = {
-        let cx = gcx.read().await;
+        let cx = gcx.clone();
         cx.documents_state.memory_document_map.lock().await.remove(path);
         let ast_service = cx.ast_service.lock().unwrap().clone();
         (
@@ -984,11 +968,11 @@ pub async fn on_did_delete(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
     }
 }
 
-pub async fn add_folder(gcx: Arc<ARwLock<GlobalContext>>, fpath: &PathBuf) {
+pub async fn add_folder(gcx: Arc<GlobalContext>, fpath: &PathBuf) {
     let canonical_path =
         crate::files_correction::canonical_path(fpath.to_string_lossy().to_string());
     let was_added = {
-        let documents_state = &gcx.write().await.documents_state;
+        let documents_state = &gcx.documents_state;
         let mut folders = documents_state.workspace_folders.lock().unwrap();
         if folders.iter().any(|p| *p == canonical_path) {
             false
@@ -1008,11 +992,11 @@ pub async fn add_folder(gcx: Arc<ARwLock<GlobalContext>>, fpath: &PathBuf) {
     }
 }
 
-pub async fn remove_folder(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
+pub async fn remove_folder(gcx: Arc<GlobalContext>, path: &PathBuf) {
     let canonical_path =
         crate::files_correction::canonical_path(path.to_string_lossy().to_string());
     let was_removed = {
-        let documents_state = &gcx.write().await.documents_state;
+        let documents_state = &gcx.documents_state;
         let mut folders = documents_state.workspace_folders.lock().unwrap();
         let before = folders.len();
         folders.retain(|p| *p != canonical_path && *p != *path);
@@ -1026,8 +1010,8 @@ pub async fn remove_folder(gcx: Arc<ARwLock<GlobalContext>>, path: &PathBuf) {
     }
 }
 
-pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalContext>>) {
-    async fn on_file_change(gcx_weak: Weak<ARwLock<GlobalContext>>, event: Event) {
+pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
+    async fn on_file_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         let mut docs = vec![];
         let indexing_everywhere_arc;
         if let Some(gcx) = gcx_weak.clone().upgrade() {
@@ -1068,7 +1052,7 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
         }
     }
 
-    async fn on_dot_git_dir_change(gcx_weak: Weak<ARwLock<GlobalContext>>, event: Event) {
+    async fn on_dot_git_dir_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         if let Some(gcx) = gcx_weak.clone().upgrade() {
             // Get the path before .git component, and check if repo associated exists
             let repo_paths = event
@@ -1092,7 +1076,7 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
                 return;
             }
 
-            let workspace_vcs_roots = gcx.read().await.documents_state.workspace_vcs_roots.clone();
+            let workspace_vcs_roots = gcx.documents_state.workspace_vcs_roots.clone();
 
             let mut should_reindex = false;
             {
@@ -1151,11 +1135,8 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<ARwLock<GlobalConte
     }
 }
 
-pub async fn files_in_workspace_init_task(gcx: Arc<ARwLock<GlobalContext>>) {
-    let previous_folders = gcx
-        .read()
-        .await
-        .documents_state
+pub async fn files_in_workspace_init_task(gcx: Arc<GlobalContext>) {
+    let previous_folders = gcx.documents_state
         .workspace_folders
         .lock()
         .unwrap()
@@ -1170,10 +1151,7 @@ pub async fn files_in_workspace_init_task(gcx: Arc<ARwLock<GlobalContext>>) {
     );
     crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
     let file_count = enqueue_all_files_from_workspace_folders(gcx.clone(), true, false).await;
-    let current_folders = gcx
-        .read()
-        .await
-        .documents_state
+    let current_folders = gcx.documents_state
         .workspace_folders
         .lock()
         .unwrap()
@@ -1189,7 +1167,7 @@ pub async fn files_in_workspace_init_task(gcx: Arc<ARwLock<GlobalContext>>) {
         .map(|folder| folder.to_string_lossy().to_string())
         .collect::<Vec<_>>();
     if !added.is_empty() || !removed.is_empty() {
-        let user_activity = gcx.read().await.user_activity.clone();
+        let user_activity = gcx.user_activity.clone();
         if let Ok(mut ring) = user_activity.try_lock() {
             ring.push(UserAction::WorkspaceChanged {
                 folders_added: added,
@@ -1236,10 +1214,9 @@ mod tests {
         files
     }
 
-    async fn cache_dirty_value(gcx: &Arc<ARwLock<GlobalContext>>) -> f64 {
+    async fn cache_dirty_value(gcx: &Arc<GlobalContext>) -> f64 {
         let dirty = {
-            let gcx_locked = gcx.read().await;
-            gcx_locked.documents_state.cache_dirty.clone()
+            gcx.documents_state.cache_dirty.clone()
         };
         let value = *dirty.lock().await;
         value
@@ -1315,8 +1292,7 @@ mod tests {
         on_did_open(gcx.clone(), &path, &text, &language_id).await;
 
         let (memory_doc_map, active_fp) = {
-            let gcx_locked = gcx.read().await;
-            (gcx_locked.documents_state.memory_document_map.clone(), gcx_locked.documents_state.active_file_path.clone())
+            (gcx.documents_state.memory_document_map.clone(), gcx.documents_state.active_file_path.clone())
         };
         let has_doc = memory_doc_map.lock().await.contains_key(&path);
         let active_file_path = active_fp.lock().await.clone();
@@ -1340,9 +1316,8 @@ mod tests {
         on_did_change(gcx.clone(), &path, &text).await;
 
         let (memory_doc_map2, active_fp2, workspace_files_len) = {
-            let gcx_locked = gcx.read().await;
-            let wf_len = gcx_locked.documents_state.workspace_files.lock().unwrap().len();
-            (gcx_locked.documents_state.memory_document_map.clone(), gcx_locked.documents_state.active_file_path.clone(), wf_len)
+            let wf_len = gcx.documents_state.workspace_files.lock().unwrap().len();
+            (gcx.documents_state.memory_document_map.clone(), gcx.documents_state.active_file_path.clone(), wf_len)
         };
         let has_doc = memory_doc_map2.lock().await.contains_key(&path);
         let active_file_path = active_fp2.lock().await.clone();
@@ -1364,8 +1339,7 @@ mod tests {
         let mut doc = Document::new(&path);
         doc.update_text(&"{}".to_string());
         {
-            let gcx_locked = gcx.read().await;
-            gcx_locked
+            gcx
                 .documents_state
                 .memory_document_map.lock().await
                 .insert(path.clone(), Arc::new(ARwLock::new(doc)));
@@ -1373,7 +1347,7 @@ mod tests {
 
         on_did_delete(gcx.clone(), &path).await;
 
-        let mdm = gcx.read().await.documents_state.memory_document_map.clone();
+        let mdm = gcx.documents_state.memory_document_map.clone();
         let has_doc = mdm.lock().await.contains_key(&path);
         assert!(has_doc);
         assert_eq!(cache_dirty_value(&gcx).await, 0.0);
@@ -1395,7 +1369,6 @@ mod tests {
         on_did_open(gcx.clone(), &path, &text, &language_id).await;
 
         let (mdm3, afp3) = {
-            let g = gcx.read().await;
             (g.documents_state.memory_document_map.clone(), g.documents_state.active_file_path.clone())
         };
         let has_doc = mdm3.lock().await.contains_key(&path);

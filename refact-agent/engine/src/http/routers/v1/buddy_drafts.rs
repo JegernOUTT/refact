@@ -88,11 +88,11 @@ pub async fn handle_v1_buddy_draft_create_pulse_report(
 }
 
 async fn create_draft(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     req: DraftCreateRequest,
     kind: DraftKind,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
         ScratchError::new(
@@ -111,7 +111,7 @@ pub async fn handle_v1_buddy_draft_get(
     Path(id): Path<String>,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
     let gcx = app.gcx.clone();
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
     let svc = lock.as_ref().ok_or_else(|| {
         ScratchError::new(
@@ -130,7 +130,7 @@ pub async fn handle_v1_buddy_draft_delete(
     Path(id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
     let gcx = app.gcx.clone();
-    let buddy_arc = gcx.read().await.buddy.clone();
+    let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     let svc = lock.as_mut().ok_or_else(|| {
         ScratchError::new(

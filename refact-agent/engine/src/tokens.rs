@@ -135,22 +135,21 @@ async fn try_download_tokenizer_file_and_open(
 }
 
 pub async fn cached_tokenizer(
-    global_context: Arc<ARwLock<GlobalContext>>,
+    global_context: Arc<GlobalContext>,
     model_rec: &BaseModelRecord,
 ) -> Result<Option<Arc<Tokenizer>>, String> {
     let model_id = strip_model_from_finetune(&model_rec.id);
-    let tokenizer_state = global_context.read().await.tokenizer_state.clone();
+    let tokenizer_state = global_context.tokenizer_state.clone();
     let tokenizer_download_lock: Arc<AMutex<bool>> =
         tokenizer_state.read().unwrap().download_lock.clone();
     let _tokenizer_download_locked = tokenizer_download_lock.lock().await;
 
     let (client2, cache_dir, tokenizer_in_gcx, hf_tokenizer_template) = {
         let (client, cache_dir, caps_state) = {
-            let cx_locked = global_context.read().await;
             (
-                cx_locked.http_client.clone(),
-                cx_locked.cache_dir.clone(),
-                cx_locked.caps_state.clone(),
+                global_context.http_client.clone(),
+                global_context.cache_dir.clone(),
+                global_context.caps_state.clone(),
             )
         };
         let template = caps_state.read().await.caps.clone()

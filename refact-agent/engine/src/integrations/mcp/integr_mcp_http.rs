@@ -49,7 +49,7 @@ pub fn default_http_headers() -> HashMap<String, String> {
 
 #[derive(Default, Clone)]
 pub struct IntegrationMCPHttp {
-    pub gcx_option: Option<Weak<ARwLock<GlobalContext>>>,
+    pub gcx_option: Option<Weak<GlobalContext>>,
     pub cfg: SettingsMCPHttp,
     pub common: IntegrationCommon,
     pub config_path: String,

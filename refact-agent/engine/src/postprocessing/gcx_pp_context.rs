@@ -10,7 +10,7 @@ use crate::global_context::GlobalContext;
 use crate::files_correction::{canonical_path, correct_to_nearest_filename, shortify_paths};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 
-pub struct GcxPPContext(pub Arc<ARwLock<GlobalContext>>);
+pub struct GcxPPContext(pub Arc<GlobalContext>);
 
 #[async_trait]
 impl PPContextTrait for GcxPPContext {
@@ -28,7 +28,7 @@ impl PPContextTrait for GcxPPContext {
 
     async fn doc_defs_for_path(&self, path: &str) -> Vec<Arc<AstDefinition>> {
         let path_buf = PathBuf::from(path);
-        let ast_service = self.0.read().await.ast_service.lock().unwrap().clone();
+        let ast_service = self.0.ast_service.lock().unwrap().clone();
         match ast_service {
             Some(ast) if get_ast_parser_by_filename(&path_buf).is_ok() => {
                 let ast_index = ast.lock().await.ast_index.clone();

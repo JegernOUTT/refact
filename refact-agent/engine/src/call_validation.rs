@@ -126,7 +126,7 @@ pub fn is_agentic_mode_id(mode_id: &str) -> bool {
 /// Validate and canonicalize a mode ID with strict registry existence check.
 /// Returns 422-compatible error if mode is invalid or doesn't exist in registry.
 pub async fn validate_mode_for_request(
-    gcx: std::sync::Arc<tokio::sync::RwLock<crate::global_context::GlobalContext>>,
+    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
     mode: &str,
 ) -> Result<String, String> {
     let canonical = canonical_mode_id(mode)?;

@@ -18,7 +18,7 @@ use crate::scratchpad_abstract::ScratchpadAbstract;
 use crate::completion_cache;
 
 pub async fn create_code_completion_scratchpad(
-    global_context: Arc<ARwLock<GlobalContext>>,
+    global_context: Arc<GlobalContext>,
     model_rec: &CompletionModelRecord,
     post: &CodeCompletionPost,
     cache_arc: Arc<StdRwLock<completion_cache::CompletionCache>>,

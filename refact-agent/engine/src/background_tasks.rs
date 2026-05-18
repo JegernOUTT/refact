@@ -52,13 +52,12 @@ impl BackgroundTasksHolder {
 }
 
 pub async fn start_background_tasks(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     _config_dir: &PathBuf,
 ) -> BackgroundTasksHolder {
     let (stats_tx, stats_rx) = tokio::sync::mpsc::channel(1000);
     {
-        let mut gcx_locked = gcx.write().await;
-        gcx_locked.llm_stats_sender = Some(stats_tx);
+        *gcx.llm_stats_sender.lock().unwrap() = Some(stats_tx);
     }
     let gcx_for_knowledge_index = gcx.clone();
     let gcx_for_stats = gcx.clone();
@@ -96,12 +95,7 @@ pub async fn start_background_tasks(
         tokio::spawn(async move {
             // Build in-memory knowledge index in background (best-effort).
             let index = build_knowledge_index(gcx_for_knowledge_index.clone()).await;
-            *gcx_for_knowledge_index
-                .read()
-                .await
-                .knowledge_index
-                .lock()
-                .await = index;
+            *gcx_for_knowledge_index.knowledge_index.lock().await = index;
             tracing::info!("knowledge_index: built");
         }),
         tokio::spawn({
@@ -112,13 +106,13 @@ pub async fn start_background_tasks(
             }
         }),
     ]);
-    let ast = gcx.clone().read().await.ast_service.lock().unwrap().clone();
+    let ast = gcx.clone().ast_service.lock().unwrap().clone();
     if let Some(ast_service) = ast {
         bg.extend(
             crate::ast::ast_indexer_thread::ast_indexer_start(ast_service, gcx.clone()).await,
         );
     }
-    let files_jsonl_path = gcx.clone().read().await.cmdline.files_jsonl_path.clone();
+    let files_jsonl_path = gcx.clone().cmdline.files_jsonl_path.clone();
     if !files_jsonl_path.is_empty() {
         bg.extend(vec![tokio::spawn(
             crate::files_in_jsonl::reload_if_jsonl_changes_background_task(gcx.clone()),

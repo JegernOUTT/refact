@@ -9,7 +9,7 @@ use crate::global_context::GlobalContext;
 use super::gcx_pp_context::GcxPPContext;
 
 pub async fn postprocess_tool_results(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     tokenizer: Option<Arc<Tokenizer>>,
     tool_messages: Vec<ChatMessage>,
     context_files: Vec<ContextFile>,

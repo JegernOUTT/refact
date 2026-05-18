@@ -56,8 +56,7 @@ pub async fn handle_v1_lsp_initialize(
 
     let workspace_dirs = canonical_workspace_roots(&workspace_dirs);
     let changed = {
-        let gcx = global_context.write().await;
-        let mut folders = gcx.documents_state.workspace_folders.lock().unwrap();
+        let mut folders = app.gcx.documents_state.workspace_folders.lock().unwrap();
         if workspace_roots_changed(&folders, &workspace_dirs) {
             *folders = workspace_dirs;
             true
@@ -68,15 +67,12 @@ pub async fn handle_v1_lsp_initialize(
 
     let files_count = if changed {
         let n = files_in_workspace::on_workspaces_init(global_context.clone()).await;
-        if let Some(tx) = global_context.read().await.workspace_changed_tx.as_ref() {
+        if let Some(tx) = global_context.workspace_changed_tx.as_ref() {
             let _ = tx.send(());
         }
         n
     } else {
-        global_context
-            .read()
-            .await
-            .documents_state
+        global_context.documents_state
             .workspace_files
             .lock()
             .unwrap()
@@ -130,10 +126,7 @@ pub async fn handle_v1_set_active_document(
         "ACTIVE_DOC {:?}",
         crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
     );
-    *global_context
-        .read()
-        .await
-        .documents_state
+    *global_context.documents_state
         .active_file_path
         .lock()
         .await = Some(path);
@@ -158,13 +151,12 @@ pub async fn handle_v1_lsp_add_folder(
     })?;
     let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     let changed = {
-        let gcx = global_context.write().await;
-        let mut folders = gcx.documents_state.workspace_folders.lock().unwrap();
+        let mut folders = app.gcx.documents_state.workspace_folders.lock().unwrap();
         add_workspace_root_to_set(&mut folders, cpath)
     };
     if changed {
         files_in_workspace::on_workspaces_init(global_context.clone()).await;
-        if let Some(tx) = global_context.read().await.workspace_changed_tx.as_ref() {
+        if let Some(tx) = global_context.workspace_changed_tx.as_ref() {
             let _ = tx.send(());
         }
     }
@@ -189,13 +181,12 @@ pub async fn handle_v1_lsp_remove_folder(
     })?;
     let cpath = crate::files_correction::canonical_path(file_path.to_string_lossy().into_owned());
     let changed = {
-        let gcx = global_context.write().await;
-        let mut folders = gcx.documents_state.workspace_folders.lock().unwrap();
+        let mut folders = app.gcx.documents_state.workspace_folders.lock().unwrap();
         remove_workspace_root_from_set(&mut folders, &cpath)
     };
     if changed {
         files_in_workspace::on_workspaces_init(global_context.clone()).await;
-        if let Some(tx) = global_context.read().await.workspace_changed_tx.as_ref() {
+        if let Some(tx) = global_context.workspace_changed_tx.as_ref() {
             let _ = tx.send(());
         }
     }

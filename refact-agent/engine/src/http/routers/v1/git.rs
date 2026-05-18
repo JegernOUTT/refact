@@ -64,7 +64,7 @@ fn serialize_datetime_utc<S: serde::Serializer>(
 }
 
 async fn checkpoint_worktree_for_meta(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     meta: &ChatMeta,
 ) -> Option<WorktreeMeta> {
     if let Some(worktree) = &meta.worktree {
@@ -74,8 +74,7 @@ async fn checkpoint_worktree_for_meta(
         return None;
     }
     let sessions = {
-        let gcx_locked = gcx.read().await;
-        gcx_locked.chat_sessions.clone()
+        gcx.chat_sessions.clone()
     };
     let session_arc = {
         let sessions_read = sessions.read().await;
@@ -113,7 +112,7 @@ pub async fn handle_v1_git_commit(
     let mut error_log = Vec::new();
     let mut commits_applied = Vec::new();
 
-    let abort_flag: Arc<AtomicBool> = gcx.read().await.git_operations_abort_flag.clone();
+    let abort_flag: Arc<AtomicBool> = gcx.git_operations_abort_flag.clone();
     for commit in post.commits {
         let project_path_str = commit.project_path.to_string();
         let project_name = commit

@@ -84,7 +84,7 @@ impl Tool for ToolBuddyCreateDraft {
             .map_err(|e| format!("invalid kind '{}': {}", kind_str, e))?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let buddy_arc = gcx.read().await.buddy.clone();
+        let buddy_arc = gcx.buddy.clone();
         let mut lock = buddy_arc.lock().await;
         let svc = lock.as_mut().ok_or("buddy service not initialized")?;
 

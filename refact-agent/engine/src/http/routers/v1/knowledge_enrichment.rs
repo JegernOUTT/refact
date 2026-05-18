@@ -100,7 +100,7 @@ const MAX_ENRICHMENT_PREVIEW_ITEMS: usize = 5;
 const MAX_ENRICHMENT_PREVIEW_CANDIDATES: usize = 64;
 
 pub async fn enrich_messages_with_knowledge(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     messages: &mut Vec<ChatMessage>,
     current_chat_id: Option<&str>,
     force_enrichment: bool,
@@ -283,7 +283,7 @@ fn count_weak_signals(query_raw: &str, query_normalized: &str) -> usize {
 }
 
 async fn create_knowledge_context(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     query_text: &str,
     existing_paths: &HashSet<String>,
     current_chat_id: Option<&str>,
@@ -386,9 +386,9 @@ fn get_existing_context_file_paths(messages: &[ChatMessage]) -> HashSet<String> 
     paths
 }
 
-async fn get_allowed_enrichment_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+async fn get_allowed_enrichment_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let mut candidates = Vec::new();
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     for pd in project_dirs {
@@ -879,8 +879,7 @@ mod tests {
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![workspace];
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace];
         }
 
         let allowed_dirs = get_allowed_enrichment_dirs(gcx).await;
@@ -1109,7 +1108,7 @@ pub async fn handle_v1_memory_enrichment_preview(
 const ENRICHMENT_SUBAGENT_ID: &str = "memory_enrichment_rewrite";
 
 async fn model_gather_and_rewrite(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     query: &str,
 ) -> Result<(String, Vec<EnrichmentItem>), String> {
     let system_prompt = get_subagent_config(gcx.clone(), ENRICHMENT_SUBAGENT_ID, None)

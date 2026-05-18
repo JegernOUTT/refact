@@ -63,8 +63,7 @@ impl Tool for ToolAddWorkspaceFolder {
         let gcx = ccx.lock().await.app.gcx.clone();
 
         let already_exists = {
-            let gcx_locked = gcx.read().await;
-            let workspace_folders = gcx_locked.documents_state.workspace_folders.lock().unwrap();
+            let workspace_folders = gcx.documents_state.workspace_folders.lock().unwrap();
             workspace_folders.contains(&abs_path)
         };
 
@@ -83,9 +82,8 @@ impl Tool for ToolAddWorkspaceFolder {
         }
 
         {
-            let gcx_locked = gcx.read().await;
             let mut workspace_folders =
-                gcx_locked.documents_state.workspace_folders.lock().unwrap();
+                gcx.documents_state.workspace_folders.lock().unwrap();
             workspace_folders.push(abs_path.clone());
             tracing::info!(
                 "add_workspace_folder: added {} to workspace folders",

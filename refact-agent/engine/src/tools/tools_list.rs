@@ -111,16 +111,15 @@ fn tool_available(
 }
 
 async fn tool_available_from_gcx(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> impl Fn(&Box<dyn Tool + Send>) -> bool {
     let (ast_on, vecdb_on, allow_experimental) = {
-        let gcx_locked = gcx.read().await;
-        let vecdb_on = gcx_locked.vec_db.lock().await.is_some();
-        let ast_on = gcx_locked.ast_service.lock().unwrap().is_some();
+        let vecdb_on = gcx.vec_db.lock().await.is_some();
+        let ast_on = gcx.ast_service.lock().unwrap().is_some();
         (
             ast_on,
             vecdb_on,
-            gcx_locked.cmdline.experimental,
+            gcx.cmdline.experimental,
         )
     };
 
@@ -147,14 +146,14 @@ async fn tool_available_from_gcx(
 }
 
 impl ToolGroup {
-    pub async fn retain_available_tools(&mut self, gcx: Arc<ARwLock<GlobalContext>>) {
+    pub async fn retain_available_tools(&mut self, gcx: Arc<GlobalContext>) {
         let tool_available = tool_available_from_gcx(gcx.clone()).await;
         self.tools.retain(|tool| tool_available(tool));
     }
 }
 
-async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
-    let config_dir = gcx.read().await.config_dir.clone();
+async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
+    let config_dir = gcx.config_dir.clone();
     let config_path = config_dir
         .join("builtin_tools.yaml")
         .to_string_lossy()
@@ -494,7 +493,7 @@ async fn get_builtin_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
     tool_groups
 }
 
-pub async fn get_integration_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
+pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     let mut integrations_group = ToolGroup {
         name: "Integrations".to_string(),
         description: "Integration tools".to_string(),
@@ -548,7 +547,7 @@ pub async fn get_integration_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<Tool
     tool_groups
 }
 
-async fn get_config_subagent_tools(gcx: Arc<ARwLock<GlobalContext>>) -> ToolGroup {
+async fn get_config_subagent_tools(gcx: Arc<GlobalContext>) -> ToolGroup {
     let mut subagent_tools: Vec<Box<dyn Tool + Send>> = vec![];
 
     if let Some(registry) = get_project_registry(gcx.clone()).await {
@@ -569,7 +568,7 @@ async fn get_config_subagent_tools(gcx: Arc<ARwLock<GlobalContext>>) -> ToolGrou
     }
 }
 
-pub async fn get_available_tool_groups(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<ToolGroup> {
+pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     let mut tools_all = get_builtin_tools(gcx.clone()).await;
     tools_all.extend(get_integration_tools(gcx.clone()).await);
 
@@ -581,7 +580,7 @@ pub async fn get_available_tool_groups(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<
     tools_all
 }
 
-pub async fn get_available_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<Box<dyn Tool + Send>> {
+pub async fn get_available_tools(gcx: Arc<GlobalContext>) -> Vec<Box<dyn Tool + Send>> {
     get_available_tool_groups(gcx)
         .await
         .into_iter()
@@ -590,7 +589,7 @@ pub async fn get_available_tools(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<Box<dy
 }
 
 pub async fn get_tools_for_mode(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     mode_id: &str,
     model_id: Option<&str>,
 ) -> Vec<Box<dyn Tool + Send>> {

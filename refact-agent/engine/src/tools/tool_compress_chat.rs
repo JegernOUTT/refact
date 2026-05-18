@@ -123,7 +123,7 @@ impl Tool for ToolCompressChatProbe {
             (ccx_lock.app.gcx.clone(), ccx_lock.chat_id.clone())
         };
 
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = gcx.chat_sessions.clone();
         let session_arc =
             get_or_create_session_with_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
         let messages = {
@@ -427,7 +427,7 @@ impl Tool for ToolCompressChatApply {
             (ccx_lock.app.gcx.clone(), ccx_lock.chat_id.clone())
         };
 
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = gcx.chat_sessions.clone();
         let session_arc =
             get_or_create_session_with_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 

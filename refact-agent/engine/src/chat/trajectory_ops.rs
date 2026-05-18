@@ -9,7 +9,7 @@ use crate::global_context::GlobalContext;
 pub async fn handoff_select(
     messages: &[ChatMessage],
     opts: &HandoffOptions,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     generate_summary: bool,
     trajectory_id: &str,
 ) -> Result<(Vec<ChatMessage>, TransformStats, Option<String>), String> {

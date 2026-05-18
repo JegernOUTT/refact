@@ -103,7 +103,7 @@ pub struct GatherFilesParams<'a> {
 }
 
 pub async fn gather_files_phase(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     external_messages: Vec<ChatMessage>,
     tool_call_id: String,

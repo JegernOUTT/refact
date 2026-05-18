@@ -115,7 +115,7 @@ pub async fn handle_v1_mcp_export(
     let req = serde_json::from_slice::<ExportRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
 
     let all_files = collect_mcp_yaml_files(&integrations_dir).await;
@@ -247,7 +247,7 @@ pub async fn handle_v1_mcp_import(
     let req = serde_json::from_slice::<ImportRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
     tokio::fs::create_dir_all(&integrations_dir)
         .await
@@ -328,8 +328,7 @@ pub async fn handle_v1_mcp_project_config(
 ) -> Result<Json<Value>, ScratchError> {
     let gcx = app.gcx.clone();
     let workspace_folders = {
-        let gcx_locked = gcx.read().await;
-        let folders = gcx_locked
+        let folders = gcx
             .documents_state
             .workspace_folders
             .lock()
@@ -366,7 +365,7 @@ pub async fn handle_v1_mcp_project_config(
             }
         };
 
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let integrations_dir = config_dir.join("integrations.d");
 
         let mut missing_servers = Vec::new();

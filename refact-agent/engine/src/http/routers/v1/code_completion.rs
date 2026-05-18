@@ -47,8 +47,7 @@ pub async fn handle_v1_code_completion(
     code_completion_post.parameters.temperature =
         Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
     let cache_arc = {
-        let gcx_locked = gcx.write().await;
-        gcx_locked.completions_cache.clone()
+        gcx.completions_cache.clone()
     };
     if !code_completion_post.no_cache {
         let cache_key = completion_cache::cache_key_from_post(&code_completion_post);
@@ -63,7 +62,7 @@ pub async fn handle_v1_code_completion(
         }
     }
 
-    let ast_service_opt = gcx.read().await.ast_service.lock().unwrap().clone();
+    let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
     let mut scratchpad = scratchpads::create_code_completion_scratchpad(
         gcx.clone(),
         &model_rec,
@@ -145,11 +144,10 @@ pub async fn handle_v1_code_completion_prompt(
 
     // don't need cache, but go along
     let cache_arc = {
-        let cx_locked = gcx.write().await;
-        cx_locked.completions_cache.clone()
+        gcx.completions_cache.clone()
     };
 
-    let ast_service_opt = gcx.read().await.ast_service.lock().unwrap().clone();
+    let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
     let mut scratchpad = scratchpads::create_code_completion_scratchpad(
         gcx.clone(),
         &model_rec,
@@ -176,10 +174,10 @@ pub async fn handle_v1_code_completion_prompt(
         .await,
     ));
     let prompt_input = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         ScratchpadPromptInput {
-            n_ctx: ccx_locked.n_ctx,
-            postprocess_parameters: ccx_locked.postprocess_parameters.clone(),
+            n_ctx: cgcx.n_ctx,
+            postprocess_parameters: cgcx.postprocess_parameters.clone(),
         }
     };
     let prompt = scratchpad

@@ -301,10 +301,10 @@ pub async fn tree_for_tools(
     is_root_query: bool,
 ) -> Result<String, String> {
     let (ast_service, tokens_for_rag) = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         (
-            ccx_locked.app.workspace.ast_service.clone(),
-            ccx_locked.tokens_for_rag,
+            cgcx.app.workspace.ast_service.clone(),
+            cgcx.tokens_for_rag,
         )
     };
     const CHARS_PER_TOKEN: f32 = 3.5;
@@ -348,10 +348,10 @@ impl AtCommand for AtTree {
         args: &mut Vec<AtCommandMember>,
     ) -> Result<(Vec<ContextEnum>, String), String> {
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.global_context.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.global_context.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
         let scoped_enforced = execution_scope

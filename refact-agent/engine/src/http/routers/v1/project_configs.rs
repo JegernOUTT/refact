@@ -46,7 +46,7 @@ fn json_error_response(status: StatusCode, message: &str) -> Response<Body> {
 }
 
 async fn validate_project_root(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     requested: Option<String>,
 ) -> Result<std::path::PathBuf, Response<Body>> {
     let dirs = get_project_dirs(gcx).await;
@@ -91,7 +91,7 @@ pub async fn handle_v1_project_configs_rescan(
         Err(response) => return Ok(response),
     };
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let registry = load_merged_registry(&config_dir, Some(&project_root)).await;
 
     let response = RescanResponse {
@@ -168,7 +168,7 @@ pub async fn handle_v1_project_configs_bootstrap(
         Err(response) => return Ok(response),
     };
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let _ = global_configs_try_create_all(&config_dir).await;
     match project_configs_ensure_dirs(&project_root).await {
         Ok(_) => {
@@ -215,7 +215,7 @@ pub async fn handle_v1_project_configs_get(
         }
     };
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let _ = global_configs_try_create_all(&config_dir).await;
     let _ = project_configs_ensure_dirs(&project_root).await;
     let registry = load_merged_registry(&config_dir, Some(&project_root)).await;

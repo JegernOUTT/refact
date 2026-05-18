@@ -20,9 +20,9 @@ pub use refact_files::path_utils::{
     shortify_paths_from_indexed,
 };
 
-pub async fn paths_from_anywhere(global_context: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+pub async fn paths_from_anywhere(global_context: Arc<GlobalContext>) -> Vec<PathBuf> {
     let (file_paths_from_memory, paths_from_workspace, paths_from_jsonl) = {
-        let documents_state = &global_context.read().await.documents_state; // somehow keeps lock until out of scope
+        let documents_state = &global_context.documents_state; // somehow keeps lock until out of scope
         let file_paths_from_memory = documents_state
             .memory_document_map.lock().await
             .keys()
@@ -47,15 +47,10 @@ pub async fn paths_from_anywhere(global_context: Arc<ARwLock<GlobalContext>>) ->
 }
 
 pub async fn files_cache_rebuild_as_needed(
-    global_context: Arc<ARwLock<GlobalContext>>,
+    global_context: Arc<GlobalContext>,
 ) -> Arc<CacheCorrection> {
-    let (cache_dirty_arc, mut cache_correction_arc) = {
-        let cx = global_context.read().await;
-        (
-            cx.documents_state.cache_dirty.clone(),
-            cx.documents_state.cache_correction.clone(),
-        )
-    };
+    let cache_dirty_arc = global_context.documents_state.cache_dirty.clone();
+    let mut cache_correction_arc = global_context.documents_state.cache_correction.lock().unwrap().clone();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -78,8 +73,8 @@ pub async fn files_cache_rebuild_as_needed(
         );
         cache_correction_arc = Arc::new(cache_correction);
         {
-            let mut cx = global_context.write().await;
-            cx.documents_state.cache_correction = cache_correction_arc.clone();
+            let cx = global_context.clone();
+            *cx.documents_state.cache_correction.lock().unwrap() = cache_correction_arc.clone();
         }
         *cache_dirty_ref = 0.0;
     }
@@ -88,7 +83,7 @@ pub async fn files_cache_rebuild_as_needed(
 }
 
 async fn complete_path_with_project_dir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     correction_candidate: &String,
     is_dir: bool,
 ) -> Option<PathBuf> {
@@ -130,7 +125,7 @@ async fn complete_path_with_project_dir(
 }
 
 async fn _correct_to_nearest(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     correction_candidate: &String,
     is_dir: bool,
     fuzzy: bool,
@@ -184,7 +179,7 @@ async fn _correct_to_nearest(
 }
 
 pub async fn correct_to_nearest_filename(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     correction_candidate: &String,
     fuzzy: bool,
     top_n: usize,
@@ -193,7 +188,7 @@ pub async fn correct_to_nearest_filename(
 }
 
 pub async fn correct_to_nearest_dir_path(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     correction_candidate: &String,
     fuzzy: bool,
     top_n: usize,
@@ -201,15 +196,15 @@ pub async fn correct_to_nearest_dir_path(
     _correct_to_nearest(gcx, correction_candidate, true, fuzzy, top_n).await
 }
 
-pub async fn get_project_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
-    let workspace_folders = gcx.read().await.documents_state.workspace_folders.clone();
+pub async fn get_project_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    let workspace_folders = gcx.documents_state.workspace_folders.clone();
     let workspace_folders_locked = workspace_folders.lock().unwrap();
     workspace_folders_locked.iter().cloned().collect::<Vec<_>>()
 }
 
 #[allow(dead_code)]
 pub async fn get_project_dirs_with_execution_scope(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
 ) -> Vec<PathBuf> {
     if let Some(scope) = execution_scope {
@@ -220,13 +215,13 @@ pub async fn get_project_dirs_with_execution_scope(
     get_project_dirs(gcx).await
 }
 
-pub async fn get_active_project_path(gcx: Arc<ARwLock<GlobalContext>>) -> Option<PathBuf> {
+pub async fn get_active_project_path(gcx: Arc<GlobalContext>) -> Option<PathBuf> {
     let workspace_folders = get_project_dirs(gcx.clone()).await;
     if workspace_folders.is_empty() {
         return None;
     }
 
-    let active_file = gcx.read().await.documents_state.active_file_path.lock().await.clone();
+    let active_file = gcx.documents_state.active_file_path.lock().await.clone();
     // tracing::info!("get_active_project_path(), active_file={:?} workspace_folders={:?}", active_file, workspace_folders);
 
     let active_file_path = if let Some(active_file) = active_file {
@@ -253,10 +248,10 @@ pub async fn get_active_project_path(gcx: Arc<ARwLock<GlobalContext>>) -> Option
     None
 }
 
-pub async fn get_active_workspace_folder(gcx: Arc<ARwLock<GlobalContext>>) -> Option<PathBuf> {
+pub async fn get_active_workspace_folder(gcx: Arc<GlobalContext>) -> Option<PathBuf> {
     let workspace_folders = get_project_dirs(gcx.clone()).await;
 
-    let active_file = gcx.read().await.documents_state.active_file_path.lock().await.clone();
+    let active_file = gcx.documents_state.active_file_path.lock().await.clone();
     if let Some(active_file) = active_file {
         for f in &workspace_folders {
             if active_file.starts_with(f) {
@@ -277,7 +272,7 @@ pub async fn get_active_workspace_folder(gcx: Arc<ARwLock<GlobalContext>>) -> Op
     }
 }
 
-pub async fn shortify_paths(gcx: Arc<ARwLock<GlobalContext>>, paths: &Vec<String>) -> Vec<String> {
+pub async fn shortify_paths(gcx: Arc<GlobalContext>, paths: &Vec<String>) -> Vec<String> {
     let cache_correction_arc = files_cache_rebuild_as_needed(gcx.clone()).await;
     shortify_paths_from_indexed(&cache_correction_arc, paths)
 }
@@ -285,11 +280,11 @@ pub async fn shortify_paths(gcx: Arc<ARwLock<GlobalContext>>, paths: &Vec<String
 
 
 pub async fn check_if_its_inside_a_workspace_or_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     path: &Path,
 ) -> Result<(), String> {
     let workspace_folders = get_project_dirs(gcx.clone()).await;
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
 
     if workspace_folders.iter().any(|d| path.starts_with(d)) || path.starts_with(&config_dir) {
         Ok(())

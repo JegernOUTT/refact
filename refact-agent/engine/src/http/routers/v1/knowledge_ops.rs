@@ -102,7 +102,7 @@ pub struct MemoryOperationResponse {
 }
 
 pub async fn auto_link_memory(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     frontmatter: &mut KnowledgeFrontmatter,
     content: &str,
     doc_path: &Path,
@@ -147,8 +147,8 @@ pub async fn auto_link_memory(
     Ok(())
 }
 
-async fn get_knowledge_root(gcx: &Arc<ARwLock<GlobalContext>>) -> Result<PathBuf, ScratchError> {
-    let workspace_folders = gcx.read().await.documents_state.workspace_folders.clone();
+async fn get_knowledge_root(gcx: &Arc<GlobalContext>) -> Result<PathBuf, ScratchError> {
+    let workspace_folders = gcx.documents_state.workspace_folders.clone();
     let folders = workspace_folders.lock().unwrap();
 
     if folders.is_empty() {
@@ -333,11 +333,10 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
-    async fn test_gcx_with_workspace(dir: &Path) -> Arc<ARwLock<GlobalContext>> {
+    async fn test_gcx_with_workspace(dir: &Path) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![dir.to_path_buf()];
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.to_path_buf()];
         }
         gcx
     }
@@ -402,7 +401,7 @@ mod tests {
     }
 
     async fn update_status(
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
         path: &Path,
         status: &str,
     ) -> Result<Response<Body>, ScratchError> {
@@ -421,7 +420,7 @@ mod tests {
     }
 
     async fn delete_memory(
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
         path: &Path,
         archive: bool,
     ) -> Result<Response<Body>, ScratchError> {

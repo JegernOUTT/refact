@@ -6,18 +6,18 @@ use tokio::sync::RwLock as ARwLock;
 
 use crate::global_context::GlobalContext;
 
-async fn get_project_dirs(gcx: Arc<ARwLock<GlobalContext>>) -> Vec<PathBuf> {
+async fn get_project_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     crate::files_correction::get_project_dirs(gcx).await
 }
 
-async fn get_config_path(gcx: Arc<ARwLock<GlobalContext>>) -> Option<PathBuf> {
+async fn get_config_path(gcx: Arc<GlobalContext>) -> Option<PathBuf> {
     let dirs = get_project_dirs(gcx).await;
     dirs.first()
         .map(|d| d.join(".refact").join("project_information.yaml"))
 }
 
 pub async fn load_project_information_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> ProjectInformationConfig {
     let Some(path) = get_config_path(gcx.clone()).await else {
         return ProjectInformationConfig::default();
@@ -37,7 +37,7 @@ pub async fn load_project_information_config(
 }
 
 pub async fn save_project_information_config(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     config: &ProjectInformationConfig,
 ) -> std::io::Result<()> {
     let Some(path) = get_config_path(gcx).await else {
@@ -58,7 +58,7 @@ pub async fn save_project_information_config(
 }
 
 pub async fn ensure_default_config_exists(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
 ) -> std::io::Result<bool> {
     let Some(path) = get_config_path(gcx.clone()).await else {
         return Ok(false);

@@ -66,17 +66,15 @@ impl Tool for ToolMCP {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let session_key = format!("{}", self.config_path);
         let (gcx, current_model) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.global_context.clone(),
-                ccx_locked.current_model.clone(),
+                cgcx.global_context.clone(),
+                cgcx.current_model.clone(),
             )
         };
         let (session_maybe, caps_maybe) = {
-            let gcx_locked = gcx.read().await;
-            let integration_sessions = gcx_locked.integration_sessions.clone();
-            let caps_state = gcx_locked.caps_state.clone();
-            drop(gcx_locked);
+            let integration_sessions = gcx.integration_sessions.clone();
+            let caps_state = gcx.caps_state.clone();
             let caps = caps_state.read().await.caps.clone();
             let integration_sessions = integration_sessions.lock().await;
             (integration_sessions.get(&session_key).cloned(), caps)

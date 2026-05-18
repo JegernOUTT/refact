@@ -123,7 +123,7 @@ impl Tool for ToolTaskDone {
         abort_flag.store(true, Ordering::SeqCst);
 
         {
-            let gcx_read = gcx.read().await;
+            let gcx_read = gcx.clone();
             if let Some(ref tx) = gcx_read.notification_events_tx {
                 let _ = tx.send(NotificationEvent::TaskDone {
                     chat_id: chat_id.clone(),

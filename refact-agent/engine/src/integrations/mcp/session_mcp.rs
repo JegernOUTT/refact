@@ -54,7 +54,7 @@ pub struct McpClientHandler {
     pub logs: Arc<AMutex<Vec<String>>>,
     pub debug_name: String,
     pub request_timeout: u64,
-    pub gcx: Weak<ARwLock<GlobalContext>>,
+    pub gcx: Weak<GlobalContext>,
     pub tool_refresh_handle: Arc<AMutex<Option<tokio::task::AbortHandle>>>,
     pub resource_refresh_handle: Arc<AMutex<Option<tokio::task::AbortHandle>>>,
     pub prompt_refresh_handle: Arc<AMutex<Option<tokio::task::AbortHandle>>>,

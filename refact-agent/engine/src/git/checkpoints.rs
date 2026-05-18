@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ast::chunk_utils::official_text_hashing_function;
+use crate::background_tasks::BackgroundTasksHolder;
 use crate::custom_error::MapErrToString;
 use crate::files_blocklist::reload_indexing_everywhere_if_needed;
 use crate::files_correction::{
@@ -25,12 +26,12 @@ use crate::git::cleanup::RECENT_COMMITS_DURATION;
 pub use refact_core::chat_types::Checkpoint;
 
 async fn open_shadow_repo_and_nested_repos(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     workspace_folder: &Path,
     allow_init_main_repo: bool,
 ) -> Result<(Repository, Vec<Repository>, String), String> {
     async fn open_repos(
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
         paths: &[PathBuf],
         allow_init: bool,
         nested: bool,
@@ -94,10 +95,9 @@ async fn open_shadow_repo_and_nested_repos(
     }
 
     let (cache_dir, vcs_roots) = {
-        let gcx_locked = gcx.read().await;
         (
-            gcx_locked.cache_dir.clone(),
-            gcx_locked.documents_state.workspace_vcs_roots.clone(),
+            gcx.cache_dir.clone(),
+            gcx.documents_state.workspace_vcs_roots.clone(),
         )
     };
     let nested_vcs_roots: Vec<PathBuf> = {
@@ -238,11 +238,11 @@ fn create_initial_shadow_commit(
 }
 
 async fn initialize_shadow_repo_for_root_if_needed(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     workspace_folder: &Path,
 ) -> Result<(), String> {
     let workspace_folder_str = workspace_folder.to_string_lossy().to_string();
-    let abort_flag: Arc<AtomicBool> = gcx.read().await.git_operations_abort_flag.clone();
+    let abort_flag: Arc<AtomicBool> = gcx.git_operations_abort_flag.clone();
     let (repo, nested_repos, _) =
         open_shadow_repo_and_nested_repos(gcx.clone(), workspace_folder, true).await?;
 
@@ -270,7 +270,7 @@ async fn initialize_shadow_repo_for_root_if_needed(
 }
 
 pub async fn create_workspace_checkpoint_for_root(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     workspace_folder: &Path,
     prev_checkpoint: Option<&Checkpoint>,
     chat_id: &str,
@@ -286,7 +286,7 @@ pub async fn create_workspace_checkpoint_for_root(
 
     initialize_shadow_repo_for_root_if_needed(gcx.clone(), &workspace_folder).await?;
 
-    let abort_flag: Arc<AtomicBool> = gcx.read().await.git_operations_abort_flag.clone();
+    let abort_flag: Arc<AtomicBool> = gcx.git_operations_abort_flag.clone();
     let (repo, nested_repos, _) =
         open_shadow_repo_and_nested_repos(gcx.clone(), &workspace_folder, false).await?;
 
@@ -346,7 +346,7 @@ pub async fn create_workspace_checkpoint_for_root(
 }
 
 pub async fn create_workspace_checkpoint(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     prev_checkpoint: Option<&Checkpoint>,
     chat_id: &str,
 ) -> Result<(Checkpoint, Repository), String> {
@@ -357,7 +357,7 @@ pub async fn create_workspace_checkpoint(
 }
 
 pub async fn preview_changes_for_workspace_checkpoint_for_root(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     workspace_folder: &Path,
     checkpoint_to_restore: &Checkpoint,
     chat_id: &str,
@@ -414,7 +414,7 @@ pub async fn preview_changes_for_workspace_checkpoint_for_root(
 }
 
 pub async fn preview_changes_for_workspace_checkpoint(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     checkpoint_to_restore: &Checkpoint,
     chat_id: &str,
 ) -> Result<(Vec<FileChange>, DateTime<Utc>, Checkpoint), String> {
@@ -431,7 +431,7 @@ pub async fn preview_changes_for_workspace_checkpoint(
 }
 
 pub async fn restore_workspace_checkpoint_for_root(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     workspace_folder: &Path,
     checkpoint_to_restore: &Checkpoint,
     chat_id: &str,
@@ -489,7 +489,7 @@ pub async fn restore_workspace_checkpoint_for_root(
 }
 
 pub async fn restore_workspace_checkpoint(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     checkpoint_to_restore: &Checkpoint,
     chat_id: &str,
 ) -> Result<(), String> {
@@ -500,12 +500,12 @@ pub async fn restore_workspace_checkpoint(
         .await
 }
 
-pub async fn init_shadow_repos_if_needed(gcx: Arc<ARwLock<GlobalContext>>) -> () {
-    let init_shadow_repos_lock: Arc<AMutex<bool>> = gcx.read().await.init_shadow_repos_lock.clone();
+pub async fn init_shadow_repos_if_needed(gcx: Arc<GlobalContext>) -> () {
+    let init_shadow_repos_lock: Arc<AMutex<bool>> = gcx.init_shadow_repos_lock.clone();
     let _init_shadow_repos_lock = init_shadow_repos_lock.lock().await; // wait for previous init
 
     let workspace_folders = get_project_dirs(gcx.clone()).await;
-    let abort_flag: Arc<AtomicBool> = gcx.read().await.git_operations_abort_flag.clone();
+    let abort_flag: Arc<AtomicBool> = gcx.git_operations_abort_flag.clone();
 
     for workspace_folder in workspace_folders {
         let workspace_folder_str = workspace_folder.to_string_lossy().to_string();
@@ -584,26 +584,22 @@ pub async fn init_shadow_repos_if_needed(gcx: Arc<ARwLock<GlobalContext>>) -> ()
     }
 }
 
-pub async fn enqueue_init_shadow_repos(gcx: Arc<ARwLock<GlobalContext>>) {
-    let mut gcx_locked = gcx.write().await;
+pub async fn enqueue_init_shadow_repos(gcx: Arc<GlobalContext>) {
     // NOTE: potentially we can run init multiple times
     let gcx_cloned = gcx.clone();
-    gcx_locked
-        .init_shadow_repos_background_task_holder
-        .push_back(tokio::spawn(async move {
-            init_shadow_repos_if_needed(gcx_cloned).await;
-        }));
+    tokio::spawn(async move {
+        init_shadow_repos_if_needed(gcx_cloned).await;
+    });
 }
 
-pub async fn abort_init_shadow_repos(gcx: Arc<ARwLock<GlobalContext>>) {
+pub async fn abort_init_shadow_repos(gcx: Arc<GlobalContext>) {
     // NOTE: git2 operations are synchronous and can't be cancelled by tokio abort;
     // we set the abort flag and wait with a timeout to avoid hanging shutdown.
     let holder = {
-        let mut gcx_locked = gcx.write().await;
-        gcx_locked
+        gcx
             .git_operations_abort_flag
             .store(true, Ordering::SeqCst);
-        std::mem::take(&mut gcx_locked.init_shadow_repos_background_task_holder)
+        BackgroundTasksHolder::default()
     };
     // holder.abort() already has an internal timeout, but we call it here after releasing the lock
     let mut holder = holder;
@@ -622,7 +618,7 @@ mod tests {
         _temp: tempfile::TempDir,
         source: PathBuf,
         worktree: PathBuf,
-        gcx: Arc<ARwLock<GlobalContext>>,
+        gcx: Arc<GlobalContext>,
         worktree_meta: WorktreeMeta,
     }
 
@@ -648,8 +644,7 @@ mod tests {
         let worktree = dunce::simplified(&fs::canonicalize(worktree).unwrap()).to_path_buf();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            let gcx_lock = gcx.read().await;
-            *gcx_lock.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
         let worktree_meta = WorktreeMeta {
             id: "wt-checkpoint".to_string(),

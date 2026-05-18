@@ -11,7 +11,7 @@ use crate::integrations::yaml_schema::ISchema;
 use crate::tools::tools_list::get_tools_for_mode;
 
 pub async fn mix_config_messages(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     chat_meta: &ChatMeta,
     messages: &mut Vec<ChatMessage>,
     stream_back_to_user: &mut HasRagResults,
@@ -54,7 +54,7 @@ pub async fn mix_config_messages(
         context_file_vec.push(context_file);
     }
 
-    let global_config_dir = gcx.read().await.config_dir.clone();
+    let global_config_dir = gcx.config_dir.clone();
     let current_config_path = canonical_path(&chat_meta.current_config_file);
     let mut active_project_path = if current_config_path.starts_with(&global_config_dir) {
         Some(PathBuf::new()) // If it's global config, it shouldn't use specific project info

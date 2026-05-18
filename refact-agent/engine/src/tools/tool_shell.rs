@@ -253,10 +253,10 @@ impl Tool for ToolShell {
         args: &HashMap<String, Value>,
     ) -> Result<String, String> {
         let (gcx, execution_scope) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.app.gcx.clone(),
-                ccx_locked.execution_scope.clone(),
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
             )
         };
         let (command, _) = parse_args(gcx, args, execution_scope.as_ref()).await?;
@@ -395,7 +395,7 @@ pub async fn execute_shell_command_with_streaming(
     workdir_maybe: &Option<PathBuf>,
     timeout: u64,
     env_variables: &HashMap<String, String>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     subchat_tx: &Arc<AMutex<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>>,
     tool_call_id: &str,
     abort_flag: Arc<AtomicBool>,
@@ -588,7 +588,7 @@ pub async fn execute_shell_command_with_streaming(
 }
 
 async fn parse_args(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     execution_scope: Option<&ExecutionScope>,
 ) -> Result<(String, Option<PathBuf>), String> {
@@ -598,7 +598,7 @@ async fn parse_args(
 }
 
 async fn parse_args_with_filter(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     args: &HashMap<String, Value>,
     config_filter: &OutputFilter,
     execution_scope: Option<&ExecutionScope>,
@@ -656,7 +656,7 @@ async fn parse_args_with_filter(
 }
 
 async fn resolve_shell_workdir(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     raw_path: Option<&str>,
     execution_scope: Option<&ExecutionScope>,
 ) -> Result<(Option<PathBuf>, Vec<String>), String> {

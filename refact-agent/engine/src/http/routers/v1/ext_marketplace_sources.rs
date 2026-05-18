@@ -18,7 +18,7 @@ pub async fn handle_v1_ext_marketplace_sources_get(
     State(app): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let sources = load_all_sources(&config_dir)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -55,7 +55,7 @@ pub async fn handle_v1_ext_marketplace_sources_post(
         error: None,
     };
 
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     let saved = save_user_source(&config_dir, source)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -67,7 +67,7 @@ pub async fn handle_v1_ext_marketplace_sources_delete(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     let gcx = app.gcx.clone();
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     delete_user_source(&config_dir, &id).await.map_err(|e| {
         let status = if e.contains("cannot delete") {
             StatusCode::BAD_REQUEST
@@ -89,7 +89,7 @@ pub async fn handle_v1_ext_marketplace_sources_configure(
     let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<ConfigureMarketplaceSourceRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
-    let config_dir = gcx.read().await.config_dir.clone();
+    let config_dir = gcx.config_dir.clone();
     configure_source(&config_dir, &id, req.enabled)
         .await
         .map_err(|e| {
@@ -109,8 +109,7 @@ pub async fn handle_v1_ext_marketplace_sources_refresh(
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     let gcx = app.gcx.clone();
     let (config_dir, cache_dir) = {
-        let g = gcx.read().await;
-        (g.config_dir.clone(), g.cache_dir.clone())
+        (gcx.config_dir.clone(), gcx.cache_dir.clone())
     };
     refresh_source_cache(&config_dir, &cache_dir, &id)
         .await
@@ -149,7 +148,7 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        let config_dir = gcx.read().await.config_dir.clone();
+        let config_dir = gcx.config_dir.clone();
         let sources = load_all_sources(&config_dir).await.unwrap();
         assert!(sources.iter().any(|s| s.id == "example-repo"));
     }

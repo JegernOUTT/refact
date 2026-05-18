@@ -64,7 +64,7 @@ impl PathsAccess for AgenticPathContext {
 }
 
 pub async fn analyze_mode_transition(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     messages: &[ChatMessage],
     target_mode: &str,
     target_mode_description: &str,

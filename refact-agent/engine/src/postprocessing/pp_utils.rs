@@ -13,7 +13,7 @@ use crate::global_context::GlobalContext;
 use super::gcx_pp_context::GcxPPContext;
 
 pub async fn pp_resolve_ctx_file_paths(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     context_file_vec: &mut Vec<ContextFile>,
 ) -> Vec<(String, String)> {
     refact_postprocessing::pp_utils::pp_resolve_ctx_file_paths(
@@ -24,7 +24,7 @@ pub async fn pp_resolve_ctx_file_paths(
 }
 
 pub async fn pp_ast_markup_files(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     context_file_vec: &mut Vec<ContextFile>,
 ) -> Vec<Arc<PPFile>> {
     refact_postprocessing::pp_utils::pp_ast_markup_files(
@@ -35,7 +35,7 @@ pub async fn pp_ast_markup_files(
 }
 
 pub async fn pp_load_files_without_ast(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     context_file_vec: &mut Vec<ContextFile>,
 ) -> Vec<Arc<PPFile>> {
     refact_postprocessing::pp_utils::pp_load_files_without_ast(
@@ -46,7 +46,7 @@ pub async fn pp_load_files_without_ast(
 }
 
 pub async fn context_msgs_from_paths(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     files_set: HashSet<String>,
 ) -> Vec<ContextFile> {
     refact_postprocessing::pp_utils::context_msgs_from_paths(Arc::new(GcxPPContext(gcx)), files_set)

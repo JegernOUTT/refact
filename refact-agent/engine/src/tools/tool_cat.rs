@@ -208,7 +208,7 @@ impl Tool for ToolCat {
         // This is fast: uses in-memory KnowledgeIndex only.
         let related_section = {
             let gcx = ccx.lock().await.app.gcx.clone();
-            let idx_arc = { gcx.read().await.knowledge_index.clone() };
+            let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;
             let mut cards = idx_guard.related_for_files(&filenames_present, 8);
             if cards.is_empty() {
@@ -363,14 +363,14 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
     Vec<String>,
 ) {
     let (gcx, top_n, execution_scope) = {
-        let ccx_locked = ccx.lock().await;
+        let cgcx = ccx.lock().await;
         (
-            ccx_locked.app.gcx.clone(),
-            ccx_locked.top_n,
-            ccx_locked.execution_scope.clone(),
+            cgcx.app.gcx.clone(),
+            cgcx.top_n,
+            cgcx.execution_scope.clone(),
         )
     };
-    let ast_service_opt = gcx.read().await.ast_service.lock().unwrap().clone();
+    let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
 
     let mut not_found_messages = vec![];
     let mut scope_notices = vec![];

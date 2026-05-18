@@ -96,7 +96,7 @@ pub struct ToolCmdline {
 impl IntegrationTrait for ToolCmdline {
     async fn integr_settings_apply(
         &mut self,
-        _gcx: Arc<ARwLock<GlobalContext>>,
+        _gcx: Arc<GlobalContext>,
         config_path: String,
         value: &serde_json::Value,
     ) -> Result<(), serde_json::Error> {
@@ -328,13 +328,13 @@ impl Tool for ToolCmdline {
         let (command, workdir) = _parse_command_args(args, &self.cfg)?;
 
         let (gcx, chat_id) = {
-            let ccx_locked = ccx.lock().await;
+            let cgcx = ccx.lock().await;
             (
-                ccx_locked.global_context.clone(),
-                ccx_locked.chat_id.clone(),
+                cgcx.global_context.clone(),
+                cgcx.chat_id.clone(),
             )
         };
-        let user_activity = gcx.read().await.user_activity.clone();
+        let user_activity = gcx.user_activity.clone();
         if let Ok(mut ring) = user_activity.try_lock() {
             ring.push(UserAction::CommandRun {
                 command_preview: command.chars().take(80).collect(),

@@ -172,7 +172,7 @@ async fn validate_git_worktree(worktree_path: &Path) -> Result<(), String> {
 }
 
 async fn auto_commit_worktree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     worktree_path: &Path,
     card_id: &str,
     card_title: &str,
@@ -181,7 +181,7 @@ async fn auto_commit_worktree(
 }
 
 async fn auto_commit_worktree_with_message(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     worktree_path: &Path,
     card_id: &str,
     card_title: &str,
@@ -603,7 +603,7 @@ mod tests {
         }
     }
 
-    async fn test_gcx() -> Arc<ARwLock<GlobalContext>> {
+    async fn test_gcx() -> Arc<GlobalContext> {
         crate::global_context::tests::make_test_gcx().await
     }
 

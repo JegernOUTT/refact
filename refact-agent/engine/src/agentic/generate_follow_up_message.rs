@@ -14,7 +14,7 @@ const SUBAGENT_ID: &str = "follow_up";
 
 pub async fn generate_follow_up_message(
     messages: Vec<ChatMessage>,
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     _model_id: &str,
     _chat_id: &str,
 ) -> Result<FollowUpResponse, String> {

@@ -1260,7 +1260,7 @@ pub fn generate_environment_instructions(environments: &[DetectedEnvironment]) -
 const MAX_TREE_CHARS: usize = 16_000; // ~4K tokens
 
 pub async fn generate_compact_project_tree(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     max_depth: usize,
 ) -> Result<String, String> {
     let paths = paths_from_anywhere(gcx.clone()).await;
@@ -1487,7 +1487,7 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> String {
 }
 
 pub async fn gather_system_context(
-    gcx: Arc<ARwLock<GlobalContext>>,
+    gcx: Arc<GlobalContext>,
     include_tree: bool,
     tree_max_depth: usize,
 ) -> Result<SystemContext, String> {

@@ -183,7 +183,7 @@ impl Tool for ToolHandoffToMode {
             (ccx_lock.app.gcx.clone(), ccx_lock.chat_id.clone())
         };
 
-        let sessions = gcx.read().await.chat_sessions.clone();
+        let sessions = gcx.chat_sessions.clone();
         let session_arc =
             get_or_create_session_with_trajectory(crate::app_state::AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
 
@@ -240,8 +240,7 @@ impl Tool for ToolHandoffToMode {
         apply_overrides(&mut decisions, args);
 
         let path_context = {
-            let gcx_lock = gcx.read().await;
-            AgenticPathContext::from_context(&*gcx_lock)
+            AgenticPathContext::from_context(&*gcx)
         };
         let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
             .await
