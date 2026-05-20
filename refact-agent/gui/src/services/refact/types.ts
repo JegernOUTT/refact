@@ -128,6 +128,7 @@ interface BaseMessage {
     | DiffChunk[]
     | null
     | (UserMessageContentWithImage | ProcessedUserMessageContentWithImages)[];
+  extra?: Record<string, unknown>;
 }
 
 export interface ChatContextFileMessage extends BaseMessage {
@@ -182,9 +183,33 @@ export interface AssistantMessage extends BaseMessage, CostInfo {
   extra?: Record<string, unknown>;
 }
 
+export type UserErrorCategory =
+  | "ProviderTransient"
+  | "ProviderRateLimit"
+  | "ContextTooLarge"
+  | "AuthenticationFailed"
+  | "ModelUnavailable"
+  | "BillingQuota"
+  | "InvalidRequest"
+  | "NetworkFailure"
+  | "StreamCorrupted"
+  | "ToolSchemaInvalid"
+  | "ContentPolicy"
+  | "Unknown";
+
+export type UserErrorInfo = {
+  category: UserErrorCategory;
+  title: string;
+  explanation: string;
+  suggested_action: string;
+  is_retryable: boolean;
+  raw_error?: string;
+};
+
 export interface ErrorMessage extends BaseMessage {
   role: "error";
   content: string;
+  error_info?: UserErrorInfo;
 }
 
 export interface ToolCallMessage extends AssistantMessage {

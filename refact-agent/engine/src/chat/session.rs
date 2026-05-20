@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage};
+use crate::chat::retry_policy::{classify_user_error, user_error_info};
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
 
@@ -620,10 +621,25 @@ impl ChatSession {
                 });
             }
         }
+        let category = classify_user_error(&error);
+        let info = user_error_info(category);
         let error_message = ChatMessage {
             role: "error".to_string(),
             content: ChatContent::SimpleText(error.clone()),
             message_id: Uuid::new_v4().to_string(),
+            extra: serde_json::json!({
+                "error_info": {
+                    "category": format!("{:?}", info.category),
+                    "title": info.title,
+                    "explanation": info.explanation,
+                    "suggested_action": info.suggested_action,
+                    "is_retryable": info.is_retryable,
+                    "raw_error": error,
+                }
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
             ..Default::default()
         };
         self.add_message(error_message);
@@ -1454,6 +1470,14 @@ mod tests {
         assert_eq!(session.messages[1].role, "error");
         assert_eq!(session.runtime.state, SessionState::Error);
         assert_eq!(session.runtime.error, Some("timeout".into()));
+        assert_eq!(
+            session.messages[1]
+                .extra
+                .get("error_info")
+                .and_then(|info| info.get("category"))
+                .and_then(|category| category.as_str()),
+            Some("ProviderTransient")
+        );
     }
 
     #[test]

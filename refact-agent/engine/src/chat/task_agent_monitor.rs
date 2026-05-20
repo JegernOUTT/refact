@@ -14,7 +14,10 @@ use chrono::Utc;
 use crate::app_state::AppState;
 use crate::tasks::storage;
 use crate::tasks::types::StatusUpdate;
-use crate::chat::retry_policy::{RetryDecision, classify_llm_error_for_retry};
+use crate::chat::retry_policy::{
+    RetryDecision, UserErrorCategory, classify_llm_error_for_retry, classify_user_error,
+    user_error_info,
+};
 use crate::chat::types::{SessionState, TaskMeta};
 use crate::chat::{get_or_create_session_with_trajectory, process_command_queue};
 use crate::chat::types::{CommandRequest, ChatCommand};
@@ -81,18 +84,47 @@ impl AgentFailureKind {
     }
 
     fn final_report_reason(self, error_message: &str) -> String {
-        match self {
-            AgentFailureKind::TransientExhausted => format!(
-                "Agent provider/network error after retries were exhausted; worktree retained for retry: {}",
-                error_message
-            ),
-            AgentFailureKind::ContextLimit => format!(
-                "Agent hit provider context limit; compaction or a smaller history is required: {}",
-                error_message
-            ),
-            AgentFailureKind::Permanent => format!("Agent streaming error: {}", error_message),
-            AgentFailureKind::Cancelled => format!("Agent was cancelled: {}", error_message),
-        }
+        let category = match self {
+            AgentFailureKind::Cancelled => UserErrorCategory::Unknown,
+            _ => classify_user_error(error_message),
+        };
+        let info = user_error_info(category);
+        let retry_note = if info.is_retryable {
+            "This error is usually retryable."
+        } else {
+            "This error is not expected to succeed by retrying unchanged."
+        };
+        let retention_note = match self {
+            AgentFailureKind::TransientExhausted => {
+                "Retries were exhausted; worktree retained for inspection or retry."
+            }
+            AgentFailureKind::ContextLimit => {
+                "Provider context limit was reached; worktree retained so the task can be retried after compaction or with a smaller history."
+            }
+            AgentFailureKind::Permanent => "Worktree cleanup may run after this report.",
+            AgentFailureKind::Cancelled => "The task was cancelled before the agent finished.",
+        };
+
+        format!(
+            "{}\n\n{}\n\nSuggested action: {}\n{}\n{}\n\nRaw error: {}",
+            info.title,
+            info.explanation,
+            format_user_error_action(info.suggested_action),
+            retry_note,
+            retention_note,
+            error_message
+        )
+    }
+}
+
+fn format_user_error_action(action: &str) -> &'static str {
+    match action {
+        "retry" => "Retry the task or wait for the provider/network to recover.",
+        "compact" => "Compact the chat, reduce attached context, or switch to a larger-context model.",
+        "check_auth" => "Check provider credentials, OAuth login, token scope, and provider configuration.",
+        "switch_model" => "Select an available model or update the provider route configuration.",
+        "check_billing" => "Check provider billing, credits, quota, and usage limits.",
+        _ => "Review the raw provider error and adjust the request or task before retrying.",
     }
 }
 
@@ -1021,12 +1053,13 @@ mod tests {
     #[test]
     fn task_agent_monitor_transient_exhaustion_retains_worktree() {
         let kind = AgentFailureKind::from_error("LLM error (503 Service Unavailable): overloaded");
+        let report = kind.final_report_reason("LLM error (503 Service Unavailable): overloaded");
 
         assert_eq!(kind, AgentFailureKind::TransientExhausted);
         assert!(!kind.should_cleanup_worktree());
-        assert!(kind
-            .final_report_reason("LLM error (503 Service Unavailable): overloaded")
-            .contains("worktree retained"));
+        assert!(report.contains("worktree retained"));
+        assert!(report.contains("Provider temporarily unavailable"));
+        assert!(report.contains("Suggested action: Retry"));
     }
 
     #[test]
@@ -1042,11 +1075,14 @@ mod tests {
         let kind = AgentFailureKind::from_error(
             "LLM error (413 Payload Too Large): context length exceeded",
         );
+        let report = kind.final_report_reason(
+            "LLM error (413 Payload Too Large): context length exceeded",
+        );
 
         assert_eq!(kind, AgentFailureKind::ContextLimit);
         assert!(!kind.should_cleanup_worktree());
-        assert!(kind
-            .final_report_reason("LLM error (413 Payload Too Large): context length exceeded")
-            .contains("context limit"));
+        assert!(report.contains("context limit"));
+        assert!(report.contains("Context too large"));
+        assert!(report.contains("Suggested action: Compact chat"));
     }
 }

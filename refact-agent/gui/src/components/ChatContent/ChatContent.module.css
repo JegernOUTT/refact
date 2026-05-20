@@ -262,6 +262,13 @@
   margin: 0;
 }
 
+.errorMessageRaw {
+  padding: var(--space-2);
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+  color: var(--gray-12);
+}
+
 .virtuosoScroller {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   height: 100%;

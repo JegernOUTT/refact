@@ -12,6 +12,7 @@ import {
   ChatMessages,
   DiffChunk,
   DiffMessage,
+  ErrorMessage,
   isChatContextFileMessage,
   isDiffMessage,
   isAssistantMessage,
@@ -560,7 +561,7 @@ type DisplayItemError = {
   type: "error";
   key: string;
   messageIndex: number;
-  errors: string[];
+  errors: ErrorMessage[];
 };
 
 type DisplayItemSkillActivated = {
@@ -714,12 +715,12 @@ function buildDisplayItemsFromIndex(
     if (isToolMessage(head)) continue;
 
     if (isErrorMessage(head)) {
-      const errors = [head.content];
+      const errors = [head];
       let j = i + 1;
       while (j < messages.length) {
         const candidate = messages[j];
         if (!isErrorMessage(candidate)) break;
-        errors.push(candidate.content);
+        errors.push(candidate);
         j++;
       }
       items.push({
@@ -1054,12 +1055,12 @@ function buildDisplayItems(
     if (isToolMessage(head)) continue;
 
     if (isErrorMessage(head)) {
-      const errors = [head.content];
+      const errors = [head];
       let j = i + 1;
       while (j < messages.length) {
         const candidate = messages[j];
         if (!isErrorMessage(candidate)) break;
-        errors.push(candidate.content);
+        errors.push(candidate);
         j++;
       }
       items.push({
