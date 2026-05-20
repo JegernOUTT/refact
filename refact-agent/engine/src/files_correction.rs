@@ -297,7 +297,7 @@ pub async fn check_if_its_inside_a_workspace_or_config(
 
 #[cfg(test)]
 mod tests {
-    
+    use super::*;
 
     #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
     #[cfg(not(debug_assertions))]
