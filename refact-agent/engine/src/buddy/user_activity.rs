@@ -122,6 +122,7 @@ impl UserActivityRing {
         file.write_all(content.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
+        file.flush().await.map_err(|e| e.to_string())?;
         self.persisted_len.store(self.buf.len(), Ordering::SeqCst);
         Ok(())
     }
