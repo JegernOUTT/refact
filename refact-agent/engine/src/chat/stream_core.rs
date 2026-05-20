@@ -14,7 +14,7 @@ use crate::llm::{LlmRequest, LlmStreamDelta, WireFormat, get_adapter, safe_trunc
 use crate::llm::adapter::{AdapterSettings, HttpParts, StreamParseError};
 
 use super::types::{DeltaOp, stream_heartbeat, stream_idle_timeout, stream_total_timeout};
-use super::retry_policy::{classify_llm_error_for_retry, RetryDecision};
+use super::retry_policy::{classify_llm_error_for_retry, should_retry_llm_error, RetryDecision};
 use super::openai_merge::ToolCallAccumulator;
 
 fn merge_usage(existing: Option<ChatUsage>, incoming: ChatUsage) -> ChatUsage {
@@ -82,6 +82,60 @@ pub struct StreamRunParams {
     pub supports_reasoning: bool,
     pub reasoning_type: Option<String>,
     pub supports_temperature: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct LlmStreamError {
+    pub message: String,
+    pub partial_output_emitted: bool,
+}
+
+impl LlmStreamError {
+    fn new(message: impl Into<String>, partial_output_emitted: bool) -> Self {
+        Self {
+            message: message.into(),
+            partial_output_emitted,
+        }
+    }
+
+    pub fn retry_decision(&self) -> RetryDecision {
+        classify_llm_error_for_retry(&self.message)
+    }
+
+    pub fn should_retry(&self, attempt: usize, abort: &AtomicBool) -> bool {
+        if self.partial_output_emitted {
+            return false;
+        }
+        should_retry_llm_error(&self.message, attempt, abort)
+    }
+}
+
+impl std::fmt::Display for LlmStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for LlmStreamError {}
+
+impl std::ops::Deref for LlmStreamError {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
+impl From<LlmStreamError> for String {
+    fn from(error: LlmStreamError) -> Self {
+        error.message
+    }
+}
+
+impl From<String> for LlmStreamError {
+    fn from(message: String) -> Self {
+        Self::new(message, false)
+    }
 }
 
 async fn send_llm_http_request(
@@ -278,6 +332,28 @@ impl StreamCollector for ReplayCollector {
     fn on_finish(&mut self, choice_idx: usize, finish_reason: Option<String>) {
         self.events
             .push(CollectorReplayEvent::Finish(choice_idx, finish_reason));
+    }
+}
+
+struct PartialOutputCollector<'a, C: StreamCollector> {
+    collector: &'a mut C,
+    partial_output_emitted: &'a mut bool,
+}
+
+impl<C: StreamCollector> StreamCollector for PartialOutputCollector<'_, C> {
+    fn on_delta_ops(&mut self, choice_idx: usize, ops: Vec<DeltaOp>) {
+        if !ops.is_empty() {
+            *self.partial_output_emitted = true;
+        }
+        self.collector.on_delta_ops(choice_idx, ops);
+    }
+
+    fn on_usage(&mut self, usage: &ChatUsage) {
+        self.collector.on_usage(usage);
+    }
+
+    fn on_finish(&mut self, choice_idx: usize, finish_reason: Option<String>) {
+        self.collector.on_finish(choice_idx, finish_reason);
     }
 }
 
@@ -1108,9 +1184,14 @@ pub async fn run_llm_stream<C: StreamCollector>(
     app: AppState,
     params: StreamRunParams,
     collector: &mut C,
-) -> Result<Vec<ChoiceFinal>, String> {
+) -> Result<Vec<ChoiceFinal>, LlmStreamError> {
+    let mut partial_output_emitted = false;
+
     if params.llm_request.params.n.unwrap_or(1) != 1 {
-        return Err("Streaming with n > 1 is not supported".to_string());
+        return Err(LlmStreamError::new(
+            "Streaming with n > 1 is not supported",
+            partial_output_emitted,
+        ));
     }
 
     let client = app.runtime.http_client.clone();
@@ -1139,7 +1220,12 @@ pub async fn run_llm_stream<C: StreamCollector>(
 
     let http_parts = adapter
         .build_http(&params.llm_request, &adapter_settings)
-        .map_err(|e| format!("Failed to build LLM request: {}", e))?;
+        .map_err(|e| {
+            LlmStreamError::new(
+                format!("Failed to build LLM request: {}", e),
+                partial_output_emitted,
+            )
+        })?;
 
     let mut sanitized_for_commit: Option<serde_json::Value> = None;
     if let Some(chat_id) = &params.chat_id {
@@ -1154,12 +1240,16 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 &params.llm_request.model_id,
                 &http_parts.body,
             )
-            .await?;
+            .await
+            .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
         }
     }
 
     if http_parts.url.is_empty() {
-        return Err("LLM endpoint URL is empty".to_string());
+        return Err(LlmStreamError::new(
+            "LLM endpoint URL is empty",
+            partial_output_emitted,
+        ));
     }
 
     tracing::debug!(
@@ -1200,7 +1290,9 @@ pub async fn run_llm_stream<C: StreamCollector>(
         }
     }
 
-    let mut response = send_llm_http_request(&client, &http_parts, wire_format).await?;
+    let mut response = send_llm_http_request(&client, &http_parts, wire_format)
+        .await
+        .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
     let mut status = response.status();
     if !status.is_success()
         && is_openai_codex_chatgpt_backend(&params.model_rec)
@@ -1218,7 +1310,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
             status,
             &params.model_rec.api_key,
         )
-        .await?
+        .await
+        .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?
         {
             Some(new_access_token) => {
                 let mut retry_parts = HttpParts {
@@ -1229,12 +1322,17 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 let auth_value =
                     reqwest::header::HeaderValue::from_str(&format!("Bearer {}", new_access_token))
                         .map_err(|e| {
-                            format!("OpenAI Codex refreshed token cannot be used: {}", e)
+                            LlmStreamError::new(
+                                format!("OpenAI Codex refreshed token cannot be used: {}", e),
+                                partial_output_emitted,
+                            )
                         })?;
                 retry_parts
                     .headers
                     .insert(reqwest::header::AUTHORIZATION, auth_value);
-                response = send_llm_http_request(&client, &retry_parts, wire_format).await?;
+                response = send_llm_http_request(&client, &retry_parts, wire_format)
+                    .await
+                    .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
                 status = response.status();
             }
             None => {}
@@ -1251,7 +1349,10 @@ pub async fn run_llm_stream<C: StreamCollector>(
             )
             .await;
         }
-        return Err(format_llm_error_body(&format!("{}", status), &text));
+        return Err(LlmStreamError::new(
+            format_llm_error_body(&format!("{}", status), &text),
+            partial_output_emitted,
+        ));
     }
 
     commit_cache_guard_snapshot_if_needed(
@@ -1261,15 +1362,21 @@ pub async fn run_llm_stream<C: StreamCollector>(
     )
     .await;
 
+    let mut tracking_collector = PartialOutputCollector {
+        collector,
+        partial_output_emitted: &mut partial_output_emitted,
+    };
+
     if wire_format == WireFormat::OllamaNative {
         return run_llm_ndjson_request(
             response,
             adapter,
             &params.model_rec.auth_token,
             params.abort_flag.clone(),
-            collector,
+            &mut tracking_collector,
         )
-        .await;
+        .await
+        .map_err(|e| LlmStreamError::new(e, *tracking_collector.partial_output_emitted));
     }
 
     let mut stream = response.bytes_stream().eventsource();
@@ -1290,14 +1397,23 @@ pub async fn run_llm_stream<C: StreamCollector>(
             _ = heartbeat.tick() => {
                 if let Some(ref flag) = params.abort_flag {
                     if flag.load(Ordering::SeqCst) {
-                        return Err("Aborted".to_string());
+                        return Err(LlmStreamError::new(
+                            "Aborted",
+                            *tracking_collector.partial_output_emitted,
+                        ));
                     }
                 }
                 if stream_started_at.elapsed() > stream_total_timeout() {
-                    return Err("LLM stream timeout".to_string());
+                    return Err(LlmStreamError::new(
+                        "LLM stream timeout",
+                        *tracking_collector.partial_output_emitted,
+                    ));
                 }
                 if last_event_at.elapsed() > stream_idle_timeout() {
-                    return Err("LLM stream stalled".to_string());
+                    return Err(LlmStreamError::new(
+                        "LLM stream stalled",
+                        *tracking_collector.partial_output_emitted,
+                    ));
                 }
                 continue;
             }
@@ -1305,11 +1421,17 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 match maybe_event {
                     Some(Ok(ev)) => ev,
                     Some(Err(e)) => {
-                        return Err(format!("Stream error: {}", e));
+                        return Err(LlmStreamError::new(
+                            format!("Stream error: {}", e),
+                            *tracking_collector.partial_output_emitted,
+                        ));
                     }
                     None => {
                         if !stream_done && !adapter_settings.eof_is_done {
-                            return Err("LLM stream ended unexpectedly without completion signal".to_string());
+                            return Err(LlmStreamError::new(
+                                "LLM stream ended unexpectedly without completion signal",
+                                *tracking_collector.partial_output_emitted,
+                            ));
                         }
                         break;
                     }
@@ -1323,12 +1445,13 @@ pub async fn run_llm_stream<C: StreamCollector>(
             &params.model_rec.auth_token,
             &event.data,
             &mut accumulators,
-            collector,
+            &mut tracking_collector,
             false,
-        )?;
+        )
+        .map_err(|e| LlmStreamError::new(e, *tracking_collector.partial_output_emitted))?;
     }
 
-    let results = finalize_accumulators(accumulators, collector);
+    let results = finalize_accumulators(accumulators, &mut tracking_collector);
 
     Ok(results)
 }
@@ -1549,6 +1672,30 @@ mod tests {
             reqwest::StatusCode::UNAUTHORIZED,
             r#"{"error":{"message":"invalid api key"}}"#,
         ));
+    }
+
+    #[test]
+    fn stream_error_with_partial_output_does_not_retry_transient_error() {
+        let abort = AtomicBool::new(false);
+        let error = LlmStreamError {
+            message: "LLM error (503 Service Unavailable): overloaded".to_string(),
+            partial_output_emitted: true,
+        };
+
+        assert!(matches!(error.retry_decision(), RetryDecision::Retry { .. }));
+        assert!(!error.should_retry(0, &abort));
+    }
+
+    #[test]
+    fn stream_error_without_partial_output_retries_transient_error() {
+        let abort = AtomicBool::new(false);
+        let error = LlmStreamError {
+            message: "LLM error (503 Service Unavailable): overloaded".to_string(),
+            partial_output_emitted: false,
+        };
+
+        assert!(matches!(error.retry_decision(), RetryDecision::Retry { .. }));
+        assert!(error.should_retry(0, &abort));
     }
 
     #[test]

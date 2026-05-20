@@ -1611,7 +1611,9 @@ async fn subchat_stream(
                             retry_reason_for_log,
                         );
                         if sleep_or_abort(delay, abort_flag.clone()).await {
-                            break Err("aborted".to_string());
+                            break Err(crate::chat::stream_core::LlmStreamError::from(
+                                "aborted".to_string(),
+                            ));
                         }
                         continue;
                     }
