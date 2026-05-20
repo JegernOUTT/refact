@@ -13,6 +13,8 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
+use crate::tasks::types::TaskMeta as StoredTaskMeta;
+use crate::worktrees::git;
 use crate::worktrees::service::WorktreeService;
 use refact_chat_api::{ChatCommand, TaskMeta, ThreadParams};
 use crate::worktrees::types::{CreateWorktreeRequest, WorktreeMeta};
@@ -68,6 +70,7 @@ struct PreparedWorktree {
     meta: WorktreeMeta,
     branch_was_created: bool,
     spawned_with_dirty_tree: bool,
+    base_branch_mismatch_warning: Option<String>,
 }
 
 impl PreparedWorktree {
@@ -106,6 +109,29 @@ impl PreparedWorktree {
     }
 }
 
+fn current_branch_for_workspace(
+    workspace_root: &std::path::Path,
+) -> Result<Option<String>, String> {
+    let repo = git::discover_repo(workspace_root)?;
+    Ok(git::current_branch(&repo))
+}
+
+fn task_base_branch_missing_error(branch: &str) -> String {
+    format!(
+        "Task base branch '{}' no longer exists. Update the task base branch or create a new task on the current branch.",
+        branch
+    )
+}
+
+fn map_task_base_branch_error(error: String, base_branch: Option<&str>) -> String {
+    if let Some(branch) = base_branch {
+        if error.contains(&format!("Base branch '{}' not found", branch)) {
+            return task_base_branch_missing_error(branch);
+        }
+    }
+    format!("Failed to create task-agent worktree: {}", error)
+}
+
 fn find_abandoned_worktrees(board: &crate::tasks::types::TaskBoard) -> Vec<String> {
     board
         .cards
@@ -126,6 +152,7 @@ fn find_abandoned_worktrees(board: &crate::tasks::types::TaskBoard) -> Vec<Strin
 
 async fn prepare_agent_worktree(
     gcx: Arc<GlobalContext>,
+    task_meta: &StoredTaskMeta,
     task_id: &str,
     agent_id: &str,
     card_id: &str,
@@ -143,11 +170,33 @@ async fn prepare_agent_worktree(
     );
     let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new(cache_dir, workspace_root.clone())?;
+    let task_base_branch = task_meta.base_branch.clone();
+    let current_branch = if task_base_branch.is_some() {
+        current_branch_for_workspace(&workspace_root)?
+    } else {
+        None
+    };
+    if let Some(branch) = task_base_branch.as_deref() {
+        if !git::branch_exists(&workspace_root, branch)? {
+            return Err(task_base_branch_missing_error(branch));
+        }
+    }
+    let base_branch_mismatch_warning = match (task_base_branch.as_deref(), current_branch.as_deref()) {
+        (Some(task_branch), Some(current_branch)) if task_branch != current_branch => Some(format!(
+            "Current repo HEAD is on branch '{}' but this task was created from '{}'; spawning agent from the task base branch.",
+            current_branch, task_branch
+        )),
+        (Some(task_branch), None) => Some(format!(
+            "Current repo HEAD is detached but this task was created from '{}'; spawning agent from the task base branch.",
+            task_branch
+        )),
+        _ => None,
+    };
     let created = service
         .create_worktree(CreateWorktreeRequest {
             source_workspace_root: Some(workspace_root.to_string_lossy().to_string()),
             branch: Some(branch_name),
-            base_branch: None,
+            base_branch: task_base_branch,
             chat_id: Some(agent_chat_id.to_string()),
             kind: Some("task_agent".to_string()),
             task_id: Some(task_id.to_string()),
@@ -155,18 +204,22 @@ async fn prepare_agent_worktree(
             agent_id: Some(agent_id.to_string()),
         })
         .await
-        .map_err(|e| format!("Failed to create task-agent worktree: {}", e))?;
+        .map_err(|e| map_task_base_branch_error(e, task_meta.base_branch.as_deref()))?;
 
     if created.dirty_source_warning {
         tracing::warn!(
-            "Spawning agent from HEAD — local uncommitted changes are excluded from the agent's worktree"
+            "Spawning agent from committed base — local uncommitted changes are excluded from the agent's worktree"
         );
+    }
+    if let Some(warning) = base_branch_mismatch_warning.as_deref() {
+        tracing::warn!("task_spawn_agent: {}", warning);
     }
 
     Ok(PreparedWorktree {
         meta: created.worktree.meta,
         branch_was_created: created.branch_was_created,
         spawned_with_dirty_tree: created.dirty_source_warning,
+        base_branch_mismatch_warning,
     })
 }
 
@@ -450,11 +503,18 @@ impl Tool for ToolTaskSpawnAgent {
         let agent_id = Uuid::new_v4().to_string();
         let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
 
-        let prepared_worktree =
-            prepare_agent_worktree(gcx.clone(), &task_id, &agent_id, card_id, &agent_chat_id)
-                .await?;
+        let prepared_worktree = prepare_agent_worktree(
+            gcx.clone(),
+            &task_meta,
+            &task_id,
+            &agent_id,
+            card_id,
+            &agent_chat_id,
+        )
+        .await?;
 
         let dirty_tree_warning = prepared_worktree.spawned_with_dirty_tree;
+        let base_branch_mismatch_warning = prepared_worktree.base_branch_mismatch_warning.clone();
 
         let card_id_owned = card_id.to_string();
         let agent_id_clone = agent_id.clone();
@@ -573,12 +633,8 @@ impl Tool for ToolTaskSpawnAgent {
                 return Err(e);
             }
         };
-        if meta.base_branch.is_none() {
-            meta.base_branch = base_branch_from_prep;
-        }
-        if meta.base_commit.is_none() {
-            meta.base_commit = base_commit_from_prep;
-        }
+        meta.base_branch = base_branch_from_prep;
+        meta.base_commit = base_commit_from_prep;
         if starting_new_run {
             meta.last_agents_summary_at = Some(Utc::now().to_rfc3339());
         } else if meta.last_agents_summary_at.is_none() {
@@ -705,10 +761,14 @@ impl Tool for ToolTaskSpawnAgent {
         );
 
         let dirty_note = if dirty_tree_warning {
-            "\n\n⚠️ Note: agent works from HEAD. Your uncommitted local changes are not included in the agent's worktree."
+            "\n\n⚠️ Note: agent works from the committed base. Your uncommitted local changes are not included in the agent's worktree."
         } else {
             ""
         };
+        let branch_note = base_branch_mismatch_warning
+            .as_ref()
+            .map(|warning| format!("\n\n⚠️ Note: {}", warning))
+            .unwrap_or_default();
 
         let result_message = format!(
             r#"# Agent Spawned: {}
@@ -718,8 +778,8 @@ impl Tool for ToolTaskSpawnAgent {
 **Model:** {}
 **Status:** Running in background
 
-The agent will call `task_agent_finish()` when done. Use `task_check_agents` to monitor progress.{}"#,
-            card_title, card_id, agent_id, model, dirty_note
+The agent will call `task_agent_finish()` when done. Use `task_check_agents` to monitor progress.{}{}"#,
+            card_title, card_id, agent_id, model, dirty_note, branch_note
         );
 
         Ok((
@@ -742,7 +802,7 @@ The agent will call `task_agent_finish()` when done. Use `task_check_agents` to 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::types::{BoardCard, TaskBoard};
+    use crate::tasks::types::{BoardCard, TaskBoard, TaskStatus};
     use std::path::Path;
     use std::process::Command;
 
@@ -772,9 +832,38 @@ mod tests {
         run_git(root, &["commit", "-m", "initial"]);
     }
 
+    fn commit_file(root: &Path, name: &str, content: &str, message: &str) -> String {
+        std::fs::write(root.join(name), content).unwrap();
+        run_git(root, &["add", name]);
+        run_git(root, &["commit", "-m", message]);
+        run_git(root, &["rev-parse", "HEAD"]).trim().to_string()
+    }
+
     async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
         let root = root.canonicalize().unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
+    }
+
+    fn sample_task_meta(base_branch: Option<&str>) -> StoredTaskMeta {
+        let now = Utc::now().to_rfc3339();
+        StoredTaskMeta {
+            schema_version: 1,
+            id: "task-1".to_string(),
+            name: "Task".to_string(),
+            status: TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 0,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: base_branch.map(|branch| branch.to_string()),
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+        }
     }
 
     fn sample_worktree_meta(temp: &Path) -> WorktreeMeta {
@@ -829,10 +918,17 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;
 
-        let err =
-            prepare_agent_worktree(gcx, "task-1", "agent-12345678", "T-1", "agent-T-1-12345678")
-                .await
-                .unwrap_err();
+        let task_meta = sample_task_meta(None);
+        let err = prepare_agent_worktree(
+            gcx,
+            &task_meta,
+            "task-1",
+            "agent-12345678",
+            "T-1",
+            "agent-T-1-12345678",
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.contains("not a git repository"), "{err}");
     }
@@ -847,8 +943,10 @@ mod tests {
         set_workspace(gcx.clone(), &source).await;
         let before = crate::files_correction::get_project_dirs(gcx.clone()).await;
 
+        let task_meta = sample_task_meta(None);
         let prepared = prepare_agent_worktree(
             gcx.clone(),
+            &task_meta,
             "task-1",
             "agent-12345678",
             "T-1",
@@ -878,8 +976,10 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;
+        let task_meta = sample_task_meta(None);
         let prepared = prepare_agent_worktree(
             gcx.clone(),
+            &task_meta,
             "task-1",
             "agent-abcdef12",
             "T-1",
@@ -900,6 +1000,135 @@ mod tests {
         assert!(service.get_worktree(&id).await.is_err());
         let branches = run_git(&source, &["branch", "--list", &branch]);
         assert!(branches.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_uses_stored_base_branch_not_current_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let main_head = commit_file(&source, "main_only.txt", "only main\n", "main-only");
+        run_git(&source, &["checkout", "-b", "dev"]);
+        let dev_head = commit_file(&source, "dev_only.txt", "only dev\n", "dev-only");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let task_meta = sample_task_meta(Some("main"));
+
+        let prepared = prepare_agent_worktree(
+            gcx.clone(),
+            &task_meta,
+            "task-1",
+            "agent-11111111",
+            "T-1",
+            "agent-T-1-11111111",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prepared.meta.base_branch.as_deref(), Some("main"));
+        assert_eq!(
+            prepared.meta.base_commit.as_deref(),
+            Some(main_head.as_str())
+        );
+        assert!(prepared.meta.root.join("main_only.txt").is_file());
+        assert!(!prepared.meta.root.join("dev_only.txt").exists());
+        assert_eq!(run_git(&source, &["rev-parse", "dev"]).trim(), dev_head);
+
+        prepared.cleanup(gcx).await;
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_none_base_branch_falls_back_to_current_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        run_git(&source, &["checkout", "-b", "dev"]);
+        let dev_head = commit_file(&source, "dev_only.txt", "only dev\n", "dev-only");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let task_meta = sample_task_meta(None);
+
+        let prepared = prepare_agent_worktree(
+            gcx.clone(),
+            &task_meta,
+            "task-1",
+            "agent-22222222",
+            "T-1",
+            "agent-T-1-22222222",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prepared.meta.base_branch.as_deref(), Some("dev"));
+        assert_eq!(
+            prepared.meta.base_commit.as_deref(),
+            Some(dev_head.as_str())
+        );
+        assert!(prepared.meta.root.join("dev_only.txt").is_file());
+        assert!(prepared.base_branch_mismatch_warning.is_none());
+
+        prepared.cleanup(gcx).await;
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_deleted_base_branch_returns_clear_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        run_git(&source, &["branch", "task-base"]);
+        run_git(&source, &["branch", "-D", "task-base"]);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let task_meta = sample_task_meta(Some("task-base"));
+
+        let err = prepare_agent_worktree(
+            gcx,
+            &task_meta,
+            "task-1",
+            "agent-33333333",
+            "T-1",
+            "agent-T-1-33333333",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "Task base branch 'task-base' no longer exists. Update the task base branch or create a new task on the current branch."
+        );
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_warns_when_current_head_differs_from_task_base_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        run_git(&source, &["checkout", "-b", "dev"]);
+        commit_file(&source, "dev_only.txt", "only dev\n", "dev-only");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let task_meta = sample_task_meta(Some("main"));
+
+        let prepared = prepare_agent_worktree(
+            gcx.clone(),
+            &task_meta,
+            "task-1",
+            "agent-44444444",
+            "T-1",
+            "agent-T-1-44444444",
+        )
+        .await
+        .unwrap();
+
+        let warning = prepared.base_branch_mismatch_warning.as_deref().unwrap();
+        assert!(warning.contains("Current repo HEAD is on branch 'dev'"));
+        assert!(warning.contains("this task was created from 'main'"));
+
+        prepared.cleanup(gcx).await;
     }
 
     #[test]

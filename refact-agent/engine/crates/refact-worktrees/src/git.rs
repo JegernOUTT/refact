@@ -121,6 +121,23 @@ pub fn commit_for_ref(repo: &Repository, refish: &str) -> Result<String, String>
     Ok(commit.id().to_string())
 }
 
+pub fn commit_for_branch(repo: &Repository, branch_name: &str) -> Result<String, String> {
+    let branch = repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .map_err(|e| {
+            if e.code() == git2::ErrorCode::NotFound {
+                format!("Base branch '{}' not found", branch_name)
+            } else {
+                format!("Failed to resolve base branch '{}': {}", branch_name, e)
+            }
+        })?;
+    let commit = branch
+        .into_reference()
+        .peel_to_commit()
+        .map_err(|e| format!("Base branch '{}' is not a commit: {}", branch_name, e))?;
+    Ok(commit.id().to_string())
+}
+
 pub fn has_uncommitted_changes(repo: &Repository) -> Result<bool, String> {
     let statuses = repo
         .statuses(Some(&mut status_options(StatusShow::IndexAndWorkdir)))
@@ -144,7 +161,7 @@ pub fn create_worktree(
         .map(|s| s.to_string())
         .or_else(|| current_branch(&repo));
     let base_commit = match base_ref {
-        Some(base) => commit_for_ref(&repo, base)?,
+        Some(base) => commit_for_branch(&repo, base)?,
         None => head_commit(&repo)?,
     };
     let dirty_source = has_uncommitted_changes(&repo).unwrap_or(false);
