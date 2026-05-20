@@ -27,6 +27,7 @@ use crate::ext::extensions_marketplace::{
 use crate::ext::slash_commands::parse_frontmatter_and_body;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
+use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 
 #[derive(Debug, Deserialize)]
 pub struct OpportunitiesQuery {
@@ -990,7 +991,7 @@ async fn create_investigation_chat(
     let chat_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    let snapshot = crate::chat::trajectories::TrajectorySnapshot {
+    let snapshot = TrajectorySnapshot {
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model: String::new(),

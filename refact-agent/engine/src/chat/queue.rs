@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
-use crate::buddy::user_activity::UserAction;
+use refact_buddy_core::user_action::UserAction;
 use crate::files_correction::get_project_dirs;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};

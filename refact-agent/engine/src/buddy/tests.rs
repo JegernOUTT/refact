@@ -4778,7 +4778,7 @@ async fn accept_pulse_report_action_returns_report_draft_id() {
 #[tokio::test]
 async fn tool_buddy_launch_investigation_creates_chat() {
     use crate::chat::trajectories::save_trajectory_snapshot;
-    use crate::chat::trajectories::TrajectorySnapshot;
+    use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
     use crate::buddy::types::BuddyThreadMeta;
     use crate::call_validation::{ChatContent, ChatMessage};
 

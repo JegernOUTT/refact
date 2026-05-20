@@ -3,64 +3,15 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use chrono::{DateTime, Duration, Local, Timelike, Utc};
+use chrono::{Duration, Local, Timelike, Utc};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 const USER_ACTIVITY_CAPACITY: usize = 200;
 const TEXT_CAP: usize = 80;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum UserAction {
-    FileOpened {
-        path: String,
-        ts: DateTime<Utc>,
-    },
-    SnippetSelected {
-        path: String,
-        lines: (u32, u32),
-        ts: DateTime<Utc>,
-    },
-    ToolApproved {
-        tool_name: String,
-        chat_id: String,
-        ts: DateTime<Utc>,
-    },
-    ToolRejected {
-        tool_name: String,
-        chat_id: String,
-        ts: DateTime<Utc>,
-    },
-    CommandRun {
-        command_preview: String,
-        chat_id: String,
-        ts: DateTime<Utc>,
-    },
-    WorkspaceChanged {
-        folders_added: Vec<String>,
-        folders_removed: Vec<String>,
-        ts: DateTime<Utc>,
-    },
-    CommitMade {
-        sha: String,
-        message_first_line: String,
-        files: u32,
-        ts: DateTime<Utc>,
-    },
-    TaskFailed {
-        task_id: String,
-        reason_short: String,
-        ts: DateTime<Utc>,
-    },
-    ChatStarted {
-        chat_id: String,
-        first_user_text_preview: String,
-        ts: DateTime<Utc>,
-    },
-}
+pub use refact_buddy_core::user_action::UserAction;
 
 #[derive(Debug)]
 pub struct UserActivityRing {
@@ -175,22 +126,6 @@ impl UserActivityRing {
         Ok(())
     }
 
-}
-
-impl UserAction {
-    fn ts(&self) -> DateTime<Utc> {
-        match self {
-            UserAction::FileOpened { ts, .. }
-            | UserAction::SnippetSelected { ts, .. }
-            | UserAction::ToolApproved { ts, .. }
-            | UserAction::ToolRejected { ts, .. }
-            | UserAction::CommandRun { ts, .. }
-            | UserAction::WorkspaceChanged { ts, .. }
-            | UserAction::CommitMade { ts, .. }
-            | UserAction::TaskFailed { ts, .. }
-            | UserAction::ChatStarted { ts, .. } => *ts,
-        }
-    }
 }
 
 pub fn time_of_day_pattern(actions: &[UserAction]) -> String {
@@ -347,7 +282,7 @@ fn format_window(start: usize) -> String {
 mod tests {
     use super::*;
     use crate::app_state::AppState;
-    use chrono::TimeZone;
+    use chrono::{DateTime, TimeZone};
     use hyper::{Body, Request, StatusCode};
     use tower::ServiceExt;
 

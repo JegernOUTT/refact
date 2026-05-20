@@ -13,7 +13,7 @@ use tracing::info;
 use shell_escape::escape;
 
 use crate::files_correction::CommandSimplifiedDirExt;
-use crate::buddy::user_activity::UserAction;
+use refact_buddy_core::user_action::UserAction;
 use crate::global_context::GlobalContext;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::integrations::process_io_utils::{execute_command, AnsiStrippable};

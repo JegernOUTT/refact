@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_IDLE_SUGGESTER_WORKFLOW_ID};
 use crate::buddy::jobs::autonomous_chats::{execute_autonomous_spec, AutonomousBuddyChatSpec};
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
-use crate::buddy::user_activity::UserAction;
+use refact_buddy_core::user_action::UserAction;
 use crate::app_state::AppState;
 
 pub struct BuddyIdleSuggesterJob;
@@ -13,22 +13,8 @@ pub struct BuddyIdleSuggesterJob;
 const COOLDOWN_SECONDS: u64 = 30 * 60;
 const PRIORITY: u32 = 32;
 
-fn action_ts(action: &UserAction) -> DateTime<Utc> {
-    match action {
-        UserAction::FileOpened { ts, .. }
-        | UserAction::SnippetSelected { ts, .. }
-        | UserAction::ToolApproved { ts, .. }
-        | UserAction::ToolRejected { ts, .. }
-        | UserAction::CommandRun { ts, .. }
-        | UserAction::WorkspaceChanged { ts, .. }
-        | UserAction::CommitMade { ts, .. }
-        | UserAction::TaskFailed { ts, .. }
-        | UserAction::ChatStarted { ts, .. } => *ts,
-    }
-}
-
 fn newest_action_ts(actions: &[UserAction]) -> Option<DateTime<Utc>> {
-    actions.iter().map(action_ts).max()
+    actions.iter().map(UserAction::ts).max()
 }
 
 fn idle_window_matches(last_ts: DateTime<Utc>, now: DateTime<Utc>) -> bool {

@@ -12,6 +12,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
 use crate::chat::trajectories::save_trajectory_snapshot;
+use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::chat::types::SessionState;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{
@@ -250,7 +251,7 @@ impl Tool for ToolHandoffToMode {
         let new_chat_id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
-        let snapshot = crate::chat::trajectories::TrajectorySnapshot {
+        let snapshot = TrajectorySnapshot {
             chat_id: new_chat_id.clone(),
             title: String::new(),
             model: thread.model.clone(),

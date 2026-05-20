@@ -13,7 +13,7 @@ use which::which;
 use tracing::info;
 use chrono::Utc;
 
-use crate::buddy::user_activity::UserAction;
+use refact_buddy_core::user_action::UserAction;
 use crate::files_correction::{canonical_path, CommandSimplifiedDirExt};
 use crate::git::operations::git_ls_files;
 use crate::global_context::{get_app_searchable_id, GlobalContext};

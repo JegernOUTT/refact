@@ -18,7 +18,7 @@ use crate::agentic::mode_transition::{
 };
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
-use crate::chat::trajectories::TrajectorySnapshot;
+use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::custom_error::ScratchError;
 
 #[derive(Deserialize)]

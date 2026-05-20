@@ -8,7 +8,7 @@ use tracing::warn;
 use uuid::Uuid;
 use chrono::Utc;
 
-use crate::buddy::user_activity::UserAction;
+use refact_buddy_core::user_action::UserAction;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use super::types::{TaskMeta, TaskBoard, TaskStatus, TrajectoryInfo};
@@ -584,7 +584,7 @@ pub fn infer_task_id_from_chat_id(chat_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{save_board, save_task_meta, should_list_task_trajectory, update_board_atomic};
-    use crate::buddy::user_activity::UserAction;
+    use refact_buddy_core::user_action::UserAction;
     use crate::tasks::types::{BoardCard, StatusUpdate, TaskBoard, TaskMeta, TaskStatus};
     use chrono::Utc;
     use serde_json::json;

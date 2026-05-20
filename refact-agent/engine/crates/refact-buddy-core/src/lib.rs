@@ -11,6 +11,7 @@ pub mod snapshot;
 pub mod speech_policy;
 pub mod state;
 pub mod types;
+pub mod user_action;
 pub mod voice_service;
 
 pub use queue::*;

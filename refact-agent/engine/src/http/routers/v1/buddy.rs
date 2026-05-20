@@ -12,7 +12,9 @@ use crate::buddy::pulse_inject::build_buddy_pulse_payload;
 use crate::buddy::settings::MAX_PALETTE_INDEX;
 use crate::buddy::storage::{enqueue_memory_op, load_memory_ops};
 use crate::buddy::types::{BuddyActivity, BuddyCareAction, BuddyConversationEntry, BuddySuggestion};
-use crate::buddy::user_activity::{time_of_day_pattern, UserAction};
+use crate::buddy::user_activity::time_of_day_pattern;
+use refact_buddy_core::user_action::UserAction;
+use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::buddy::voice_service::SpeechIntent;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
@@ -613,7 +615,7 @@ pub async fn handle_v1_buddy_conversations_create(
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "New Conversation".to_string());
 
-    let snapshot = crate::chat::trajectories::TrajectorySnapshot {
+    let snapshot = TrajectorySnapshot {
         chat_id: chat_id.clone(),
         title: title.clone(),
         model: String::new(),

@@ -35,8 +35,8 @@ pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), 
         .map_err(|e| format!("Failed to rename: {}", e))
 }
 
-use super::session::has_displayable_assistant_content;
 use super::types::{ThreadParams, SessionState, ChatSession};
+use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
 use super::SessionsMap;
 
@@ -180,87 +180,25 @@ pub struct LoadedTrajectory {
     pub auto_approve_dangerous_commands_present: bool,
 }
 
-#[derive(Clone)]
-pub struct TrajectorySnapshot {
-    pub chat_id: String,
-    pub title: String,
-    pub model: String,
-    pub mode: String,
-    pub tool_use: String,
-    pub messages: Vec<ChatMessage>,
-    pub created_at: String,
-    pub boost_reasoning: bool,
-    pub checkpoints_enabled: bool,
-    pub context_tokens_cap: Option<usize>,
-    pub include_project_info: bool,
-    pub is_title_generated: bool,
-    pub auto_approve_editing_tools: bool,
-    pub auto_approve_dangerous_commands: bool,
-    pub autonomous_no_confirm: bool,
-    pub version: u64,
-    pub task_meta: Option<super::types::TaskMeta>,
-    pub worktree: Option<WorktreeMeta>,
-    pub parent_id: Option<String>,
-    pub link_type: Option<String>,
-    pub root_chat_id: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub thinking_budget: Option<usize>,
-    pub temperature: Option<f32>,
-    pub frequency_penalty: Option<f32>,
-    pub max_tokens: Option<usize>,
-    pub parallel_tool_calls: Option<bool>,
+pub use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 
-    pub previous_response_id: Option<String>,
-    pub active_skill: Option<String>,
-    pub auto_enrichment_enabled: Option<bool>,
-    pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
-}
+fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot {
+    let messages = session
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role != "assistant" || has_displayable_assistant_content(message)
+        })
+        .cloned()
+        .collect();
 
-impl TrajectorySnapshot {
-    pub fn from_session(session: &ChatSession) -> Self {
-        let messages = session
-            .messages
-            .iter()
-            .filter(|message| {
-                message.role != "assistant" || has_displayable_assistant_content(message)
-            })
-            .cloned()
-            .collect();
-
-        Self {
-            chat_id: session.chat_id.clone(),
-            title: session.thread.title.clone(),
-            model: session.thread.model.clone(),
-            mode: session.thread.mode.clone(),
-            tool_use: session.thread.tool_use.clone(),
-            messages,
-            created_at: session.created_at.clone(),
-            boost_reasoning: session.thread.boost_reasoning.unwrap_or(false),
-            checkpoints_enabled: session.thread.checkpoints_enabled,
-            context_tokens_cap: session.thread.context_tokens_cap,
-            include_project_info: session.thread.include_project_info,
-            is_title_generated: session.thread.is_title_generated,
-            auto_approve_editing_tools: session.thread.auto_approve_editing_tools,
-            auto_approve_dangerous_commands: session.thread.auto_approve_dangerous_commands,
-            autonomous_no_confirm: session.thread.autonomous_no_confirm,
-            version: session.trajectory_version,
-            task_meta: session.thread.task_meta.clone(),
-            worktree: session.thread.worktree.clone(),
-            parent_id: session.thread.parent_id.clone(),
-            link_type: session.thread.link_type.clone(),
-            root_chat_id: session.thread.root_chat_id.clone(),
-            reasoning_effort: session.thread.reasoning_effort.clone(),
-            thinking_budget: session.thread.thinking_budget,
-            temperature: session.thread.temperature,
-            frequency_penalty: session.thread.frequency_penalty,
-            max_tokens: session.thread.max_tokens,
-            parallel_tool_calls: session.thread.parallel_tool_calls,
-            previous_response_id: session.thread.previous_response_id.clone(),
-            active_skill: session.thread.active_skill.clone(),
-            auto_enrichment_enabled: session.thread.auto_enrichment_enabled,
-            buddy_meta: session.thread.buddy_meta.clone(),
-        }
-    }
+    TrajectorySnapshot::from_thread_parts(
+        session.chat_id.clone(),
+        &session.thread,
+        messages,
+        session.created_at.clone(),
+        session.trajectory_version,
+    )
 }
 
 pub async fn apply_mode_defaults_to_thread(
@@ -1173,7 +1111,7 @@ pub async fn maybe_save_trajectory(
         if !session.trajectory_dirty {
             return;
         }
-        TrajectorySnapshot::from_session(&session)
+        trajectory_snapshot_from_session(&session)
     };
 
     let saved_version = snapshot.version;
@@ -3417,7 +3355,7 @@ mod tests {
             suppress_auto_enrichment_for_next_turn: false,
         };
 
-        let snapshot = TrajectorySnapshot::from_session(&session);
+        let snapshot = trajectory_snapshot_from_session(&session);
         assert_eq!(snapshot.chat_id, "test-123");
         assert_eq!(snapshot.title, "Test Thread");
         assert_eq!(snapshot.model, "gpt-4");
@@ -3482,11 +3420,11 @@ mod tests {
             suppress_auto_enrichment_for_next_turn: false,
         };
 
-        let snapshot = TrajectorySnapshot::from_session(&session);
+        let snapshot = trajectory_snapshot_from_session(&session);
         assert_eq!(snapshot.active_skill, Some("my-skill".to_string()));
 
         session.thread.active_skill = None;
-        let snapshot_none = TrajectorySnapshot::from_session(&session);
+        let snapshot_none = trajectory_snapshot_from_session(&session);
         assert!(snapshot_none.active_skill.is_none());
     }
 
@@ -3509,7 +3447,7 @@ mod tests {
         let worktree = trajectory_worktree_sample();
         let mut session = ChatSession::new("wt-snapshot".to_string());
         session.thread.worktree = Some(worktree.clone());
-        let snapshot = TrajectorySnapshot::from_session(&session);
+        let snapshot = trajectory_snapshot_from_session(&session);
         assert_eq!(snapshot.worktree, Some(worktree));
     }
 
@@ -3532,7 +3470,7 @@ mod tests {
             ..Default::default()
         });
 
-        let snapshot = TrajectorySnapshot::from_session(&session);
+        let snapshot = trajectory_snapshot_from_session(&session);
 
         assert_eq!(snapshot.messages.len(), 2);
         assert_eq!(snapshot.messages[0].role, "user");
@@ -3571,7 +3509,7 @@ mod tests {
             ..Default::default()
         });
 
-        let snapshot = TrajectorySnapshot::from_session(&session);
+        let snapshot = trajectory_snapshot_from_session(&session);
 
         assert_eq!(snapshot.messages.len(), 2);
         assert_eq!(snapshot.messages[0].role, "user");

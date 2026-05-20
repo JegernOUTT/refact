@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::buddy::user_activity::UserAction;
+use refact_buddy_core::user_action::UserAction;
 use crate::buddy::voice_service::{VoiceCtx, voice_service};
 use crate::call_validation::{
     ChatContent, ChatMessage, ChatToolCall, ContextFile, PostprocessSettings, SubchatParameters,

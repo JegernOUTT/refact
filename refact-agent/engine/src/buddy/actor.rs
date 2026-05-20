@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::app_state::AppState;
-use super::user_activity::UserAction;
+use refact_buddy_core::user_action::UserAction;
 use super::drafts::{
     validate_draft_payload, DraftCreateError, DraftStore, DraftTarget, DraftValidationError,
 };
