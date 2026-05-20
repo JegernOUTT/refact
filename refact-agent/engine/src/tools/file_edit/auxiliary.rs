@@ -303,10 +303,7 @@ pub async fn await_ast_indexing(gcx: Arc<GlobalContext>) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn sync_documents_ast(
-    gcx: Arc<GlobalContext>,
-    doc: &PathBuf,
-) -> Result<(), String> {
+pub async fn sync_documents_ast(gcx: Arc<GlobalContext>, doc: &PathBuf) -> Result<(), String> {
     let ast_service_mb = gcx.ast_service.lock().unwrap().clone();
     if let Some(ast_service) = &ast_service_mb {
         ast_indexer_enqueue_files(
@@ -366,7 +363,9 @@ pub async fn write_file(
             err
         })?;
         gcx.documents_state
-            .memory_document_map.lock().await
+            .memory_document_map
+            .lock()
+            .await
             .remove(path);
     }
 
@@ -817,6 +816,7 @@ mod tests {
 
             fs::write(f.root.join("src/update.txt"), "old\n").unwrap();
             fs::write(f.source.join("src/update.txt"), "source\n").unwrap();
+            fs::write(f.outside.join("update.txt"), "sibling\n").unwrap();
             let update_args = args(vec![
                 ("path", json!("src/update.txt")),
                 ("old_str", json!("old")),
@@ -832,6 +832,10 @@ mod tests {
             assert_eq!(
                 fs::read_to_string(f.source.join("src/update.txt")).unwrap(),
                 "source\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.outside.join("update.txt")).unwrap(),
+                "sibling\n"
             );
             let update_source_args = args(vec![
                 ("path", path_value(&f.source.join("src/update.txt"))),
@@ -1287,6 +1291,9 @@ mod tests {
             let tool_call_id = "shell".to_string();
             let mut shell = ToolShell::default();
 
+            fs::write(f.root.join("pwd_marker.txt"), "worktree\n").unwrap();
+            fs::write(f.source.join("pwd_marker.txt"), "source\n").unwrap();
+
             let (_, messages) = shell
                 .tool_execute(
                     ccx.clone(),
@@ -1298,6 +1305,14 @@ mod tests {
             let text = tool_text(&messages);
             assert!(text.contains(&f.root.to_string_lossy().to_string()));
             assert!(text.contains("shell cwd/workdir is enforced"));
+            assert_eq!(
+                fs::read_to_string(f.root.join("pwd_marker.txt")).unwrap(),
+                "worktree\n"
+            );
+            assert_eq!(
+                fs::read_to_string(f.source.join("pwd_marker.txt")).unwrap(),
+                "source\n"
+            );
 
             let (_, messages) = shell
                 .tool_execute(

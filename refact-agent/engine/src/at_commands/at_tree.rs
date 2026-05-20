@@ -14,7 +14,8 @@ use crate::at_commands::execute_at::AtCommandMember;
 use crate::call_validation::{ChatMessage, ContextEnum};
 use crate::files_correction::{correct_to_nearest_dir_path, get_project_dirs, paths_from_anywhere};
 use crate::tools::scope_utils::{
-    format_scope_notices, list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
+    format_scope_notices, is_worktree_root_alias, list_execution_scope_root,
+    list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
 };
 
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -302,10 +303,7 @@ pub async fn tree_for_tools(
 ) -> Result<String, String> {
     let (ast_service, tokens_for_rag) = {
         let cgcx = ccx.lock().await;
-        (
-            cgcx.app.workspace.ast_service.clone(),
-            cgcx.tokens_for_rag,
-        )
+        (cgcx.app.workspace.ast_service.clone(), cgcx.tokens_for_rag)
     };
     const CHARS_PER_TOKEN: f32 = 3.5;
     let char_limit = ((tokens_for_rag as f32) * CHARS_PER_TOKEN) as usize;
@@ -349,10 +347,7 @@ impl AtCommand for AtTree {
     ) -> Result<(Vec<ContextEnum>, String), String> {
         let (gcx, execution_scope) = {
             let cgcx = ccx.lock().await;
-            (
-                cgcx.global_context.clone(),
-                cgcx.execution_scope.clone(),
-            )
+            (cgcx.global_context.clone(), cgcx.execution_scope.clone())
         };
         let scoped_enforced = execution_scope
             .as_ref()
@@ -380,40 +375,50 @@ impl AtCommand for AtTree {
         let (tree, is_root_query) = if scoped_enforced {
             match args.iter().find(|x| x.text != "--ast") {
                 None => {
-                    let root = execution_scope
-                        .as_ref()
-                        .unwrap()
-                        .effective_root()
-                        .to_path_buf();
-                    let paths =
-                        list_scoped_files_under_dir(gcx.clone(), &root, true, false).await?;
+                    let paths = list_execution_scope_root(
+                        gcx.clone(),
+                        execution_scope.as_ref().unwrap(),
+                        true,
+                    )
+                    .await?;
                     (TreeNode::build(&paths), true)
                 }
                 Some(arg) => {
                     let path = arg.text.clone();
-                    let resolved = resolve_existing_path_with_execution_scope(
-                        gcx.clone(),
-                        execution_scope.as_ref(),
-                        &path,
-                    )
-                    .await?
-                    .ok_or_else(|| format!("Failed to resolve scoped path '{}'", path))?;
-                    scope_notices.extend(resolved.notices);
-                    if !resolved.path.is_dir() {
-                        let e = format!("Path '{}' is not a directory", resolved.path.display());
-                        cmd.ok = false;
-                        cmd.reason = Some(e.clone());
-                        args.clear();
-                        return Err(e);
+                    if is_worktree_root_alias(&path) {
+                        let paths = list_execution_scope_root(
+                            gcx.clone(),
+                            execution_scope.as_ref().unwrap(),
+                            true,
+                        )
+                        .await?;
+                        (TreeNode::build(&paths), true)
+                    } else {
+                        let resolved = resolve_existing_path_with_execution_scope(
+                            gcx.clone(),
+                            execution_scope.as_ref(),
+                            &path,
+                        )
+                        .await?
+                        .ok_or_else(|| format!("Failed to resolve scoped path '{}'", path))?;
+                        scope_notices.extend(resolved.notices);
+                        if !resolved.path.is_dir() {
+                            let e =
+                                format!("Path '{}' is not a directory", resolved.path.display());
+                            cmd.ok = false;
+                            cmd.reason = Some(e.clone());
+                            args.clear();
+                            return Err(e);
+                        }
+                        let paths = list_scoped_files_under_dir(
+                            gcx.clone(),
+                            &resolved.path,
+                            true,
+                            resolved.outside_absolute_path,
+                        )
+                        .await?;
+                        (TreeNode::build(&paths), false)
                     }
-                    let paths = list_scoped_files_under_dir(
-                        gcx.clone(),
-                        &resolved.path,
-                        true,
-                        resolved.outside_absolute_path,
-                    )
-                    .await?;
-                    (TreeNode::build(&paths), false)
                 }
             }
         } else {

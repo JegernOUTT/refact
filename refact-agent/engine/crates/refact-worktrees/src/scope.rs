@@ -67,6 +67,22 @@ impl ExecutionScope {
         self.source_workspace_root.as_path()
     }
 
+    pub fn ensure_active_root(&self) -> Result<(), String> {
+        if self.root.is_dir() {
+            Ok(())
+        } else {
+            Err(self.active_root_missing_error())
+        }
+    }
+
+    fn active_root_missing_error(&self) -> String {
+        format!(
+            "⚠️ Active worktree is missing or stale: '{}'. Worktree-scoped filesystem tools are fail-closed and will not fallback to source workspace '{}'. Recreate or reopen the active worktree before continuing.",
+            self.root.display(),
+            self.source_workspace_root.display()
+        )
+    }
+
     pub fn resolve_path(&self, raw: &Path) -> Result<ScopedPath, String> {
         let candidate = self.candidate_for_raw_path(raw)?;
         self.finalize_candidate(raw, candidate, false, false, false)
@@ -89,6 +105,7 @@ impl ExecutionScope {
     }
 
     fn candidate_for_raw_path(&self, raw: &Path) -> Result<PathCandidate, String> {
+        self.ensure_active_root()?;
         let used_absolute_path = raw.is_absolute();
         if !used_absolute_path {
             return Ok(PathCandidate {
@@ -459,6 +476,20 @@ mod tests {
         let result = scope.resolve_workdir(Some("src/main.rs"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not a directory"));
+    }
+
+    #[test]
+    fn worktree_execution_scope_missing_root_fails_closed() {
+        let (_temp, root, source, repo, _outside) = setup_dirs();
+        let scope = make_scope(&root, &source, &repo);
+        fs::remove_dir_all(&root).unwrap();
+
+        let result = scope.resolve_existing_path(Path::new("src/main.rs"));
+        let error = result.unwrap_err();
+
+        assert!(error.contains("Active worktree is missing or stale"));
+        assert!(error.contains("will not fallback to source workspace"));
+        assert!(error.contains(&root.to_string_lossy().to_string()));
     }
 
     #[cfg(unix)]

@@ -15,11 +15,7 @@ use crate::global_context::GlobalContext;
 use crate::worktrees::scope::ExecutionScope;
 
 async fn get_workspace_files(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
-    gcx.documents_state
-        .workspace_files
-        .lock()
-        .unwrap()
-        .clone()
+    gcx.documents_state.workspace_files.lock().unwrap().clone()
 }
 
 pub async fn resolve_existing_path_with_execution_scope(
@@ -69,10 +65,27 @@ pub async fn list_scoped_files_under_dir(
     list_files_under_dir(gcx, dir, recursive, privacy_filter).await
 }
 
-async fn resolve_scope_legacy(
+pub fn is_worktree_root_alias(scope: &str) -> bool {
+    let scope = scope.trim().trim_end_matches(&['/', '\\'][..]);
+    scope.is_empty() || scope == "." || scope == "workspace"
+}
+
+pub async fn list_execution_scope_root(
     gcx: Arc<GlobalContext>,
-    scope: &str,
-) -> Result<Vec<String>, String> {
+    execution_scope: &ExecutionScope,
+    recursive: bool,
+) -> Result<Vec<PathBuf>, String> {
+    execution_scope.ensure_active_root()?;
+    list_files_under_dir(
+        gcx,
+        &execution_scope.effective_root().to_path_buf(),
+        recursive,
+        false,
+    )
+    .await
+}
+
+async fn resolve_scope_legacy(gcx: Arc<GlobalContext>, scope: &str) -> Result<Vec<String>, String> {
     if scope == "workspace" {
         return Ok(get_workspace_files(gcx)
             .await
@@ -154,10 +167,7 @@ async fn resolve_scope_legacy(
 }
 
 #[allow(dead_code)]
-pub async fn resolve_scope(
-    gcx: Arc<GlobalContext>,
-    scope: &str,
-) -> Result<Vec<String>, String> {
+pub async fn resolve_scope(gcx: Arc<GlobalContext>, scope: &str) -> Result<Vec<String>, String> {
     resolve_scope_legacy(gcx, scope).await
 }
 
@@ -179,17 +189,12 @@ pub async fn resolve_scope_with_execution_scope(
         });
     }
 
-    if scope == "workspace" {
-        let files = list_files_under_dir(
-            gcx,
-            &execution_scope.effective_root().to_path_buf(),
-            true,
-            false,
-        )
-        .await?
-        .into_iter()
-        .map(|file| file.to_string_lossy().to_string())
-        .collect();
+    if is_worktree_root_alias(scope) {
+        let files = list_execution_scope_root(gcx, execution_scope, true)
+            .await?
+            .into_iter()
+            .map(|file| file.to_string_lossy().to_string())
+            .collect();
         return Ok(ScopedFiles {
             files,
             notices: vec![],
@@ -331,7 +336,8 @@ pub async fn create_scope_filter_with_execution_scope(
         });
     }
 
-    if scope == "workspace" {
+    execution_scope.ensure_active_root()?;
+    if is_worktree_root_alias(scope) {
         return Ok(ScopedScopeFilter {
             filter: Some(format!(
                 "(scope LIKE '{}%')",
@@ -370,6 +376,7 @@ pub async fn remap_context_file_for_execution_scope(
         return Ok(Some((context_file, vec![])));
     }
 
+    execution_scope.ensure_active_root()?;
     let raw_path = PathBuf::from(&context_file.file_name);
     if !raw_path.is_absolute() {
         return Ok(Some((context_file, vec![])));
@@ -516,6 +523,12 @@ mod worktree_scope_read_tools {
             "pub fn only_source() {}\n",
         )
         .unwrap();
+        fs::create_dir_all(temp.path().join("sibling").join("src")).unwrap();
+        fs::write(
+            temp.path().join("sibling").join("src").join("lib.rs"),
+            "fn sibling_version() {}\n",
+        )
+        .unwrap();
         fs::write(outside.join("allowed.txt"), "outside allowed\n").unwrap();
         fs::write(outside.join("blocked.blocked"), "outside blocked\n").unwrap();
         let root = dunce::simplified(&fs::canonicalize(root).unwrap()).to_path_buf();
@@ -647,6 +660,28 @@ mod worktree_scope_read_tools {
     }
 
     #[tokio::test]
+    async fn worktree_scope_read_tools_tree_aliases_use_worktree_root() {
+        let fixture = make_fixture();
+        let gcx = make_gcx(&fixture, vec![]).await;
+        let tool_call_id = "tree-call".to_string();
+
+        for path in [".", "workspace"] {
+            let ccx = make_ccx(gcx.clone(), fixture.worktree.clone()).await;
+            let mut tool = ToolTree {
+                config_path: String::new(),
+            };
+            let args = HashMap::from_iter([("path".to_string(), Value::String(path.to_string()))]);
+
+            let (_corrections, results) =
+                tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
+            let text = tool_text(&results);
+
+            assert!(text.contains("worktree_only.rs"), "{text}");
+            assert!(!text.contains("source_only.rs"), "{text}");
+        }
+    }
+
+    #[tokio::test]
     async fn worktree_scope_read_tools_cat_relative_uses_worktree_file() {
         let fixture = make_fixture();
         let gcx = make_gcx(&fixture, vec![]).await;
@@ -671,6 +706,40 @@ mod worktree_scope_read_tools {
                 .to_string_lossy()
                 .to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn worktree_scope_read_tools_duplicate_relative_path_prefers_worktree() {
+        let fixture = make_fixture();
+        let gcx = make_gcx(&fixture, vec![]).await;
+        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
+        let mut tool = ToolCat {
+            config_path: String::new(),
+        };
+        let tool_call_id = "cat-call".to_string();
+
+        let (_corrections, results) = tool
+            .tool_execute(ccx, &tool_call_id, &cat_args("src/lib.rs".to_string()))
+            .await
+            .unwrap();
+        let names = context_file_names(&results);
+        let text = tool_text(&results);
+
+        assert_eq!(names.len(), 1);
+        assert_eq!(
+            names[0],
+            fixture
+                .root
+                .join("src")
+                .join("lib.rs")
+                .to_string_lossy()
+                .to_string()
+        );
+        assert!(
+            !text.contains(&fixture.source.to_string_lossy().to_string()),
+            "{text}"
+        );
+        assert!(!text.contains("sibling"), "{text}");
     }
 
     #[tokio::test]
@@ -795,6 +864,67 @@ mod worktree_scope_read_tools {
             .files
             .iter()
             .any(|path| path.ends_with("source_only.rs")));
+    }
+
+    #[tokio::test]
+    async fn worktree_scope_read_tools_search_pattern_uses_worktree_only() {
+        let fixture = make_fixture();
+        let gcx = make_gcx(&fixture, vec![]).await;
+        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
+        let mut tool = crate::tools::tool_regex_search::ToolRegexSearch {
+            config_path: String::new(),
+        };
+        let tool_call_id = "search-call".to_string();
+        let args = HashMap::from_iter([
+            ("pattern".to_string(), Value::String("version".to_string())),
+            ("scope".to_string(), Value::String("workspace".to_string())),
+        ]);
+
+        let (_corrections, results) = tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
+        let names = context_file_names(&results);
+        let text = tool_text(&results);
+
+        assert!(names.iter().any(|path| path
+            == &fixture
+                .root
+                .join("src/lib.rs")
+                .to_string_lossy()
+                .to_string()));
+        assert!(!names.iter().any(|path| path.contains("source_only.rs")));
+        assert!(text.contains("worktree_version"), "{text}");
+        assert!(!text.contains("source_version"), "{text}");
+        assert!(
+            !text.contains(&fixture.source.to_string_lossy().to_string()),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_scope_read_tools_missing_worktree_fails_closed() {
+        let fixture = make_fixture();
+        let gcx = make_gcx(&fixture, vec![]).await;
+        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
+        fs::remove_dir_all(&fixture.root).unwrap();
+        let mut tool = ToolCat {
+            config_path: String::new(),
+        };
+        let tool_call_id = "cat-call".to_string();
+
+        let (_corrections, results) = tool
+            .tool_execute(ccx, &tool_call_id, &cat_args("src/lib.rs".to_string()))
+            .await
+            .unwrap();
+        let text = tool_text(&results);
+
+        assert!(
+            text.contains("Active worktree is missing or stale"),
+            "{text}"
+        );
+        assert!(
+            text.contains("will not fallback to source workspace"),
+            "{text}"
+        );
+        assert!(!text.contains("source_version"), "{text}");
     }
 
     #[tokio::test]

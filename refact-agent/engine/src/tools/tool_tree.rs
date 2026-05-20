@@ -19,7 +19,8 @@ use crate::files_correction::{
 use crate::files_in_workspace::ls_files;
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::scope_utils::{
-    format_scope_notices, list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
+    format_scope_notices, is_worktree_root_alias, list_execution_scope_root,
+    list_scoped_files_under_dir, resolve_existing_path_with_execution_scope,
 };
 
 pub struct ToolTree {
@@ -60,10 +61,7 @@ impl Tool for ToolTree {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, execution_scope) = {
             let cgcx = ccx.lock().await;
-            (
-                cgcx.app.gcx.clone(),
-                cgcx.execution_scope.clone(),
-            )
+            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
         };
         let scoped_enforced = execution_scope
             .as_ref()
@@ -96,40 +94,49 @@ impl Tool for ToolTree {
         let (tree, is_root_query) = if scoped_enforced {
             match path_mb.clone() {
                 Some(path) => {
-                    let resolved = resolve_existing_path_with_execution_scope(
-                        gcx.clone(),
-                        execution_scope.as_ref(),
-                        &path,
-                    )
-                    .await?
-                    .ok_or_else(|| format!("Failed to resolve scoped path '{}'", path))?;
-                    scope_notices.extend(resolved.notices);
-                    if resolved.path.is_file() {
-                        return Err(format!("⚠️ '{}' is a file, not a directory. 💡 Use cat('{}') to read it, or tree() without path for project root", path, path));
+                    if is_worktree_root_alias(&path) {
+                        let paths_in_dir = list_execution_scope_root(
+                            gcx.clone(),
+                            execution_scope.as_ref().unwrap(),
+                            true,
+                        )
+                        .await?;
+                        (TreeNode::build(&paths_in_dir), true)
+                    } else {
+                        let resolved = resolve_existing_path_with_execution_scope(
+                            gcx.clone(),
+                            execution_scope.as_ref(),
+                            &path,
+                        )
+                        .await?
+                        .ok_or_else(|| format!("Failed to resolve scoped path '{}'", path))?;
+                        scope_notices.extend(resolved.notices);
+                        if resolved.path.is_file() {
+                            return Err(format!("⚠️ '{}' is a file, not a directory. 💡 Use cat('{}') to read it, or tree() without path for project root", path, path));
+                        }
+                        if !resolved.path.is_dir() {
+                            return Err(format!(
+                                "Path '{}' is not a directory",
+                                resolved.path.display()
+                            ));
+                        }
+                        let paths_in_dir = list_scoped_files_under_dir(
+                            gcx.clone(),
+                            &resolved.path,
+                            true,
+                            resolved.outside_absolute_path,
+                        )
+                        .await?;
+                        (TreeNode::build(&paths_in_dir), false)
                     }
-                    if !resolved.path.is_dir() {
-                        return Err(format!(
-                            "Path '{}' is not a directory",
-                            resolved.path.display()
-                        ));
-                    }
-                    let paths_in_dir = list_scoped_files_under_dir(
-                        gcx.clone(),
-                        &resolved.path,
-                        true,
-                        resolved.outside_absolute_path,
-                    )
-                    .await?;
-                    (TreeNode::build(&paths_in_dir), false)
                 }
                 None => {
-                    let root = execution_scope
-                        .as_ref()
-                        .unwrap()
-                        .effective_root()
-                        .to_path_buf();
-                    let paths_in_dir =
-                        list_scoped_files_under_dir(gcx.clone(), &root, true, false).await?;
+                    let paths_in_dir = list_execution_scope_root(
+                        gcx.clone(),
+                        execution_scope.as_ref().unwrap(),
+                        true,
+                    )
+                    .await?;
                     (TreeNode::build(&paths_in_dir), true)
                 }
             }
