@@ -30,6 +30,7 @@ use super::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use super::stream_core::{
     run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal,
+    LlmStreamError,
 };
 use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
@@ -40,6 +41,8 @@ use crate::chat::trajectory_ops::approx_token_count;
 const TOKEN_BUDGET_CADENCE: usize = 6;
 const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
+const PARTIAL_OUTPUT_STREAM_ERROR: &str =
+    "Stream interrupted after partial output. Not retrying to avoid corruption.";
 
 fn make_runtime_event(
     signal_type: &str,
@@ -660,13 +663,9 @@ pub fn start_generation(
             )
             .await;
 
-            if let Err(e) = generation_result {
-                let retry_decision = super::retry_policy::classify_llm_error_for_retry(&e);
-                let should_retry_network = super::retry_policy::should_retry_llm_error(
-                    &e,
-                    network_retry_attempt,
-                    &abort_flag,
-                );
+            if let Err(mut error) = generation_result {
+                let retry_decision = error.retry_decision();
+                let should_retry_network = error.should_retry(network_retry_attempt, &abort_flag);
                 let retry_reason = retry_decision.reason();
                 if should_retry_network {
                     let delay = super::retry_policy::retry_delay_for_attempt(network_retry_attempt);
@@ -690,11 +689,21 @@ pub fn start_generation(
                     continue;
                 }
 
+                if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
+                    warn!(
+                        "{} Original error: {}",
+                        PARTIAL_OUTPUT_STREAM_ERROR, error.message
+                    );
+                    error.message = PARTIAL_OUTPUT_STREAM_ERROR.to_string();
+                }
+
+                let error_message = error.message;
+
                 let task_meta_opt = {
                     let mut session = session_arc.lock().await;
                     if !session.abort_flag.load(Ordering::SeqCst) {
                         let app2 = app.clone();
-                        let err_clone = e.clone();
+                        let err_clone = error_message.clone();
                         let chat_id2 = chat_id.clone();
                         let chat_label2 = chat_label.clone();
                         tokio::spawn(async move {
@@ -718,7 +727,7 @@ pub fn start_generation(
                             ev.chat_id = Some(chat_id2.to_string());
                             app2.buddy_event_sink.mark_chat_error(ev).await;
                         });
-                        session.finish_stream_with_error(e);
+                        session.finish_stream_with_error(error_message);
                     }
                     session.thread.task_meta.clone()
                 };
@@ -894,7 +903,7 @@ pub async fn run_llm_generation(
     thread: ThreadParams,
     chat_id: String,
     abort_flag: Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<(), LlmStreamError> {
     let gcx = app.gcx.clone();
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
@@ -1060,7 +1069,7 @@ async fn run_streaming_generation(
     mut llm_request: LlmRequest,
     model_rec: &crate::caps::ChatModelRecord,
     abort_flag: Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<(), LlmStreamError> {
     info!(
         "session generation: model={}, messages={}",
         llm_request.model_id,
@@ -1385,7 +1394,7 @@ async fn run_streaming_generation(
                     max_tokens: max_tokens_for_stats,
                     temperature: temperature_for_stats,
                     success: false,
-                    error_message: Some(e.chars().take(200).collect()),
+                    error_message: Some(e.message.chars().take(200).collect()),
                     finish_reason: None,
                     attempt_n: attempt,
                     retry_reason: None,
@@ -1489,7 +1498,8 @@ async fn run_streaming_generation(
                 return Err(format!(
                     "Empty assistant response after {} attempts (T={:.1})",
                     max_attempts, effective_temp
-                ));
+                )
+                .into());
             }
         }
 
@@ -1569,7 +1579,9 @@ async fn run_streaming_generation(
                     names,
                 );
                 if !has_content {
-                    return Err("Model returned tool_calls but none were parsable".to_string());
+                    return Err("Model returned tool_calls but none were parsable"
+                        .to_string()
+                        .into());
                 }
                 // Has useful content — discard unparsable tool calls and continue
                 result.tool_calls_raw.clear();

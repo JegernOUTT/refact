@@ -20,10 +20,10 @@ use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
 use crate::llm::params::CacheControl;
 use crate::chat::stream_core::{
     run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
+    LlmStreamError,
 };
 use crate::chat::retry_policy::{
-    classify_llm_error_for_retry, retry_delay_for_attempt, should_retry_llm_error, sleep_or_abort,
-    MAX_LLM_RETRY_ATTEMPTS,
+    retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
 };
 use crate::chat::tools::{execute_tools, resolve_tool_call_aliases, ExecuteToolsOptions};
 use crate::chat::types::{TaskMeta, ThreadParams};
@@ -33,6 +33,9 @@ use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
 use crate::stats::event::{canonicalize_mode_for_stats, split_model_provider, LlmCallEvent};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
+
+const PARTIAL_OUTPUT_STREAM_ERROR: &str =
+    "Stream interrupted after partial output. Not retrying to avoid corruption.";
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     use std::collections::HashSet;
@@ -251,10 +254,6 @@ impl SubchatProgressCollector {
 
         self.last_sent = progress;
         self.last_sent_at = now;
-    }
-
-    fn has_sent_progress(&self) -> bool {
-        !self.last_sent.is_empty()
     }
 }
 
@@ -1540,19 +1539,33 @@ async fn subchat_stream(
 
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
-        let attempt_result = run_llm_stream(AppState::from_gcx(gcx.clone()).await, params, &mut collector).await;
-        let attempt_sent_progress = collector.has_sent_progress();
+        let mut attempt_result =
+            run_llm_stream(AppState::from_gcx(gcx.clone()).await, params, &mut collector).await;
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
 
         let (provider, model_short) = split_model_provider(model_id);
+        let mut monitor_error: Option<String> = None;
 
-        match &attempt_result {
-            Err(e) => {
-                let retry_decision = classify_llm_error_for_retry(e);
+        match &mut attempt_result {
+            Err(error) => {
+                let retry_decision = error.retry_decision();
                 let retry_reason = retry_decision
                     .is_retryable_transient()
                     .then(|| retry_decision.reason().to_string());
+                let retry_attempt = attempt.saturating_sub(1);
+                let should_retry = error.should_retry(retry_attempt, &abort_flag);
+                if error.partial_output_emitted
+                    && !should_retry
+                    && !abort_flag.load(Ordering::SeqCst)
+                {
+                    warn!(
+                        "{} Original error: {}",
+                        PARTIAL_OUTPUT_STREAM_ERROR, error.message
+                    );
+                    error.message = PARTIAL_OUTPUT_STREAM_ERROR.to_string();
+                    monitor_error = Some(error.message.clone());
+                }
                 let event = LlmCallEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     ts_start: call_ts_start,
@@ -1573,7 +1586,7 @@ async fn subchat_stream(
                     max_tokens: max_new_tokens,
                     temperature,
                     success: false,
-                    error_message: Some(e.chars().take(200).collect()),
+                    error_message: Some(error.message.chars().take(200).collect()),
                     finish_reason: None,
                     attempt_n: attempt,
                     retry_reason: retry_reason.clone(),
@@ -1590,33 +1603,21 @@ async fn subchat_stream(
                     }
                 }
 
-                let retry_attempt = attempt.saturating_sub(1);
-                if should_retry_llm_error(e, retry_attempt, &abort_flag) {
-                    if attempt_sent_progress {
-                        warn!(
-                            "Not retrying subchat generation after stream sent partial progress (attempt {}, reason={})",
-                            attempt,
-                            retry_reason.as_deref().unwrap_or("retryable_error"),
-                        );
-                    } else {
-                        let delay = retry_delay_for_attempt(retry_attempt);
-                        let retry_reason_for_log =
-                            retry_reason.as_deref().unwrap_or("retryable_error");
-                        last_retry_reason = Some(retry_reason_for_log.to_string());
-                        warn!(
-                            "Retrying subchat generation after retryable LLM error in {}s (attempt {}/{}, reason={})",
-                            delay.as_secs(),
-                            attempt,
-                            MAX_LLM_RETRY_ATTEMPTS,
-                            retry_reason_for_log,
-                        );
-                        if sleep_or_abort(delay, abort_flag.clone()).await {
-                            break Err(crate::chat::stream_core::LlmStreamError::from(
-                                "aborted".to_string(),
-                            ));
-                        }
-                        continue;
+                if should_retry {
+                    let delay = retry_delay_for_attempt(retry_attempt);
+                    let retry_reason_for_log = retry_reason.as_deref().unwrap_or("retryable_error");
+                    last_retry_reason = Some(retry_reason_for_log.to_string());
+                    warn!(
+                        "Retrying subchat generation after retryable LLM error in {}s (attempt {}/{}, reason={})",
+                        delay.as_secs(),
+                        attempt,
+                        MAX_LLM_RETRY_ATTEMPTS,
+                        retry_reason_for_log,
+                    );
+                    if sleep_or_abort(delay, abort_flag.clone()).await {
+                        break Err(LlmStreamError::from("aborted".to_string()));
                     }
+                    continue;
                 }
             }
             Ok(ref results_ok) => {
@@ -1659,6 +1660,17 @@ async fn subchat_stream(
                         tracing::warn!("stats: channel full, dropping LLM call event");
                     }
                 }
+            }
+        }
+
+        if let Some(error_message) = monitor_error {
+            if let Some(task_meta) = thread.task_meta.clone() {
+                crate::chat::task_agent_monitor::handle_agent_streaming_error(
+                    AppState::from_gcx(gcx.clone()).await,
+                    &task_meta,
+                    &error_message,
+                )
+                .await;
             }
         }
 
