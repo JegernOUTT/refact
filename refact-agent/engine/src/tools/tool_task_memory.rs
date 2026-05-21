@@ -19,6 +19,7 @@ use walkdir::WalkDir;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
+use crate::knowledge_index::{build_knowledge_index, KnowledgeSearchFilters, KnowledgeSearchHit};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tasks::storage::find_task_dir;
 use crate::tools::tools_description::{
@@ -566,6 +567,62 @@ fn optional_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option
     }
 }
 
+fn optional_usize_arg(
+    args: &HashMap<String, Value>,
+    name: &str,
+    default: usize,
+) -> Result<usize, String> {
+    match args.get(name) {
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .map(|value| value as usize)
+            .ok_or_else(|| format!("argument `{}` must be a non-negative integer", name)),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(default),
+        Some(Value::String(value)) => value
+            .parse::<usize>()
+            .map_err(|_| format!("argument `{}` must be a non-negative integer", name)),
+        Some(Value::Null) | None => Ok(default),
+        Some(value) => Err(format!(
+            "argument `{}` must be a non-negative integer: {:?}",
+            name, value
+        )),
+    }
+}
+
+fn optional_string_list_arg(
+    args: &HashMap<String, Value>,
+    name: &str,
+) -> Result<Vec<String>, String> {
+    match args.get(name) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(|value| value.trim().to_string())
+                    .ok_or_else(|| format!("argument `{}` must contain only strings", name))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| {
+                values
+                    .into_iter()
+                    .filter(|value| !value.is_empty())
+                    .collect()
+            }),
+        Some(Value::String(value)) => Ok(value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect()),
+        Some(Value::Null) | None => Ok(Vec::new()),
+        Some(value) => Err(format!(
+            "argument `{}` must be a string or string array: {:?}",
+            name, value
+        )),
+    }
+}
+
 fn safe_relative_path(path: &Path) -> bool {
     !path.is_absolute()
         && path
@@ -886,6 +943,14 @@ impl ToolTaskMemoriesGet {
     }
 }
 
+pub struct ToolTaskMemorySearch;
+
+impl ToolTaskMemorySearch {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 #[async_trait]
 impl Tool for ToolTaskMemoriesGet {
     fn tool_description(&self) -> ToolDesc {
@@ -1064,6 +1129,134 @@ impl Tool for ToolTaskMemoriesGet {
     }
 }
 
+fn task_search_filters_from_args(
+    args: &HashMap<String, Value>,
+    task_id: Option<String>,
+) -> Result<KnowledgeSearchFilters, String> {
+    let kind = optional_string_arg(args, "kind")?;
+    let namespace = optional_string_arg(args, "namespace")?;
+    Ok(KnowledgeSearchFilters {
+        scope: Some("task".to_string()),
+        kind,
+        namespace,
+        task_id,
+        tags: optional_string_list_arg(args, "tags")?,
+    })
+}
+
+fn format_task_memory_hits(hits: &[KnowledgeSearchHit]) -> String {
+    let items: Vec<Value> = hits
+        .iter()
+        .map(|hit| {
+            let namespace = hit
+                .card
+                .tags
+                .iter()
+                .find_map(|tag| tag.strip_prefix("namespace:"))
+                .map(str::to_string);
+            serde_json::json!({
+                "path": hit.card.file_path.display().to_string(),
+                "title": hit.card.title.clone(),
+                "kind": hit.card.kind.clone(),
+                "namespace": namespace,
+                "tags": hit.card.tags.clone(),
+                "snippet": hit.snippet,
+                "score": hit.score,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub async fn search_task_memories_and_documents(
+    gcx: Arc<GlobalContext>,
+    query: &str,
+    filters: KnowledgeSearchFilters,
+    top_k: usize,
+) -> Vec<KnowledgeSearchHit> {
+    let index = build_knowledge_index(gcx.clone()).await;
+    let hits = index.search(query, &filters, top_k);
+    *gcx.knowledge_index.lock().await = index;
+    hits
+}
+
+#[async_trait]
+impl Tool for ToolTaskMemorySearch {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "task_mem_search".to_string(),
+            display_name: "Search Task Memory".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: true,
+            description: "Search task memories and task documents by tag, filename, and content text. Does not use VecDB.".to_string(),
+            input_schema: json_schema_from_params(
+                &[
+                    ("query", "string", "Text, tag, or filename query."),
+                    ("kind", "string", "Optional memory/document kind filter."),
+                    ("namespace", "string", "Optional namespace filter, such as task or card:T-22."),
+                    ("tags", "string", "Optional comma-separated tags that every result must have."),
+                    ("top_k", "number", "Maximum results to return. Defaults to 10."),
+                    ("task_id", "string", "Optional task id. Defaults to current task context when available."),
+                ],
+                &["query"],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let (gcx, task_meta) = {
+            let cgcx = ccx.lock().await;
+            (cgcx.app.gcx.clone(), cgcx.task_meta.clone())
+        };
+        let query = match args.get("query") {
+            Some(Value::String(value)) => value.trim().to_string(),
+            Some(value) => return Err(format!("argument `query` is not a string: {:?}", value)),
+            None => return Err("argument `query` is required".to_string()),
+        };
+        if query.is_empty() {
+            return Err("query cannot be empty".to_string());
+        }
+        let task_id = optional_string_arg(args, "task_id")?
+            .or_else(|| task_meta.as_ref().map(|meta| meta.task_id.clone()))
+            .or_else(|| Some("*".to_string()));
+        let filters = task_search_filters_from_args(args, task_id)?;
+        let top_k = optional_usize_arg(args, "top_k", 10)?.clamp(1, 50);
+        let hits = search_task_memories_and_documents(gcx, &query, filters, top_k).await;
+        let output = if hits.is_empty() {
+            "[]".to_string()
+        } else {
+            format_task_memory_hits(&hits)
+        };
+
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(output),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                output_filter: Some(OutputFilter::no_limits()),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
 pub async fn load_task_memories(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -1226,5 +1419,73 @@ mod tests {
             resolve_memory_namespace(None, None).unwrap(),
             MemoryNamespace::Task
         );
+    }
+
+    #[tokio::test]
+    async fn task_mem_search_filters_by_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let memories_dir = temp.path().join(".refact/tasks/task-1/memories");
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+        tokio::fs::write(
+            memories_dir.join("decision.md"),
+            "---\ntitle: Decision\ntask_id: task-1\nkind: decision\n---\n\nshared needle",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            memories_dir.join("risk.md"),
+            "---\ntitle: Risk\ntask_id: task-1\nkind: risk\n---\n\nshared needle",
+        )
+        .await
+        .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+
+        let hits = search_task_memories_and_documents(
+            gcx,
+            "needle",
+            KnowledgeSearchFilters {
+                scope: Some("task".to_string()),
+                kind: Some("decision".to_string()),
+                task_id: Some("task-1".to_string()),
+                ..Default::default()
+            },
+            10,
+        )
+        .await;
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].card.title, "Decision");
+    }
+
+    #[tokio::test]
+    async fn task_mem_search_finds_tag_filename_and_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let memories_dir = temp.path().join(".refact/tasks/task-1/memories");
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+        tokio::fs::write(
+            memories_dir.join("filename-match.md"),
+            "---\ntitle: Filename\ntask_id: task-1\nkind: finding\ntags: [tag-match]\n---\n\ncontent-match",
+        )
+        .await
+        .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+
+        for query in ["tag-match", "filename-match", "content-match"] {
+            let hits = search_task_memories_and_documents(
+                gcx.clone(),
+                query,
+                KnowledgeSearchFilters {
+                    scope: Some("task".to_string()),
+                    task_id: Some("task-1".to_string()),
+                    ..Default::default()
+                },
+                10,
+            )
+            .await;
+            assert_eq!(hits.len(), 1, "query {query}");
+            assert_eq!(hits[0].card.title, "Filename");
+        }
     }
 }

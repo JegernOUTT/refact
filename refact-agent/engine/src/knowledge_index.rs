@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-
 use crate::files_correction::get_project_dirs;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::global_context::GlobalContext;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
+use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 
 #[derive(Debug, Clone)]
 pub struct KnowledgeCard {
@@ -32,14 +32,63 @@ pub struct KnowledgeIndex {
     by_entity: HashMap<String, Vec<KnowledgeCard>>,
     by_related_filename: HashMap<String, Vec<KnowledgeCard>>,
     by_related_entity: HashMap<String, Vec<KnowledgeCard>>,
+    by_content: HashMap<String, Vec<KnowledgeCard>>,
+    content_by_path: HashMap<PathBuf, String>,
 }
 
-fn path_has_component(path: &Path, component: &str) -> bool {
-    path.components().any(|c| c.as_os_str() == component)
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeSearchFilters {
+    pub scope: Option<String>,
+    pub kind: Option<String>,
+    pub namespace: Option<String>,
+    pub task_id: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeSearchHit {
+    pub card: KnowledgeCard,
+    pub snippet: String,
+    pub score: f32,
+}
+
+fn path_has_any_component(path: &Path, components: &[&str]) -> bool {
+    path.components().any(|c| {
+        let candidate = c.as_os_str().to_string_lossy();
+        components.iter().any(|component| candidate == *component)
+    })
+}
+
+fn is_tmp_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    file_name.ends_with(".tmp") || file_name.contains(".tmp-")
 }
 
 fn normalize_key(s: &str) -> String {
     s.trim().to_lowercase()
+}
+
+fn normalized_contains(values: &[String], expected: &str) -> bool {
+    let expected = normalize_key(expected);
+    values.iter().any(|value| normalize_key(value) == expected)
+}
+
+fn push_unique(values: &mut Vec<String>, value: impl Into<String>) {
+    let value = value.into();
+    if !value.trim().is_empty() && !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn text_tokens(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' && ch != ':')
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token.len() >= 2)
+        .filter(|token| seen.insert(token.clone()))
+        .collect()
 }
 
 fn kind_priority(kind: Option<&str>) -> i32 {
@@ -99,6 +148,213 @@ fn retain_cards_not_at_path(index: &mut HashMap<String, Vec<KnowledgeCard>>, fil
     });
 }
 
+fn yaml_value_string(value: &YamlValue) -> Option<String> {
+    match value {
+        YamlValue::String(value) => Some(value.clone()),
+        YamlValue::Number(value) => Some(value.to_string()),
+        YamlValue::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn yaml_string(mapping: &YamlMapping, key: &str) -> Option<String> {
+    mapping
+        .get(&YamlValue::String(key.to_string()))
+        .and_then(yaml_value_string)
+}
+
+fn yaml_string_list(mapping: &YamlMapping, key: &str) -> Vec<String> {
+    let Some(value) = mapping.get(&YamlValue::String(key.to_string())) else {
+        return Vec::new();
+    };
+    match value {
+        YamlValue::Sequence(values) => values.iter().filter_map(yaml_value_string).collect(),
+        YamlValue::String(value) => value
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_yaml_frontmatter(text: &str) -> (YamlMapping, usize) {
+    if !text.starts_with("---") {
+        return (YamlMapping::new(), 0);
+    }
+    let rest = &text[3..];
+    let Some(end_idx) = rest.find("\n---") else {
+        return (YamlMapping::new(), 0);
+    };
+    let yaml_content = &rest[..end_idx];
+    let mut end_offset = 3 + end_idx + 4;
+    if text.len() > end_offset && text.as_bytes().get(end_offset) == Some(&b'\n') {
+        end_offset += 1;
+    }
+    let mapping = match serde_yaml::from_str::<YamlValue>(yaml_content) {
+        Ok(YamlValue::Mapping(mapping)) => mapping,
+        _ => YamlMapping::new(),
+    };
+    (mapping, end_offset)
+}
+
+fn mapping_is_inactive(mapping: &YamlMapping) -> bool {
+    matches!(
+        yaml_string(mapping, "status")
+            .unwrap_or_else(|| "active".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "archived" | "deprecated" | "superseded"
+    )
+}
+
+fn extract_task_id_from_path(path: &Path) -> Option<String> {
+    let mut saw_tasks = false;
+    for component in path.components() {
+        let text = component.as_os_str().to_string_lossy();
+        if saw_tasks {
+            return Some(text.to_string());
+        }
+        saw_tasks = text == "tasks";
+    }
+    None
+}
+
+fn task_card_tags(mapping: &YamlMapping) -> Vec<String> {
+    let mut tags = Vec::new();
+    for field in ["card_id", "relevant_cards"] {
+        for value in yaml_string_list(mapping, field) {
+            push_unique(&mut tags, format!("scope:card:{}", value));
+        }
+    }
+    if let Some(value) = yaml_string(mapping, "card_id") {
+        push_unique(&mut tags, format!("scope:card:{}", value));
+    }
+    tags
+}
+
+fn task_card_from_mapping(
+    mapping: &YamlMapping,
+    path: &Path,
+    directory_kind: &str,
+    body: &str,
+) -> KnowledgeCard {
+    let task_id = yaml_string(mapping, "task_id").or_else(|| extract_task_id_from_path(path));
+    let title = yaml_string(mapping, "title")
+        .or_else(|| yaml_string(mapping, "name"))
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
+    let kind = yaml_string(mapping, "kind").or_else(|| {
+        if directory_kind == "memories" {
+            Some("freeform".to_string())
+        } else {
+            None
+        }
+    });
+    let namespace = yaml_string(mapping, "namespace").unwrap_or_else(|| "task".to_string());
+    let mut tags = yaml_string_list(mapping, "tags");
+    push_unique(&mut tags, "scope:task");
+    push_unique(&mut tags, format!("type:{}", directory_kind));
+    push_unique(&mut tags, format!("namespace:{}", namespace));
+    if let Some(task_id) = &task_id {
+        push_unique(&mut tags, format!("scope:task:{}", task_id));
+    }
+    if let Some(kind) = &kind {
+        push_unique(&mut tags, format!("kind:{}", kind));
+    }
+    for tag in task_card_tags(mapping) {
+        push_unique(&mut tags, tag);
+    }
+
+    let mut filenames = Vec::new();
+    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+        filenames.push(file_name.to_string());
+    }
+    if let Some(stem) = path.file_stem().and_then(|name| name.to_str()) {
+        push_unique(&mut filenames, stem.to_string());
+    }
+    if let Some(slug) = yaml_string(mapping, "slug") {
+        push_unique(&mut filenames, slug);
+    }
+
+    KnowledgeCard {
+        id: path.to_string_lossy().to_string(),
+        title,
+        summary: first_nonempty_line(body),
+        description: None,
+        tags,
+        filenames,
+        entities: Vec::new(),
+        related_files: Vec::new(),
+        related_entities: Vec::new(),
+        kind,
+        created: None,
+        created_at: yaml_string(mapping, "created_at"),
+        file_path: path.to_path_buf(),
+    }
+}
+
+fn card_matches_filters(card: &KnowledgeCard, filters: &KnowledgeSearchFilters) -> bool {
+    if let Some(scope) = &filters.scope {
+        if !normalized_contains(&card.tags, &format!("scope:{}", scope)) {
+            return false;
+        }
+    }
+    if let Some(kind) = &filters.kind {
+        if card.kind.as_deref().map(normalize_key) != Some(normalize_key(kind)) {
+            return false;
+        }
+    }
+    if let Some(namespace) = &filters.namespace {
+        if !normalized_contains(&card.tags, &format!("namespace:{}", namespace)) {
+            return false;
+        }
+    }
+    if let Some(task_id) = &filters.task_id {
+        if normalize_key(task_id) != "*"
+            && !normalized_contains(&card.tags, &format!("scope:task:{}", task_id))
+        {
+            return false;
+        }
+    }
+    filters
+        .tags
+        .iter()
+        .all(|tag| normalized_contains(&card.tags, tag))
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let mut terms = text_tokens(query);
+    if terms.is_empty() {
+        let trimmed = query.trim().to_ascii_lowercase();
+        if !trimmed.is_empty() {
+            terms.push(trimmed);
+        }
+    }
+    terms
+}
+
+fn content_snippet(content: &str, terms: &[String]) -> String {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let start = terms
+        .iter()
+        .filter_map(|term| lower.find(term))
+        .min()
+        .unwrap_or(0);
+    let prefix_chars = trimmed[..start].chars().count().saturating_sub(80);
+    let snippet: String = trimmed.chars().skip(prefix_chars).take(240).collect();
+    snippet.replace('\n', " ")
+}
+
 impl KnowledgeIndex {
     pub fn empty() -> Self {
         Self::default()
@@ -110,6 +366,8 @@ impl KnowledgeIndex {
         retain_cards_not_at_path(&mut self.by_entity, file_path);
         retain_cards_not_at_path(&mut self.by_related_filename, file_path);
         retain_cards_not_at_path(&mut self.by_related_entity, file_path);
+        retain_cards_not_at_path(&mut self.by_content, file_path);
+        self.content_by_path.remove(file_path);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -118,6 +376,7 @@ impl KnowledgeIndex {
             && self.by_entity.is_empty()
             && self.by_related_filename.is_empty()
             && self.by_related_entity.is_empty()
+            && self.by_content.is_empty()
     }
 
     pub fn all_cards(&self) -> Vec<KnowledgeCard> {
@@ -129,6 +388,7 @@ impl KnowledgeIndex {
             &self.by_entity,
             &self.by_related_filename,
             &self.by_related_entity,
+            &self.by_content,
         ] {
             for card in cards.values().flatten() {
                 if seen.insert(card.file_path.clone()) {
@@ -140,11 +400,22 @@ impl KnowledgeIndex {
     }
 
     pub fn add_card(&mut self, card: KnowledgeCard) {
+        self.add_card_with_content(card, None);
+    }
+
+    pub fn add_card_with_content(&mut self, card: KnowledgeCard, content: Option<&str>) {
         for filename in &card.filenames {
             self.by_filename
                 .entry(filename.clone())
                 .or_default()
                 .push(card.clone());
+            let normalized = normalize_key(filename);
+            if normalized != *filename {
+                self.by_filename
+                    .entry(normalized)
+                    .or_default()
+                    .push(card.clone());
+            }
         }
         for tag in &card.tags {
             self.by_tag
@@ -170,6 +441,29 @@ impl KnowledgeIndex {
                 .entry(ent.clone())
                 .or_default()
                 .push(card.clone());
+        }
+
+        let content_text = content.unwrap_or("").to_string();
+        self.content_by_path
+            .insert(card.file_path.clone(), content_text.clone());
+        let mut searchable = String::new();
+        searchable.push_str(&card.title);
+        searchable.push('\n');
+        if let Some(summary) = &card.summary {
+            searchable.push_str(summary);
+            searchable.push('\n');
+        }
+        if let Some(description) = &card.description {
+            searchable.push_str(description);
+            searchable.push('\n');
+        }
+        searchable.push_str(&card.tags.join("\n"));
+        searchable.push('\n');
+        searchable.push_str(&card.filenames.join("\n"));
+        searchable.push('\n');
+        searchable.push_str(&content_text);
+        for token in text_tokens(&searchable) {
+            self.by_content.entry(token).or_default().push(card.clone());
         }
     }
 
@@ -199,22 +493,32 @@ impl KnowledgeIndex {
             .or_else(|| content.and_then(first_nonempty_line));
 
         let description = fm.description.clone();
+        let mut filenames = fm.filenames.clone();
+        if let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) {
+            push_unique(&mut filenames, file_name.to_string());
+        }
+        if let Some(stem) = file_path.file_stem().and_then(|name| name.to_str()) {
+            push_unique(&mut filenames, stem.to_string());
+        }
 
-        self.add_card(KnowledgeCard {
-            id,
-            title,
-            summary,
-            description,
-            tags: fm.tags.clone(),
-            filenames: fm.filenames.clone(),
-            entities: fm.entities.clone(),
-            related_files: fm.related_files.clone(),
-            related_entities: fm.related_entities.clone(),
-            kind: fm.kind.clone(),
-            created: fm.created.clone(),
-            created_at: fm.created_at.clone(),
-            file_path,
-        });
+        self.add_card_with_content(
+            KnowledgeCard {
+                id,
+                title,
+                summary,
+                description,
+                tags: fm.tags.clone(),
+                filenames,
+                entities: fm.entities.clone(),
+                related_files: fm.related_files.clone(),
+                related_entities: fm.related_entities.clone(),
+                kind: fm.kind.clone(),
+                created: fm.created.clone(),
+                created_at: fm.created_at.clone(),
+                file_path,
+            },
+            content,
+        );
     }
 
     pub fn related_for_files(&self, filenames: &[String], max_items: usize) -> Vec<KnowledgeCard> {
@@ -304,6 +608,81 @@ impl KnowledgeIndex {
         }
         rank_cards(out, max_items)
     }
+
+    pub fn search(
+        &self,
+        query: &str,
+        filters: &KnowledgeSearchFilters,
+        max_items: usize,
+    ) -> Vec<KnowledgeSearchHit> {
+        let terms = query_terms(query);
+        let mut scores: HashMap<PathBuf, (KnowledgeCard, f32)> = HashMap::new();
+        let mut add_score = |card: &KnowledgeCard, score: f32| {
+            if !card_matches_filters(card, filters) {
+                return;
+            }
+            scores
+                .entry(card.file_path.clone())
+                .and_modify(|(_, current)| *current += score)
+                .or_insert_with(|| (card.clone(), score));
+        };
+
+        if terms.is_empty() {
+            for card in self.all_cards() {
+                add_score(&card, 1.0);
+            }
+        }
+
+        for term in &terms {
+            if let Some(cards) = self.by_tag.get(term) {
+                for card in cards {
+                    add_score(card, 4.0);
+                }
+            }
+            if let Some(cards) = self.by_filename.get(term) {
+                for card in cards {
+                    add_score(card, 3.0);
+                }
+            }
+            if let Some(cards) = self.by_content.get(term) {
+                for card in cards {
+                    add_score(card, 1.0);
+                }
+            }
+        }
+
+        let mut hits: Vec<_> = scores
+            .into_values()
+            .map(|(card, score)| {
+                let snippet = self.content_by_path.get(&card.file_path).map_or_else(
+                    || content_snippet(card.summary.as_deref().unwrap_or_default(), &terms),
+                    |content| content_snippet(content, &terms),
+                );
+                KnowledgeSearchHit {
+                    card,
+                    snippet,
+                    score,
+                }
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    kind_priority(b.card.kind.as_deref())
+                        .cmp(&kind_priority(a.card.kind.as_deref()))
+                })
+                .then_with(|| {
+                    recency_key(b.card.created_at.as_deref(), b.card.created.as_deref()).cmp(
+                        &recency_key(a.card.created_at.as_deref(), a.card.created.as_deref()),
+                    )
+                })
+                .then_with(|| a.card.title.cmp(&b.card.title))
+        });
+        hits.truncate(max_items);
+        hits
+    }
 }
 
 pub fn format_related_memories_section(
@@ -367,6 +746,15 @@ pub async fn build_knowledge_index(gcx: Arc<GlobalContext>) -> KnowledgeIndex {
         knowledge_dirs.push(global_dir);
     }
 
+    scan_knowledge_dirs(&mut index, knowledge_dirs).await;
+
+    let task_dirs = crate::tasks::storage::get_all_tasks_dirs(gcx).await;
+    scan_task_dirs(&mut index, task_dirs).await;
+
+    index
+}
+
+async fn scan_knowledge_dirs(index: &mut KnowledgeIndex, knowledge_dirs: Vec<PathBuf>) {
     for dir in knowledge_dirs {
         for entry in walkdir::WalkDir::new(&dir)
             .into_iter()
@@ -380,7 +768,9 @@ pub async fn build_knowledge_index(gcx: Arc<GlobalContext>) -> KnowledgeIndex {
             if ext != "md" && ext != "mdx" {
                 continue;
             }
-            if path_has_component(path, "archive") {
+            if path_has_any_component(path, &["archive", "archived", ".history"])
+                || is_tmp_path(path)
+            {
                 continue;
             }
 
@@ -398,8 +788,57 @@ pub async fn build_knowledge_index(gcx: Arc<GlobalContext>) -> KnowledgeIndex {
             index.add_from_frontmatter(path_buf, &fm, Some(content_slice));
         }
     }
+}
 
-    index
+async fn scan_task_dirs(index: &mut KnowledgeIndex, task_roots: Vec<PathBuf>) {
+    for tasks_dir in task_roots {
+        for task_entry in match std::fs::read_dir(&tasks_dir) {
+            Ok(entries) => entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>(),
+            Err(_) => continue,
+        } {
+            let task_dir = task_entry.path();
+            if !task_dir.is_dir() {
+                continue;
+            }
+            for subdir in ["memories", "documents"] {
+                let scan_dir = task_dir.join(subdir);
+                if !scan_dir.exists() {
+                    continue;
+                }
+                for entry in walkdir::WalkDir::new(&scan_dir)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if ext != "md" && ext != "mdx" {
+                        continue;
+                    }
+                    if path_has_any_component(path, &[".history", "archived", "archive"])
+                        || is_tmp_path(path)
+                    {
+                        continue;
+                    }
+
+                    let path_buf = path.to_path_buf();
+                    let text = match tokio::fs::read_to_string(&path_buf).await {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let (mapping, content_start) = parse_yaml_frontmatter(&text);
+                    if mapping_is_inactive(&mapping) {
+                        continue;
+                    }
+                    let content_slice = text.get(content_start..).unwrap_or("");
+                    let card = task_card_from_mapping(&mapping, &path_buf, subdir, content_slice);
+                    index.add_card_with_content(card, Some(content_slice));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -437,8 +876,7 @@ mod tests {
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            *gcx.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
 
         let index = build_knowledge_index(gcx).await;
@@ -447,5 +885,119 @@ mod tests {
         assert!(deprecated_path.exists());
         assert!(active_path.exists());
         assert_eq!(index.related_for_tags(&vec!["new".to_string()], 5).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn build_index_picks_up_task_memories_and_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_dir = dir.path().join(".refact/tasks/task-1");
+        let memories_dir = task_dir.join("memories");
+        let documents_dir = task_dir.join("documents");
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+        tokio::fs::create_dir_all(&documents_dir).await.unwrap();
+        tokio::fs::write(
+            memories_dir.join("decision.md"),
+            "---\ntitle: Routing\ntask_id: task-1\nkind: decision\nnamespace: card:T-22\ntags: [routing]\n---\n\nUse text search for task memory.",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            documents_dir.join("spec.md"),
+            "---\nname: Main Spec\nslug: main-spec\nkind: spec\ncreated_at: now\nupdated_at: now\nauthor_role: planner\npinned: true\nversion: 1\nrelevant_cards: [T-22]\n---\n\nDocument body token.",
+        )
+        .await
+        .unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let index = build_knowledge_index(gcx).await;
+        let filters = KnowledgeSearchFilters {
+            scope: Some("task".to_string()),
+            task_id: Some("task-1".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(index.search("routing", &filters, 10).len(), 1);
+        assert_eq!(index.search("main-spec", &filters, 10).len(), 1);
+        assert_eq!(index.search("body", &filters, 10).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn existing_knowledge_still_found_after_task_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        tokio::fs::write(
+            knowledge_dir.join("active.md"),
+            "---\ntitle: Knowledge Card\ntags: [stable]\n---\n\nEvergreen content",
+        )
+        .await
+        .unwrap();
+        tokio::fs::create_dir_all(dir.path().join(".refact/tasks/task-1/memories"))
+            .await
+            .unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let index = build_knowledge_index(gcx).await;
+        assert_eq!(
+            index.related_for_tags(&vec!["stable".to_string()], 5).len(),
+            1
+        );
+        assert_eq!(
+            index
+                .search("evergreen", &KnowledgeSearchFilters::default(), 5)
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn task_index_excludes_archived_superseded_history_and_tmp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let memories_dir = dir.path().join(".refact/tasks/task-1/memories");
+        tokio::fs::create_dir_all(memories_dir.join(".history"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(memories_dir.join("archived"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            memories_dir.join("active.md"),
+            "---\ntitle: Active\ntask_id: task-1\nkind: finding\n---\n\nneedle active",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            memories_dir.join("superseded.md"),
+            "---\nstatus: superseded\ntags: [needle]\n---\n\nneedle superseded",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(memories_dir.join("archived/old.md"), "needle archived")
+            .await
+            .unwrap();
+        tokio::fs::write(memories_dir.join(".history/old.md"), "needle history")
+            .await
+            .unwrap();
+        tokio::fs::write(memories_dir.join("draft.md.tmp"), "needle tmp")
+            .await
+            .unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let index = build_knowledge_index(gcx).await;
+        let filters = KnowledgeSearchFilters {
+            scope: Some("task".to_string()),
+            task_id: Some("task-1".to_string()),
+            ..Default::default()
+        };
+
+        let hits = index.search("needle", &filters, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].card.title, "Active");
     }
 }

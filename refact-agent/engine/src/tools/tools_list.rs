@@ -426,6 +426,7 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_task_documents::ToolDocHistory::new()),
         Box::new(crate::tools::tool_task_memory::ToolTaskMemorySave::new()),
         Box::new(crate::tools::tool_task_memory::ToolTaskMemoriesGet::new()),
+        Box::new(crate::tools::tool_task_memory::ToolTaskMemorySearch::new()),
     ];
 
     let worktree_tools: Vec<Box<dyn Tool + Send>> = vec![Box::new(
