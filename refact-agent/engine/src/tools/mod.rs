@@ -12,6 +12,7 @@ mod tool_activate_skill;
 mod tool_add_workspace_folder;
 mod tool_agent_chat_summary;
 mod tool_agent_diff;
+mod tool_agent_lifecycle;
 mod tool_agent_pulse;
 mod tool_agent_steer;
 mod tool_ast_definition;
