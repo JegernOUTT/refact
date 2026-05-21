@@ -2,6 +2,7 @@ pub mod browser_context;
 pub mod cache_guard;
 pub mod config;
 mod content;
+pub mod diagnostics;
 mod generation;
 mod handlers;
 pub mod history_limit;

@@ -18,6 +18,7 @@ use refact_tool_api::{build_registry_from_names, ToolDesc};
 use super::tools::execute_tools;
 use super::types::ThreadParams;
 
+use super::diagnostics::filter_ui_only_messages;
 use super::history_limit::fix_and_limit_messages_history;
 use super::linearize::apply_summarization_linearize;
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
@@ -41,6 +42,13 @@ fn last_system_message(messages: &[ChatMessage]) -> Option<ChatMessage> {
     messages.iter().rev().find(|m| m.role == "system").cloned()
 }
 
+fn remove_visualization_only_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .filter(|message| message.role != "error")
+        .collect()
+}
+
 pub struct PreparedChat {
     pub llm_request: LlmRequest,
     pub limited_messages: Vec<ChatMessage>,
@@ -57,12 +65,6 @@ pub struct ChatPrepareOptions {
     pub cache_control: CacheControl,
 }
 
-fn remove_visualization_only_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    messages
-        .into_iter()
-        .filter(|message| message.role != "error")
-        .collect()
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -104,6 +106,7 @@ pub async fn prepare_chat_passthrough(
     options: &ChatPrepareOptions,
 ) -> Result<PreparedChat, String> {
     let mut has_rag_results = HasRagResults::new();
+    let messages = filter_ui_only_messages(messages);
     let messages = remove_visualization_only_messages(messages);
     let tool_names: HashSet<String> = tools.iter().map(|x| x.name.clone()).collect();
 
@@ -832,6 +835,24 @@ mod tests {
         params.reasoning_effort = Some(ReasoningEffort::High);
         let intent = sampling_params_to_reasoning_intent(&params, &model);
         assert_eq!(intent, ReasoningIntent::Off);
+    }
+
+    #[test]
+    fn test_ui_only_messages_are_filtered_before_prepare_steps() {
+        let visible = ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("visible".to_string()),
+            ..Default::default()
+        };
+        let hidden = crate::chat::diagnostics::make_ui_only_error_message(
+            "context_length_exceeded: too large",
+        );
+
+        let filtered = filter_ui_only_messages(vec![hidden, visible.clone()]);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].role, "user");
+        assert_eq!(filtered[0].content.content_text_only(), "visible");
     }
 
     #[test]

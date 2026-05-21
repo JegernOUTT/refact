@@ -18,7 +18,11 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
     : "Messages summarized";
 
   const tierLabel =
-    message.summarization_tier === "tier1_llm" ? "LLM" : "deterministic";
+    message.summarization_tier === "tier2_reactive"
+      ? "Reactive compaction"
+      : message.summarization_tier === "tier1_llm"
+        ? "LLM"
+        : "deterministic";
 
   const tokenLabel = message.summarized_token_estimate
     ? ` — ~${message.summarized_token_estimate} tokens`

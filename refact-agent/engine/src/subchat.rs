@@ -22,6 +22,9 @@ use crate::chat::stream_core::{
     run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
     LlmStreamError,
 };
+use crate::chat::diagnostics::{
+    append_ui_only_reactive_compaction_diagnostics, format_tier0_compaction_report,
+};
 use crate::chat::retry_policy::{
     classify_llm_error_for_retry, retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
 };
@@ -38,6 +41,58 @@ use crate::worktrees::types::WorktreeReference;
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output. Not retrying to avoid corruption.";
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 3;
+
+fn should_compact_context_limit_error(
+    error: &str,
+    attempts: usize,
+    abort_flag: &Option<Arc<AtomicBool>>,
+) -> bool {
+    classify_llm_error_for_retry(error).is_context_limit()
+        && attempts < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS
+        && !is_aborted(abort_flag)
+}
+
+async fn emit_parent_compaction_diagnostics(
+    config: &SubchatConfig,
+    error: &str,
+    report: &crate::chat::history_limit::Tier0CompactReport,
+    attempt: usize,
+) {
+    let (Some(parent_tx), Some(tool_call_id)) = (
+        config.parent_subchat_tx.as_ref(),
+        config.parent_tool_call_id.as_deref(),
+    ) else {
+        return;
+    };
+    let error_msg = json!({
+        "tool_call_id": tool_call_id,
+        "subchat_id": format!("⚠️ Context limit error before compaction:\n{}", error),
+        "attached_files": []
+    });
+    let report_msg = json!({
+        "tool_call_id": tool_call_id,
+        "subchat_id": format_tier0_compaction_report(report, attempt),
+        "attached_files": []
+    });
+    let _ = parent_tx.lock().await.send(error_msg);
+    let _ = parent_tx.lock().await.send(report_msg);
+}
+
+async fn apply_subchat_reactive_compaction(
+    config: &SubchatConfig,
+    messages: &mut Vec<ChatMessage>,
+    error: &str,
+    attempt: usize,
+    preserve_last_message: bool,
+) {
+    let last = if preserve_last_message { messages.pop() } else { None };
+    let report = tier0_deterministic_compact(messages, 0);
+    append_ui_only_reactive_compaction_diagnostics(messages, error, &report, attempt);
+    if let Some(msg) = last {
+        messages.push(msg);
+    }
+    emit_parent_compaction_diagnostics(config, error, &report, attempt).await;
+}
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     use std::collections::HashSet;
@@ -915,6 +970,9 @@ pub async fn run_subchat(
         let mut thread = stateful_thread_from_config(&chat_id, &config);
         register_stateful_subchat_worktree(gcx.clone(), &chat_id, &mut thread).await;
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
+    } else if current_messages.iter().any(crate::chat::diagnostics::is_ui_only_message) {
+        let thread = stateful_thread_from_config(&chat_id, &config);
+        save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
     }
 
     let metering = aggregate_metering_from_messages(&current_messages);
@@ -948,50 +1006,7 @@ pub async fn run_subchat_once(
     )
     .await?;
 
-    let chat_id = format!("subchat-{}", Uuid::new_v4());
-
-    let messages = sanitize_messages_for_new_thread(&messages);
-    let ccx = Arc::new(AMutex::new(
-        AtCommandsContext::new_from_app(
-            AppState::from_gcx(gcx.clone()).await,
-            config.n_ctx,
-            1,
-            false,
-            messages.clone(),
-            chat_id.clone(),
-            config.root_chat_id.clone(),
-            config.model.clone(),
-            None,
-            None,
-        )
-        .await,
-    ));
-
-    ccx.lock().await.subchat_depth = config.subchat_depth;
-
-    let results = subchat_single_internal(
-        ccx,
-        &config.model,
-        &config.mode,
-        messages,
-        Some(vec![]),
-        false,
-        config.temperature,
-        config.max_new_tokens,
-        config.reasoning_effort.clone(),
-        false,
-        None,
-    )
-    .await?;
-
-    let final_messages = results.into_iter().next().unwrap_or_default();
-    let metering = aggregate_metering_from_messages(&final_messages);
-
-    Ok(SubchatResult {
-        messages: final_messages,
-        metering,
-        chat_id: None,
-    })
+    run_subchat(gcx, messages, config).await
 }
 
 pub async fn run_subchat_once_with_parent(
@@ -1099,18 +1114,28 @@ async fn run_subchat_loop(
                     break r;
                 }
                 Err(ref err)
-                    if classify_llm_error_for_retry(err).is_context_limit()
-                        && context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS
-                        && !is_aborted(&config.abort_flag) =>
+                    if should_compact_context_limit_error(
+                        err,
+                        context_limit_compact_count,
+                        &config.abort_flag,
+                    ) =>
                 {
+                    let original_error = err.clone();
                     context_limit_compact_count += 1;
                     warn!(
                         "Subchat context limit, applying Tier 0 compact attempt {}/{}: {}",
                         context_limit_compact_count,
                         MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                        err,
+                        original_error,
                     );
-                    tier0_deterministic_compact(&mut messages, 0);
+                    apply_subchat_reactive_compaction(
+                        config,
+                        &mut messages,
+                        &original_error,
+                        context_limit_compact_count,
+                        false,
+                    )
+                    .await;
                 }
                 Err(err) => return Err(err),
             }
@@ -1210,18 +1235,28 @@ async fn run_subchat_with_wrap_up(
                     break r;
                 }
                 Err(ref err)
-                    if classify_llm_error_for_retry(err).is_context_limit()
-                        && context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS
-                        && !is_aborted(&config.abort_flag) =>
+                    if should_compact_context_limit_error(
+                        err,
+                        context_limit_compact_count,
+                        &config.abort_flag,
+                    ) =>
                 {
+                    let original_error = err.clone();
                     context_limit_compact_count += 1;
                     warn!(
                         "Subchat wrap-up context limit, applying Tier 0 compact attempt {}/{}: {}",
                         context_limit_compact_count,
                         MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                        err,
+                        original_error,
                     );
-                    tier0_deterministic_compact(&mut messages, 0);
+                    apply_subchat_reactive_compaction(
+                        config,
+                        &mut messages,
+                        &original_error,
+                        context_limit_compact_count,
+                        false,
+                    )
+                    .await;
                 }
                 Err(err) => return Err(err),
             }
@@ -1291,27 +1326,32 @@ async fn run_subchat_with_wrap_up(
         {
             Ok(r) => break r,
             Err(ref err)
-                if classify_llm_error_for_retry(err).is_context_limit()
-                    && context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS
-                    && !is_aborted(&config.abort_flag) =>
+                if should_compact_context_limit_error(
+                    err,
+                    context_limit_compact_count,
+                    &config.abort_flag,
+                ) =>
             {
+                let original_error = err.clone();
                 context_limit_compact_count += 1;
                 warn!(
                     "Subchat wrap-up final context limit, applying Tier 0 compact attempt {}/{}: {}",
                     context_limit_compact_count,
                     MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                    err,
+                    original_error,
                 );
-                let last = messages.pop();
-                tier0_deterministic_compact(&mut messages, 0);
-                if let Some(msg) = last {
-                    messages.push(msg);
-                }
+                apply_subchat_reactive_compaction(
+                    config,
+                    &mut messages,
+                    &original_error,
+                    context_limit_compact_count,
+                    true,
+                )
+                .await;
             }
             Err(err) => return Err(err),
         }
     };
-
     update_usage_from_messages(usage, &final_results);
 
     Ok(final_results.into_iter().next().unwrap_or_default())
@@ -1631,6 +1671,7 @@ async fn subchat_stream(
                 let should_retry = error.should_retry(retry_attempt, &abort_flag);
                 if error.partial_output_emitted
                     && !should_retry
+                    && !retry_decision.is_context_limit()
                     && !abort_flag.load(Ordering::SeqCst)
                 {
                     let original = error.message.clone();
@@ -1897,12 +1938,14 @@ async fn subchat_single_internal(
 #[cfg(test)]
 mod subchat_tests {
     use super::{
-        parent_thread_worktree, register_stateful_subchat_worktree, resolve_subchat_model,
-        resolve_subchat_params, resolve_subchat_worktree, stateful_thread_from_config,
-        SubchatConfig, ToolsPolicy,
+        apply_subchat_reactive_compaction, parent_thread_worktree,
+        register_stateful_subchat_worktree, resolve_subchat_model, resolve_subchat_params,
+        resolve_subchat_worktree, should_compact_context_limit_error, stateful_thread_from_config,
+        SubchatConfig, ToolsPolicy, PARTIAL_OUTPUT_STREAM_ERROR,
     };
+    use crate::chat::diagnostics::is_ui_only_message;
     use crate::chat::trajectories::save_trajectory_as;
-    use crate::call_validation::{ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters};
+    use crate::call_validation::{ChatContent, ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters};
     use crate::chat::types::{TaskMeta, ThreadParams};
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
@@ -1953,6 +1996,36 @@ mod subchat_tests {
         run_git(root, &["commit", "-m", "initial"]);
     }
 
+    fn test_subchat_config() -> SubchatConfig {
+        SubchatConfig {
+            tool_name: "subagent".to_string(),
+            stateful: false,
+            autonomous_no_confirm: false,
+            chat_id: None,
+            title: None,
+            parent_id: None,
+            link_type: None,
+            root_chat_id: None,
+            tools: ToolsPolicy::None,
+            max_steps: 1,
+            prepend_system_prompt: false,
+            wrap_up: None,
+            task_meta: None,
+            worktree: None,
+            model: "model".to_string(),
+            mode: "agent".to_string(),
+            n_ctx: 4096,
+            max_new_tokens: 512,
+            temperature: None,
+            reasoning_effort: None,
+            parent_tool_call_id: None,
+            parent_subchat_tx: None,
+            abort_flag: None,
+            subchat_depth: 1,
+            buddy_meta: None,
+        }
+    }
+
     fn sample_worktree() -> (tempfile::TempDir, WorktreeMeta) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("worktree");
@@ -1993,6 +2066,100 @@ mod subchat_tests {
         let mut caps_state = caps_state.write().await;
         caps_state.caps = Some(Arc::new(caps));
         caps_state.last_attempted_ts = now;
+    }
+
+    #[test]
+    fn subchat_context_limit_compaction_gate_allows_wrapped_partial_output_error() {
+        let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let error = format!(
+            "{} Original error: context_length_exceeded",
+            PARTIAL_OUTPUT_STREAM_ERROR,
+        );
+
+        assert!(should_compact_context_limit_error(&error, 0, &Some(abort)));
+    }
+
+    #[test]
+    fn subchat_context_limit_compaction_gate_respects_abort() {
+        let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        assert!(!should_compact_context_limit_error(
+            "context_length_exceeded",
+            0,
+            &Some(abort),
+        ));
+    }
+
+    #[tokio::test]
+    async fn subchat_reactive_compaction_appends_diagnostics_and_preserves_last_message() {
+        let config = test_subchat_config();
+        let mut messages = vec![
+            ChatMessage::new("user".to_string(), "first".to_string()),
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("x".repeat(500)),
+                tool_call_id: "tc1".to_string(),
+                ..Default::default()
+            },
+            ChatMessage::new("user".to_string(), "wrap up".to_string()),
+        ];
+
+        apply_subchat_reactive_compaction(
+            &config,
+            &mut messages,
+            "context_length_exceeded",
+            1,
+            true,
+        )
+        .await;
+
+        assert_eq!(messages.last().unwrap().content.content_text_only(), "wrap up");
+        assert!(messages.iter().any(|message| message.role == "error" && is_ui_only_message(message)));
+        assert!(messages.iter().any(|message| {
+            message.role == "summarization"
+                && message.summarization_tier.as_deref() == Some("tier2_reactive")
+                && is_ui_only_message(message)
+        }));
+    }
+
+    #[tokio::test]
+    async fn subchat_reactive_compaction_emits_parent_diagnostics() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = test_subchat_config();
+        config.parent_tool_call_id = Some("call_1".to_string());
+        config.parent_subchat_tx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(tx)));
+        let mut messages = vec![
+            ChatMessage::new("user".to_string(), "first".to_string()),
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("x".repeat(500)),
+                tool_call_id: "tc1".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        apply_subchat_reactive_compaction(
+            &config,
+            &mut messages,
+            "context_length_exceeded",
+            1,
+            false,
+        )
+        .await;
+
+        let first = rx.try_recv().unwrap();
+        let second = rx.try_recv().unwrap();
+        assert_eq!(first.get("tool_call_id").and_then(|v| v.as_str()), Some("call_1"));
+        assert!(first
+            .get("subchat_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .contains("context_length_exceeded"));
+        assert!(second
+            .get("subchat_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .contains("Reactive compaction report"));
     }
 
     #[test]

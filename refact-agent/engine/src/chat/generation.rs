@@ -36,8 +36,11 @@ use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
-use crate::chat::trajectory_ops::approx_token_count;
+use crate::chat::diagnostics::{
+    make_ui_only_compaction_report_message, make_ui_only_error_message,
+};
 use crate::chat::history_limit::tier0_deterministic_compact;
+use crate::chat::trajectory_ops::approx_token_count;
 
 const TOKEN_BUDGET_CADENCE: usize = 6;
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 3;
@@ -83,7 +86,6 @@ fn maybe_inject_token_budget_instruction(
 ) -> bool {
     let used_tokens = approx_token_count(&session.messages);
     let remaining = effective_n_ctx.saturating_sub(used_tokens);
-    let below_ten_percent_left = remaining.saturating_mul(10) < effective_n_ctx;
     let last_has_tool_calls = session
         .messages
         .last()
@@ -700,21 +702,26 @@ pub fn start_generation(
                     }
                     continue;
                 }
-
                 if retry_decision.is_context_limit() && !abort_flag.load(Ordering::SeqCst) {
                     if context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
+                        let original_error = error.message.clone();
                         context_limit_compact_count += 1;
                         warn!(
                             "Context limit error, applying Tier 0 compact attempt {}/{}: {}",
                             context_limit_compact_count,
                             MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                            error.message,
+                            original_error,
                         );
                         {
                             let mut session = session_arc.lock().await;
-                            tier0_deterministic_compact(&mut session.messages, 0);
-                            session.cache_guard_force_next = true;
                             session.clear_stream_for_retry();
+                            session.add_message(make_ui_only_error_message(&original_error));
+                            let report = tier0_deterministic_compact(&mut session.messages, 0);
+                            session.add_message(make_ui_only_compaction_report_message(
+                                &report,
+                                context_limit_compact_count,
+                            ));
+                            session.cache_guard_force_next = true;
                         }
                         continue;
                     }
@@ -2124,11 +2131,70 @@ mod tests {
     }
 
     #[test]
+    fn test_context_limit_compaction_appends_ui_only_diagnostics() {
+        let mut messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
+        let long_output = "x".repeat(500);
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(long_output),
+            tool_call_id: "tc1".to_string(),
+            ..Default::default()
+        });
+
+        messages.push(make_ui_only_error_message(
+            "context_length_exceeded: too many tokens",
+        ));
+        let report = tier0_deterministic_compact(&mut messages, 0);
+        messages.push(make_ui_only_compaction_report_message(&report, 1));
+
+        assert_eq!(messages[messages.len() - 2].role, "error");
+        assert_eq!(messages[messages.len() - 1].role, "summarization");
+        assert!(crate::chat::diagnostics::is_ui_only_message(&messages[messages.len() - 2]));
+        assert!(crate::chat::diagnostics::is_ui_only_message(&messages[messages.len() - 1]));
+        assert_eq!(
+            messages[messages.len() - 1].summarization_tier.as_deref(),
+            Some("tier2_reactive")
+        );
+        assert!(messages[messages.len() - 1]
+            .content
+            .content_text_only()
+            .contains("Tool outputs truncated: 1"));
+    }
+
+    #[test]
+    fn test_context_limit_compaction_allows_partial_output_errors() {
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let partial_context_error = crate::chat::stream_core::LlmStreamError {
+            message: format!(
+                "{} Original error: context_length_exceeded",
+                PARTIAL_OUTPUT_STREAM_ERROR,
+            ),
+            partial_output_emitted: true,
+        };
+
+        assert!(partial_context_error.retry_decision().is_context_limit());
+        assert!(!partial_context_error.should_retry(0, &abort));
+        assert!(partial_context_error.retry_decision().is_context_limit() && !abort.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_context_limit_compaction_blocked_by_abort_flag() {
+        let abort = std::sync::atomic::AtomicBool::new(true);
+        let partial_context_error = crate::chat::stream_core::LlmStreamError {
+            message: "context_length_exceeded".to_string(),
+            partial_output_emitted: false,
+        };
+
+        assert!(partial_context_error.retry_decision().is_context_limit());
+        assert!(
+            !(partial_context_error.retry_decision().is_context_limit()
+                && !abort.load(Ordering::SeqCst))
+        );
+    }
+
+    #[test]
     fn test_context_limit_compact_count_resets_on_success() {
-        let mut count = 2usize;
-        let mut network = 3usize;
-        network = 0;
-        count = 0;
+        let (count, network) = (0usize, 0usize);
         assert_eq!(network, 0);
         assert_eq!(count, 0);
     }
@@ -2153,8 +2219,7 @@ mod tests {
 
     #[test]
     fn test_tier1_compact_count_resets_on_success() {
-        let mut tier1_count = 2usize;
-        tier1_count = 0;
+        let tier1_count = 0usize;
         assert_eq!(tier1_count, 0);
     }
 
