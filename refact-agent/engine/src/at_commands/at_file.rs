@@ -405,7 +405,7 @@ pub async fn context_file_from_file_path(
     }
 
     Ok(ContextFile {
-        file_name: file_path_no_colon,
+        file_name: refact_core::chat_types::normalize_file_name(file_path_no_colon),
         file_content,
         line1,
         line2,

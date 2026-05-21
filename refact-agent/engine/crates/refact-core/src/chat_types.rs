@@ -431,7 +431,7 @@ fn default_gradient_type_value() -> i32 {
     -1
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct ContextFile {
     pub file_name: String,
     pub file_content: String,
@@ -447,6 +447,58 @@ pub struct ContextFile {
     pub usefulness: f32,
     #[serde(default, skip_serializing)]
     pub skip_pp: bool,
+}
+
+/// Normalize path separators to forward slashes for cross-platform consistency.
+/// All ContextFile.file_name values use forward slashes regardless of OS.
+/// This is unconditional (not cfg-gated) so serialized paths are always portable.
+pub fn normalize_file_name(name: String) -> String {
+    name.replace('\\', "/")
+}
+
+impl<'de> Deserialize<'de> for ContextFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de>
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            file_name: String,
+            file_content: String,
+            #[serde(default)]
+            line1: usize,
+            #[serde(default)]
+            line2: usize,
+            #[serde(default)]
+            file_rev: Option<String>,
+            #[serde(default)]
+            symbols: Vec<String>,
+            #[serde(default = "default_gradient_type_value")]
+            gradient_type: i32,
+            #[serde(default)]
+            usefulness: f32,
+            #[serde(default)]
+            skip_pp: bool,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(ContextFile {
+            file_name: normalize_file_name(raw.file_name),
+            file_content: raw.file_content,
+            line1: raw.line1,
+            line2: raw.line2,
+            file_rev: raw.file_rev,
+            symbols: raw.symbols,
+            gradient_type: raw.gradient_type,
+            usefulness: raw.usefulness,
+            skip_pp: raw.skip_pp,
+        })
+    }
+}
+
+impl ContextFile {
+    /// Set file_name with cross-platform normalization (backslash → forward slash).
+    pub fn set_file_name(&mut self, name: String) {
+        self.file_name = normalize_file_name(name);
+    }
 }
 
 impl Default for ContextFile {

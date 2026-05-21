@@ -15,10 +15,8 @@ use crate::global_context::GlobalContext;
 use crate::worktrees::scope::ExecutionScope;
 
 /// Convert a PathBuf to a String with forward slashes on all platforms.
-/// Matches the dominant codebase convention for serialized/context file paths.
 fn path_to_string(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
+    refact_core::chat_types::normalize_file_name(p.to_string_lossy().into_owned())
 }
 
 async fn get_workspace_files(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {

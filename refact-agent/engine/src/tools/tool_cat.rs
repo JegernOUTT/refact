@@ -537,7 +537,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                 };
 
                 let cf = ContextFile {
-                    file_name: p.clone(),
+                    file_name: refact_core::chat_types::normalize_file_name(p.clone()),
                     file_content: "".to_string(),
                     line1: start_line,
                     line2: end_line,
@@ -633,7 +633,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                     };
 
                     let cf = ContextFile {
-                        file_name: p.clone(),
+                        file_name: refact_core::chat_types::normalize_file_name(p.clone()),
                         file_content: "".to_string(),
                         line1: start_line,
                         line2: end_line,
