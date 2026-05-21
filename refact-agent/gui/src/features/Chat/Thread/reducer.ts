@@ -69,6 +69,7 @@ import {
   clearSseRefreshRequest,
   setTaskWidgetExpanded,
   setAutoEnrichmentEnabled,
+  setAutoCompactEnabled,
   markMemoryEnrichmentUserTouched,
   setManualPreviewItems,
   removeManualPreviewItem,
@@ -652,6 +653,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (rt) rt.thread.auto_enrichment_enabled = action.payload.value;
   });
 
+  builder.addCase(setAutoCompactEnabled, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) rt.thread.auto_compact_enabled = action.payload.value;
+  });
+
   builder.addCase(markMemoryEnrichmentUserTouched, (state, action) => {
     const rt = getRuntime(state, action.payload.chatId);
     if (rt) rt.memory_enrichment_user_touched = true;
@@ -1145,6 +1151,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
             typeof event.thread.auto_enrichment_enabled === "boolean"
               ? (event.thread.auto_enrichment_enabled as boolean)
               : existing?.auto_enrichment_enabled ?? false,
+          auto_compact_enabled:
+            typeof event.thread.auto_compact_enabled === "boolean"
+              ? event.thread.auto_compact_enabled
+              : existing?.auto_compact_enabled,
           worktree:
             "worktree" in event.thread
               ? event.thread.worktree === null
@@ -1307,6 +1317,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
           const rawAe = params.auto_enrichment_enabled;
           rt.thread.auto_enrichment_enabled =
             rawAe == null ? undefined : (rawAe as boolean);
+        }
+        if ("auto_compact_enabled" in params) {
+          const rawCompact = params.auto_compact_enabled;
+          rt.thread.auto_compact_enabled =
+            rawCompact == null ? undefined : (rawCompact as boolean);
         }
         if ("worktree" in params) {
           const rawWorktree = params.worktree;

@@ -748,6 +748,15 @@ export const selectAutoEnrichmentEnabledById = (
   chatId: string,
 ) => state.chat.threads[chatId]?.thread.auto_enrichment_enabled ?? false;
 
+export const selectAutoCompactEnabled = (state: RootState) =>
+  state.chat.threads[state.chat.current_thread_id]?.thread
+    .auto_compact_enabled ?? true;
+
+export const selectAutoCompactEnabledById = (
+  state: RootState,
+  chatId: string,
+) => state.chat.threads[chatId]?.thread.auto_compact_enabled ?? true;
+
 export const selectMemoryEnrichmentUserTouched = (state: RootState) =>
   state.chat.threads[state.chat.current_thread_id]
     ?.memory_enrichment_user_touched ?? false;

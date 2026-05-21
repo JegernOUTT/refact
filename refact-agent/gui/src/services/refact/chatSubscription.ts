@@ -40,6 +40,7 @@ export type ThreadParams = {
 
   previous_response_id?: string;
   auto_enrichment_enabled?: boolean | null;
+  auto_compact_enabled?: boolean | null;
   worktree?: WorktreeMeta | null;
   parent_id?: string | null;
   link_type?: string | null;

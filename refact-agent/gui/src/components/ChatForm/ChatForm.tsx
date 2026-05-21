@@ -55,6 +55,7 @@ import {
   BrowserToggleButton,
   WandButton,
   AutoEnrichmentToggleButton,
+  AutoCompactToggleButton,
 } from "../Buttons";
 import {
   StreamingTokenCounter,
@@ -590,6 +591,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 />
               </span>
               <span className={styles.hideActionThird}>
+                <AutoCompactToggleButton disabled={isStreaming || isWaiting} />
+              </span>
+              <span className={styles.hideActionFourth}>
                 <WandButton
                   currentText={value}
                   disabled={isStreaming || isWaiting}
@@ -597,7 +601,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 />
               </span>
               {onClose && (
-                <span className={styles.hideActionFourth}>
+                <span className={styles.hideActionFifth}>
                   <BackToSideBarButton
                     disabled={isStreaming}
                     title="Return to sidebar"
@@ -607,11 +611,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               )}
               {config.features?.images !== false &&
                 isMultimodalitySupportedForCurrentModel && (
-                  <span className={styles.hideActionFifth}>
+                  <span className={styles.hideActionSixth}>
                     <AttachImagesButton />
                   </span>
                 )}
-              <span className={styles.hideActionSixth}>
+              <span className={styles.hideActionSeventh}>
                 <MicrophoneButton
                   ref={microphoneRef}
                   onTranscript={(text) => {

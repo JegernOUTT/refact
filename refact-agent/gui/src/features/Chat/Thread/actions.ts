@@ -70,6 +70,8 @@ function buildThreadParamsPatch(
     patch.parallel_tool_calls = thread.parallel_tool_calls;
   if ("auto_enrichment_enabled" in thread)
     patch.auto_enrichment_enabled = thread.auto_enrichment_enabled;
+  if ("auto_compact_enabled" in thread)
+    patch.auto_compact_enabled = thread.auto_compact_enabled;
   Object.assign(patch, buildThreadScopePatch(thread));
   return patch;
 }
@@ -539,6 +541,10 @@ export const requestSseRefresh = createAction<{ chatId: string }>(
 
 export const setAutoEnrichmentEnabled = createAction<PayloadWithChatAndBoolean>(
   "chatThread/setAutoEnrichmentEnabled",
+);
+
+export const setAutoCompactEnabled = createAction<PayloadWithChatAndBoolean>(
+  "chatThread/setAutoCompactEnabled",
 );
 
 export const markMemoryEnrichmentUserTouched = createAction<{ chatId: string }>(

@@ -14,3 +14,4 @@ export { UnifiedSendButton } from "./UnifiedSendButton";
 export { BrowserToggleButton } from "./BrowserToggleButton";
 export { WandButton } from "./WandButton";
 export { AutoEnrichmentToggleButton } from "./AutoEnrichmentToggleButton";
+export { AutoCompactToggleButton } from "./AutoCompactToggleButton";

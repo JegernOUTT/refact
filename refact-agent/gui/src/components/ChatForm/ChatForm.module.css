@@ -205,7 +205,8 @@
 
 @container (max-width: 320px) {
   .bottomWorkspaceControl,
-  .hideActionSixth {
+  .hideActionSixth,
+  .hideActionSeventh {
     display: none;
   }
 }
