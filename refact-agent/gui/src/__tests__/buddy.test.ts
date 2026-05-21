@@ -86,6 +86,7 @@ import { BuddyErrorBoundary } from "../features/Buddy/BuddyErrorBoundary";
 import { getOpportunityDismissAction } from "../features/Buddy/buddyOpportunityActions";
 import {
   buildBuddySceneSpeech,
+  formatBuddyRuntimeEventText,
   isBuddySpeechExpired,
 } from "../features/Buddy/buddySceneSpeech";
 import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
@@ -408,6 +409,18 @@ async function expectCompanionNotification(container: HTMLElement, id: string) {
   );
 }
 
+async function expectCompanionNotificationText(
+  container: HTMLElement,
+  id: string,
+  text: string,
+) {
+  await waitFor(() => {
+    const element = notificationElement(container, id);
+    expect(element).not.toBeNull();
+    expect(element?.textContent).toContain(text);
+  });
+}
+
 async function expectNoCompanionNotification(
   container: HTMLElement,
   id: string,
@@ -713,6 +726,103 @@ describe("Buddy chat notification freshness", () => {
     }
   });
 
+  test("chat companion runtime text includes title and description", async () => {
+    const store = setUpStore();
+    const runtime = makeChatRuntimeEvent({
+      id: "runtime-description",
+      title: "Setup ready",
+      description: "Connect GitHub to enable issue sync.",
+      controls: [],
+    });
+    const expectedText = formatBuddyRuntimeEventText(runtime);
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [runtime] })),
+    );
+
+    const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+    expect(expectedText).toBe(
+      "Setup ready: Connect GitHub to enable issue sync.",
+    );
+    await expectCompanionNotificationText(
+      container,
+      "runtime:runtime-description",
+      expectedText,
+    );
+  });
+
+  test("chat companion runtime speech text takes precedence", async () => {
+    const store = setUpStore();
+    const runtime = makeChatRuntimeEvent({
+      id: "runtime-speech-text",
+      title: "Hidden title",
+      description: "Hidden description",
+      speech_text: "  Server says this instead.  ",
+      controls: [],
+    });
+    const expectedText = formatBuddyRuntimeEventText(runtime);
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [runtime] })),
+    );
+
+    const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+    expect(expectedText).toBe("Server says this instead.");
+    await expectCompanionNotificationText(
+      container,
+      "runtime:runtime-speech-text",
+      expectedText,
+    );
+  });
+
+  test("chat companion runtime text applies noisy prefix cleanup", async () => {
+    const store = setUpStore();
+    const runtime = makeChatRuntimeEvent({
+      id: "runtime-noisy-prefix",
+      title: "generic: LLM error",
+      description: "LLM error: upstream returned 429",
+      controls: [],
+    });
+    const expectedText = formatBuddyRuntimeEventText(runtime);
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [runtime] })),
+    );
+
+    const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+    expect(expectedText).toBe("I hit an LLM snag: upstream returned 429");
+    await expectCompanionNotificationText(
+      container,
+      "runtime:runtime-noisy-prefix",
+      expectedText,
+    );
+  });
+
+  test("chat companion runtime text rewrites context-window errors", async () => {
+    const store = setUpStore();
+    const runtime = makeChatRuntimeEvent({
+      id: "runtime-context-window",
+      title: "generic: LLM error",
+      description:
+        "LLM error: Your input exceeds the context window of this model.",
+      controls: [],
+    });
+    const expectedText = formatBuddyRuntimeEventText(runtime);
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ runtime_queue: [runtime] })),
+    );
+
+    const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+    expect(expectedText).toBe(
+      "I ran out of context room. Want me to compress this and try again?",
+    );
+    await expectCompanionNotificationText(
+      container,
+      "runtime:runtime-context-window",
+      expectedText,
+    );
+  });
   test("same runtime notification does not reappear after BuddyChatCompanion unmount/remount", async () => {
     const store = setUpStore();
     const runtime = makeChatRuntimeEvent({

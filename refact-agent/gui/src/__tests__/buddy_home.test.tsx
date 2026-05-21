@@ -29,6 +29,7 @@ import { bubblePositionForSceneX } from "../features/Buddy/buddyWorldUtils";
 import { buildBuddyWorldState } from "../features/Buddy/buddyWorldModel";
 import {
   buildBuddySceneSpeech,
+  formatBuddyRuntimeEventText,
   isBuddySpeechExpired,
 } from "../features/Buddy/buddySceneSpeech";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
@@ -1927,19 +1928,60 @@ describe("buildBuddySceneSpeech", () => {
   }
 
   it("includes runtime descriptions for non-error notifications", () => {
+    const runtime = makeRuntimeEvent({
+      title: "Setup ready",
+      description: "Connect GitHub to enable issue sync.",
+    });
     const speech = buildBuddySceneSpeech({
       activeSpeech: null,
-      nowPlaying: makeRuntimeEvent({
-        title: "Setup ready",
-        description: "Connect GitHub to enable issue sync.",
-      }),
+      nowPlaying: runtime,
       runtimeQueue: [],
       activeSuggestion: null,
     });
 
-    expect(speech?.text).toBe(
+    expect(formatBuddyRuntimeEventText(runtime)).toBe(
       "Setup ready: Connect GitHub to enable issue sync.",
     );
+    expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
+  });
+
+  it("uses speech text before runtime title or description", () => {
+    const runtime = makeRuntimeEvent({
+      title: "Hidden title",
+      description: "Hidden description",
+      speech_text: "  Server says this instead.  ",
+    });
+    const speech = buildBuddySceneSpeech({
+      activeSpeech: null,
+      nowPlaying: runtime,
+      runtimeQueue: [],
+      activeSuggestion: null,
+    });
+
+    expect(formatBuddyRuntimeEventText(runtime)).toBe(
+      "Server says this instead.",
+    );
+    expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
+  });
+
+  it("strips noisy runtime prefixes consistently", () => {
+    const runtime = makeRuntimeEvent({
+      title: "generic: LLM error",
+      description: "LLM error: upstream returned 429",
+      status: "failed",
+      priority: "high",
+    });
+    const speech = buildBuddySceneSpeech({
+      activeSpeech: null,
+      nowPlaying: runtime,
+      runtimeQueue: [],
+      activeSuggestion: null,
+    });
+
+    expect(formatBuddyRuntimeEventText(runtime)).toBe(
+      "I hit an LLM snag: upstream returned 429",
+    );
+    expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
   });
 
   it("ignores expired active speech before choosing home speech", () => {
@@ -2001,23 +2043,25 @@ describe("buildBuddySceneSpeech", () => {
   });
 
   it("turns repeated context-window errors into Buddy language", () => {
+    const runtime = makeRuntimeEvent({
+      id: "context-error",
+      title: "generic: LLM error",
+      description:
+        "LLM error: Your input exceeds the context window of this model. Please adjust your input and try again. LLM error: Your input exceeds the context window of this model.",
+      priority: "high",
+      status: "failed",
+    });
     const speech = buildBuddySceneSpeech({
       activeSpeech: null,
-      nowPlaying: makeRuntimeEvent({
-        id: "context-error",
-        title: "generic: LLM error",
-        description:
-          "LLM error: Your input exceeds the context window of this model. Please adjust your input and try again. LLM error: Your input exceeds the context window of this model.",
-        priority: "high",
-        status: "failed",
-      }),
+      nowPlaying: runtime,
       runtimeQueue: [],
       activeSuggestion: null,
     });
 
-    expect(speech?.text).toBe(
+    expect(formatBuddyRuntimeEventText(runtime)).toBe(
       "I ran out of context room. Want me to compress this and try again?",
     );
+    expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
     expect(speech?.controls.map((control) => control.action)).toEqual([
       "investigate_error",
       "dismiss_runtime_event",

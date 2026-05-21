@@ -52,6 +52,7 @@ import {
 import { isBuddyRuntimeEventVisible } from "./buddyRuntimeEvents";
 import {
   compareBuddyRuntimeEvents,
+  formatBuddyRuntimeEventText,
   isBuddySpeechExpired,
 } from "./buddySceneSpeech";
 
@@ -98,11 +99,6 @@ function createdAtMs(value: string): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function runtimeNotificationText(event: BuddyRuntimeEvent): string {
-  const speechText = event.speech_text?.trim();
-  return speechText && speechText.length > 0 ? speechText : event.title;
-}
-
 function speechMatchesChat(
   activeSpeech: { chat_id?: string } | null,
   chatId: string,
@@ -144,7 +140,7 @@ function runtimeCandidates(
         event?.chat_id === chatId &&
         isBuddyRuntimeEventVisible(event) &&
         !isBuddyOverlaySuppressedIssue(
-          runtimeNotificationText(event),
+          formatBuddyRuntimeEventText(event),
           chatDiagnostic,
         ),
     )
@@ -277,8 +273,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           source: "speech",
           controls: activeSpeech.controls,
           diagnostic: activeSpeech.chat_id
-            ? diagnostics.find((d) => d.chat_id === activeSpeech.chat_id) ??
-              null
+            ? (diagnostics.find((d) => d.chat_id === activeSpeech.chat_id) ??
+              null)
             : null,
           speechIntent: activeSpeech.speech_intent,
         };
@@ -299,7 +295,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       return {
         id: notificationIdentity("runtime", criticalRuntime.id),
         sourceId: criticalRuntime.id,
-        text: runtimeNotificationText(criticalRuntime),
+        text: formatBuddyRuntimeEventText(criticalRuntime),
         source: "runtime",
         controls: criticalRuntime.controls?.length
           ? criticalRuntime.controls
@@ -333,7 +329,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       return {
         id: notificationIdentity("runtime", runtimeError.id),
         sourceId: runtimeError.id,
-        text: runtimeNotificationText(runtimeError),
+        text: formatBuddyRuntimeEventText(runtimeError),
         source: "runtime",
         controls: runtimeError.controls?.length
           ? runtimeError.controls

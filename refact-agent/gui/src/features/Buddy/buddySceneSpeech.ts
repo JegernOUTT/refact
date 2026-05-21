@@ -49,7 +49,7 @@ function isContextWindowError(text: string): boolean {
   );
 }
 
-function runtimeEventText(event: BuddyRuntimeEvent): string {
+export function formatBuddyRuntimeEventText(event: BuddyRuntimeEvent): string {
   const speechText = event.speech_text?.trim();
   if (speechText) return normalizeRuntimeText(speechText);
 
@@ -104,7 +104,7 @@ function runtimeEventToSpeech(
 ): BuddySceneSpeech | null {
   if (event === null || event === undefined) return null;
   if (!isBuddyRuntimeEventVisible(event)) return null;
-  const text = runtimeEventText(event).trim();
+  const text = formatBuddyRuntimeEventText(event).trim();
   if (!text) return null;
   const controls = event.controls?.length
     ? event.controls
@@ -178,7 +178,7 @@ function runtimeCandidatesFromQueue(
   const candidates = [nowPlaying, ...runtimeQueue].filter(
     (event): event is BuddyRuntimeEvent =>
       isBuddyRuntimeEventVisible(event) &&
-      runtimeEventText(event).trim() !== "",
+      formatBuddyRuntimeEventText(event).trim() !== "",
   );
 
   return candidates.sort(compareBuddyRuntimeEvents).slice(0, 4);
