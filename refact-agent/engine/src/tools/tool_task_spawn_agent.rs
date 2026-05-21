@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
@@ -340,6 +340,75 @@ pub(crate) fn build_agent_thread_params(
     }
 }
 
+fn resolve_files_to_open_path(worktree_root: &Path, source_root: &Path, path_str: &str) -> PathBuf {
+    let requested = Path::new(path_str);
+    if requested.is_absolute() {
+        if let Ok(relative) = requested.strip_prefix(source_root) {
+            return worktree_root.join(relative);
+        }
+        return requested.to_path_buf();
+    }
+    worktree_root.join(path_str)
+}
+
+async fn context_files_from_files_to_open(
+    gcx: Arc<GlobalContext>,
+    worktree_root: &Path,
+    source_root: &Path,
+    files_to_open: &[String],
+) -> Result<Vec<ContextFile>, String> {
+    let worktree_canonical = dunce::canonicalize(worktree_root).map_err(|e| {
+        format!(
+            "Failed to canonicalize agent worktree '{}': {}",
+            worktree_root.display(),
+            e
+        )
+    })?;
+    let mut context_files = Vec::new();
+    for path_str in files_to_open {
+        let resolved = resolve_files_to_open_path(worktree_root, source_root, path_str);
+        let canonical_resolved = dunce::canonicalize(&resolved).map_err(|e| {
+            format!(
+                "files_to_open '{}' does not exist or cannot be resolved: {}",
+                path_str, e
+            )
+        })?;
+        if !canonical_resolved.starts_with(&worktree_canonical) {
+            return Err(format!(
+                "files_to_open '{}' resolves outside agent worktree: {}",
+                path_str,
+                canonical_resolved.display()
+            ));
+        }
+        crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &canonical_resolved)
+            .await
+            .map_err(|e| {
+                format!(
+                    "files_to_open '{}' is blocked by privacy settings: {}",
+                    path_str, e
+                )
+            })?;
+        let content = tokio::fs::read_to_string(&canonical_resolved)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Could not read files_to_open '{}': {}",
+                    canonical_resolved.display(),
+                    e
+                )
+            })?;
+        let line_count = content.lines().count().max(1);
+        context_files.push(ContextFile {
+            file_name: canonical_resolved.to_string_lossy().to_string(),
+            file_content: content,
+            line1: 1,
+            line2: line_count,
+            ..Default::default()
+        });
+    }
+    Ok(context_files)
+}
+
 #[async_trait]
 impl Tool for ToolTaskSpawnAgent {
     fn tool_description(&self) -> ToolDesc {
@@ -520,6 +589,27 @@ impl Tool for ToolTaskSpawnAgent {
 
         let dirty_tree_warning = prepared_worktree.spawned_with_dirty_tree;
         let base_branch_mismatch_warning = prepared_worktree.base_branch_mismatch_warning.clone();
+
+        let initial_context_files = if files_to_open.is_empty() {
+            Vec::new()
+        } else {
+            let worktree_path = prepared_worktree.worktree_path();
+            let source_workspace_root = prepared_worktree.source_workspace_root();
+            match context_files_from_files_to_open(
+                gcx.clone(),
+                &worktree_path,
+                &source_workspace_root,
+                &files_to_open,
+            )
+            .await
+            {
+                Ok(context_files) => context_files,
+                Err(e) => {
+                    prepared_worktree.cleanup(gcx.clone()).await;
+                    return Err(e);
+                }
+            }
+        };
 
         let card_id_owned = card_id.to_string();
         let agent_id_clone = agent_id.clone();
@@ -703,64 +793,13 @@ impl Tool for ToolTaskSpawnAgent {
         };
         let mut messages = vec![user_msg];
 
-        if !files_to_open.is_empty() {
-            let mut context_files: Vec<ContextFile> = Vec::new();
-            let worktree_path = prepared_worktree.worktree_path();
-            let worktree_canonical = dunce::canonicalize(&worktree_path)
-                .unwrap_or_else(|_| worktree_path.clone());
-            for path_str in &files_to_open {
-                let orig = std::path::Path::new(path_str);
-                let source_root = prepared_worktree.source_workspace_root();
-                let resolved = match orig.strip_prefix(&source_root) {
-                    Ok(rel) => worktree_path.join(rel),
-                    Err(_) => worktree_path.join(path_str.trim_start_matches('/')),
-                };
-                let canonical_resolved = match dunce::canonicalize(&resolved) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        tracing::warn!("task_spawn_agent: files_to_open '{}' does not exist, skipping", path_str);
-                        continue;
-                    }
-                };
-                if !canonical_resolved.starts_with(&worktree_canonical) {
-                    tracing::warn!("task_spawn_agent: files_to_open '{}' escapes worktree, rejecting", path_str);
-                    continue;
-                }
-                if crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &canonical_resolved)
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!("task_spawn_agent: files_to_open '{}' blocked by privacy settings, skipping", path_str);
-                    continue;
-                }
-                match tokio::fs::read_to_string(&canonical_resolved).await {
-                    Ok(content) => {
-                        let line_count = content.lines().count().max(1);
-                        context_files.push(ContextFile {
-                            file_name: canonical_resolved.to_string_lossy().to_string(),
-                            file_content: content,
-                            line1: 1,
-                            line2: line_count,
-                            ..Default::default()
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "task_spawn_agent: could not read file {:?}: {}",
-                            canonical_resolved,
-                            e
-                        );
-                    }
-                }
-            }
-            if !context_files.is_empty() {
-                messages.push(ChatMessage {
-                    role: "context_file".to_string(),
-                    content: ChatContent::ContextFiles(context_files),
-                    tool_call_id: "initial_files".to_string(),
-                    ..Default::default()
-                });
-            }
+        if !initial_context_files.is_empty() {
+            messages.push(ChatMessage {
+                role: "context_file".to_string(),
+                content: ChatContent::ContextFiles(initial_context_files),
+                tool_call_id: "initial_files".to_string(),
+                ..Default::default()
+            });
         }
 
         app.chat
@@ -827,6 +866,7 @@ The agent will call `task_agent_finish()` when done. Use `task_check_agents` to 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::privacy::{FilePrivacySettings, PrivacySettings};
     use crate::tasks::types::{BoardCard, TaskBoard, TaskStatus};
     use std::path::Path;
     use std::process::Command;
@@ -867,6 +907,18 @@ mod tests {
     async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
         let root = root.canonicalize().unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
+    }
+
+    async fn test_gcx_with_privacy(blocked: Vec<String>) -> Arc<GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: vec![],
+                blocked,
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        gcx
     }
 
     fn sample_task_meta(base_branch: Option<&str>) -> StoredTaskMeta {
@@ -1267,6 +1319,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn task_spawn_agent_files_to_open_rejects_outside_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        let gcx = test_gcx_with_privacy(vec![]).await;
+
+        let err = context_files_from_files_to_open(
+            gcx,
+            &worktree,
+            &source,
+            &["../outside/secret.txt".to_string()],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("outside agent worktree"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_files_to_open_rejects_privacy_blocked_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(worktree.join(".env"), "SECRET=value\n").unwrap();
+        let gcx = test_gcx_with_privacy(vec!["*.env".to_string()]).await;
+
+        let err = context_files_from_files_to_open(gcx, &worktree, &source, &[".env".to_string()])
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("blocked by privacy settings"), "{err}");
+        assert!(err.contains("Blocked"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn task_spawn_agent_files_to_open_valid_file_works() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(worktree.join("safe.txt"), "safe\ncontent\n").unwrap();
+        let gcx = test_gcx_with_privacy(vec![]).await;
+
+        let files =
+            context_files_from_files_to_open(gcx, &worktree, &source, &["safe.txt".to_string()])
+                .await
+                .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_content, "safe\ncontent\n");
+        assert_eq!(files[0].line1, 1);
+        assert_eq!(files[0].line2, 2);
+        assert!(files[0].file_name.ends_with("safe.txt"));
+    }
+
     #[test]
     fn abandoned_worktree_detection_ignores_failed_cards_with_retained_worktrees() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -1287,7 +1403,13 @@ mod tests {
 
         let abandoned = find_abandoned_worktrees(&board);
         assert_eq!(abandoned.len(), 1, "only done card should be flagged");
-        assert!(!abandoned[0].contains("T-1"), "failed card retained worktree should not block spawning");
-        assert!(abandoned[0].contains("T-2"), "done card with retained worktree should still be flagged");
+        assert!(
+            !abandoned[0].contains("T-1"),
+            "failed card retained worktree should not block spawning"
+        );
+        assert!(
+            abandoned[0].contains("T-2"),
+            "done card with retained worktree should still be flagged"
+        );
     }
 }

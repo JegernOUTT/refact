@@ -170,6 +170,42 @@ async fn validate_git_worktree(worktree_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn mark_finished_card(
+    card: &mut BoardCard,
+    success: bool,
+    report: &str,
+    commit_hash: Option<&str>,
+) {
+    if success {
+        card.final_report = Some(report.to_string());
+        card.column = "done".to_string();
+        card.completed_at = Some(Utc::now().to_rfc3339());
+        if let Some(hash) = commit_hash {
+            card.status_updates.push(StatusUpdate {
+                timestamp: Utc::now().to_rfc3339(),
+                message: format!("Auto-committed: {}", hash),
+            });
+        }
+        card.status_updates.push(StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: "Agent completed successfully".to_string(),
+        });
+    } else {
+        card.final_report = Some(format!("FAILED: {}", report));
+        card.column = "failed".to_string();
+        card.completed_at = Some(Utc::now().to_rfc3339());
+        card.status_updates.push(StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: format!("Agent failed: {}", report),
+        });
+    }
+}
+
+fn clear_finished_agent_session(card: &mut BoardCard) {
+    card.agent_chat_id = None;
+    card.assignee = None;
+}
+
 async fn auto_commit_worktree(
     gcx: Arc<GlobalContext>,
     worktree_path: &Path,
@@ -318,9 +354,12 @@ impl Tool for ToolTaskAgentFinish {
         let finish_lock = get_finish_lock(&task_id, &card_id).await;
         let _finish_guard = finish_lock.lock().await;
 
-        let _ =
-            crate::chat::task_agent_monitor::update_card_heartbeat(crate::app_state::AppState::from_gcx(gcx.clone()).await, &task_id, &card_id)
-                .await;
+        let _ = crate::chat::task_agent_monitor::update_card_heartbeat(
+            crate::app_state::AppState::from_gcx(gcx.clone()).await,
+            &task_id,
+            &card_id,
+        )
+        .await;
 
         let board_pre = storage::load_board(gcx.clone(), &task_id).await?;
         let card_pre = board_pre
@@ -368,7 +407,7 @@ impl Tool for ToolTaskAgentFinish {
         let success_clone = success;
         let commit_hash = commit_result.clone();
 
-        let (board, (card_title, _agent_branch, all_finished)) =
+        let (board, (card_title, all_finished)) =
             storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                 let card = board
                     .get_card_mut(&card_id_owned)
@@ -382,31 +421,8 @@ impl Tool for ToolTaskAgentFinish {
                 }
 
                 let card_title = card.title.clone();
-                let agent_branch = card.agent_branch.clone();
 
-                if success_clone {
-                    card.final_report = Some(report_clone.clone());
-                    card.column = "done".to_string();
-                    card.completed_at = Some(Utc::now().to_rfc3339());
-                    if let Some(ref hash) = commit_hash {
-                        card.status_updates.push(StatusUpdate {
-                            timestamp: Utc::now().to_rfc3339(),
-                            message: format!("Auto-committed: {}", hash),
-                        });
-                    }
-                    card.status_updates.push(StatusUpdate {
-                        timestamp: Utc::now().to_rfc3339(),
-                        message: "Agent completed successfully".to_string(),
-                    });
-                } else {
-                    card.final_report = Some(format!("FAILED: {}", report_clone));
-                    card.column = "failed".to_string();
-                    card.completed_at = Some(Utc::now().to_rfc3339());
-                    card.status_updates.push(StatusUpdate {
-                        timestamp: Utc::now().to_rfc3339(),
-                        message: format!("Agent failed: {}", report_clone),
-                    });
-                }
+                mark_finished_card(card, success_clone, &report_clone, commit_hash.as_deref());
 
                 let agents_active = board
                     .cards
@@ -415,36 +431,11 @@ impl Tool for ToolTaskAgentFinish {
                     .count();
                 let all_finished = agents_active == 0;
 
-                Ok((card_title, agent_branch, all_finished))
+                Ok((card_title, all_finished))
             })
             .await?;
 
         storage::update_task_stats(gcx.clone(), &task_id).await?;
-
-        if !success {
-            if let Some(ref worktree) = resolved_worktree {
-                if let Some(branch) = worktree.branch.clone() {
-                    let worktree_root = worktree.root.to_string_lossy().to_string();
-                    let _diff = crate::chat::task_agent_monitor::cleanup_failed_agent_worktree(
-                        crate::app_state::AppState::from_gcx(gcx.clone()).await,
-                        &worktree_root,
-                        &branch,
-                        worktree.name.as_deref(),
-                    )
-                    .await;
-                    let card_id_clear = card_id.clone();
-                    let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                        if let Some(c) = board.get_card_mut(&card_id_clear) {
-                            c.agent_worktree = None;
-                            c.agent_branch = None;
-                            c.agent_worktree_name = None;
-                        }
-                        Ok(())
-                    })
-                    .await;
-                }
-            }
-        }
 
         let result_message = if success {
             if all_finished {
@@ -494,6 +485,17 @@ impl Tool for ToolTaskAgentFinish {
                 card_id,
                 error
             );
+        }
+
+        if !success {
+            let card_id_clear = card_id.clone();
+            let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                if let Some(c) = board.get_card_mut(&card_id_clear) {
+                    clear_finished_agent_session(c);
+                }
+                Ok(())
+            })
+            .await;
         }
 
         {
@@ -622,6 +624,29 @@ mod tests {
         assert_eq!(legacy.root, legacy_root);
         assert_eq!(legacy.branch.as_deref(), Some("legacy-branch"));
         assert_eq!(legacy.name.as_deref(), Some("legacy-id"));
+    }
+
+    #[test]
+    fn task_spawn_agent_finish_failure_retains_worktree_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp
+            .path()
+            .join("retained-worktree")
+            .to_string_lossy()
+            .to_string();
+        let mut card = test_card(Some(worktree.clone()));
+        let branch = card.agent_branch.clone();
+        let name = card.agent_worktree_name.clone();
+
+        mark_finished_card(&mut card, false, "agent failed", None);
+        clear_finished_agent_session(&mut card);
+
+        assert_eq!(card.column, "failed");
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert_eq!(card.agent_worktree.as_deref(), Some(worktree.as_str()));
+        assert_eq!(card.agent_branch, branch);
+        assert_eq!(card.agent_worktree_name, name);
     }
 
     #[tokio::test]

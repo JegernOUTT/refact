@@ -1455,12 +1455,14 @@ mod worktree_scope_read_tools {
             .await
             .unwrap();
         let names = context_file_names(&results);
+        let text = tool_text(&results);
 
         assert!(
             !names.iter().any(|n| n.ends_with(".env")),
             "cat('.') should not expose .env: {:?}",
             names
         );
+        assert!(!text.contains("SECRET=value"), "{text}");
     }
 
     #[tokio::test]

@@ -17,7 +17,9 @@ use crate::files_correction::{
     canonical_path, correct_to_nearest_dir_path, get_project_dirs,
     preprocess_path_for_normalization,
 };
-use crate::files_in_workspace::{get_file_text_from_memory_or_disk, ls_files};
+use crate::files_in_workspace::{
+    check_file_privacy_for_send, get_file_text_from_memory_or_disk, ls_files,
+};
 use crate::scratchpads::multimodality::MultimodalElement;
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::scope_utils::{
@@ -393,13 +395,8 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                 Ok(Some(resolved)) => {
                     scope_notices.extend(resolved.notices);
                     if resolved.path.is_dir() {
-                        match list_scoped_files_under_dir(
-                            gcx.clone(),
-                            &resolved.path,
-                            false,
-                            true,
-                        )
-                        .await
+                        match list_scoped_files_under_dir(gcx.clone(), &resolved.path, false, true)
+                            .await
                         {
                             Ok(files_in_dir) => {
                                 for file in files_in_dir {
@@ -580,8 +577,14 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
         let original_path = corrected_path_to_original.get(p).unwrap_or(p);
         let line_range = path_line_ranges.get(original_path).cloned().flatten();
 
+        let path_buf = PathBuf::from(p);
+        if let Err(e) = check_file_privacy_for_send(gcx.clone(), &path_buf).await {
+            not_found_messages.push(format!("{}: {}", p, e));
+            continue;
+        }
+
         // don't have symbols for these, so we need to mention them as files, without a symbol, analog of @file
-        let f_type = get_file_type(&PathBuf::from(p));
+        let f_type = get_file_type(&path_buf);
 
         if f_type.starts_with("image/") {
             filenames_present.push(p.clone());
@@ -601,7 +604,7 @@ pub async fn paths_and_symbols_to_cat_with_path_ranges(
                 }
             }
         } else {
-            match get_file_text_from_memory_or_disk(gcx.clone(), &PathBuf::from(p)).await {
+            match get_file_text_from_memory_or_disk(gcx.clone(), &path_buf).await {
                 Ok(text) => {
                     let total_lines = text.lines().count();
                     let (start_line, end_line) = match line_range {
