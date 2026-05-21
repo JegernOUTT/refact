@@ -42,8 +42,8 @@ impl Default for ChatTimeouts {
         Self {
             session_idle: Duration::from_secs(30 * 60),
             session_cleanup_interval: Duration::from_secs(5 * 60),
-            stream_idle: Duration::from_secs(60 * 60),
-            stream_total: Duration::from_secs(60 * 60),
+            stream_idle: Duration::from_secs(5 * 60),
+            stream_total: Duration::from_secs(30 * 60),
             stream_heartbeat: Duration::from_secs(2),
             watcher_debounce: Duration::from_millis(200),
             watcher_idle: Duration::from_secs(60),

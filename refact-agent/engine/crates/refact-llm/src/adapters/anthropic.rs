@@ -372,8 +372,10 @@ impl LlmWireAdapter for AnthropicAdapter {
                 }
             }
             "message_delta" => {
+                let mut has_stop_reason = false;
                 if let Some(delta) = json.get("delta") {
                     if let Some(reason) = delta.get("stop_reason").and_then(|r| r.as_str()) {
+                        has_stop_reason = true;
                         deltas.push(LlmStreamDelta::SetFinishReason {
                             reason: reason.to_string(),
                         });
@@ -384,10 +386,14 @@ impl LlmWireAdapter for AnthropicAdapter {
                         deltas.push(LlmStreamDelta::SetUsage { usage: u });
                     }
                 }
+                if has_stop_reason {
+                    deltas.push(LlmStreamDelta::Done);
+                }
             }
             "message_stop" => {
                 deltas.push(LlmStreamDelta::Done);
             }
+            "ping" => {}
             "content_block_start" => {
                 if let Some(cb) = json.get("content_block") {
                     let block_type = cb.get("type").and_then(|t| t.as_str());
@@ -1167,6 +1173,30 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         assert!(matches!(&deltas[0], LlmStreamDelta::Done));
+    }
+
+    #[test]
+    fn test_parse_stream_message_delta_stop_reason_finishes() {
+        let adapter = AnthropicAdapter;
+        let chunk = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":5}}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert!(deltas.iter().any(|d| {
+            matches!(d, LlmStreamDelta::SetFinishReason { reason } if reason == "end_turn")
+        }));
+        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::SetUsage { .. })));
+        assert!(matches!(deltas.last(), Some(LlmStreamDelta::Done)));
+    }
+
+    #[test]
+    fn test_parse_stream_ping_is_ignored() {
+        let adapter = AnthropicAdapter;
+        let chunk = r#"{"type":"ping"}"#;
+
+        let deltas = adapter.parse_stream_chunk(chunk).unwrap();
+
+        assert!(deltas.is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use futures::{SinkExt, StreamExt};
 use eventsource_stream::Eventsource;
@@ -338,12 +338,14 @@ impl StreamCollector for ReplayCollector {
 struct PartialOutputCollector<'a, C: StreamCollector> {
     collector: &'a mut C,
     partial_output_emitted: &'a mut bool,
+    progress_events: Arc<AtomicU64>,
 }
 
 impl<C: StreamCollector> StreamCollector for PartialOutputCollector<'_, C> {
     fn on_delta_ops(&mut self, choice_idx: usize, ops: Vec<DeltaOp>) {
         if !ops.is_empty() {
             *self.partial_output_emitted = true;
+            self.progress_events.fetch_add(1, Ordering::SeqCst);
         }
         self.collector.on_delta_ops(choice_idx, ops);
     }
@@ -1362,9 +1364,11 @@ pub async fn run_llm_stream<C: StreamCollector>(
     )
     .await;
 
+    let progress_events = Arc::new(AtomicU64::new(0));
     let mut tracking_collector = PartialOutputCollector {
         collector,
         partial_output_emitted: &mut partial_output_emitted,
+        progress_events: progress_events.clone(),
     };
 
     if wire_format == WireFormat::OllamaNative {
@@ -1385,7 +1389,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
     let mut stream_done = false;
 
     let stream_started_at = Instant::now();
-    let mut last_event_at = Instant::now();
+    let mut last_progress_event_count = 0;
+    let mut last_progress_at = Instant::now();
     let mut heartbeat = tokio::time::interval(stream_heartbeat());
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -1409,7 +1414,12 @@ pub async fn run_llm_stream<C: StreamCollector>(
                         *tracking_collector.partial_output_emitted,
                     ));
                 }
-                if last_event_at.elapsed() > stream_idle_timeout() {
+                let progress_event_count = progress_events.load(Ordering::SeqCst);
+                if progress_event_count != last_progress_event_count {
+                    last_progress_event_count = progress_event_count;
+                    last_progress_at = Instant::now();
+                }
+                if last_progress_at.elapsed() > stream_idle_timeout() {
                     return Err(LlmStreamError::new(
                         "LLM stream stalled",
                         *tracking_collector.partial_output_emitted,
@@ -1428,18 +1438,18 @@ pub async fn run_llm_stream<C: StreamCollector>(
                     }
                     None => {
                         if !stream_done && !adapter_settings.eof_is_done {
-                            return Err(LlmStreamError::new(
-                                "LLM stream ended unexpectedly without completion signal",
-                                *tracking_collector.partial_output_emitted,
-                            ));
+                            if !should_finish_on_anthropic_stop_reason_eof(wire_format, &accumulators) {
+                                return Err(LlmStreamError::new(
+                                    "LLM stream ended unexpectedly without completion signal",
+                                    *tracking_collector.partial_output_emitted,
+                                ));
+                            }
                         }
                         break;
                     }
                 }
             }
         };
-        last_event_at = Instant::now();
-
         stream_done = process_stream_event_data(
             adapter,
             &params.model_rec.auth_token,
@@ -1588,6 +1598,16 @@ pub fn normalize_tool_call(tc: &serde_json::Value) -> Option<crate::call_validat
     })
 }
 
+fn should_finish_on_anthropic_stop_reason_eof(
+    wire_format: WireFormat,
+    accumulators: &[ChoiceAccumulator],
+) -> bool {
+    wire_format == WireFormat::AnthropicMessages
+        && accumulators
+            .iter()
+            .any(|acc| matches!(acc.finish_reason.as_deref(), Some("end_turn" | "stop_sequence")))
+}
+
 fn format_llm_error_body(status_label: &str, text: &str) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
         if let Some(detail) = json.get("detail") {
@@ -1704,6 +1724,38 @@ mod tests {
 
         assert!(matches!(error.retry_decision(), RetryDecision::Retry { .. }));
         assert!(error.should_retry(0, &abort));
+    }
+
+    #[test]
+    fn anthropic_eof_after_stop_reason_can_finish_stream() {
+        let mut acc = ChoiceAccumulator::default();
+        acc.finish_reason = Some("end_turn".to_string());
+
+        assert!(should_finish_on_anthropic_stop_reason_eof(
+            WireFormat::AnthropicMessages,
+            &[acc],
+        ));
+    }
+
+    #[test]
+    fn anthropic_eof_without_stop_reason_stays_unexpected() {
+        let acc = ChoiceAccumulator::default();
+
+        assert!(!should_finish_on_anthropic_stop_reason_eof(
+            WireFormat::AnthropicMessages,
+            &[acc],
+        ));
+    }
+
+    #[test]
+    fn non_anthropic_eof_after_stop_reason_stays_unexpected() {
+        let mut acc = ChoiceAccumulator::default();
+        acc.finish_reason = Some("end_turn".to_string());
+
+        assert!(!should_finish_on_anthropic_stop_reason_eof(
+            WireFormat::OpenaiChatCompletions,
+            &[acc],
+        ));
     }
 
     #[test]
