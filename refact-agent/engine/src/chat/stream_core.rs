@@ -370,6 +370,9 @@ fn split_with_partial_literal_suffix<'a>(text: &'a str, tag: &str) -> (&'a str, 
     let max_len = tag.len().saturating_sub(1).min(text.len());
     for len in (1..=max_len).rev() {
         let suffix_start = text.len() - len;
+        if !text.is_char_boundary(suffix_start) {
+            continue;
+        }
         let suffix = &text[suffix_start..];
         if tag.starts_with(suffix) {
             return (&text[..suffix_start], suffix);
@@ -1811,6 +1814,52 @@ mod tests {
         flush_pending_function_calls_parse(&mut acc, &mut ops);
 
         assert_eq!(acc.content, "Before  after");
+    }
+
+    #[test]
+    fn split_with_partial_literal_suffix_handles_multibyte_boundaries() {
+        let text = "aaaaaaaaaaaaa🙂<";
+
+        let (emit, keep) = split_with_partial_literal_suffix(text, FUNCTION_CALLS_OPEN_TAG);
+
+        assert_eq!(emit, "aaaaaaaaaaaaa🙂");
+        assert_eq!(keep, "<");
+    }
+
+    #[test]
+    fn function_calls_parser_handles_multibyte_before_partial_open_tag() {
+        let mut acc = ChoiceAccumulator::default();
+        let mut ops = Vec::new();
+
+        route_append_content_without_function_calls(
+            &mut acc,
+            &mut ops,
+            "aaaaaaaaaaaaa🙂<".to_string(),
+            None,
+        );
+
+        assert_eq!(acc.content, "aaaaaaaaaaaaa🙂");
+        assert_eq!(acc.pending_function_calls_parse, "<");
+        assert!(matches!(
+            ops.last(),
+            Some(DeltaOp::AppendContent { text }) if text == "aaaaaaaaaaaaa🙂"
+        ));
+    }
+
+    #[test]
+    fn function_calls_parser_handles_multibyte_before_partial_close_tag() {
+        let mut acc = ChoiceAccumulator {
+            inside_function_calls_tag: true,
+            pending_function_calls_parse: "aaaaaaaaaaaaa🙂</".to_string(),
+            ..Default::default()
+        };
+        let mut ops = Vec::new();
+
+        route_append_content_without_function_calls(&mut acc, &mut ops, "".to_string(), None);
+
+        assert_eq!(acc.function_calls_xml_raw, "aaaaaaaaaaaaa🙂");
+        assert_eq!(acc.pending_function_calls_parse, "</");
+        assert!(ops.is_empty());
     }
 
     #[test]
