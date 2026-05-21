@@ -23,8 +23,9 @@ use crate::chat::stream_core::{
     LlmStreamError,
 };
 use crate::chat::retry_policy::{
-    retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
+    classify_llm_error_for_retry, retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
 };
+use crate::chat::history_limit::tier0_deterministic_compact;
 use crate::chat::tools::{execute_tools, resolve_tool_call_aliases, ExecuteToolsOptions};
 use crate::chat::types::{TaskMeta, ThreadParams};
 use crate::worktrees::types::WorktreeMeta;
@@ -36,6 +37,7 @@ use crate::worktrees::types::WorktreeReference;
 
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output. Not retrying to avoid corruption.";
+const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 3;
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     use std::collections::HashSet;
@@ -1066,29 +1068,53 @@ async fn run_subchat_loop(
     tools_policy: &ToolsPolicy,
     usage: &mut ChatUsage,
 ) -> Result<Vec<ChatMessage>, String> {
+    let mut context_limit_compact_count = 0usize;
     for step in 0..config.max_steps {
         if is_aborted(&config.abort_flag) {
             return Err("Aborted".to_string());
         }
 
-        let results = subchat_single_internal(
-            ccx.clone(),
-            &config.model,
-            &config.mode,
-            messages.clone(),
-            tools_policy.to_subset_for_llm(),
-            false,
-            config.temperature,
-            config.max_new_tokens,
-            config.reasoning_effort.clone(),
-            config.prepend_system_prompt && step == 0,
-            if should_stream_thinking_progress(&config.tool_name) {
-                config.parent_tool_call_id.as_deref()
-            } else {
-                None
-            },
-        )
-        .await?;
+        let results = loop {
+            match subchat_single_internal(
+                ccx.clone(),
+                &config.model,
+                &config.mode,
+                messages.clone(),
+                tools_policy.to_subset_for_llm(),
+                false,
+                config.temperature,
+                config.max_new_tokens,
+                config.reasoning_effort.clone(),
+                config.prepend_system_prompt && step == 0,
+                if should_stream_thinking_progress(&config.tool_name) {
+                    config.parent_tool_call_id.as_deref()
+                } else {
+                    None
+                },
+            )
+            .await
+            {
+                Ok(r) => {
+                    context_limit_compact_count = 0;
+                    break r;
+                }
+                Err(ref err)
+                    if classify_llm_error_for_retry(err).is_context_limit()
+                        && context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS
+                        && !is_aborted(&config.abort_flag) =>
+                {
+                    context_limit_compact_count += 1;
+                    warn!(
+                        "Subchat context limit, applying Tier 0 compact attempt {}/{}: {}",
+                        context_limit_compact_count,
+                        MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
+                        err,
+                    );
+                    tier0_deterministic_compact(&mut messages, 0);
+                }
+                Err(err) => return Err(err),
+            }
+        };
 
         update_usage_from_messages(usage, &results);
         messages = results.into_iter().next().unwrap_or(messages);
@@ -1127,6 +1153,7 @@ async fn run_subchat_with_wrap_up(
     usage: &mut ChatUsage,
 ) -> Result<Vec<ChatMessage>, String> {
     let mut step_n = 0;
+    let mut context_limit_compact_count = 0usize;
 
     loop {
         if is_aborted(&config.abort_flag) {
@@ -1158,24 +1185,47 @@ async fn run_subchat_with_wrap_up(
             }
         }
 
-        let results = subchat_single_internal(
-            ccx.clone(),
-            &config.model,
-            &config.mode,
-            messages.clone(),
-            tools_policy.to_subset_for_llm(),
-            false,
-            config.temperature,
-            config.max_new_tokens,
-            config.reasoning_effort.clone(),
-            config.prepend_system_prompt && step_n == 0,
-            if should_stream_thinking_progress(&config.tool_name) {
-                config.parent_tool_call_id.as_deref()
-            } else {
-                None
-            },
-        )
-        .await?;
+        let results = loop {
+            match subchat_single_internal(
+                ccx.clone(),
+                &config.model,
+                &config.mode,
+                messages.clone(),
+                tools_policy.to_subset_for_llm(),
+                false,
+                config.temperature,
+                config.max_new_tokens,
+                config.reasoning_effort.clone(),
+                config.prepend_system_prompt && step_n == 0,
+                if should_stream_thinking_progress(&config.tool_name) {
+                    config.parent_tool_call_id.as_deref()
+                } else {
+                    None
+                },
+            )
+            .await
+            {
+                Ok(r) => {
+                    context_limit_compact_count = 0;
+                    break r;
+                }
+                Err(ref err)
+                    if classify_llm_error_for_retry(err).is_context_limit()
+                        && context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS
+                        && !is_aborted(&config.abort_flag) =>
+                {
+                    context_limit_compact_count += 1;
+                    warn!(
+                        "Subchat wrap-up context limit, applying Tier 0 compact attempt {}/{}: {}",
+                        context_limit_compact_count,
+                        MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
+                        err,
+                    );
+                    tier0_deterministic_compact(&mut messages, 0);
+                }
+                Err(err) => return Err(err),
+            }
+        };
 
         update_usage_from_messages(usage, &results);
         messages = results.into_iter().next().unwrap_or(messages);
@@ -1219,24 +1269,48 @@ async fn run_subchat_with_wrap_up(
 
     messages.push(ChatMessage::new("user".to_string(), wrap_up.prompt.clone()));
 
-    let final_results = subchat_single_internal(
-        ccx.clone(),
-        &config.model,
-        &config.mode,
-        messages,
-        Some(vec![]),
-        false,
-        config.temperature,
-        config.max_new_tokens,
-        config.reasoning_effort.clone(),
-        false,
-        if should_stream_thinking_progress(&config.tool_name) {
-            config.parent_tool_call_id.as_deref()
-        } else {
-            None
-        },
-    )
-    .await?;
+    let final_results = loop {
+        match subchat_single_internal(
+            ccx.clone(),
+            &config.model,
+            &config.mode,
+            messages.clone(),
+            Some(vec![]),
+            false,
+            config.temperature,
+            config.max_new_tokens,
+            config.reasoning_effort.clone(),
+            false,
+            if should_stream_thinking_progress(&config.tool_name) {
+                config.parent_tool_call_id.as_deref()
+            } else {
+                None
+            },
+        )
+        .await
+        {
+            Ok(r) => break r,
+            Err(ref err)
+                if classify_llm_error_for_retry(err).is_context_limit()
+                    && context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS
+                    && !is_aborted(&config.abort_flag) =>
+            {
+                context_limit_compact_count += 1;
+                warn!(
+                    "Subchat wrap-up final context limit, applying Tier 0 compact attempt {}/{}: {}",
+                    context_limit_compact_count,
+                    MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
+                    err,
+                );
+                let last = messages.pop();
+                tier0_deterministic_compact(&mut messages, 0);
+                if let Some(msg) = last {
+                    messages.push(msg);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    };
 
     update_usage_from_messages(usage, &final_results);
 

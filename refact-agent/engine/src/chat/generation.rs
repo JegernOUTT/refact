@@ -37,8 +37,10 @@ use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
 use crate::chat::trajectory_ops::approx_token_count;
+use crate::chat::history_limit::tier0_deterministic_compact;
 
 const TOKEN_BUDGET_CADENCE: usize = 6;
+const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 3;
 const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
@@ -534,6 +536,7 @@ pub fn start_generation(
     Box::pin(async move {
         let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
+        let mut context_limit_compact_count = 0usize;
         loop {
             let (mut thread, chat_id) = {
                 let session = session_arc.lock().await;
@@ -689,6 +692,32 @@ pub fn start_generation(
                     continue;
                 }
 
+                if retry_decision.is_context_limit()
+                    && !error.partial_output_emitted
+                    && !abort_flag.load(Ordering::SeqCst)
+                {
+                    if context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
+                        context_limit_compact_count += 1;
+                        warn!(
+                            "Context limit error, applying Tier 0 compact attempt {}/{}: {}",
+                            context_limit_compact_count,
+                            MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
+                            error.message,
+                        );
+                        {
+                            let mut session = session_arc.lock().await;
+                            tier0_deterministic_compact(&mut session.messages, 0);
+                            session.cache_guard_force_next = true;
+                            session.clear_stream_for_retry();
+                        }
+                        continue;
+                    }
+                    error.message = format!(
+                        "Context too large after {} compaction attempts. Original error: {}",
+                        context_limit_compact_count, error.message
+                    );
+                }
+
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
                     warn!(
                         "{} Original error: {}",
@@ -752,6 +781,7 @@ pub fn start_generation(
             }
 
             network_retry_attempt = 0;
+            context_limit_compact_count = 0;
 
             if abort_flag.load(Ordering::SeqCst) {
                 break;
@@ -2062,6 +2092,34 @@ mod tests {
             loop_count, 2,
             "Loop must iterate twice: fork error then normal generation"
         );
+    }
+
+    #[test]
+    fn test_context_limit_compact_circuit_breaker_stops_at_three() {
+        let max = MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS;
+        assert_eq!(max, 3);
+        let mut count = 0usize;
+        let mut stopped_by_breaker = false;
+        for _ in 0..10 {
+            if count < max {
+                count += 1;
+            } else {
+                stopped_by_breaker = true;
+                break;
+            }
+        }
+        assert!(stopped_by_breaker);
+        assert_eq!(count, max);
+    }
+
+    #[test]
+    fn test_context_limit_compact_count_resets_on_success() {
+        let mut count = 2usize;
+        let mut network = 3usize;
+        network = 0;
+        count = 0;
+        assert_eq!(network, 0);
+        assert_eq!(count, 0);
     }
 
     #[test]

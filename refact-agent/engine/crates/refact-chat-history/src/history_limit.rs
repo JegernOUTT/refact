@@ -94,6 +94,47 @@ pub fn tier0_deterministic_compact(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextPressure {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextBudgetReport {
+    pub used_tokens_estimate: usize,
+    pub effective_n_ctx: usize,
+    pub remaining_estimate: isize,
+    pub pressure: ContextPressure,
+}
+
+pub fn compute_context_budget(messages: &[ChatMessage], effective_n_ctx: usize) -> ContextBudgetReport {
+    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(messages);
+    let remaining_estimate = (effective_n_ctx as isize) - (used_tokens_estimate as isize);
+    let pressure = if effective_n_ctx == 0 {
+        ContextPressure::Low
+    } else {
+        let pct_used = used_tokens_estimate.saturating_mul(100) / effective_n_ctx;
+        if pct_used < 70 {
+            ContextPressure::Low
+        } else if pct_used < 85 {
+            ContextPressure::Medium
+        } else if pct_used < 95 {
+            ContextPressure::High
+        } else {
+            ContextPressure::Critical
+        }
+    };
+    ContextBudgetReport {
+        used_tokens_estimate,
+        effective_n_ctx,
+        remaining_estimate,
+        pressure,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CompressionStrength {
@@ -647,6 +688,51 @@ mod tests {
         assert_eq!(deserialized.summarization_tier.as_deref(), Some("tier0_deterministic"));
         assert_eq!(deserialized.summarized_token_estimate, Some(1200));
         assert_eq!(deserialized.content.content_text_only(), "Summary text");
+    }
+
+    #[test]
+    fn test_compute_context_budget_low_pressure() {
+        let messages = vec![make_user_msg_basic("hello world")];
+        let report = compute_context_budget(&messages, 10_000);
+        assert_eq!(report.pressure, ContextPressure::Low);
+        assert!(report.used_tokens_estimate > 0);
+        assert_eq!(report.effective_n_ctx, 10_000);
+        assert!(report.remaining_estimate > 0);
+    }
+
+    #[test]
+    fn test_compute_context_budget_medium_pressure() {
+        // 2800 chars -> 2800/4+10 = 710 tokens; 710/1000 = 71% -> Medium
+        let text = "x".repeat(2_800);
+        let messages = vec![make_user_msg_basic(&text)];
+        let report = compute_context_budget(&messages, 1_000);
+        assert_eq!(report.pressure, ContextPressure::Medium);
+    }
+
+    #[test]
+    fn test_compute_context_budget_high_pressure() {
+        // 3400 chars -> 3400/4+10 = 860 tokens; 860/1000 = 86% -> High
+        let text = "x".repeat(3_400);
+        let messages = vec![make_user_msg_basic(&text)];
+        let report = compute_context_budget(&messages, 1_000);
+        assert_eq!(report.pressure, ContextPressure::High);
+    }
+
+    #[test]
+    fn test_compute_context_budget_critical_pressure() {
+        // 3800 chars -> 3800/4+10 = 960 tokens; 960/1000 = 96% -> Critical
+        let text = "x".repeat(3_800);
+        let messages = vec![make_user_msg_basic(&text)];
+        let report = compute_context_budget(&messages, 1_000);
+        assert_eq!(report.pressure, ContextPressure::Critical);
+    }
+
+    #[test]
+    fn test_compute_context_budget_zero_n_ctx() {
+        let messages = vec![make_user_msg_basic("hello")];
+        let report = compute_context_budget(&messages, 0);
+        assert_eq!(report.pressure, ContextPressure::Low);
+        assert_eq!(report.effective_n_ctx, 0);
     }
 
     #[test]
