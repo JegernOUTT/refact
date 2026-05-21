@@ -1,5 +1,13 @@
-import { fireEvent, render, screen, waitFor } from "../utils/test-utils";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { Provider } from "react-redux";
@@ -11,6 +19,8 @@ import {
   setPulse,
   addOpportunity,
   addBuddySuggestion,
+  selectHomeSnoozedUntil,
+  selectSeenNotificationIds,
 } from "../features/Buddy/buddySlice";
 import { push } from "../features/Pages/pagesSlice";
 import { BuddyPulseCard } from "../features/Buddy/BuddyPulseCard";
@@ -20,6 +30,8 @@ import { BuddyWorkshop } from "../features/Buddy/BuddyWorkshop";
 import { BuddyDraftPreview } from "../features/Buddy/BuddyDraftPreview";
 import { BuddySettingsPanel } from "../features/Buddy/BuddySettingsPanel";
 import { BuddyPanel } from "../features/Buddy/BuddyPanel";
+import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
+import { BuddyHome } from "../features/Buddy/BuddyHome";
 import { BuddyWorld } from "../features/Buddy/BuddyWorld";
 import { AutonomousChats } from "../features/Buddy/AutonomousChats";
 import { UserActivityCard } from "../features/Buddy/UserActivityCard";
@@ -62,6 +74,8 @@ vi.mock("../features/Buddy/BuddyCharacter", async () => {
       sceneYPercent,
       sceneDepthScale,
       speechText,
+      speechControls,
+      onSpeechControl,
     }: {
       bubblePosition?: string;
       randomizeBubblePosition?: boolean;
@@ -71,6 +85,20 @@ vi.mock("../features/Buddy/BuddyCharacter", async () => {
       sceneYPercent?: number;
       sceneDepthScale?: number;
       speechText?: string | null;
+      speechControls?: Array<{
+        id: string;
+        label: string;
+        action: string;
+        action_param?: string;
+        style: string;
+      }>;
+      onSpeechControl?: (control: {
+        id: string;
+        label: string;
+        action: string;
+        action_param?: string;
+        style: string;
+      }) => void;
     }) =>
       ReactModule.createElement(
         "div",
@@ -95,6 +123,17 @@ vi.mock("../features/Buddy/BuddyCharacter", async () => {
               : undefined,
         },
         speechText,
+        ...(speechControls?.map((control) =>
+          ReactModule.createElement(
+            "button",
+            {
+              key: control.id,
+              type: "button",
+              onClick: () => onSpeechControl?.(control),
+            },
+            control.label,
+          ),
+        ) ?? []),
       ),
   };
 });
@@ -107,6 +146,10 @@ const CONFIG_STATE = {
     host: "vscode" as const,
   },
 };
+
+function readGuiSource(path: string): Promise<string> {
+  return readFile(resolve(process.cwd(), "src", path), "utf8");
+}
 
 function makeConversation(
   overrides?: Partial<BuddyConversationEntry>,
@@ -260,7 +303,10 @@ function makeSemanticState(
   };
 }
 
-function makeSnapshot(pulse?: BuddyPulse): BuddySnapshot {
+function makeSnapshot(
+  pulse?: BuddyPulse,
+  overrides?: Partial<BuddySnapshot>,
+): BuddySnapshot {
   return {
     state: {
       identity: { name: "Buddy", created_at: "", palette_index: 0 },
@@ -347,6 +393,7 @@ function makeSnapshot(pulse?: BuddyPulse): BuddySnapshot {
     },
     enabled: true,
     pulse,
+    ...overrides,
   };
 }
 
@@ -533,6 +580,161 @@ describe("BuddyHome_renders_all_sections", () => {
       ).toBeInTheDocument();
       expect(screen.getByTestId("buddy-workshop")).toBeInTheDocument();
     });
+  });
+
+  it("failed hero runtime dismiss remains local and snoozes notifications", async () => {
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    let dismissCalled = false;
+    const runtime = {
+      id: "home-runtime-dismiss-fails",
+      signal_type: "chat_error",
+      title: "Runtime dismiss fails",
+      source: "test",
+      status: "failed",
+      priority: "high",
+      created_at: "2024-01-01T00:00:00Z",
+    } satisfies BuddyRuntimeEvent;
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([]),
+      ),
+      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss",
+        () => {
+          dismissCalled = true;
+          return HttpResponse.json({ detail: "offline" }, { status: 503 });
+        },
+      ),
+    );
+    const unhandled = vi.fn();
+    window.addEventListener("unhandledrejection", unhandled);
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot(makePulse(), { runtime_queue: [runtime] })),
+    );
+
+    try {
+      render(<BuddyHome />, { store });
+      const world = await screen.findByTestId("buddy-world");
+      const dismissButton = within(world)
+        .getAllByRole("button", { hidden: true })
+        .find((button) => button.textContent === "Dismiss");
+      expect(dismissButton).toBeDefined();
+      if (!dismissButton) throw new Error("expected dismiss button");
+      fireEvent.click(dismissButton);
+
+      await waitFor(() => {
+        expect(store.getState().buddy.nowPlaying?.id).toBe(runtime.id);
+        expect(store.getState().buddy.nowPlaying?.dismissed).toBe(true);
+        expect(dismissCalled).toBe(true);
+      });
+      expect(selectHomeSnoozedUntil(store.getState())).toBeGreaterThan(
+        Date.now(),
+      );
+      expect(
+        `runtime-${runtime.id}` in selectSeenNotificationIds(store.getState()),
+      ).toBe(true);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("unhandledrejection", unhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  it("failed dashboard runtime dismiss remains local", async () => {
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    let dismissCalled = false;
+    const runtime = {
+      id: "dashboard-runtime-dismiss-fails",
+      signal_type: "chat_error",
+      title: "Dashboard runtime dismiss fails",
+      source: "test",
+      status: "failed",
+      priority: "high",
+      created_at: "2024-01-01T00:00:00Z",
+    } satisfies BuddyRuntimeEvent;
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss",
+        () => {
+          dismissCalled = true;
+          return HttpResponse.json({ detail: "offline" }, { status: 503 });
+        },
+      ),
+    );
+    const unhandled = vi.fn();
+    window.addEventListener("unhandledrejection", unhandled);
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot(makePulse(), { runtime_queue: [runtime] })),
+    );
+
+    try {
+      render(<BuddyDashboardScene />, { store });
+      const world = await screen.findByTestId("buddy-world");
+      const dismissButton = within(world)
+        .getAllByRole("button", { hidden: true })
+        .find((button) => button.textContent === "Dismiss");
+      expect(dismissButton).toBeDefined();
+      if (!dismissButton) throw new Error("expected dismiss button");
+      fireEvent.click(dismissButton);
+
+      await waitFor(() => {
+        expect(store.getState().buddy.nowPlaying?.id).toBe(runtime.id);
+        expect(store.getState().buddy.nowPlaying?.dismissed).toBe(true);
+        expect(dismissCalled).toBe(true);
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("unhandledrejection", unhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  it("source keeps runtime dismiss best-effort outside chat companion", async () => {
+    const home = await readGuiSource("features/Buddy/BuddyHome.tsx");
+    const dashboard = await readGuiSource(
+      "features/Buddy/BuddyDashboardScene.tsx",
+    );
+    const panel = await readGuiSource("features/Buddy/BuddyPanel.tsx");
+    const executor = await readGuiSource("features/Buddy/executeBuddyAction.ts");
+
+    expect(home).toContain(
+      "void dismissRuntimeMutation(heroSpeech.runtimeEventId)",
+    );
+    expect(home).toContain(".catch(() => undefined)");
+    expect(home).toContain('ctrl.action === "dismiss_runtime_event"');
+    expect(home).not.toContain(
+      "await dismissRuntimeMutation(heroSpeech.runtimeEventId).unwrap()",
+    );
+    expect(dashboard).toContain("void dismissRuntimeMutation(runtimeEventId)");
+    expect(dashboard).toContain(".catch(() => undefined)");
+    expect(dashboard).toContain('control.action === "dismiss_runtime_event"');
+    expect(dashboard).not.toContain(
+      "await dismissRuntimeMutation(runtimeEventId).unwrap()",
+    );
+    expect(panel).toContain('ctrl.action === "dismiss_runtime_event"');
+    expect(executor).toContain("dispatch(dismissRuntimeEvent(eventId))");
+    expect(executor).toContain(".catch(() => undefined)");
   });
 });
 

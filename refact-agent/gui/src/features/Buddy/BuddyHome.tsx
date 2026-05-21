@@ -431,12 +431,16 @@ export const BuddyHome: React.FC = () => {
       if (
         heroSpeech.source === "runtime" &&
         heroSpeech.runtimeEventId &&
-        (ctrl.action === "dismiss" || ctrl.action === "dismiss_speech")
+        (ctrl.action === "dismiss" ||
+          ctrl.action === "dismiss_speech" ||
+          ctrl.action === "dismiss_runtime_event")
       ) {
         dispatch(markBuddyNotificationSeen(heroSpeech.id));
         dispatch(snoozeHomeNotifications(undefined));
         dispatch(dismissRuntimeEvent(heroSpeech.runtimeEventId));
-        await dismissRuntimeMutation(heroSpeech.runtimeEventId).unwrap();
+        void dismissRuntimeMutation(heroSpeech.runtimeEventId)
+          .unwrap()
+          .catch(() => undefined);
         return;
       }
       if (heroSpeech.source === "opportunity" && heroSpeech.opportunityId) {

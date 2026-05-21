@@ -181,7 +181,11 @@ export const BuddyPanel: React.FC = () => {
         }
       : activeRuntime?.controls?.length
         ? async (ctrl: BuddyControl) => {
-            if (ctrl.action === "dismiss" || ctrl.action === "dismiss_speech") {
+            if (
+              ctrl.action === "dismiss" ||
+              ctrl.action === "dismiss_speech" ||
+              ctrl.action === "dismiss_runtime_event"
+            ) {
               dispatch(dismissRuntimeEvent(activeRuntime.id));
               try {
                 await dismissRuntimeMutation(activeRuntime.id).unwrap();

@@ -78,9 +78,11 @@ export const BuddyDashboardScene: React.FC = () => {
     : undefined;
 
   const dismissRuntimeSpeech = useCallback(
-    async (runtimeEventId: string) => {
+    (runtimeEventId: string) => {
       dispatch(dismissRuntimeEvent(runtimeEventId));
-      await dismissRuntimeMutation(runtimeEventId).unwrap();
+      void dismissRuntimeMutation(runtimeEventId)
+        .unwrap()
+        .catch(() => undefined);
     },
     [dispatch, dismissRuntimeMutation],
   );
@@ -121,9 +123,11 @@ export const BuddyDashboardScene: React.FC = () => {
       if (
         sceneSpeech.source === "runtime" &&
         sceneSpeech.runtimeEventId &&
-        (control.action === "dismiss" || control.action === "dismiss_speech")
+        (control.action === "dismiss" ||
+          control.action === "dismiss_speech" ||
+          control.action === "dismiss_runtime_event")
       ) {
-        await dismissRuntimeSpeech(sceneSpeech.runtimeEventId);
+        dismissRuntimeSpeech(sceneSpeech.runtimeEventId);
         return;
       }
       await executeBuddyAction(control, dispatch, {
