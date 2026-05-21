@@ -213,6 +213,7 @@ enum MemoryRouting {
 
 const MEMORY_COOLDOWN_SECS: u64 = 6 * 60 * 60;
 const BEHAVIOR_COOLDOWN_SECS: u64 = 4 * 60 * 60;
+const AUTONOMOUS_SUCCESS_XP: u64 = 4;
 const MAX_FACT_EVIDENCE_ITEMS: usize = 12;
 const MAX_TRAJECTORY_SNIPPETS: usize = 12;
 const MAX_BEHAVIOR_PREFERENCE_WRITES: usize = 2;
@@ -589,6 +590,7 @@ async fn autonomous_success_result(
         activity: Some(activity),
         runtime_event: Some(runtime_event),
         last_result: Some(serialize_last_autonomous_result(&last)),
+        xp: AUTONOMOUS_SUCCESS_XP,
         ..Default::default()
     }
 }
@@ -2200,6 +2202,7 @@ async fn execute_built_autonomous_job(
         last_result: Some(serialize_last_autonomous_result(
             &AutonomousLastResult::new(signal_hash, chat_id),
         )),
+        xp: AUTONOMOUS_SUCCESS_XP,
         ..Default::default()
     }
 }

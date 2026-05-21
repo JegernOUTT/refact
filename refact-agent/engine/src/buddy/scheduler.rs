@@ -40,6 +40,7 @@ pub struct BuddyJobResult {
     pub activity: Option<BuddyActivity>,
     pub runtime_event: Option<BuddyRuntimeEvent>,
     pub last_result: Option<String>,
+    pub xp: u64,
 }
 
 impl Default for BuddyJobResult {
@@ -51,6 +52,7 @@ impl Default for BuddyJobResult {
             activity: None,
             runtime_event: None,
             last_result: None,
+            xp: 0,
         }
     }
 }
@@ -61,6 +63,7 @@ impl BuddyJobResult {
             || self.suggestion.is_some()
             || self.activity.is_some()
             || self.runtime_event.is_some()
+            || self.xp > 0
     }
 }
 
@@ -449,6 +452,9 @@ impl BuddyScheduler {
                     if let Some(event) = result.runtime_event {
                         svc.enqueue_runtime_event(event);
                     }
+                    if result.xp > 0 {
+                        svc.grant_xp(result.xp);
+                    }
                 }
             }
         }
@@ -533,6 +539,7 @@ mod tests {
             _ctx: BuddyJobContext,
         ) -> BuddyJobResult {
             BuddyJobResult {
+                xp: 4,
                 activity: Some(BuddyActivity {
                     icon: "•".to_string(),
                     title: self.id.clone(),
@@ -1007,6 +1014,49 @@ mod tests {
         assert!(job_cooldowns.contains_key("autonomous_1"));
         assert!(!job_cooldowns.contains_key("autonomous_2"));
         assert!(!job_cooldowns.contains_key("autonomous_3"));
+    }
+
+    #[tokio::test]
+    async fn autonomous_job_success_grants_bounded_xp() {
+        let dir = tempfile::tempdir().unwrap();
+        let scheduler = BuddyScheduler {
+            jobs: vec![Box::new(ReadyAutonomousJob {
+                id: "autonomous_xp".to_string(),
+            })],
+        };
+        let buddy_arc = test_service(&dir, crate::buddy::state::default_buddy_state()).await;
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+
+        scheduler
+            .tick(gcx.clone(), buddy_arc.clone(), dir.path())
+            .await;
+
+        {
+            let buddy = buddy_arc.lock().await;
+            let service = buddy.as_ref().unwrap();
+            assert_eq!(service.state.progression.xp, 4);
+            assert_eq!(service.state.progression.stage, 0);
+        }
+
+        for _ in 0..4 {
+            {
+                let mut buddy = buddy_arc.lock().await;
+                buddy
+                    .as_mut()
+                    .unwrap()
+                    .state
+                    .job_cooldowns
+                    .remove("autonomous_xp");
+            }
+            scheduler
+                .tick(gcx.clone(), buddy_arc.clone(), dir.path())
+                .await;
+        }
+
+        let buddy = buddy_arc.lock().await;
+        let service = buddy.as_ref().unwrap();
+        assert_eq!(service.state.progression.stage, 1);
+        assert_eq!(service.state.progression.xp, 0);
     }
 
     fn active_suggestion(idx: usize) -> BuddySuggestion {

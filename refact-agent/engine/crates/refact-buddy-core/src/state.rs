@@ -57,37 +57,37 @@ const STAGE_SPECS: &[StageSpec] = &[
     StageSpec {
         name: "Sprite",
         growth_goal: 35,
-        min_open_seconds: 15 * 60,
-        min_care_score: 28,
-        max_neglect_score: 45,
+        min_open_seconds: 0,
+        min_care_score: 0,
+        max_neglect_score: u64::MAX,
     },
     StageSpec {
         name: "Imp",
         growth_goal: 55,
-        min_open_seconds: 35 * 60,
-        min_care_score: 60,
-        max_neglect_score: 85,
+        min_open_seconds: 0,
+        min_care_score: 0,
+        max_neglect_score: u64::MAX,
     },
     StageSpec {
         name: "Daemon",
         growth_goal: 85,
-        min_open_seconds: 75 * 60,
-        min_care_score: 105,
-        max_neglect_score: 140,
+        min_open_seconds: 0,
+        min_care_score: 0,
+        max_neglect_score: u64::MAX,
     },
     StageSpec {
         name: "Sage",
         growth_goal: 130,
-        min_open_seconds: 150 * 60,
-        min_care_score: 165,
-        max_neglect_score: 220,
+        min_open_seconds: 0,
+        min_care_score: 0,
+        max_neglect_score: u64::MAX,
     },
     StageSpec {
         name: "Archon",
         growth_goal: 210,
-        min_open_seconds: 270 * 60,
-        min_care_score: 245,
-        max_neglect_score: 320,
+        min_open_seconds: 0,
+        min_care_score: 0,
+        max_neglect_score: u64::MAX,
     },
 ];
 
@@ -349,11 +349,15 @@ fn sync_progression(state: &mut BuddyState) {
     state.progression.stage = stage;
     state.progression.stage_name = stage_name(stage).to_string();
     state.progression.level = stage + 1;
-    state.progression.xp_next = next_stage_spec(stage)
-        .map(|spec| spec.growth_goal)
-        .unwrap_or(0);
-    if state.progression.xp_next == 0 {
-        state.progression.xp = 0;
+    if let Some(next) = next_stage_spec(stage) {
+        state.progression.xp_next = next.growth_goal;
+    } else {
+        let display_goal = STAGE_SPECS
+            .get(stage as usize)
+            .map(|spec| spec.growth_goal)
+            .unwrap_or(0);
+        state.progression.xp_next = display_goal;
+        state.progression.xp = display_goal;
     }
 }
 
@@ -476,6 +480,7 @@ pub fn sync_state(state: &mut BuddyState) {
     }
     sync_progression(state);
     sync_conditions(state);
+    let _ = maybe_advance_stage(state);
     if sleeping {
         state.pet.condition.sleeping = true;
     }
@@ -502,8 +507,7 @@ fn maybe_advance_stage(state: &mut BuddyState) -> bool {
     let mut changed = false;
     loop {
         let Some(next) = next_stage_spec(state.progression.stage) else {
-            state.progression.xp = 0;
-            state.progression.xp_next = 0;
+            sync_progression(state);
             break;
         };
 
@@ -683,7 +687,7 @@ pub fn apply_care_action(
     let toy_note = toy
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("toy");
-    let (message, activity_type, activity_icon) = match action {
+    let (message, activity_type, activity_icon, xp_reward) = match action {
         BuddyCareAction::Feed => {
             inc_stat(&mut state.pet.needs.hunger, 24);
             dec_stat(&mut state.pet.needs.boredom, 6);
@@ -692,6 +696,7 @@ pub fn apply_care_action(
                 "Snack obtained. Tiny morale boost unlocked.".to_string(),
                 "care_feed",
                 "🍜",
+                2,
             )
         }
         BuddyCareAction::Play => {
@@ -706,6 +711,7 @@ pub fn apply_care_action(
                 ),
                 "care_play",
                 "🎾",
+                3,
             )
         }
         BuddyCareAction::Pet => {
@@ -716,6 +722,7 @@ pub fn apply_care_action(
                 "Warm pats received. Confidence and wiggles restored.".to_string(),
                 "care_pet",
                 "💕",
+                2,
             )
         }
         BuddyCareAction::Sleep => {
@@ -726,6 +733,7 @@ pub fn apply_care_action(
                 "Sleep mode engaged. Dreaming of helpful little victories.".to_string(),
                 "care_sleep",
                 "😴",
+                1,
             )
         }
         BuddyCareAction::Clean => {
@@ -736,10 +744,12 @@ pub fn apply_care_action(
                 "Fresh and tidy again. Sparkle levels look much better.".to_string(),
                 "care_clean",
                 "🧼",
+                2,
             )
         }
     };
 
+    state.progression.xp = state.progression.xp.saturating_add(xp_reward);
     state.pet.evolution.neglect_score = state.pet.evolution.neglect_score.saturating_sub(3);
     state.semantic.last_active = Utc::now().to_rfc3339();
     let keep_sleep = matches!(action, BuddyCareAction::Sleep);
@@ -805,6 +815,47 @@ mod tests {
     }
 
     #[test]
+    fn xp_only_advances_multiple_stages() {
+        let mut state = default_buddy_state();
+
+        grant_xp(&mut state, 20 + 35 + 10);
+
+        assert_eq!(state.progression.stage, 2);
+        assert_eq!(state.progression.stage_name, "Sprite");
+        assert_eq!(state.progression.level, 3);
+        assert_eq!(state.progression.xp, 10);
+        assert_eq!(state.progression.xp_next, 55);
+    }
+
+    #[test]
+    fn care_and_open_time_path_advances_later_stage() {
+        let mut state = default_buddy_state();
+
+        apply_pet_tick(&mut state, 60);
+        for _ in 0..15 {
+            let _ = apply_care_action(&mut state, BuddyCareAction::Play, Some("bug"));
+            let _ = apply_care_action(&mut state, BuddyCareAction::Feed, None);
+        }
+
+        assert!(state.pet.evolution.open_seconds >= 60);
+        assert!(state.pet.evolution.care_score >= 100);
+        assert!(state.progression.stage >= 1);
+        assert!(state.progression.xp_next > 0);
+    }
+
+    #[test]
+    fn repeated_successful_workflow_rewards_eventually_advance() {
+        let mut state = default_buddy_state();
+
+        for _ in 0..12 {
+            grant_xp(&mut state, 5);
+        }
+
+        assert!(state.progression.stage >= 2);
+        assert_eq!(state.progression.stage_name, "Sprite");
+    }
+
+    #[test]
     fn max_stage_behavior() {
         let mut state = default_buddy_state();
         state.pet.evolution.open_seconds = 400 * 60;
@@ -815,7 +866,8 @@ mod tests {
         assert_eq!(state.progression.stage_name, "Archon");
         assert_eq!(state.progression.stage, 6);
         assert_eq!(state.progression.level, 7);
-        assert_eq!(state.progression.xp_next, 0);
+        assert_eq!(state.progression.xp, 210);
+        assert_eq!(state.progression.xp_next, 210);
     }
 
     #[test]

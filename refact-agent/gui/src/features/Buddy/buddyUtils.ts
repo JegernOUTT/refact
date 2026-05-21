@@ -1,5 +1,7 @@
 export function computeXpFill(xp: number, xpNext: number): number {
-  if (xpNext <= 0) return 100;
+  if (!Number.isFinite(xp)) return 0;
+  if (!Number.isFinite(xpNext)) return xp > 0 ? 100 : 0;
+  if (xpNext <= 0) return xp > 0 ? 100 : 0;
   return Math.min(100, Math.max(0, (xp / xpNext) * 100));
 }
 

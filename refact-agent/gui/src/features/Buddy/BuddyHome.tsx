@@ -248,10 +248,7 @@ export const BuddyHome: React.FC = () => {
   const xp = progression?.xp ?? state.progress.xp;
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   const xpNext = progression?.xp_next ?? nextStage?.xpThreshold;
-  const xpFill = useMemo(
-    () => computeXpFill(progression?.xp ?? 0, progression?.xp_next ?? 100),
-    [progression],
-  );
+  const xpFill = useMemo(() => computeXpFill(xp, xpNext ?? 0), [xp, xpNext]);
 
   const name = identity?.name ?? state.name;
   const needRows = useMemo<NeedRow[]>(

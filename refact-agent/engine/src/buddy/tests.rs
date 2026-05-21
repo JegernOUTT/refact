@@ -140,19 +140,66 @@ fn test_grant_xp_updates_stage_when_care_gate_met() {
 }
 
 #[test]
-fn test_stage_transitions_require_runtime_and_care_after_hatch() {
+fn test_xp_only_advance_reaches_later_stage() {
     let mut state = default_buddy_state();
-    grant_xp(&mut state, 100);
-    assert_eq!(state.progression.stage_name, "Hatch");
-    state.pet.evolution.open_seconds = 20 * 60;
-    state.pet.evolution.care_score = 40;
-    grant_xp(&mut state, 0);
-    assert_eq!(state.progression.stage_name, "Sprite");
-    assert_eq!(state.progression.stage, 2);
+    grant_xp(&mut state, 120);
+    assert_eq!(state.progression.stage_name, "Imp");
+    assert_eq!(state.progression.stage, 3);
 }
 
 #[test]
-fn test_xp_bar_never_negative() {
+fn test_xp_only_advances_multiple_stages() {
+    let mut state = default_buddy_state();
+    grant_xp(&mut state, 20 + 35 + 10);
+    assert_eq!(state.progression.stage, 2);
+    assert_eq!(state.progression.stage_name, "Sprite");
+    assert_eq!(state.progression.xp, 10);
+    assert_eq!(state.progression.xp_next, 55);
+}
+
+#[test]
+fn test_realistic_workflow_care_path_advances_later_stage() {
+    let mut state = default_buddy_state();
+    apply_pet_tick(&mut state, 60);
+    for _ in 0..15 {
+        let _ = apply_care_action(&mut state, BuddyCareAction::Play, Some("bug"));
+        let _ = apply_care_action(&mut state, BuddyCareAction::Feed, None);
+    }
+    assert!(state.pet.evolution.open_seconds >= 60);
+    assert!(state.pet.evolution.care_score >= 100);
+    assert!(state.progression.stage >= 1);
+}
+
+#[test]
+fn test_repeated_successful_workflow_rewards_eventually_advance() {
+    let mut svc = make_service();
+    for idx in 0..12 {
+        svc.workflow_completed(
+            "workflow_xp_test",
+            5,
+            BuddyActivity {
+                icon: "⚙️".to_string(),
+                title: format!("Workflow {idx}"),
+                description: "done".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                activity_type: "workflow".to_string(),
+                chat_id: None,
+            },
+        );
+    }
+    assert!(svc.state.progression.stage >= 2);
+    assert_eq!(
+        svc.state
+            .workflow_summaries
+            .iter()
+            .find(|summary| summary.workflow_id == "workflow_xp_test")
+            .map(|summary| summary.run_count),
+        Some(12)
+    );
+}
+
+#[test]
+fn test_xp_display_starts_below_next_threshold() {
     let mut state = default_buddy_state();
     grant_xp(&mut state, 0);
     assert!(state.progression.xp < state.progression.xp_next);
@@ -167,7 +214,8 @@ fn test_max_stage_behavior() {
     assert_eq!(state.progression.stage_name, "Archon");
     assert_eq!(state.progression.stage, 6);
     assert_eq!(state.progression.level, 7);
-    assert_eq!(state.progression.xp_next, 0);
+    assert_eq!(state.progression.xp, 210);
+    assert_eq!(state.progression.xp_next, 210);
 }
 
 #[test]
