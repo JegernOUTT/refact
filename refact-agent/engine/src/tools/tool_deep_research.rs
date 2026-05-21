@@ -272,6 +272,7 @@ impl Tool for ToolDeepResearch {
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
                 usage: None,
+                preserve: Some(true),
                 extra: metering,
                 output_filter: Some(OutputFilter::no_limits()),
                 ..Default::default()

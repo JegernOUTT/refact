@@ -50,6 +50,7 @@ mod tests {
             }]),
             tool_call_id: "".to_string(),
             tool_failed: None,
+            preserve: Some(true),
             usage: Some(ChatUsage {
                 prompt_tokens: 100,
                 completion_tokens: 50,
@@ -85,6 +86,8 @@ mod tests {
         assert_eq!(deserialized.role, original.role);
         assert_eq!(deserialized.finish_reason, original.finish_reason);
         assert_eq!(deserialized.reasoning_content, original.reasoning_content);
+        assert_eq!(deserialized.preserve, Some(true));
+        assert_eq!(serialized.get("preserve"), Some(&json!(true)));
 
         assert!(deserialized.tool_calls.is_some());
         let tc = deserialized.tool_calls.as_ref().unwrap();

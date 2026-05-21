@@ -431,6 +431,7 @@ impl Tool for ToolSubagent {
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
                 usage: None,
+                preserve: Some(true),
                 extra: result.metering,
                 output_filter: Some(OutputFilter::no_limits()),
                 ..Default::default()

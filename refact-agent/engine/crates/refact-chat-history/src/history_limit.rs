@@ -71,6 +71,9 @@ pub fn tier0_deterministic_compact(
         if msg.role != "tool" {
             continue;
         }
+        if msg.preserve == Some(true) {
+            continue;
+        }
         if msg.tool_failed == Some(true) {
             continue;
         }
@@ -656,6 +659,34 @@ mod tests {
         let report = tier0_deterministic_compact(&mut messages, 0);
         assert_eq!(report.tool_outputs_truncated, 0);
         assert_eq!(messages[1].content.content_text_only(), long_output);
+    }
+
+    #[test]
+    fn test_tier0_skips_preserved_tool_output() {
+        let long_output = "x".repeat(500);
+        let mut preserved = make_tool_msg("tc1", &long_output, None);
+        preserved.preserve = Some(true);
+        let mut messages = vec![
+            make_user_msg_basic("question"),
+            preserved,
+            make_user_msg_basic("another"),
+        ];
+        let report = tier0_deterministic_compact(&mut messages, 0);
+        assert_eq!(report.tool_outputs_truncated, 0);
+        assert_eq!(messages[1].content.content_text_only(), long_output);
+    }
+
+    #[test]
+    fn test_tier0_truncates_unpreserved_tool_output() {
+        let long_output = "x".repeat(500);
+        let mut messages = vec![
+            make_user_msg_basic("question"),
+            make_tool_msg("tc1", &long_output, None),
+            make_user_msg_basic("another"),
+        ];
+        let report = tier0_deterministic_compact(&mut messages, 0);
+        assert_eq!(report.tool_outputs_truncated, 1);
+        assert!(messages[1].content.content_text_only().contains("truncated"));
     }
 
     #[test]

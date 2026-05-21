@@ -43,6 +43,10 @@ fn find_tool_safe_boundary(messages: &[ChatMessage], target_idx: usize) -> usize
     let mut idx = target_idx.min(messages.len());
     while idx > 0 {
         let msg = &messages[idx - 1];
+        if msg.preserve == Some(true) {
+            idx -= 1;
+            continue;
+        }
         if msg.role == "tool" || msg.role == "diff" {
             idx -= 1;
             continue;
@@ -54,6 +58,12 @@ fn find_tool_safe_boundary(messages: &[ChatMessage], target_idx: usize) -> usize
         break;
     }
     idx
+}
+
+fn range_contains_preserved(messages: &[ChatMessage], start: usize, end: usize) -> bool {
+    messages[start..end]
+        .iter()
+        .any(|msg| msg.preserve == Some(true))
 }
 
 pub fn find_summarization_boundary(messages: &[ChatMessage]) -> (usize, usize) {
@@ -73,7 +83,16 @@ pub fn find_summarization_boundary(messages: &[ChatMessage]) -> (usize, usize) {
 
     let range = safe_end - start;
     let target_end = start + range / 2;
-    let adjusted_end = find_tool_safe_boundary(messages, target_end);
+    let mut adjusted_end = find_tool_safe_boundary(messages, target_end);
+    while adjusted_end > start && range_contains_preserved(messages, start, adjusted_end) {
+        let Some(offset) = messages[start..adjusted_end]
+            .iter()
+            .rposition(|msg| msg.preserve == Some(true))
+        else {
+            break;
+        };
+        adjusted_end = find_tool_safe_boundary(messages, start + offset);
+    }
     if adjusted_end <= start + 1 {
         return (start, start);
     }
@@ -418,5 +437,25 @@ mod tests {
             let msg_at_end = &messages[end];
             assert_ne!(msg_at_end.role, "tool", "boundary should not end on a tool result");
         }
+    }
+
+    #[test]
+    fn test_summarization_boundary_skips_preserved_messages() {
+        let mut messages: Vec<ChatMessage> = (0..12)
+            .map(|i| {
+                if i % 2 == 0 {
+                    make_user_msg(&format!("user {}", i))
+                } else {
+                    make_assistant_msg(&format!("assistant {}", i))
+                }
+            })
+            .collect();
+        messages[3].preserve = Some(true);
+        let (start, end) = find_summarization_boundary(&messages);
+        assert_eq!(start, 0);
+        assert!(end < 3, "boundary must exclude preserved message, got {start}..={end}");
+        assert!(!messages[start..=end]
+            .iter()
+            .any(|msg| msg.preserve == Some(true)));
     }
 }

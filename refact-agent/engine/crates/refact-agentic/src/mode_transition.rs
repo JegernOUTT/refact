@@ -723,6 +723,13 @@ pub async fn assemble_new_chat(
         })
         .collect();
     preserved_indices.extend(&tool_output_indices);
+    preserved_indices.extend(
+        metadata
+            .annotated_messages
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (_, msg))| (msg.preserve == Some(true)).then_some(idx)),
+    );
 
     let mut all_indices: Vec<usize> = preserved_indices.into_iter().collect();
     all_indices.sort();
@@ -1365,6 +1372,33 @@ MSG_ID:2
             decisions.messages_to_preserve,
             vec!["MSG_ID:10", "MSG_ID:2", "MSG_ID:5", "MSG_ID:2"]
         );
+    }
+
+    #[tokio::test]
+    async fn test_assemble_new_chat_includes_preserved_flag_messages() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText("current request".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call_plan".to_string(),
+                content: ChatContent::SimpleText("important preserved plan".to_string()),
+                preserve: Some(true),
+                ..Default::default()
+            },
+        ];
+        let new_messages = assemble_new_chat(&messages, &ParsedDecisions::default(), &[])
+            .await
+            .unwrap();
+        let text = new_messages
+            .iter()
+            .map(|msg| msg.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("important preserved plan"));
     }
 
     #[test]

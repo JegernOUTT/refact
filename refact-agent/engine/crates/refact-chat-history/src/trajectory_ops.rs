@@ -12,6 +12,7 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
         tool_calls: m.tool_calls.clone(),
         tool_call_id: m.tool_call_id.clone(),
         tool_failed: m.tool_failed,
+        preserve: m.preserve,
         finish_reason: None,
         reasoning_content: None,
         usage: None,
@@ -139,6 +140,16 @@ pub const TOOLS_TO_PRESERVE: &[&str] = &[
 
 fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
+}
+
+fn should_preserve_message(
+    msg: &ChatMessage,
+    tool_call_names: &HashMap<String, String>,
+) -> bool {
+    msg.preserve == Some(true)
+        || tool_call_names
+            .get(&msg.tool_call_id)
+            .map_or(false, |name| should_preserve_tool(name))
 }
 
 fn normalize_path_text(path: &str) -> String {
@@ -383,10 +394,8 @@ pub fn compress_in_place(
 
         for msg in messages.iter_mut() {
             if msg.role == "tool" && !msg.tool_call_id.is_empty() {
-                if let Some(name) = tool_call_names.get(&msg.tool_call_id) {
-                    if should_preserve_tool(name) {
-                        continue;
-                    }
+                if should_preserve_message(msg, &tool_call_names) {
+                    continue;
                 }
                 let content_text = msg.content.content_text_only();
                 if content_text.len() > 500 {
@@ -616,6 +625,26 @@ mod tests {
         assert_eq!(stats.tool_messages_modified, 1);
         let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
         assert!(tool_msg.content.content_text_only().contains("compressed"));
+    }
+
+    #[test]
+    fn test_compress_preserves_flagged_tool() {
+        let long_content = "x".repeat(1000);
+        let mut preserved = make_tool_msg("tc1", &long_content);
+        preserved.preserve = Some(true);
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            preserved,
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+        let stats = compress_in_place(&mut messages, &opts).unwrap();
+        assert_eq!(stats.tool_messages_modified, 0);
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        assert_eq!(tool_msg.content.content_text_only(), long_content);
     }
 
     #[test]

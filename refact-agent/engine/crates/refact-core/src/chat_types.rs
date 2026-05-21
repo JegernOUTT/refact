@@ -334,6 +334,7 @@ impl<'de> Deserialize<'de> for ChatMessage {
         let reasoning_content = obj.get("reasoning_content").and_then(|x| x.as_str().map(|x| x.to_string()));
         let tool_call_id = obj.get("tool_call_id").and_then(|s| s.as_str()).unwrap_or_default().to_string();
         let tool_failed = obj.get("tool_failed").and_then(|x| x.as_bool());
+        let preserve = obj.get("preserve").and_then(|x| x.as_bool());
 
         let tool_calls: Option<Vec<ChatToolCall>> = obj
             .get("tool_calls")
@@ -383,7 +384,7 @@ impl<'de> Deserialize<'de> for ChatMessage {
 
         const KNOWN_FIELDS: &[&str] = &[
             "role", "content", "message_id", "finish_reason", "reasoning_content",
-            "tool_calls", "tool_call_id", "tool_failed", "usage", "checkpoints",
+            "tool_calls", "tool_call_id", "tool_failed", "preserve", "usage", "checkpoints",
             "thinking_blocks", "citations", "server_content_blocks",
             "summarized_range", "summarization_tier", "summarized_token_estimate",
         ];
@@ -402,6 +403,7 @@ impl<'de> Deserialize<'de> for ChatMessage {
             tool_calls,
             tool_call_id,
             tool_failed,
+            preserve,
             usage,
             checkpoints,
             thinking_blocks,
@@ -774,6 +776,8 @@ pub struct ChatMessage {
     pub tool_call_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_failed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ChatUsage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

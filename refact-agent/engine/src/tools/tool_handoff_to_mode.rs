@@ -302,6 +302,7 @@ impl Tool for ToolHandoffToMode {
                 role: "tool".to_string(),
                 content: ChatContent::SimpleText(result.to_string()),
                 tool_call_id: tool_call_id.clone(),
+                preserve: Some(true),
                 output_filter: Some(OutputFilter::no_limits()),
                 ..Default::default()
             })],
