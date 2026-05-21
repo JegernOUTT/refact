@@ -14,6 +14,13 @@ use crate::files_in_workspace::{check_file_privacy_for_send, filter_privacy_allo
 use crate::global_context::GlobalContext;
 use crate::worktrees::scope::ExecutionScope;
 
+/// Convert a PathBuf to a String with forward slashes on all platforms.
+/// Matches the dominant codebase convention for serialized/context file paths.
+fn path_to_string(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
+}
+
 async fn get_workspace_files(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     gcx.documents_state.workspace_files.lock().unwrap().clone()
 }
@@ -90,7 +97,7 @@ async fn resolve_scope_legacy(gcx: Arc<GlobalContext>, scope: &str) -> Result<Ve
         return Ok(get_workspace_files(gcx)
             .await
             .into_iter()
-            .map(|f| f.to_string_lossy().to_string())
+            .map(|f| path_to_string(&f))
             .collect());
     }
 
@@ -120,7 +127,7 @@ async fn resolve_scope_legacy(gcx: Arc<GlobalContext>, scope: &str) -> Result<Ve
                 f.to_string_lossy().starts_with(&dir_path_with_sep)
                     || f.to_string_lossy() == dir_path
             })
-            .map(|f| f.to_string_lossy().to_string())
+            .map(|f| path_to_string(&f))
             .collect());
     }
 
@@ -157,7 +164,7 @@ async fn resolve_scope_legacy(gcx: Arc<GlobalContext>, scope: &str) -> Result<Ve
                             f.to_string_lossy().starts_with(&dir_path_with_sep)
                                 || f.to_string_lossy() == dir_path
                         })
-                        .map(|f| f.to_string_lossy().to_string())
+                        .map(|f| path_to_string(&f))
                         .collect())
                 }
                 Err(_) => Err(file_err),
@@ -193,7 +200,7 @@ pub async fn resolve_scope_with_execution_scope(
         let files = list_execution_scope_root(gcx, execution_scope, true)
             .await?
             .into_iter()
-            .map(|file| file.to_string_lossy().to_string())
+            .map(|file| path_to_string(&file))
             .collect();
         return Ok(ScopedFiles {
             files,
@@ -212,7 +219,7 @@ pub async fn resolve_scope_with_execution_scope(
         }
         check_file_privacy_for_send(gcx, &scoped.path).await?;
         return Ok(ScopedFiles {
-            files: vec![scoped.path.to_string_lossy().to_string()],
+            files: vec![path_to_string(&scoped.path)],
             notices: scoped_path_notices(&scoped),
         });
     }
@@ -226,7 +233,7 @@ pub async fn resolve_scope_with_execution_scope(
     let files = list_files_under_dir(gcx, &scoped.path, true, true)
         .await?
         .into_iter()
-        .map(|file| file.to_string_lossy().to_string())
+        .map(|file| path_to_string(&file))
         .collect();
 
     Ok(ScopedFiles {
@@ -405,7 +412,7 @@ pub async fn remap_context_file_for_execution_scope(
 
     if normalized_path.starts_with(execution_scope.effective_root()) {
         check_file_privacy_for_send(gcx.clone(), &normalized_path).await?;
-        context_file.file_name = normalized_path.to_string_lossy().to_string();
+        context_file.file_name = path_to_string(&normalized_path);
         return Ok(Some((context_file, vec![])));
     }
 
@@ -427,7 +434,7 @@ pub async fn remap_context_file_for_execution_scope(
                         normalized_path.display(),
                         worktree_path.display()
                     );
-                    context_file.file_name = worktree_path.to_string_lossy().to_string();
+                    context_file.file_name = path_to_string(&worktree_path);
                     return Ok(Some((context_file, vec![notice])));
                 }
             }
@@ -436,7 +443,7 @@ pub async fn remap_context_file_for_execution_scope(
     }
 
     check_file_privacy_for_send(gcx, &normalized_path).await?;
-    context_file.file_name = normalized_path.to_string_lossy().to_string();
+    context_file.file_name = path_to_string(&normalized_path);
     Ok(Some((
         context_file,
         vec![format!(
@@ -760,7 +767,7 @@ mod worktree_scope_read_tools {
         results
             .iter()
             .filter_map(|item| match item {
-                ContextEnum::ContextFile(file) => Some(norm_str(&file.file_name)),
+                ContextEnum::ContextFile(file) => Some(file.file_name.clone()),
                 _ => None,
             })
             .collect()
@@ -847,12 +854,7 @@ mod worktree_scope_read_tools {
 
         assert_eq!(
             names,
-            vec![fixture
-                .root
-                .join("src")
-                .join("lib.rs")
-                .to_string_lossy()
-                .to_string()]
+            vec![norm(fixture.root.join("src").join("lib.rs"))]
         );
     }
 
@@ -876,12 +878,7 @@ mod worktree_scope_read_tools {
         assert_eq!(names.len(), 1);
         assert_eq!(
             names[0],
-            fixture
-                .root
-                .join("src")
-                .join("lib.rs")
-                .to_string_lossy()
-                .to_string()
+            norm(fixture.root.join("src").join("lib.rs"))
         );
         assert!(
             !norm_str(&text).contains(&norm(fixture.source.clone())),
@@ -917,7 +914,7 @@ mod worktree_scope_read_tools {
             text.contains("Absolute path used in active worktree"),
             "{text}"
         );
-        assert_eq!(names, vec![path]);
+        assert_eq!(names, vec![norm_str(&path)]);
     }
 
     #[tokio::test]
@@ -935,12 +932,7 @@ mod worktree_scope_read_tools {
             .join("lib.rs")
             .to_string_lossy()
             .to_string();
-        let worktree_path = fixture
-            .root
-            .join("src")
-            .join("lib.rs")
-            .to_string_lossy()
-            .to_string();
+        let worktree_path = norm(fixture.root.join("src").join("lib.rs"));
 
         let (_corrections, results) = tool
             .tool_execute(ccx, &tool_call_id, &cat_args(source_path))
@@ -976,7 +968,7 @@ mod worktree_scope_read_tools {
         let names = context_file_names(&results);
 
         assert!(text.contains("STRONG NOTICE"), "{text}");
-        assert_eq!(names, vec![outside_allowed]);
+        assert_eq!(names, vec![norm_str(&outside_allowed)]);
 
         let blocked_path = fixture
             .outside
@@ -1277,12 +1269,7 @@ mod worktree_scope_read_tools {
             .join("lib.rs")
             .to_string_lossy()
             .to_string();
-        let worktree_path = fixture
-            .root
-            .join("src")
-            .join("lib.rs")
-            .to_string_lossy()
-            .to_string();
+        let worktree_path = norm(fixture.root.join("src").join("lib.rs"));
         let mut args = vec![AtCommandMember::new("arg".to_string(), source_path, 7, 10)];
 
         let (results, replacement) = at_file.at_execute(ccx, &mut cmd, &mut args).await.unwrap();
@@ -1291,7 +1278,7 @@ mod worktree_scope_read_tools {
 
         assert!(text.contains("mapped to active worktree"), "{text}");
         assert_eq!(names, vec![worktree_path.clone()]);
-        assert_eq!(replacement, worktree_path);
+        assert_eq!(norm_str(&replacement), worktree_path);
     }
 
     #[tokio::test]
