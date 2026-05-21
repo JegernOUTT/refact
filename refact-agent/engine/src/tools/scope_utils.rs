@@ -1290,12 +1290,7 @@ mod worktree_scope_read_tools {
             .join("lib.rs")
             .to_string_lossy()
             .to_string();
-        let worktree_path = fixture
-            .root
-            .join("src")
-            .join("lib.rs")
-            .to_string_lossy()
-            .to_string();
+        let worktree_path = norm(fixture.root.join("src").join("lib.rs"));
         let context_file = ContextFile {
             file_name: source_path,
             file_content: String::new(),
