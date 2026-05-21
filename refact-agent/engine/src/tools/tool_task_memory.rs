@@ -27,6 +27,7 @@ use crate::tools::tools_description::{
 };
 
 const MEMORIES_DIR: &str = "memories";
+const ARCHIVED_MEMORIES_DIR: &str = "archived";
 const MAX_MEMORIES_CHARS: usize = 120_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,6 +568,14 @@ fn optional_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option
     }
 }
 
+fn required_string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
+    optional_string_arg(args, name)?.ok_or_else(|| format!("argument `{}` is required", name))
+}
+
+fn required_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<bool, String> {
+    optional_bool_arg(args, name)?.ok_or_else(|| format!("argument `{}` is required", name))
+}
+
 fn optional_usize_arg(
     args: &HashMap<String, Value>,
     name: &str,
@@ -628,6 +637,268 @@ fn safe_relative_path(path: &Path) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn planner_task_id_from_meta(
+    task_meta: Option<&crate::chat::types::TaskMeta>,
+    tool_name: &str,
+) -> Result<String, String> {
+    let meta = task_meta.ok_or_else(|| {
+        format!(
+            "{} requires task planner context (task_id missing).",
+            tool_name
+        )
+    })?;
+    if meta.role != "planner" {
+        return Err(format!(
+            "{} can only be called by the task planner.",
+            tool_name
+        ));
+    }
+    Ok(meta.task_id.clone())
+}
+
+fn validate_memory_reference(reference: &str) -> Result<String, String> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err("memory_id cannot be empty".to_string());
+    }
+    if reference.contains('/') || reference.contains('\\') {
+        return Err("memory_id must be a filename or slug without path separators".to_string());
+    }
+    let mut components = Path::new(reference).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(reference.to_string()),
+        _ => Err("memory_id must be a filename or slug without path separators".to_string()),
+    }
+}
+
+fn is_memory_markdown_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|ext| ext.to_str()), Some("md" | "mdx"))
+}
+
+fn memory_slug_from_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let parts: Vec<&str> = stem.splitn(4, '_').collect();
+    if parts.len() == 4 && !parts[3].is_empty() {
+        Some(parts[3].to_string())
+    } else {
+        Some(stem.to_string())
+    }
+}
+
+fn memory_short_id_from_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let parts: Vec<&str> = stem.splitn(4, '_').collect();
+    if parts.len() == 4 && !parts[2].is_empty() {
+        Some(parts[2].to_string())
+    } else {
+        None
+    }
+}
+
+fn memory_reference_stem(reference: &str) -> String {
+    Path::new(reference)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(reference)
+        .to_string()
+}
+
+async fn find_task_memory_path(
+    search_dir: &Path,
+    reference: &str,
+    scope_label: &str,
+) -> Result<PathBuf, String> {
+    let reference = validate_memory_reference(reference)?;
+    if !search_dir.exists() {
+        return Err(format!(
+            "No {} directory found: {}",
+            scope_label,
+            search_dir.display()
+        ));
+    }
+
+    let reference_stem = memory_reference_stem(&reference);
+    let mut exact_matches = Vec::new();
+    let mut slug_matches = Vec::new();
+    let mut available = Vec::new();
+
+    for entry in WalkDir::new(search_dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() || !is_memory_markdown_file(path) {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        available.push(file_name.clone());
+        if file_name == reference {
+            exact_matches.push(path.to_path_buf());
+            continue;
+        }
+        let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("");
+        let slug = memory_slug_from_path(path).unwrap_or_default();
+        let short_id = memory_short_id_from_path(path).unwrap_or_default();
+        if stem == reference
+            || stem == reference_stem
+            || slug == reference
+            || slug == reference_stem
+            || short_id == reference
+            || short_id == reference_stem
+        {
+            slug_matches.push(path.to_path_buf());
+        }
+    }
+
+    if let Some(path) = exact_matches.into_iter().next() {
+        return Ok(path);
+    }
+
+    if slug_matches.len() == 1 {
+        return Ok(slug_matches.remove(0));
+    }
+    if slug_matches.len() > 1 {
+        let matches = slug_matches
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "memory_id `{}` matches multiple {} files: {}",
+            reference, scope_label, matches
+        ));
+    }
+
+    available.sort();
+    let available = if available.is_empty() {
+        "none".to_string()
+    } else {
+        available.into_iter().take(10).collect::<Vec<_>>().join(", ")
+    };
+    Err(format!(
+        "Memory not found: `{}` in {} at {}. Available files: {}",
+        reference,
+        scope_label,
+        search_dir.display(),
+        available
+    ))
+}
+
+async fn rewrite_memory_frontmatter_path<F>(
+    path: &Path,
+    update: F,
+) -> Result<(TaskMemoryFrontmatter, bool), String>
+where
+    F: FnOnce(&mut TaskMemoryFrontmatter) -> bool,
+{
+    let content = fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("Failed to read memory {}: {}", path.display(), e))?;
+    let (mut frontmatter, body) = parse_memory_file(&content)?;
+    let changed = update(&mut frontmatter);
+    if changed {
+        let updated = render_memory_file(&frontmatter, &body);
+        atomic_write_text(path, &updated).await?;
+    }
+    Ok((frontmatter, changed))
+}
+
+async fn set_task_memory_pinned(
+    memories_dir: &Path,
+    memory_id: &str,
+    pinned: bool,
+) -> Result<(PathBuf, bool), String> {
+    let path = find_task_memory_path(memories_dir, memory_id, "active task memories").await?;
+    let (_, changed) = rewrite_memory_frontmatter_path(&path, |frontmatter| {
+        if frontmatter.pinned == pinned {
+            false
+        } else {
+            frontmatter.pinned = pinned;
+            true
+        }
+    })
+    .await?;
+    Ok((path, changed))
+}
+
+async fn move_task_memory_with_status(
+    source_dir: &Path,
+    dest_dir: &Path,
+    memory_id: &str,
+    status: MemoryStatus,
+    source_label: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let source_path = find_task_memory_path(source_dir, memory_id, source_label).await?;
+    fs::create_dir_all(dest_dir)
+        .await
+        .map_err(|e| format!("Failed to create memory destination directory: {}", e))?;
+    let file_name = source_path
+        .file_name()
+        .ok_or_else(|| "Invalid memory path: missing file name".to_string())?;
+    let dest_path = dest_dir.join(file_name);
+    if dest_path.exists() {
+        return Err(format!(
+            "Cannot move memory because destination already exists: {}",
+            dest_path.display()
+        ));
+    }
+    rewrite_memory_frontmatter_path(&source_path, |frontmatter| {
+        frontmatter.status = status;
+        true
+    })
+    .await?;
+    fs::rename(&source_path, &dest_path)
+        .await
+        .map_err(|e| format!("Failed to move memory with atomic rename: {}", e))?;
+    Ok((source_path, dest_path))
+}
+
+async fn archive_task_memory(
+    memories_dir: &Path,
+    memory_id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    move_task_memory_with_status(
+        memories_dir,
+        &memories_dir.join(ARCHIVED_MEMORIES_DIR),
+        memory_id,
+        MemoryStatus::Archived,
+        "active task memories",
+    )
+    .await
+}
+
+async fn unarchive_task_memory(
+    memories_dir: &Path,
+    memory_id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    move_task_memory_with_status(
+        &memories_dir.join(ARCHIVED_MEMORIES_DIR),
+        memories_dir,
+        memory_id,
+        MemoryStatus::Active,
+        "archived task memories",
+    )
+    .await
+}
+
+fn task_memory_tool_output(tool_call_id: &String, output: String) -> (bool, Vec<ContextEnum>) {
+    (
+        false,
+        vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(output),
+            tool_calls: None,
+            tool_call_id: tool_call_id.clone(),
+            ..Default::default()
+        })],
+    )
 }
 
 async fn find_superseded_memory_path(
@@ -948,6 +1219,215 @@ pub struct ToolTaskMemorySearch;
 impl ToolTaskMemorySearch {
     pub fn new() -> Self {
         Self
+    }
+}
+
+pub struct ToolTaskMemoryPin;
+
+impl ToolTaskMemoryPin {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+pub struct ToolTaskMemoryArchive;
+
+impl ToolTaskMemoryArchive {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+pub struct ToolTaskMemoryUnarchive;
+
+impl ToolTaskMemoryUnarchive {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for ToolTaskMemoryPin {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "task_mem_pin".to_string(),
+            display_name: "Pin Task Memory".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Planner-only tool that pins or unpins a task memory by filename or slug.".to_string(),
+            input_schema: json_schema_from_params(
+                &[
+                    ("memory_id", "string", "Memory filename or short slug."),
+                    ("pinned", "boolean", "Whether the memory should be pinned."),
+                ],
+                &["memory_id", "pinned"],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let (gcx, task_id) = {
+            let cgcx = ccx.lock().await;
+            (
+                cgcx.app.gcx.clone(),
+                planner_task_id_from_meta(cgcx.task_meta.as_ref(), "task_mem_pin")?,
+            )
+        };
+        let memory_id = required_string_arg(args, "memory_id")?;
+        let pinned = required_bool_arg(args, "pinned")?;
+        let memories_dir = get_task_memories_dir(gcx, &task_id).await?;
+        let (path, changed) = set_task_memory_pinned(&memories_dir, &memory_id, pinned).await?;
+        info!(
+            "Task memory pin updated: {} pinned={} changed={}",
+            path.display(),
+            pinned,
+            changed
+        );
+        let output = if changed {
+            format!(
+                "Memory pin updated.\nFile: {}\nPinned: {}",
+                path.display(),
+                pinned
+            )
+        } else {
+            format!(
+                "Memory pin unchanged.\nFile: {}\nPinned: {}",
+                path.display(),
+                pinned
+            )
+        };
+        Ok(task_memory_tool_output(tool_call_id, output))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+#[async_trait]
+impl Tool for ToolTaskMemoryArchive {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "task_mem_archive".to_string(),
+            display_name: "Archive Task Memory".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Planner-only tool that archives a task memory by filename or slug.".to_string(),
+            input_schema: json_schema_from_params(
+                &[("memory_id", "string", "Memory filename or short slug.")],
+                &["memory_id"],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let (gcx, task_id) = {
+            let cgcx = ccx.lock().await;
+            (
+                cgcx.app.gcx.clone(),
+                planner_task_id_from_meta(cgcx.task_meta.as_ref(), "task_mem_archive")?,
+            )
+        };
+        let memory_id = required_string_arg(args, "memory_id")?;
+        let memories_dir = get_task_memories_dir(gcx, &task_id).await?;
+        let (source_path, dest_path) = archive_task_memory(&memories_dir, &memory_id).await?;
+        info!(
+            "Task memory archived: {} -> {}",
+            source_path.display(),
+            dest_path.display()
+        );
+        Ok(task_memory_tool_output(
+            tool_call_id,
+            format!(
+                "Memory archived.\nFrom: {}\nTo: {}",
+                source_path.display(),
+                dest_path.display()
+            ),
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+#[async_trait]
+impl Tool for ToolTaskMemoryUnarchive {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "task_mem_unarchive".to_string(),
+            display_name: "Unarchive Task Memory".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Planner-only tool that restores an archived task memory by filename or slug.".to_string(),
+            input_schema: json_schema_from_params(
+                &[("memory_id", "string", "Archived memory filename or short slug.")],
+                &["memory_id"],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let (gcx, task_id) = {
+            let cgcx = ccx.lock().await;
+            (
+                cgcx.app.gcx.clone(),
+                planner_task_id_from_meta(cgcx.task_meta.as_ref(), "task_mem_unarchive")?,
+            )
+        };
+        let memory_id = required_string_arg(args, "memory_id")?;
+        let memories_dir = get_task_memories_dir(gcx, &task_id).await?;
+        let (source_path, dest_path) = unarchive_task_memory(&memories_dir, &memory_id).await?;
+        info!(
+            "Task memory unarchived: {} -> {}",
+            source_path.display(),
+            dest_path.display()
+        );
+        Ok(task_memory_tool_output(
+            tool_call_id,
+            format!(
+                "Memory unarchived.\nFrom: {}\nTo: {}",
+                source_path.display(),
+                dest_path.display()
+            ),
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
     }
 }
 
@@ -1299,7 +1779,89 @@ pub async fn load_task_memories(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
+    use crate::at_commands::at_commands::AtCommandsContext;
+    use crate::chat::types::TaskMeta;
+    use crate::tools::tools_description::Tool;
     use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AMutex;
+
+    const MEMORY_FILE: &str = "2026-05-22_023548_edf49905_master-plan.md";
+
+    fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
+        items
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect()
+    }
+
+    async fn write_memory(dir: &Path, file_name: &str, frontmatter: TaskMemoryFrontmatter) {
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        tokio::fs::write(dir.join(file_name), render_memory_file(&frontmatter, "Body"))
+            .await
+            .unwrap();
+    }
+
+    async fn read_frontmatter(path: &Path) -> TaskMemoryFrontmatter {
+        let text = tokio::fs::read_to_string(path).await.unwrap();
+        parse_memory_file(&text).unwrap().0
+    }
+
+    async fn make_ccx(
+        gcx: Arc<GlobalContext>,
+        role: &str,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "planner-chat".to_string(),
+                None,
+                "model".to_string(),
+                Some(TaskMeta {
+                    task_id: "task-1".to_string(),
+                    role: role.to_string(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: None,
+                }),
+                None,
+            )
+            .await,
+        ))
+    }
+
+    async fn make_task_with_memory(
+        role: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<GlobalContext>,
+        Arc<AMutex<AtCommandsContext>>,
+        PathBuf,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let task_dir = temp.path().join(".refact/tasks/task-1");
+        let memories_dir = task_dir.join(MEMORIES_DIR);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        write_memory(
+            &memories_dir,
+            MEMORY_FILE,
+            TaskMemoryFrontmatter {
+                task_id: Some("task-1".to_string()),
+                title: Some("Master Plan".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let ccx = make_ccx(gcx.clone(), role).await;
+        (temp, gcx, ccx, memories_dir.join(MEMORY_FILE))
+    }
 
     #[test]
     fn memory_enums_parse_display_round_trip() {
@@ -1403,6 +1965,98 @@ mod tests {
         assert_eq!(updated_frontmatter.kind, MemoryKind::Finding);
         assert_eq!(updated_frontmatter.status, MemoryStatus::Superseded);
         assert_eq!(body, "Old body");
+    }
+
+    #[tokio::test]
+    async fn task_mem_pin_unpin_round_trip() {
+        let (_temp, _gcx, ccx, path) = make_task_with_memory("planner").await;
+        let mut tool = ToolTaskMemoryPin::new();
+
+        tool.tool_execute(
+            ccx.clone(),
+            &"call".to_string(),
+            &args(&[("memory_id", json!("master-plan")), ("pinned", json!(true))]),
+        )
+        .await
+        .unwrap();
+        assert!(read_frontmatter(&path).await.pinned);
+
+        tool.tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(&[("memory_id", json!(MEMORY_FILE)), ("pinned", json!(false))]),
+        )
+        .await
+        .unwrap();
+        assert!(!read_frontmatter(&path).await.pinned);
+    }
+
+    #[tokio::test]
+    async fn task_mem_archive_moves_file() {
+        let (_temp, _gcx, ccx, path) = make_task_with_memory("planner").await;
+        let mut tool = ToolTaskMemoryArchive::new();
+
+        tool.tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(&[("memory_id", json!("master-plan"))]),
+        )
+        .await
+        .unwrap();
+
+        let archived_path = path.parent().unwrap().join(ARCHIVED_MEMORIES_DIR).join(MEMORY_FILE);
+        assert!(!path.exists());
+        assert!(archived_path.exists());
+        assert_eq!(
+            read_frontmatter(&archived_path).await.status,
+            MemoryStatus::Archived
+        );
+    }
+
+    #[tokio::test]
+    async fn task_mem_unarchive_moves_file_back() {
+        let (_temp, _gcx, ccx, path) = make_task_with_memory("planner").await;
+        let mut archive = ToolTaskMemoryArchive::new();
+        let mut unarchive = ToolTaskMemoryUnarchive::new();
+
+        archive
+            .tool_execute(
+                ccx.clone(),
+                &"call".to_string(),
+                &args(&[("memory_id", json!("master-plan"))]),
+            )
+            .await
+            .unwrap();
+        unarchive
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[("memory_id", json!("master-plan"))]),
+            )
+            .await
+            .unwrap();
+
+        let archived_path = path.parent().unwrap().join(ARCHIVED_MEMORIES_DIR).join(MEMORY_FILE);
+        assert!(path.exists());
+        assert!(!archived_path.exists());
+        assert_eq!(read_frontmatter(&path).await.status, MemoryStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn task_mem_pin_rejects_non_planner_role() {
+        let (_temp, _gcx, ccx, _path) = make_task_with_memory("agents").await;
+        let mut tool = ToolTaskMemoryPin::new();
+
+        let err = tool
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[("memory_id", json!("master-plan")), ("pinned", json!(true))]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("can only be called by the task planner"));
     }
 
     #[test]
