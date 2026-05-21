@@ -34,6 +34,7 @@ import {
 import type {
   BuddyControl,
   BuddyOpportunity,
+  BuddyRuntimeEvent,
   BuddySuggestion,
   DiagnosticContext,
 } from "./types";
@@ -46,6 +47,11 @@ import {
   opportunityActionControls,
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
+import { isBuddyRuntimeEventVisible } from "./buddyRuntimeEvents";
+import {
+  compareBuddyRuntimeEvents,
+  isBuddySpeechExpired,
+} from "./buddySceneSpeech";
 
 import styles from "./BuddyChatCompanion.module.css";
 
@@ -55,6 +61,7 @@ interface Props {
 
 interface NotificationItem {
   id: string;
+  sourceId: string;
   text: string;
   source:
     | "speech"
@@ -64,7 +71,6 @@ interface NotificationItem {
     | "suggestion"
     | "opportunity";
   controls: BuddyControl[];
-  timestamp: number;
   diagnostic?: DiagnosticContext | null;
   opportunity?: BuddyOpportunity;
   speechIntent?: string;
@@ -76,6 +82,64 @@ function notificationTriggerSource(
   if (source === "speech") return "runtime";
   if (source === "opportunity") return "suggestion";
   return source;
+}
+
+function notificationIdentity(
+  source: NotificationItem["source"] | "thread-error",
+  id: string,
+): string {
+  return `${source}:${id}`;
+}
+
+function createdAtMs(value: string): number {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function runtimeNotificationText(event: BuddyRuntimeEvent): string {
+  const speechText = event.speech_text?.trim();
+  return speechText || event.title;
+}
+
+function speechExpiryDelayMs(
+  activeSpeech: {
+    created_at: string;
+    persistent: boolean;
+    ttl_seconds: number;
+  } | null,
+): number | null {
+  if (
+    !activeSpeech ||
+    activeSpeech.persistent ||
+    activeSpeech.ttl_seconds <= 0
+  ) {
+    return null;
+  }
+  const createdAt = Date.parse(activeSpeech.created_at);
+  if (!Number.isFinite(createdAt)) return null;
+  return Math.max(
+    0,
+    createdAt + activeSpeech.ttl_seconds * 1000 - Date.now() + 1,
+  );
+}
+
+function runtimeCandidates(
+  chatId: string,
+  nowPlaying: BuddyRuntimeEvent | null,
+  runtimeQueue: BuddyRuntimeEvent[],
+  chatDiagnostic: DiagnosticContext | null,
+): BuddyRuntimeEvent[] {
+  return [nowPlaying, ...runtimeQueue]
+    .filter(
+      (event): event is BuddyRuntimeEvent =>
+        event?.chat_id === chatId &&
+        isBuddyRuntimeEventVisible(event) &&
+        !isBuddyOverlaySuppressedIssue(
+          runtimeNotificationText(event),
+          chatDiagnostic,
+        ),
+    )
+    .sort(compareBuddyRuntimeEvents);
 }
 
 export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
@@ -92,36 +156,43 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   const buddy = useBuddyState();
   const { unread } = useBuddyOpportunities();
-  const [opportunityIndex, setOpportunityIndex] = useState(0);
-  const [chatCooldownActive, setChatCooldownActive] = useState(true);
   const executeOpportunityAction = useExecuteBuddyAction();
   const [dismissMutation] = useDismissBuddySuggestionMutation();
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
 
-  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
-  const [chatNotificationsMuted, setChatNotificationsMuted] = useState(false);
+  const [seenNotificationIds, setSeenNotificationIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [dismissedNotificationIds, setDismissedNotificationIds] = useState<
+    Set<string>
+  >(new Set());
+  const [activeNotificationId, setActiveNotificationId] = useState<
+    string | null
+  >(null);
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [speechExpiryTick, refreshSpeechExpiry] = useState(0);
   const pendingRef = useRef(false);
   const prevChatIdRef = useRef(chatId);
 
   useEffect(() => {
     if (prevChatIdRef.current !== chatId) {
       prevChatIdRef.current = chatId;
-      setDismissedIds(new Set());
-      setChatNotificationsMuted(false);
+      setSeenNotificationIds(new Set());
+      setDismissedNotificationIds(new Set());
+      setActiveNotificationId(null);
       setActionError(null);
-      setOpportunityIndex(0);
     }
   }, [chatId]);
 
   useEffect(() => {
-    setChatCooldownActive(true);
+    const delayMs = speechExpiryDelayMs(activeSpeech);
+    if (delayMs == null) return;
     const timer = window.setTimeout(() => {
-      setChatCooldownActive(false);
-    }, 60_000);
+      refreshSpeechExpiry((tick) => tick + 1);
+    }, delayMs);
     return () => window.clearTimeout(timer);
-  }, [chatId]);
+  }, [activeSpeech]);
 
   const errorControls: BuddyControl[] = useMemo(
     () => [
@@ -159,176 +230,191 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     [],
   );
 
-  const baseNotification: NotificationItem | null = useMemo(() => {
-    if (activeSpeech) {
-      return {
-        id: `speech-${activeSpeech.id}`,
-        text: activeSpeech.text,
-        source: "speech",
-        controls: activeSpeech.controls,
-        timestamp: new Date(activeSpeech.created_at).getTime(),
-        diagnostic: activeSpeech.chat_id
-          ? diagnostics.find((d) => d.chat_id === activeSpeech.chat_id) ?? null
-          : null,
-        speechIntent: activeSpeech.speech_intent,
-      };
-    }
+  const notification = useMemo<NotificationItem | null>(() => {
+    const isEligible = (id: string) =>
+      !dismissedNotificationIds.has(id) &&
+      (!seenNotificationIds.has(id) || activeNotificationId === id);
 
     const chatDiagnostic =
       diagnostics.find((d) => d.chat_id === chatId) ?? null;
+
+    if (activeSpeech && !isBuddySpeechExpired(activeSpeech)) {
+      const id = notificationIdentity("speech", activeSpeech.id);
+      if (isEligible(id)) {
+        return {
+          id,
+          sourceId: activeSpeech.id,
+          text: activeSpeech.text,
+          source: "speech",
+          controls: activeSpeech.controls,
+          diagnostic: activeSpeech.chat_id
+            ? diagnostics.find((d) => d.chat_id === activeSpeech.chat_id) ??
+              null
+            : null,
+          speechIntent: activeSpeech.speech_intent,
+        };
+      }
+    }
+
+    const runtimes = runtimeCandidates(
+      chatId,
+      nowPlaying,
+      runtimeQueue,
+      chatDiagnostic,
+    );
+    const criticalRuntime = runtimes.find((event) => {
+      const id = notificationIdentity("runtime", event.id);
+      return event.priority === "critical" && isEligible(id);
+    });
+    if (criticalRuntime) {
+      return {
+        id: notificationIdentity("runtime", criticalRuntime.id),
+        sourceId: criticalRuntime.id,
+        text: runtimeNotificationText(criticalRuntime),
+        source: "runtime",
+        controls: criticalRuntime.controls?.length
+          ? criticalRuntime.controls
+          : errorControls,
+        diagnostic: chatDiagnostic,
+      };
+    }
+
     const normalizedThreadError = threadError?.trim() ?? null;
-    if (normalizedThreadError) {
+    const threadId = notificationIdentity("thread-error", chatId);
+    if (normalizedThreadError && isEligible(threadId)) {
       if (
         isBuddyOverlaySuppressedIssue(normalizedThreadError, chatDiagnostic)
       ) {
         return null;
       }
       return {
-        id: `thread-${chatId}`,
+        id: threadId,
+        sourceId: chatId,
         text: normalizedThreadError.slice(0, 160),
         source: "thread",
         controls: errorControls,
-        timestamp: Date.now(),
         diagnostic: chatDiagnostic,
       };
     }
 
-    const runtimeError =
-      nowPlaying?.chat_id === chatId &&
-      nowPlaying.status === "failed" &&
-      !nowPlaying.dismissed
-        ? nowPlaying
-        : runtimeQueue.find(
-            (e) =>
-              e.chat_id === chatId && e.status === "failed" && !e.dismissed,
-          ) ?? null;
+    const runtimeError = runtimes.find((event) =>
+      isEligible(notificationIdentity("runtime", event.id)),
+    );
     if (runtimeError) {
-      if (isBuddyOverlaySuppressedIssue(runtimeError.title, chatDiagnostic)) {
-        return null;
-      }
       return {
-        id: runtimeError.id,
-        text: runtimeError.title,
+        id: notificationIdentity("runtime", runtimeError.id),
+        sourceId: runtimeError.id,
+        text: runtimeNotificationText(runtimeError),
         source: "runtime",
         controls: runtimeError.controls?.length
           ? runtimeError.controls
           : errorControls,
-        timestamp: new Date(runtimeError.created_at).getTime(),
         diagnostic: chatDiagnostic,
       };
     }
 
     if (chatDiagnostic?.error_message.trim()) {
-      if (
-        isBuddyOverlaySuppressedIssue(
-          chatDiagnostic.error_message,
-          chatDiagnostic,
-        )
-      ) {
-        return null;
+      const id = notificationIdentity(
+        "diagnostic",
+        `${chatId}:${chatDiagnostic.collected_at}`,
+      );
+      if (isEligible(id)) {
+        if (
+          isBuddyOverlaySuppressedIssue(
+            chatDiagnostic.error_message,
+            chatDiagnostic,
+          )
+        ) {
+          return null;
+        }
+        return {
+          id,
+          sourceId: chatDiagnostic.diagnostic_id ?? chatDiagnostic.collected_at,
+          text: chatDiagnostic.error_message.slice(0, 120),
+          source: "diagnostic",
+          controls: errorControls,
+          diagnostic: chatDiagnostic,
+        };
       }
-      return {
-        id: `diag-${chatId}-${chatDiagnostic.collected_at}`,
-        text: chatDiagnostic.error_message.slice(0, 120),
-        source: "diagnostic",
-        controls: errorControls,
-        timestamp: new Date(chatDiagnostic.collected_at).getTime(),
-        diagnostic: chatDiagnostic,
-      };
     }
 
-    const activeSuggestion = suggestions.find(
-      (s: BuddySuggestion) => !s.dismissed,
-    );
+    const activeSuggestion = suggestions.find((suggestion: BuddySuggestion) => {
+      const id = notificationIdentity("suggestion", suggestion.id);
+      return !suggestion.dismissed && isEligible(id);
+    });
     if (activeSuggestion) {
       return {
-        id: activeSuggestion.id,
+        id: notificationIdentity("suggestion", activeSuggestion.id),
+        sourceId: activeSuggestion.id,
         text: `${activeSuggestion.title}: ${activeSuggestion.description}`,
         source: "suggestion",
         controls: activeSuggestion.controls.length
           ? activeSuggestion.controls
           : suggestionControls,
-        timestamp: new Date(activeSuggestion.created_at).getTime(),
         diagnostic: null,
+      };
+    }
+
+    const activeOpportunity = unread
+      .filter((opportunity) =>
+        isEligible(notificationIdentity("opportunity", opportunity.id)),
+      )
+      .sort(
+        (left, right) =>
+          createdAtMs(right.created_at) - createdAtMs(left.created_at),
+      )[0];
+    if (activeOpportunity) {
+      return {
+        id: notificationIdentity("opportunity", activeOpportunity.id),
+        sourceId: activeOpportunity.id,
+        text: opportunitySpeechText(activeOpportunity),
+        source: "opportunity",
+        controls: opportunityActionControls(activeOpportunity),
+        diagnostic: null,
+        opportunity: activeOpportunity,
       };
     }
 
     return null;
   }, [
+    activeNotificationId,
     activeSpeech,
-    threadError,
     chatId,
+    diagnostics,
+    dismissedNotificationIds,
+    errorControls,
     nowPlaying,
     runtimeQueue,
-    diagnostics,
-    suggestions,
-    errorControls,
+    seenNotificationIds,
+    speechExpiryTick,
     suggestionControls,
+    suggestions,
+    threadError,
+    unread,
   ]);
-
-  const activeOpportunities = useMemo(
-    () => unread.filter((opp) => !dismissedIds.has(`opportunity-${opp.id}`)),
-    [dismissedIds, unread],
-  );
-
-  useEffect(() => {
-    if (activeOpportunities.length <= 1) return;
-    const timer = window.setInterval(() => {
-      setOpportunityIndex((index) => (index + 1) % activeOpportunities.length);
-    }, 12_000);
-    return () => window.clearInterval(timer);
-  }, [activeOpportunities.length]);
-
-  useEffect(() => {
-    if (opportunityIndex < activeOpportunities.length) return;
-    setOpportunityIndex(0);
-  }, [activeOpportunities.length, opportunityIndex]);
-
-  const topOpportunity =
-    baseNotification === null && activeOpportunities.length > 0
-      ? activeOpportunities[opportunityIndex % activeOpportunities.length]
-      : null;
-
-  const notification: NotificationItem | null = useMemo(() => {
-    if (!topOpportunity) return baseNotification;
-
-    return {
-      id: `opportunity-${topOpportunity.id}`,
-      text: opportunitySpeechText(topOpportunity),
-      source: "opportunity",
-      controls: opportunityActionControls(topOpportunity),
-      timestamp: new Date(topOpportunity.created_at).getTime(),
-      diagnostic: null,
-      opportunity: topOpportunity,
-    };
-  }, [baseNotification, topOpportunity]);
-
-  const isDismissed = notification ? dismissedIds.has(notification.id) : false;
 
   useEffect(() => {
     setActionError(null);
   }, [notification?.id]);
 
   useEffect(() => {
-    if (
-      chatCooldownActive ||
-      !notification ||
-      notification.source === "speech" ||
-      isDismissed
-    ) {
+    if (!notification) {
+      setActiveNotificationId(null);
       return;
     }
-    const t = setTimeout(() => {
-      setDismissedIds((prev) => new Set(prev).add(notification.id));
-    }, 15000);
-    return () => clearTimeout(t);
-  }, [chatCooldownActive, notification, isDismissed]);
+    if (activeNotificationId === notification.id) return;
+    setActiveNotificationId(notification.id);
+    setSeenNotificationIds((prev) => new Set(prev).add(notification.id));
+  }, [activeNotificationId, notification]);
 
   const handleControl = useCallback(
     async (ctrl: BuddyControl) => {
       if (!notification) return;
 
       if (notification.source === "opportunity") {
+        setDismissedNotificationIds((prev) =>
+          new Set(prev).add(notification.id),
+        );
         if (pendingRef.current || !notification.opportunity) return;
         const actionIndex = getOpportunityActionIndexFromControl(ctrl);
         if (actionIndex == null) return;
@@ -343,9 +429,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         setActionError(null);
         try {
           if (action.kind === "dismiss") {
-            setChatNotificationsMuted(true);
             const results = await Promise.allSettled(
-              activeOpportunities.map(async (opp) => {
+              [notification.opportunity].map(async (opp) => {
                 const dismissAction = getOpportunityDismissAction(opp);
                 await executeOpportunityAction(
                   dismissAction.action,
@@ -359,10 +444,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
               result.status === "fulfilled" ? [result.value] : [],
             );
             if (dismissedOpportunityIds.length > 0) {
-              setDismissedIds((prev) => {
+              setDismissedNotificationIds((prev) => {
                 const next = new Set(prev);
                 for (const oppId of dismissedOpportunityIds) {
-                  next.add(`opportunity-${oppId}`);
+                  next.add(notificationIdentity("opportunity", oppId));
                 }
                 return next;
               });
@@ -373,7 +458,6 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             if (failed) {
               setActionError(formatOpportunityActionError(failed.reason));
             }
-            setOpportunityIndex(0);
             return;
           }
 
@@ -382,8 +466,9 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             notification.opportunity,
             actionIndex,
           );
-          setDismissedIds((prev) => new Set(prev).add(notification.id));
-          setOpportunityIndex((index) => index + 1);
+          setDismissedNotificationIds((prev) =>
+            new Set(prev).add(notification.id),
+          );
         } catch (error) {
           setActionError(formatOpportunityActionError(error));
         } finally {
@@ -394,39 +479,54 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       }
 
       if (ctrl.action === "dismiss" || ctrl.action === "dismiss_speech") {
+        setDismissedNotificationIds((prev) =>
+          new Set(prev).add(notification.id),
+        );
         if (notification.source === "speech") {
           dispatch(clearActiveSpeech());
         } else if (notification.source === "suggestion") {
-          setChatNotificationsMuted(true);
-          await dismissMutation(notification.id);
-          dispatch(dismissBuddySuggestion(notification.id));
+          await dismissMutation(notification.sourceId);
+          dispatch(dismissBuddySuggestion(notification.sourceId));
         } else if (notification.source === "runtime") {
-          setChatNotificationsMuted(true);
-          // Optimistically mark dismissed so the bubble disappears immediately,
-          // then persist to the backend so it stays dismissed across reloads/SSE.
-          dispatch(dismissRuntimeEvent(notification.id));
+          dispatch(dismissRuntimeEvent(notification.sourceId));
           try {
-            await dismissRuntimeMutation(notification.id).unwrap();
+            await dismissRuntimeMutation(notification.sourceId).unwrap();
           } catch {
-            // Server unavailable: local-state fallback below still hides it
-            // for this session.
+            return;
           }
-        } else {
-          setChatNotificationsMuted(true);
         }
-        setDismissedIds((prev) => new Set(prev).add(notification.id));
+        return;
+      }
+
+      if (ctrl.action === "dismiss_runtime_event") {
+        const runtimeEventId = ctrl.action_param?.trim()
+          ? ctrl.action_param.trim()
+          : notification.sourceId;
+        setDismissedNotificationIds((prev) =>
+          new Set(prev).add(notificationIdentity("runtime", runtimeEventId)),
+        );
+        dispatch(dismissRuntimeEvent(runtimeEventId));
+        try {
+          await dismissRuntimeMutation(runtimeEventId).unwrap();
+        } catch {
+          return;
+        }
         return;
       }
 
       if (ctrl.action === "open_buddy") {
-        setDismissedIds((prev) => new Set(prev).add(notification.id));
+        setDismissedNotificationIds((prev) =>
+          new Set(prev).add(notification.id),
+        );
         dispatch(push({ name: "buddy" }));
         return;
       }
 
       if (ctrl.action.startsWith("care_")) {
         await executeBuddyAction(ctrl, dispatch);
-        setDismissedIds((prev) => new Set(prev).add(notification.id));
+        setDismissedNotificationIds((prev) =>
+          new Set(prev).add(notification.id),
+        );
         return;
       }
 
@@ -438,9 +538,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           diagnostic: notification.diagnostic,
         });
         if (notification.source === "suggestion") {
-          dispatch(dismissBuddySuggestion(notification.id));
+          dispatch(dismissBuddySuggestion(notification.sourceId));
         }
-        setDismissedIds((prev) => new Set(prev).add(notification.id));
+        setDismissedNotificationIds((prev) =>
+          new Set(prev).add(notification.id),
+        );
         return;
       }
 
@@ -451,17 +553,14 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         setActionError(null);
         try {
           if (notification.source === "suggestion") {
-            await dismissMutation(notification.id);
-            dispatch(dismissBuddySuggestion(notification.id));
+            await dismissMutation(notification.sourceId);
+            dispatch(dismissBuddySuggestion(notification.sourceId));
           } else if (notification.source === "runtime") {
-            // Investigating an error implicitly resolves it — persist
-            // dismissal so the bubble doesn't reappear after the
-            // investigation chat opens.
-            dispatch(dismissRuntimeEvent(notification.id));
+            dispatch(dismissRuntimeEvent(notification.sourceId));
             try {
-              await dismissRuntimeMutation(notification.id).unwrap();
+              await dismissRuntimeMutation(notification.sourceId).unwrap();
             } catch {
-              // Non-fatal: local dismiss still hides it for this session.
+              return;
             }
           }
           await dispatch(
@@ -472,8 +571,9 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
               diagnostic: notification.diagnostic,
             }),
           );
-          setDismissedIds((prev) => new Set(prev).add(notification.id));
-          setChatNotificationsMuted(true);
+          setDismissedNotificationIds((prev) =>
+            new Set(prev).add(notification.id),
+          );
         } catch (error) {
           setActionError(formatOpportunityActionError(error));
         } finally {
@@ -486,7 +586,6 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       notification,
       pending,
       executeOpportunityAction,
-      activeOpportunities,
       dismissMutation,
       dismissRuntimeMutation,
       dispatch,
@@ -495,16 +594,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   );
 
   if (!enabled) return null;
-  if (!notification || isDismissed) return null;
-  if (
-    notification.source !== "speech" &&
-    (chatCooldownActive || chatNotificationsMuted)
-  ) {
-    return null;
-  }
+  if (!notification) return null;
 
   return (
-    <div className={styles.companion}>
+    <div className={styles.companion} data-notification-id={notification.id}>
       <BuddyCanvas
         state={buddy.state}
         onEvent={buddy.handleCanvasEvent}

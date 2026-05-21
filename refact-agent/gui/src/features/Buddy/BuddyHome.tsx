@@ -48,6 +48,7 @@ import {
 } from "./executeBuddyAction";
 import {
   buildBuddySceneSpeechCandidates,
+  isBuddySpeechExpired,
   pickBuddySceneSpeechCandidate,
   type BuddySceneSpeech,
 } from "./buddySceneSpeech";
@@ -369,7 +370,7 @@ export const BuddyHome: React.FC = () => {
   const homeNotificationsSnoozed =
     homeSnoozedUntil != null && homeSnoozedUntil > Date.now();
   const heroSpeechCandidates = useMemo(() => {
-    if (activeSpeech) {
+    if (activeSpeech && !isBuddySpeechExpired(activeSpeech)) {
       return [
         {
           id: `speech-${activeSpeech.id}`,
@@ -415,7 +416,9 @@ export const BuddyHome: React.FC = () => {
 
   const heroSpeech = useMemo(() => {
     if (heroSpeechCandidates.length === 0) return null;
-    if (activeSpeech) return heroSpeechCandidates[0] ?? null;
+    if (activeSpeech && !isBuddySpeechExpired(activeSpeech)) {
+      return heroSpeechCandidates[0] ?? null;
+    }
     return pickBuddySceneSpeechCandidate([
       heroSpeechCandidates[speechIndex % heroSpeechCandidates.length],
     ]);

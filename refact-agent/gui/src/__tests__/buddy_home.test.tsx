@@ -27,7 +27,10 @@ import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
 import { BuddySpeechCloud } from "../features/Buddy/BuddySpeechCloud";
 import { bubblePositionForSceneX } from "../features/Buddy/buddyWorldUtils";
 import { buildBuddyWorldState } from "../features/Buddy/buddyWorldModel";
-import { buildBuddySceneSpeech } from "../features/Buddy/buddySceneSpeech";
+import {
+  buildBuddySceneSpeech,
+  isBuddySpeechExpired,
+} from "../features/Buddy/buddySceneSpeech";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 import { PALETTES, STAGES } from "../features/Buddy/constants";
@@ -1937,6 +1940,35 @@ describe("buildBuddySceneSpeech", () => {
     expect(speech?.text).toBe(
       "Setup ready: Connect GitHub to enable issue sync.",
     );
+  });
+
+  it("ignores expired active speech before choosing home speech", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T00:01:00Z"));
+    try {
+      const expired = makeSpeech({
+        id: "expired-home-speech",
+        text: "Expired home speech",
+        ttl_seconds: 5,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const speech = buildBuddySceneSpeech({
+        activeSpeech: expired,
+        nowPlaying: makeRuntimeEvent({
+          id: "runtime-after-expired-speech",
+          title: "Runtime after expired speech",
+          created_at: "2024-01-01T00:00:59Z",
+        }),
+        runtimeQueue: [],
+        activeSuggestion: null,
+      });
+
+      expect(isBuddySpeechExpired(expired)).toBe(true);
+      expect(speech?.source).toBe("runtime");
+      expect(speech?.text).toBe("Runtime after expired speech");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("prioritizes critical queued failures over low-priority now playing", () => {

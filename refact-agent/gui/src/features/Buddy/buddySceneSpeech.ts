@@ -119,11 +119,16 @@ function runtimeEventToSpeech(
   };
 }
 
-function isSpeechExpired(speech: BuddySpeechItem): boolean {
+export function isBuddySpeechExpired(
+  speech: BuddySpeechItem,
+  nowMs = Date.now(),
+): boolean {
   if (speech.persistent) return false;
+  if (speech.ttl_seconds <= 0) return false;
   const createdAt = Date.parse(speech.created_at);
   if (!Number.isFinite(createdAt)) return false;
-  return Date.now() - createdAt > speech.ttl_seconds * 1000;
+  if (!Number.isFinite(nowMs)) return false;
+  return nowMs - createdAt > speech.ttl_seconds * 1000;
 }
 
 function suggestionToSpeech(
@@ -176,7 +181,7 @@ function runtimeCandidatesFromQueue(
       runtimeEventText(event).trim() !== "",
   );
 
-  return candidates.sort(compareRuntimeEvents).slice(0, 4);
+  return candidates.sort(compareBuddyRuntimeEvents).slice(0, 4);
 }
 
 function runtimePriorityScore(event: BuddyRuntimeEvent): number {
@@ -219,7 +224,7 @@ function runtimeCreatedAtMs(event: BuddyRuntimeEvent): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function compareRuntimeEvents(
+export function compareBuddyRuntimeEvents(
   left: BuddyRuntimeEvent,
   right: BuddyRuntimeEvent,
 ): number {
@@ -260,7 +265,7 @@ export function buildBuddySceneSpeech(args: {
   activeSuggestion?: BuddySuggestion | null;
   activeOpportunities?: BuddyOpportunity[];
 }): BuddySceneSpeech | null {
-  if (args.activeSpeech && !isSpeechExpired(args.activeSpeech)) {
+  if (args.activeSpeech && !isBuddySpeechExpired(args.activeSpeech)) {
     return {
       id: `speech-${args.activeSpeech.id}`,
       text: args.activeSpeech.text,

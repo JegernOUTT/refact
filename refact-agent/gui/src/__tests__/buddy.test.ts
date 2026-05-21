@@ -81,9 +81,12 @@ import {
 } from "../features/Buddy/reportBuddyFrontendError";
 import { BuddyErrorBoundary } from "../features/Buddy/BuddyErrorBoundary";
 import { getOpportunityDismissAction } from "../features/Buddy/buddyOpportunityActions";
-import { buildBuddySceneSpeech } from "../features/Buddy/buddySceneSpeech";
-
+import {
+  buildBuddySceneSpeech,
+  isBuddySpeechExpired,
+} from "../features/Buddy/buddySceneSpeech";
 const reducer = buddySlice.reducer;
+const buddyDir = path.join(__dirname, "../features/Buddy");
 
 type CapturedThunk = (
   dispatch: (action: unknown) => unknown,
@@ -270,6 +273,126 @@ function makePostMock() {
       Promise.resolve(undefined),
   );
 }
+
+function makeChatRuntimeEvent(
+  overrides?: Partial<BuddyRuntimeEvent>,
+): BuddyRuntimeEvent {
+  return {
+    id: "runtime-1",
+    signal_type: "chat_error",
+    title: "Runtime notice",
+    source: "chat",
+    status: "failed",
+    priority: "high",
+    created_at: new Date().toISOString(),
+    chat_id: "chat-a",
+    ...overrides,
+  };
+}
+
+function makeChatSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
+  return {
+    id: "speech-1",
+    text: "Fresh server speech",
+    mood: "happy",
+    scope: "global",
+    persistent: false,
+    ttl_seconds: 30,
+    created_at: new Date().toISOString(),
+    controls: [],
+    ...overrides,
+  };
+}
+
+describe("Buddy chat notification freshness", () => {
+  test("expired active speech is ignored by scene selection", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T00:01:00Z"));
+    try {
+      const expired = makeChatSpeech({
+        id: "expired-speech",
+        text: "Expired speech",
+        ttl_seconds: 5,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const runtime = makeChatRuntimeEvent({
+        id: "runtime-fresh",
+        title: "Fresh runtime",
+        created_at: "2024-01-01T00:00:59Z",
+      });
+
+      expect(isBuddySpeechExpired(expired)).toBe(true);
+      expect(
+        buildBuddySceneSpeech({
+          activeSpeech: expired,
+          nowPlaying: runtime,
+          runtimeQueue: [],
+        })?.runtimeEventId,
+      ).toBe("runtime-fresh");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("chat companion source uses stable notification identities", () => {
+    const source = fs.readFileSync(
+      path.join(buddyDir, "BuddyChatCompanion.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain('notificationIdentity("speech", activeSpeech.id)');
+    expect(source).toContain('notificationIdentity("runtime", event.id)');
+    expect(source).toContain(
+      'notificationIdentity("suggestion", suggestion.id)',
+    );
+    expect(source).toContain(
+      'notificationIdentity("opportunity", opportunity.id)',
+    );
+    expect(source).toContain('notificationIdentity("thread-error", chatId)');
+  });
+
+  test("chat companion source dedupes replayed notification ids", () => {
+    const source = fs.readFileSync(
+      path.join(buddyDir, "BuddyChatCompanion.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("seenNotificationIds");
+    expect(source).toContain("setSeenNotificationIds");
+    expect(source).toContain("!seenNotificationIds.has(id)");
+    expect(source).not.toContain("setInterval");
+    expect(source).not.toContain("12_000");
+    expect(source).not.toContain("15_000");
+    expect(source).not.toContain("data-testid");
+    expect(source).not.toContain("hidden>");
+  });
+
+  test("chat companion filters runtime events and sorts current candidates", () => {
+    const source = fs.readFileSync(
+      path.join(buddyDir, "BuddyChatCompanion.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("isBuddyRuntimeEventVisible(event)");
+    expect(source).toContain(".sort(compareBuddyRuntimeEvents)");
+    expect(source).toContain("runtimes.find((event) => {");
+    expect(source).toContain('event.priority === "critical"');
+  });
+
+  test("dismissing a chat notification hides only that notification", () => {
+    const source = fs.readFileSync(
+      path.join(buddyDir, "BuddyChatCompanion.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("setDismissedNotificationIds((prev) =>");
+    expect(source).toContain("new Set(prev).add(notification.id)");
+    expect(source).toContain(
+      "dispatch(dismissRuntimeEvent(notification.sourceId))",
+    );
+    expect(source).toContain("await dismissMutation(notification.sourceId)");
+  });
+});
 
 describe("buddySlice reducers", () => {
   test("setBuddySnapshot replaces snapshot state", () => {
@@ -1083,8 +1206,6 @@ describe("BuddyChatCompanion chat_id scoping", () => {
 });
 
 describe("BuddyPanel hero layout", () => {
-  const buddyDir = path.join(__dirname, "../features/Buddy");
-
   test("BuddyPanel does not render BuddyRecentChats", () => {
     const src = fs.readFileSync(path.join(buddyDir, "BuddyPanel.tsx"), "utf8");
     expect(src).not.toContain("BuddyRecentChats");
