@@ -1633,11 +1633,15 @@ async fn subchat_stream(
                     && !should_retry
                     && !abort_flag.load(Ordering::SeqCst)
                 {
+                    let original = error.message.clone();
                     warn!(
                         "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, error.message
+                        PARTIAL_OUTPUT_STREAM_ERROR, original
                     );
-                    error.message = PARTIAL_OUTPUT_STREAM_ERROR.to_string();
+                    error.message = format!(
+                        "{} Original error: {}",
+                        PARTIAL_OUTPUT_STREAM_ERROR, original
+                    );
                     monitor_error = Some(error.message.clone());
                 }
                 let event = LlmCallEvent {

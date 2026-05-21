@@ -701,10 +701,7 @@ pub fn start_generation(
                     continue;
                 }
 
-                if retry_decision.is_context_limit()
-                    && !error.partial_output_emitted
-                    && !abort_flag.load(Ordering::SeqCst)
-                {
+                if retry_decision.is_context_limit() && !abort_flag.load(Ordering::SeqCst) {
                     if context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
                         context_limit_compact_count += 1;
                         warn!(
@@ -728,11 +725,15 @@ pub fn start_generation(
                 }
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
+                    let original = error.message.clone();
                     warn!(
                         "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, error.message
+                        PARTIAL_OUTPUT_STREAM_ERROR, original
                     );
-                    error.message = PARTIAL_OUTPUT_STREAM_ERROR.to_string();
+                    error.message = format!(
+                        "{} Original error: {}",
+                        PARTIAL_OUTPUT_STREAM_ERROR, original
+                    );
                 }
 
                 let error_message = error.message;
