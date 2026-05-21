@@ -5,6 +5,7 @@
 // - Agent becomes stuck (no activity beyond threshold)
 // - Session ends in Error state without calling task_agent_finish
 
+use std::sync::Arc;
 use std::time::Duration;
 use std::process::Command;
 use std::path::Path;
@@ -13,12 +14,12 @@ use chrono::Utc;
 
 use crate::app_state::AppState;
 use crate::tasks::storage;
-use crate::tasks::types::StatusUpdate;
+use crate::tasks::types::{BoardCard, StatusUpdate};
 use crate::chat::retry_policy::{
     RetryDecision, UserErrorCategory, classify_llm_error_for_retry, classify_user_error,
     user_error_info,
 };
-use crate::chat::types::{SessionState, TaskMeta};
+use crate::chat::types::{ChatSession, SessionState, TaskMeta};
 use crate::chat::{get_or_create_session_with_trajectory, process_command_queue};
 use crate::chat::types::{CommandRequest, ChatCommand};
 use crate::worktrees::service::WorktreeService;
@@ -30,6 +31,16 @@ const AGENT_STUCK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// How often to check for stuck agents (5 minutes)
 const MONITOR_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+const MAX_IDLE_AGENT_NUDGES_PER_CARD: usize = 2;
+const IDLE_AGENT_NUDGE_GRACE: Duration = Duration::from_secs(60);
+const IDLE_AGENT_NUDGE_COOLDOWN_SECONDS: i64 = 300;
+const IDLE_AGENT_NUDGE_STATUS_PREFIX: &str = "Auto-nudged idle agent:";
+const IDLE_AGENT_REMINDER_MESSAGE: &str = concat!(
+    "Automatic reminder: this task card is still marked as doing, but your chat stopped without calling `task_agent_finish`.\n",
+    "Continue working if more changes are needed. If the task is complete, call `task_agent_finish(success=true, report=\"...\")`. ",
+    "If it cannot be completed, call `task_agent_finish(success=false, report=\"...\")`."
+);
 
 fn make_runtime_event(
     signal_type: &str,
@@ -59,6 +70,199 @@ fn make_runtime_event(
         chat_id: None,
         dismissed: false,
     }
+}
+
+fn idle_agent_nudge_updates(
+    card: &BoardCard,
+) -> (usize, Option<chrono::DateTime<Utc>>) {
+    let mut count = 0usize;
+    let mut latest = None;
+
+    for update in &card.status_updates {
+        if !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX) {
+            continue;
+        }
+        count += 1;
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&update.timestamp) {
+            let parsed = parsed.with_timezone(&Utc);
+            latest = Some(match latest {
+                Some(existing) if existing > parsed => existing,
+                _ => parsed,
+            });
+        }
+    }
+
+    (count, latest)
+}
+
+fn idle_agent_nudge_allowed_at(card: &BoardCard, now: chrono::DateTime<Utc>) -> bool {
+    let (count, latest) = idle_agent_nudge_updates(card);
+    if count >= MAX_IDLE_AGENT_NUDGES_PER_CARD {
+        return false;
+    }
+    if let Some(latest) = latest {
+        let since = now.signed_duration_since(latest).num_seconds();
+        if since < IDLE_AGENT_NUDGE_COOLDOWN_SECONDS {
+            return false;
+        }
+    }
+    true
+}
+
+fn linked_agent_session_matches(session: &ChatSession, task_id: &str, card: &BoardCard) -> bool {
+    let Some(meta) = session.thread.task_meta.as_ref() else {
+        return false;
+    };
+
+    if meta.role != "agents" || meta.task_id != task_id {
+        return false;
+    }
+    if meta.card_id.as_deref() != Some(card.id.as_str()) {
+        return false;
+    }
+    if card.assignee.as_deref() != meta.agent_id.as_deref() {
+        return false;
+    }
+    true
+}
+
+fn idle_agent_session_can_be_nudged(
+    session: &ChatSession,
+    task_id: &str,
+    card: &BoardCard,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if card.column != "doing" || card.agent_chat_id.is_none() {
+        return false;
+    }
+    if !linked_agent_session_matches(session, task_id, card) {
+        return false;
+    }
+    if !matches!(
+        session.runtime.state,
+        SessionState::Idle | SessionState::Completed
+    ) {
+        return false;
+    }
+    if session.closed
+        || session.draft_message.is_some()
+        || session.pending_browser_message.is_some()
+        || !session.command_queue.is_empty()
+        || !session.runtime.pause_reasons.is_empty()
+    {
+        return false;
+    }
+    if session
+        .user_interrupt_flag
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return false;
+    }
+    if session.last_activity.elapsed() < IDLE_AGENT_NUDGE_GRACE {
+        return false;
+    }
+    idle_agent_nudge_allowed_at(card, now)
+}
+
+async fn record_idle_agent_nudge(
+    app: AppState,
+    task_id: &str,
+    card_id: &str,
+    agent_chat_id: &str,
+    idle_for: Duration,
+) -> Result<bool, String> {
+    let card_id_owned = card_id.to_string();
+    let agent_chat_id_owned = agent_chat_id.to_string();
+    let now = Utc::now();
+    let timestamp = now.to_rfc3339();
+    let message = format!(
+        "{} {} (idle for {})",
+        IDLE_AGENT_NUDGE_STATUS_PREFIX,
+        agent_chat_id,
+        humantime::format_duration(idle_for)
+    );
+
+    storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
+        let card = board
+            .get_card_mut(&card_id_owned)
+            .ok_or_else(|| format!("Card {} not found", card_id_owned))?;
+        if card.column != "doing"
+            || card.agent_chat_id.as_deref() != Some(agent_chat_id_owned.as_str())
+            || card.assignee.is_none()
+            || !idle_agent_nudge_allowed_at(card, now)
+        {
+            return Ok(false);
+        }
+        card.last_heartbeat_at = Some(timestamp.clone());
+        card.status_updates.push(StatusUpdate {
+            timestamp: timestamp.clone(),
+            message: message.clone(),
+        });
+        Ok(true)
+    })
+    .await
+    .map(|(_, recorded)| recorded)
+}
+
+fn make_idle_agent_nudge_request() -> CommandRequest {
+    CommandRequest {
+        client_request_id: format!("idle-agent-nudge-{}", uuid::Uuid::new_v4()),
+        priority: true,
+        command: ChatCommand::UserMessage {
+            content: serde_json::Value::String(IDLE_AGENT_REMINDER_MESSAGE.to_string()),
+            attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+        },
+    }
+}
+
+async fn enqueue_idle_agent_nudge_command(
+    app: AppState,
+    session_arc: Arc<tokio::sync::Mutex<ChatSession>>,
+) -> Result<(), String> {
+    let processor_flag = {
+        let mut session = session_arc.lock().await;
+        if session.closed {
+            return Err(format!("Session {} is closed", session.chat_id));
+        }
+        session.command_queue.push_back(make_idle_agent_nudge_request());
+        session.emit_queue_update();
+        session.touch();
+        session.queue_notify.notify_one();
+        session.queue_processor_running.clone()
+    };
+
+    if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tokio::spawn(process_command_queue(
+            app.clone(),
+            session_arc.clone(),
+            processor_flag,
+        ));
+    }
+
+    Ok(())
+}
+
+async fn nudge_idle_agent(
+    app: AppState,
+    task_id: &str,
+    card_id: &str,
+    agent_chat_id: &str,
+    session_arc: Arc<tokio::sync::Mutex<ChatSession>>,
+    idle_for: Duration,
+) -> Result<bool, String> {
+    if !record_idle_agent_nudge(app.clone(), task_id, card_id, agent_chat_id, idle_for).await? {
+        return Ok(false);
+    }
+
+    enqueue_idle_agent_nudge_command(app, session_arc).await?;
+    tracing::info!(
+        "Auto-nudged idle task agent for card {} in chat {}",
+        card_id,
+        agent_chat_id
+    );
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -854,14 +1058,28 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                 continue;
             }
 
-            // Check for stuck agents (no activity for too long)
-            let last_activity = session.last_activity;
-            let elapsed = last_activity.elapsed();
+            let elapsed = session.last_activity.elapsed();
             let planner_chat_id = session
                 .thread
                 .task_meta
                 .as_ref()
                 .and_then(|meta| meta.planner_chat_id.clone());
+            let can_nudge = idle_agent_session_can_be_nudged(&session, task_id, card, Utc::now());
+
+            if can_nudge {
+                drop(session);
+
+                let _ = nudge_idle_agent(
+                    app.clone(),
+                    task_id,
+                    &card.id,
+                    agent_chat_id,
+                    session_arc.clone(),
+                    elapsed,
+                )
+                .await?;
+                continue;
+            }
 
             // If agent is idle and hasn't done anything in a long time, might be stuck
             if session.runtime.state == SessionState::Idle
@@ -899,7 +1117,11 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::types::{BoardCard, StatusUpdate};
+    use crate::tasks::types::{
+        BoardCard, StatusUpdate, TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus,
+    };
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
 
     fn create_test_card(id: &str, column: &str, assignee: Option<String>) -> BoardCard {
         let agent_chat_id = assignee.as_ref().map(|a| format!("agent-{}", a));
@@ -923,6 +1145,256 @@ mod tests {
             agent_worktree_name: None,
             target_files: vec![],
         }
+    }
+
+    fn make_test_agent_session(
+        task_id: &str,
+        card_id: &str,
+        agent_id: &str,
+        agent_chat_id: &str,
+        state: SessionState,
+        idle_for: Duration,
+    ) -> ChatSession {
+        let mut session = ChatSession::new(agent_chat_id.to_string());
+        session.thread.task_meta = Some(TaskMeta {
+            task_id: task_id.to_string(),
+            role: "agents".to_string(),
+            agent_id: Some(agent_id.to_string()),
+            card_id: Some(card_id.to_string()),
+            planner_chat_id: Some("planner-test".to_string()),
+        });
+        session.runtime.state = state;
+        session.last_activity = Instant::now()
+            .checked_sub(idle_for)
+            .unwrap_or_else(Instant::now);
+        session.queue_processor_running.store(true, Ordering::SeqCst);
+        session
+    }
+
+    async fn setup_monitor_case(
+        column: &str,
+        state: SessionState,
+        idle_for: Duration,
+        status_updates: Vec<StatusUpdate>,
+    ) -> (
+        tempfile::TempDir,
+        AppState,
+        String,
+        String,
+        Arc<tokio::sync::Mutex<ChatSession>>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *app.workspace.documents_state.workspace_folders.lock().unwrap() =
+            vec![temp.path().to_path_buf()];
+        let task = crate::tasks::storage::create_task(gcx.clone(), "Nudge task")
+            .await
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        let meta = StoredTaskMeta {
+            schema_version: 1,
+            id: task.id.clone(),
+            name: task.name.clone(),
+            status: TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 1,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: if column == "doing" { 1 } else { 0 },
+            base_branch: None,
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: true,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+        };
+        crate::tasks::storage::save_task_meta(gcx.clone(), &task.id, &meta)
+            .await
+            .unwrap();
+
+        let card_id = "T-1".to_string();
+        let agent_id = "agent-1".to_string();
+        let agent_chat_id = "agent-T-1".to_string();
+        let mut card = create_test_card(&card_id, column, Some(agent_id.clone()));
+        card.agent_chat_id = Some(agent_chat_id.clone());
+        card.status_updates = status_updates;
+        crate::tasks::storage::save_board(
+            gcx.clone(),
+            &task.id,
+            &TaskBoard {
+                cards: vec![card],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let session = make_test_agent_session(
+            &task.id,
+            &card_id,
+            &agent_id,
+            &agent_chat_id,
+            state,
+            idle_for,
+        );
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(agent_chat_id.clone(), session_arc.clone());
+
+        (temp, app, task.id, agent_chat_id, session_arc)
+    }
+
+    #[tokio::test]
+    async fn idle_doing_agent_without_finish_gets_nudged() {
+        let (_temp, app, task_id, agent_chat_id, session_arc) = setup_monitor_case(
+            "doing",
+            SessionState::Idle,
+            Duration::from_secs(90),
+            vec![],
+        )
+        .await;
+
+        check_for_stuck_agents(app.clone()).await.unwrap();
+
+        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.status_updates.iter().any(|update| {
+            update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
+                && update.message.contains(&agent_chat_id)
+        }));
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.command_queue.len(), 1);
+        let queued = session.command_queue.front().unwrap();
+        assert!(queued.priority);
+        match &queued.command {
+            ChatCommand::UserMessage { content, .. } => {
+                let text = content.as_str().unwrap();
+                assert!(text.contains("task_agent_finish(success=true, report=\"...\")"));
+                assert!(text.contains("task_agent_finish(success=false, report=\"...\")"));
+            }
+            _ => panic!("expected user message nudge"),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_agent_is_not_nudged() {
+        for state in [
+            SessionState::Generating,
+            SessionState::ExecutingTools,
+            SessionState::WaitingUserInput,
+            SessionState::WaitingIde,
+        ] {
+            let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+                "doing",
+                state,
+                Duration::from_secs(90),
+                vec![],
+            )
+            .await;
+
+            check_for_stuck_agents(app.clone()).await.unwrap();
+
+            let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+            let card = board.get_card("T-1").unwrap();
+            assert!(card.status_updates.iter().all(|update| {
+                !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
+            }));
+            assert!(session_arc.lock().await.command_queue.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn done_or_failed_card_is_not_nudged() {
+        for column in ["done", "failed"] {
+            let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+                column,
+                SessionState::Idle,
+                Duration::from_secs(90),
+                vec![],
+            )
+            .await;
+
+            check_for_stuck_agents(app.clone()).await.unwrap();
+
+            let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+            let card = board.get_card("T-1").unwrap();
+            assert!(card.status_updates.iter().all(|update| {
+                !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
+            }));
+            assert!(session_arc.lock().await.command_queue.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn nudge_rate_limit_prevents_spam() {
+        let recent = StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: format!("{} agent-T-1", IDLE_AGENT_NUDGE_STATUS_PREFIX),
+        };
+        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+            "doing",
+            SessionState::Idle,
+            Duration::from_secs(90),
+            vec![recent],
+        )
+        .await;
+
+        check_for_stuck_agents(app.clone()).await.unwrap();
+
+        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(idle_agent_nudge_updates(card).0, 1);
+        assert!(session_arc.lock().await.command_queue.is_empty());
+
+        let old_timestamp = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
+        let maxed_updates = (0..MAX_IDLE_AGENT_NUDGES_PER_CARD)
+            .map(|_| StatusUpdate {
+                timestamp: old_timestamp.clone(),
+                message: format!("{} agent-T-1", IDLE_AGENT_NUDGE_STATUS_PREFIX),
+            })
+            .collect::<Vec<_>>();
+        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+            "doing",
+            SessionState::Idle,
+            Duration::from_secs(90),
+            maxed_updates,
+        )
+        .await;
+
+        check_for_stuck_agents(app.clone()).await.unwrap();
+
+        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(idle_agent_nudge_updates(card).0, MAX_IDLE_AGENT_NUDGES_PER_CARD);
+        assert!(session_arc.lock().await.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nudge_triggers_regeneration_or_command_queue() {
+        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+            "doing",
+            SessionState::Completed,
+            Duration::from_secs(90),
+            vec![],
+        )
+        .await;
+        check_for_stuck_agents(app.clone()).await.unwrap();
+
+        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+        assert_eq!(idle_agent_nudge_updates(board.get_card("T-1").unwrap()).0, 1);
+        let session = session_arc.lock().await;
+        assert_eq!(session.command_queue.len(), 1);
+        assert_eq!(session.runtime.queue_size, 1);
+        assert!(matches!(
+            &session.command_queue.front().unwrap().command,
+            ChatCommand::UserMessage { .. }
+        ));
     }
 
     #[test]
