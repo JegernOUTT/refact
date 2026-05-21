@@ -347,7 +347,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
               {deferredReportMarkdown.length <= MAX_MD_RENDER_CHARS &&
               looksLikeMarkdown(deferredReportMarkdown) ? (
                 <Text size="2">
-                  <Markdown>{deferredReportMarkdown}</Markdown>
+                  <Markdown isStreaming={status === "running"}>
+                    {deferredReportMarkdown}
+                  </Markdown>
                 </Text>
               ) : (
                 <ShikiCodeBlock showLineNumbers={false}>

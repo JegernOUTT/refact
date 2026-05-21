@@ -294,6 +294,7 @@ export function subscribeToChatEvents(
   const abortController = new AbortController();
   const state = { connected: false };
   let abortReason: string | null = null;
+  let terminalErrorEmitted = false;
   let connectTimer: ReturnType<typeof setTimeout> | null = null;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -317,7 +318,9 @@ export function subscribeToChatEvents(
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       abortReason = abortReason ?? "SSE idle timeout";
+      emitTerminalError(abortReason);
       abortController.abort();
+      disconnect(false);
     }, idleTimeoutMs);
   };
 
@@ -328,9 +331,16 @@ export function subscribeToChatEvents(
     }
   };
 
+  const emitTerminalError = (message: string) => {
+    if (terminalErrorEmitted) return;
+    terminalErrorEmitted = true;
+    callbacks.onError(new Error(message));
+  };
+
   connectTimer = setTimeout(() => {
     if (!state.connected) {
       abortReason = abortReason ?? "SSE connect timeout";
+      emitTerminalError(abortReason);
       abortController.abort();
     }
   }, connectTimeoutMs);
@@ -434,7 +444,7 @@ export function subscribeToChatEvents(
       clearTimers();
       if (abortController.signal.aborted) {
         if (abortReason) {
-          callbacks.onError(new Error(abortReason));
+          emitTerminalError(abortReason);
         }
         abortReason = null;
         disconnect(false);
@@ -448,7 +458,7 @@ export function subscribeToChatEvents(
 
       if (error.name === "AbortError") {
         if (abortReason) {
-          callbacks.onError(new Error(abortReason));
+          emitTerminalError(abortReason);
         }
         abortReason = null;
         disconnect(true);

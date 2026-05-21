@@ -197,7 +197,9 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
             <Box className={styles.content}>
               {shouldRenderMarkdown ? (
                 <Text size="2">
-                  <Markdown>{deferredContent}</Markdown>
+                  <Markdown isStreaming={status === "running"}>
+                    {deferredContent}
+                  </Markdown>
                 </Text>
               ) : (
                 <ShikiCodeBlock showLineNumbers={false}>

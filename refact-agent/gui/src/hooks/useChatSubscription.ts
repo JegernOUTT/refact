@@ -4,6 +4,7 @@ import { useAppSelector } from "./useAppSelector";
 import {
   applyChatEvent,
   clearSseRefreshRequest,
+  markThreadSseError,
 } from "../features/Chat/Thread/actions";
 import { selectSseRefreshRequested } from "../features/Chat/Thread/selectors";
 import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
@@ -297,6 +298,14 @@ export function useChatSubscription(
     connectingRef.current = false;
   }, [clearStreamDeltaFlush, clearSubchatFlush]);
 
+  const markSseError = useCallback(
+    (err: Error) => {
+      if (!chatId) return;
+      dispatch(markThreadSseError({ id: chatId, error: err.message }));
+    },
+    [chatId, dispatch],
+  );
+
   const scheduleReconnect = useCallback(
     (delayMs: number) => {
       if (!autoReconnect || !enabled || !chatId || !port) return;
@@ -409,6 +418,7 @@ export function useChatSubscription(
           flushPendingStreamDelta();
           clearSubchatFlush();
           flushPendingSubchatUpdate();
+          markSseError(err);
           connectingRef.current = false;
           setStatus("disconnected");
           setError(err);
@@ -430,6 +440,7 @@ export function useChatSubscription(
     enqueueStreamDelta,
     flushPendingSubchatUpdate,
     flushPendingStreamDelta,
+    markSseError,
     dispatch,
     scheduleReconnect,
     reconnectDelay,

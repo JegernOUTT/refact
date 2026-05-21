@@ -426,6 +426,11 @@ export const setIsWaitingForResponse = createAction<{
   value: boolean;
 }>("chatThread/setIsWaiting");
 
+export const markThreadSseError = createAction<{
+  id: string;
+  error: string;
+}>("chatThread/markSseError");
+
 export const setMaxNewTokens = createAction<number>(
   "chatThread/setMaxNewTokens",
 );

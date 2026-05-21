@@ -16,6 +16,22 @@ import { useAppearance } from "../../hooks/useAppearance";
 import { reportBuddyFrontendError } from "../../features/Buddy/reportBuddyFrontendError";
 
 let mermaidInitialized: "dark" | "light" | null = null;
+const REPORTED_MERMAID_ERRORS = new Map<string, number>();
+const MERMAID_ERROR_REPORT_INTERVAL_MS = 60_000;
+const MAX_REPORTED_MERMAID_ERRORS = 50;
+
+function shouldReportMermaidError(key: string): boolean {
+  const now = Date.now();
+  const previous = REPORTED_MERMAID_ERRORS.get(key) ?? 0;
+  if (now - previous < MERMAID_ERROR_REPORT_INTERVAL_MS) return false;
+
+  REPORTED_MERMAID_ERRORS.set(key, now);
+  if (REPORTED_MERMAID_ERRORS.size > MAX_REPORTED_MERMAID_ERRORS) {
+    const oldest = REPORTED_MERMAID_ERRORS.keys().next().value;
+    if (oldest) REPORTED_MERMAID_ERRORS.delete(oldest);
+  }
+  return true;
+}
 
 async function getMermaid(theme: "dark" | "light") {
   const mermaid = (await import("mermaid")).default;
@@ -178,12 +194,15 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
         if (!cancelled) {
           const msg = err instanceof Error ? err.message : String(err);
           setError(msg);
-          void reportBuddyFrontendError({
-            source: "mermaid_render",
-            error: `${msg}\n\n${code}`,
-            sourceFile: "frontend/mermaid_render",
-            toolName: "mermaid_render",
-          });
+          const reportKey = `${msg}\n${code}`.slice(0, 2000);
+          if (shouldReportMermaidError(reportKey)) {
+            void reportBuddyFrontendError({
+              source: "mermaid_render",
+              error: `${msg}\n\n${code}`,
+              sourceFile: "frontend/mermaid_render",
+              toolName: "mermaid_render",
+            });
+          }
           setRawSvg(null);
           setSvgMeta(null);
         }

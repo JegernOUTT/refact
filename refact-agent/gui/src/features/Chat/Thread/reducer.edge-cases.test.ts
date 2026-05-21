@@ -2,7 +2,7 @@
 import { expect, test, describe, beforeEach } from "vitest";
 import { chatReducer } from "./reducer";
 import type { Chat } from "./types";
-import { newChatAction, applyChatEvent } from "./actions";
+import { newChatAction, applyChatEvent, markThreadSseError } from "./actions";
 import type { ChatEventEnvelope } from "../../../services/refact/chatSubscription";
 import type { ChatMessage } from "../../../services/refact/types";
 
@@ -347,6 +347,40 @@ describe("Chat Thread Reducer - Edge Cases", () => {
 
       expect((msg?.extra as any)?.metering_a).toBe(150);
       expect((msg?.extra as any)?.metering_b).toBe(200);
+    });
+  });
+
+  describe("SSE error recovery", () => {
+    test("should clear streaming and waiting state on subscription errors", () => {
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([{ role: "user", content: "Hello" }])),
+      );
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "stream_started",
+          message_id: "msg-stalled",
+        }),
+      );
+
+      expect(state.threads[chatId]!.streaming).toBe(true);
+      expect(state.threads[chatId]!.waiting_for_response).toBe(true);
+
+      state = chatReducer(
+        state,
+        markThreadSseError({ id: chatId, error: "SSE idle timeout" }),
+      );
+
+      const runtime = state.threads[chatId]!;
+      expect(runtime.streaming).toBe(false);
+      expect(runtime.waiting_for_response).toBe(false);
+      expect(runtime.session_state).toBe("error");
+      expect(runtime.error).toBe("SSE idle timeout");
+      expect(runtime.prevent_send).toBe(false);
     });
   });
 

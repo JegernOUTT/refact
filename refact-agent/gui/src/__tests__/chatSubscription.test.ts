@@ -259,5 +259,44 @@ describe("chatSubscription", () => {
 
       expect(onDisconnected).toHaveBeenCalled();
     });
+
+    it("should call onError on idle timeout", async () => {
+      vi.useFakeTimers();
+      const onError = vi.fn();
+      const pendingRead = new Promise<{
+        done: boolean;
+        value: Uint8Array | undefined;
+      }>((resolve) => {
+        void resolve;
+      });
+      const read = vi.fn(() => pendingRead);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({ read }),
+        },
+      });
+
+      const unsubscribe = subscribeToChatEvents(
+        "test",
+        8001,
+        {
+          onEvent: vi.fn(),
+          onError,
+        },
+        undefined,
+        { idleTimeoutMs: 10 },
+      );
+
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "SSE idle timeout" }),
+      );
+      unsubscribe();
+      vi.useRealTimers();
+    });
   });
 });

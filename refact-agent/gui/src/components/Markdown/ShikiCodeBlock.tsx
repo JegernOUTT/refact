@@ -109,7 +109,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
     return {};
   }, [onCopyClick, textWithOutIndent]);
 
-  if (isBlock && DIAGRAM_LANGUAGES.has(language)) {
+  if (isBlock && DIAGRAM_LANGUAGES.has(language) && !isStreaming) {
     const diagramCode = textWithOutIndent ?? String(children);
     if (language === "mermaid") {
       return <MermaidBlock code={diagramCode} onCopyClick={onCopyClick} />;

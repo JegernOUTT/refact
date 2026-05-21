@@ -4,6 +4,7 @@ import { useAppSelector } from "./useAppSelector";
 import {
   applyChatEvent,
   clearSseRefreshRequest,
+  markThreadSseError,
 } from "../features/Chat/Thread/actions";
 import {
   selectCurrentThreadId,
@@ -446,6 +447,7 @@ export function useAllChatsSubscription() {
             flushPendingStreamDeltaForChatRef.current?.(chatId);
             clearSubchatFlushForChat(chatId);
             flushPendingSubchatUpdateForChat(chatId);
+            dispatch(markThreadSseError({ id: chatId, error: error.message }));
             subscriptionsRef.current.delete(chatId);
             clearChatStreamState(chatId);
             const count = (retryCountRef.current.get(chatId) ?? 0) + 1;

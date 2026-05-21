@@ -32,6 +32,7 @@ import {
   setChatMode,
   setIntegrationData,
   setIsWaitingForResponse,
+  markThreadSseError,
   setMaxNewTokens,
   setAutoApproveEditingTools,
   setAutoApproveDangerousCommands,
@@ -935,6 +936,24 @@ export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(setIsWaitingForResponse, (state, action) => {
     const rt = getRuntime(state, action.payload.id);
     if (rt) rt.waiting_for_response = action.payload.value;
+  });
+
+  builder.addCase(markThreadSseError, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (!rt) return;
+    const wasBusy =
+      rt.streaming ||
+      rt.waiting_for_response ||
+      rt.session_state === "generating" ||
+      rt.session_state === "executing_tools" ||
+      rt.session_state === "waiting_ide";
+    if (!wasBusy) return;
+
+    rt.streaming = false;
+    rt.waiting_for_response = false;
+    rt.prevent_send = false;
+    rt.session_state = "error";
+    rt.error = action.payload.error;
   });
 
   builder.addCase(setMaxNewTokens, (state, action) => {
