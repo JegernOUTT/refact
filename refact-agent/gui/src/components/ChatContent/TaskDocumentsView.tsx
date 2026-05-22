@@ -125,9 +125,7 @@ function parseDocument(markdown: string): ParsedDocument {
 
 function hasParsedDocumentContent(document: ParsedDocument): boolean {
   if (document.body.trim().length > 0) return true;
-  return Object.values(document.meta).some(
-    (value) => (value ?? "").trim().length > 0,
-  );
+  return Object.values(document.meta).some((value) => value.trim().length > 0);
 }
 
 const RawMarkdownFallback: React.FC<{ content: string; notice: string }> = ({
@@ -280,6 +278,7 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
   }, [isStreaming, isWaiting, maybeResult]);
 
   return (
+    <div data-testid="task-documents-view" style={{ display: "contents" }}>
     <ToolCard
       icon={<FileTextIcon />}
       summary={toolType === "doc_list" ? "Task documents" : "Task document"}
@@ -297,6 +296,7 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
         <TaskDocumentsContent toolType={toolType} content={content} />
       )}
     </ToolCard>
+    </div>
   );
 };
 

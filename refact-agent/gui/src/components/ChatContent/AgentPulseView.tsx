@@ -384,6 +384,7 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   );
 
   return (
+    <div data-testid="agent-pulse-view" style={{ display: "contents" }}>
     <ToolCard
       icon={<LapTimerIcon />}
       summary={report ? `Agent pulse: ${report.cardId}` : "Agent pulse"}
@@ -403,6 +404,7 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
         <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
       ) : null}
     </ToolCard>
+    </div>
   );
 };
 

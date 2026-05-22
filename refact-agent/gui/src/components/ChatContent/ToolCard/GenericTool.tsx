@@ -94,6 +94,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
     content && content.length <= 50000 && looksLikeMarkdown(content);
 
   return (
+    <div data-testid="generic-tool" style={{ display: "contents" }}>
     <ToolCard
       icon={<GearIcon />}
       summary={summary}
@@ -114,6 +115,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
         </Box>
       )}
     </ToolCard>
+    </div>
   );
 };
 

@@ -167,7 +167,7 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
     );
 
   return (
-    <Box className={styles.root}>
+    <Box className={styles.root} data-testid="final-report-view">
       <Flex justify="between" align="center" gap="2" className={styles.header}>
         <Text weight="medium" className={styles.title}>
           {title}
