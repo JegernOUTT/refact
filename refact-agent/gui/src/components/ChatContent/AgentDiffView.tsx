@@ -219,22 +219,22 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
 
   return (
     <>
-    <span data-testid="agent-diff-view" hidden />
-    <ToolCard
-      icon={<GitHubLogoIcon />}
-      summary={report ? `Agent diff: ${report.cardId}` : "Agent diff"}
-      meta={meta}
-      status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {report ? (
-        <AgentDiffContent report={report} />
-      ) : content ? (
-        <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-      ) : null}
-    </ToolCard>
+      <span data-testid="agent-diff-view" hidden />
+      <ToolCard
+        icon={<GitHubLogoIcon />}
+        summary={report ? `Agent diff: ${report.cardId}` : "Agent diff"}
+        meta={meta}
+        status={status}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        {report ? (
+          <AgentDiffContent report={report} />
+        ) : content ? (
+          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+        ) : null}
+      </ToolCard>
     </>
   );
 };

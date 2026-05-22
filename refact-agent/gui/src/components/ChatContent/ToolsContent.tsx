@@ -115,7 +115,8 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
   const reportSuccess = finalReportSuccess(content);
-  const status = toolFailed || reportSuccess === false ? "error" : "success";
+  const isError = Boolean(toolFailed) || reportSuccess === false;
+  const status = isError ? "error" : "success";
   const statusIcon =
     status === "error" ? (
       <CrossCircledIcon data-testid="final-report-tool-error-icon" />

@@ -10,7 +10,10 @@ import {
   Text,
   TextField,
 } from "@radix-ui/themes";
-import { ExclamationTriangleIcon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
+import {
+  ExclamationTriangleIcon,
+  MagnifyingGlassIcon,
+} from "@radix-ui/react-icons";
 import classNames from "classnames";
 import {
   taskMemoriesApi,
@@ -74,7 +77,9 @@ function optimisticKey(taskId: string, filename: string): string {
   return `${taskId}:${filename}`;
 }
 
-export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) => {
+export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
+  taskId,
+}) => {
   const dispatch = useAppDispatch();
   const [kind, setKind] = useState(ALL_VALUE);
   const [namespace, setNamespace] = useState(ALL_VALUE);
@@ -85,10 +90,12 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
   const [optimisticPinned, setOptimisticPinned] = useState<
     ReadonlyMap<string, boolean>
   >(() => new Map());
-  const [archived, setArchived] = useState<ReadonlySet<string>>(() => new Set());
-  const [pendingMemoryKeys, setPendingMemoryKeys] = useState<ReadonlySet<string>>(
+  const [archived, setArchived] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [pendingMemoryKeys, setPendingMemoryKeys] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const debouncedSearch = useDebouncedValue(search, 200);
 
   useEffect(() => {
@@ -124,8 +131,11 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
       }));
   }, [archived, data?.memories, optimisticPinned, taskId]);
 
-  const namespaces = facets?.namespaces ?? [];
-  const tags = facets?.tags ?? [];
+  const namespaces = useMemo(
+    () => facets?.namespaces ?? [],
+    [facets?.namespaces],
+  );
+  const tags = useMemo(() => facets?.tags ?? [], [facets?.tags]);
 
   const selectedTagList = useMemo(
     () => [...selectedTags].sort((a, b) => a.localeCompare(b)),
@@ -258,7 +268,10 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
       <Flex direction="column" gap="2" className={styles.filters}>
         <Flex gap="2" wrap="wrap" align="center">
           <Select.Root value={kind} onValueChange={setKind} size="1">
-            <Select.Trigger aria-label="Memory kind filter" className={styles.filterControl} />
+            <Select.Trigger
+              aria-label="Memory kind filter"
+              className={styles.filterControl}
+            />
             <Select.Content>
               <Select.Item value={ALL_VALUE}>All kinds</Select.Item>
               {MEMORY_KINDS.map((item) => (

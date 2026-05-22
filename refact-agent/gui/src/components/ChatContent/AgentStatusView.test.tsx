@@ -1,5 +1,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "../../utils/test-utils";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "../../utils/test-utils";
 import {
   filterAgentStatusRows,
   formatAgentActionCommand,
@@ -94,7 +100,9 @@ describe("AgentStatusContent", () => {
     await waitFor(() => {
       const table = screen.getByRole("table");
       expect(within(table).getByText("paused-card")).toBeInTheDocument();
-      expect(within(table).queryByText("implement-render")).not.toBeInTheDocument();
+      expect(
+        within(table).queryByText("implement-render"),
+      ).not.toBeInTheDocument();
     });
   });
 

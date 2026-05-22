@@ -157,7 +157,9 @@ describe("AgentDiffContent", () => {
 
     fireEvent.click(screen.getByText("src/new-name.ts"));
 
-    expect(screen.getByText("No diff hunks for this file.")).toBeInTheDocument();
+    expect(
+      screen.getByText("No diff hunks for this file."),
+    ).toBeInTheDocument();
     expect(screen.queryByText("old value")).not.toBeInTheDocument();
   });
 });

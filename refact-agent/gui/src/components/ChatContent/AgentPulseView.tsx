@@ -385,26 +385,26 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
 
   return (
     <>
-    <span data-testid="agent-pulse-view" hidden />
-    <ToolCard
-      icon={<LapTimerIcon />}
-      summary={report ? `Agent pulse: ${report.cardId}` : "Agent pulse"}
-      meta={report?.state}
-      status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {report ? (
-        <AgentPulseContent
-          report={report}
-          onSubmitCommand={handleSubmitCommand}
-          actionsDisabled={!chatId || !port}
-        />
-      ) : content ? (
-        <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-      ) : null}
-    </ToolCard>
+      <span data-testid="agent-pulse-view" hidden />
+      <ToolCard
+        icon={<LapTimerIcon />}
+        summary={report ? `Agent pulse: ${report.cardId}` : "Agent pulse"}
+        meta={report?.state}
+        status={status}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        {report ? (
+          <AgentPulseContent
+            report={report}
+            onSubmitCommand={handleSubmitCommand}
+            actionsDisabled={!chatId || !port}
+          />
+        ) : content ? (
+          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+        ) : null}
+      </ToolCard>
     </>
   );
 };

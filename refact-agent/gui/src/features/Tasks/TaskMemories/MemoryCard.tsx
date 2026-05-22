@@ -64,7 +64,12 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
       data-testid={`memory-card-${memory.filename}`}
     >
       <Flex direction="column" gap="2">
-        <Flex justify="between" align="start" gap="2" className={styles.cardHeader}>
+        <Flex
+          justify="between"
+          align="start"
+          gap="2"
+          className={styles.cardHeader}
+        >
           <Flex direction="column" gap="1" className={styles.cardHeader}>
             <Flex gap="2" align="center" className={styles.cardHeader}>
               <Badge color={KIND_COLORS[memory.kind]} variant="soft">
@@ -103,7 +108,12 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
         )}
 
         <Flex gap="2" wrap="wrap" className={styles.actions}>
-          <Button size="1" variant="soft" onClick={handlePin} disabled={disabled}>
+          <Button
+            size="1"
+            variant="soft"
+            onClick={handlePin}
+            disabled={disabled}
+          >
             {memory.pinned ? "Unpin" : "Pin"}
           </Button>
           <Button

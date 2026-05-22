@@ -95,27 +95,27 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
 
   return (
     <>
-    <span data-testid="generic-tool" hidden />
-    <ToolCard
-      icon={<GearIcon />}
-      summary={summary}
-      status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {content && (
-        <Box className={styles.resultContent}>
-          {shouldRenderMarkdown ? (
-            <Box className={styles.markdownContent}>
-              <Markdown>{content}</Markdown>
-            </Box>
-          ) : (
-            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-          )}
-        </Box>
-      )}
-    </ToolCard>
+      <span data-testid="generic-tool" hidden />
+      <ToolCard
+        icon={<GearIcon />}
+        summary={summary}
+        status={status}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        {content && (
+          <Box className={styles.resultContent}>
+            {shouldRenderMarkdown ? (
+              <Box className={styles.markdownContent}>
+                <Markdown>{content}</Markdown>
+              </Box>
+            ) : (
+              <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+            )}
+          </Box>
+        )}
+      </ToolCard>
     </>
   );
 };

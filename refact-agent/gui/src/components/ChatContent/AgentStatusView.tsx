@@ -614,26 +614,26 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
 
   return (
     <>
-    <span data-testid="agent-status-view" hidden />
-    <ToolCard
-      icon={<GearIcon />}
-      summary={summary}
-      meta={meta}
-      status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {report ? (
-        <AgentStatusContent
-          report={report}
-          onSubmitCommand={handleSubmitCommand}
-          actionsDisabled={!chatId || !port}
-        />
-      ) : content ? (
-        <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-      ) : null}
-    </ToolCard>
+      <span data-testid="agent-status-view" hidden />
+      <ToolCard
+        icon={<GearIcon />}
+        summary={summary}
+        meta={meta}
+        status={status}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        {report ? (
+          <AgentStatusContent
+            report={report}
+            onSubmitCommand={handleSubmitCommand}
+            actionsDisabled={!chatId || !port}
+          />
+        ) : content ? (
+          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+        ) : null}
+      </ToolCard>
     </>
   );
 };

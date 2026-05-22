@@ -174,9 +174,11 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId, filename, pinned }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${state.config.lspPort}/v1/task/${encodeURIComponent(
-            taskId,
-          )}/memories/${encodeURIComponent(filename)}/pin`,
+          url: `http://127.0.0.1:${
+            state.config.lspPort
+          }/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
+            filename,
+          )}/pin`,
           method: "POST",
           body: { pinned },
         });
@@ -195,9 +197,11 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId, filename }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${state.config.lspPort}/v1/task/${encodeURIComponent(
-            taskId,
-          )}/memories/${encodeURIComponent(filename)}/archive`,
+          url: `http://127.0.0.1:${
+            state.config.lspPort
+          }/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
+            filename,
+          )}/archive`,
           method: "POST",
         });
         if (result.error) return { error: result.error };
@@ -215,9 +219,9 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId, cursor }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${state.config.lspPort}/v1/task/${encodeURIComponent(
-            taskId,
-          )}/memories/triage-done`,
+          url: `http://127.0.0.1:${
+            state.config.lspPort
+          }/v1/task/${encodeURIComponent(taskId)}/memories/triage-done`,
           method: "POST",
           body: { cursor },
         });

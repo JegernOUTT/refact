@@ -65,7 +65,9 @@ describe("MemoryInboxPanel", () => {
       preloadedState: CONFIG_STATE,
     });
 
-    expect(await screen.findByText("Use scoped memory index")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Use scoped memory index"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Archive stale notes")).toBeInTheDocument();
     expect(screen.getByText(/5 new since/)).toBeInTheDocument();
     expect(screen.getByText("pinned")).toBeInTheDocument();
@@ -116,10 +118,13 @@ describe("MemoryInboxPanel", () => {
     const queryStrings: string[] = [];
     mockMemories();
     server.use(
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", ({ request }) => {
-        queryStrings.push(new URL(request.url).search);
-        return HttpResponse.json(memoriesResponse);
-      }),
+      http.get(
+        "http://127.0.0.1:8001/v1/task/:taskId/memories",
+        ({ request }) => {
+          queryStrings.push(new URL(request.url).search);
+          return HttpResponse.json(memoriesResponse);
+        },
+      ),
     );
 
     const { user } = render(<MemoryInboxPanel taskId="task-1" />, {
@@ -127,7 +132,9 @@ describe("MemoryInboxPanel", () => {
     });
 
     await screen.findByText("Use scoped memory index");
-    await user.click(screen.getByRole("combobox", { name: "Memory kind filter" }));
+    await user.click(
+      screen.getByRole("combobox", { name: "Memory kind filter" }),
+    );
     await user.click(await screen.findByRole("option", { name: "risk" }));
     await user.click(
       screen.getByRole("combobox", { name: "Memory namespace filter" }),
@@ -142,21 +149,29 @@ describe("MemoryInboxPanel", () => {
       expect(
         queryStrings.some((query) => query.includes("namespace=card%3AT-2")),
       ).toBe(true);
-      expect(screen.queryByText("Use scoped memory index")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("Use scoped memory index"),
+      ).not.toBeInTheDocument();
       expect(screen.getByText("Archive stale notes")).toBeInTheDocument();
     });
   });
 
   it("memory_inbox_filter_options_persist_under_active_filters", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", ({ request }) => {
-        const url = new URL(request.url);
-        const response =
-          url.searchParams.get("kind") === "risk"
-            ? { ...memoriesResponse, memories: [memoriesResponse.memories[1]] }
-            : memoriesResponse;
-        return HttpResponse.json(response);
-      }),
+      http.get(
+        "http://127.0.0.1:8001/v1/task/:taskId/memories",
+        ({ request }) => {
+          const url = new URL(request.url);
+          const response =
+            url.searchParams.get("kind") === "risk"
+              ? {
+                  ...memoriesResponse,
+                  memories: [memoriesResponse.memories[1]],
+                }
+              : memoriesResponse;
+          return HttpResponse.json(response);
+        },
+      ),
     );
 
     const { user } = render(<MemoryInboxPanel taskId="task-1" />, {
@@ -164,20 +179,28 @@ describe("MemoryInboxPanel", () => {
     });
 
     await screen.findByText("Use scoped memory index");
-    await user.click(screen.getByRole("combobox", { name: "Memory kind filter" }));
+    await user.click(
+      screen.getByRole("combobox", { name: "Memory kind filter" }),
+    );
     await user.click(await screen.findByRole("option", { name: "risk" }));
 
     await waitFor(() => {
-      expect(screen.queryByText("Use scoped memory index")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("Use scoped memory index"),
+      ).not.toBeInTheDocument();
       expect(screen.getByText("Archive stale notes")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "planner" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "planner" }),
+      ).toBeInTheDocument();
     });
 
     await user.click(
       screen.getByRole("combobox", { name: "Memory namespace filter" }),
     );
 
-    expect(await screen.findByRole("option", { name: "task" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("option", { name: "task" }),
+    ).toBeInTheDocument();
   });
 
   it("search filters client-side", async () => {
@@ -191,7 +214,9 @@ describe("MemoryInboxPanel", () => {
     await user.type(screen.getByLabelText("Search memories"), "stale");
 
     await waitFor(() => {
-      expect(screen.queryByText("Use scoped memory index")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("Use scoped memory index"),
+      ).not.toBeInTheDocument();
       expect(screen.getByText("Archive stale notes")).toBeInTheDocument();
     });
   });
@@ -210,8 +235,9 @@ describe("MemoryInboxPanel", () => {
           ],
         }),
       ),
-      http.post("http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin", () =>
-        new Promise<HttpResponse>(() => undefined),
+      http.post(
+        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        () => new Promise<HttpResponse>(() => undefined),
       ),
     );
 
@@ -220,12 +246,18 @@ describe("MemoryInboxPanel", () => {
     });
 
     await user.click(await screen.findByRole("button", { name: "Pin" }));
-    expect(await screen.findByRole("button", { name: "Unpin" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Unpin" }),
+    ).toBeInTheDocument();
 
     rerender(<MemoryInboxPanel taskId="task-2" />);
 
-    expect(await screen.findByRole("button", { name: "Pin" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Unpin" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Pin" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Unpin" }),
+    ).not.toBeInTheDocument();
   });
 
   it("memory_inbox_pin_disabled_while_in_flight", async () => {
@@ -296,7 +328,9 @@ describe("MemoryInboxPanel", () => {
       preloadedState: CONFIG_STATE,
     });
 
-    await user.click(await screen.findByRole("button", { name: "Mark all triaged" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Mark all triaged" }),
+    );
 
     await waitFor(() => {
       expect(triageRequests).toHaveLength(1);

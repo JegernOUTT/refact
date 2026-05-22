@@ -185,7 +185,9 @@ describe("FinalReportView", () => {
   });
 
   it("keeps verification output tails expandable", () => {
-    const { container } = render(<FinalReportView content={structuredPayload} />);
+    const { container } = render(
+      <FinalReportView content={structuredPayload} />,
+    );
     const details = screen
       .getByText("npm run test -- FinalReportView --run")
       .closest("details");

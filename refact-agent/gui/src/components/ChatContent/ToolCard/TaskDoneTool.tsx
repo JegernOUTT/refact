@@ -31,15 +31,15 @@ function extractTaskDoneReport(content: string): ReportData | null {
 export const TaskDoneTool: React.FC<TaskDoneToolProps> = ({ toolCall }) => {
   return (
     <>
-    <span data-testid="task-done-tool" hidden />
-    <ReportToolCard
-      toolCall={toolCall}
-      icon={<CheckCircledIcon />}
-      defaultSummary="Task completed"
-      variant="taskDone"
-      extractReport={extractTaskDoneReport}
-      defaultOpen={false}
-    />
+      <span data-testid="task-done-tool" hidden />
+      <ReportToolCard
+        toolCall={toolCall}
+        icon={<CheckCircledIcon />}
+        defaultSummary="Task completed"
+        variant="taskDone"
+        extractReport={extractTaskDoneReport}
+        defaultOpen={false}
+      />
     </>
   );
 };

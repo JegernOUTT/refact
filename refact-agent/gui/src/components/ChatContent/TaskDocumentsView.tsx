@@ -317,24 +317,24 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
 
   return (
     <>
-    <span data-testid="task-documents-view" hidden />
-    <ToolCard
-      icon={<FileTextIcon />}
-      summary={toolType === "doc_list" ? "Task documents" : "Task document"}
-      meta={
-        toolType === "doc_list" && content && rows.length > 0
-          ? `${rows.length} documents`
-          : undefined
-      }
-      status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {content && (
-        <TaskDocumentsContent toolType={toolType} content={content} />
-      )}
-    </ToolCard>
+      <span data-testid="task-documents-view" hidden />
+      <ToolCard
+        icon={<FileTextIcon />}
+        summary={toolType === "doc_list" ? "Task documents" : "Task document"}
+        meta={
+          toolType === "doc_list" && content && rows.length > 0
+            ? `${rows.length} documents`
+            : undefined
+        }
+        status={status}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        {content && (
+          <TaskDocumentsContent toolType={toolType} content={content} />
+        )}
+      </ToolCard>
     </>
   );
 };
