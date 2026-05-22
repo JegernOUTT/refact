@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Local, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
@@ -28,6 +28,9 @@ use crate::tools::tools_description::{
 
 const MEMORIES_DIR: &str = "memories";
 const ARCHIVED_MEMORIES_DIR: &str = "archived";
+const MEMORY_INBOX_CURSOR_FILE: &str = ".mem_inbox_cursor";
+const DEFAULT_INBOX_LIMIT: usize = 20;
+const STALE_PROGRESS_DAYS: i64 = 7;
 const MAX_MEMORIES_CHARS: usize = 120_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -705,6 +708,316 @@ fn memory_reference_stem(reference: &str) -> String {
         .to_string()
 }
 
+fn task_memory_cursor_path(task_dir: &Path) -> PathBuf {
+    task_dir.join(MEMORY_INBOX_CURSOR_FILE)
+}
+
+async fn read_memory_inbox_cursor(task_dir: &Path) -> Result<Option<DateTime<Utc>>, String> {
+    let path = task_memory_cursor_path(task_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Failed to read memory inbox cursor: {}", e))?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    parse_rfc3339_utc(trimmed).map(Some)
+}
+
+async fn write_memory_inbox_cursor(task_dir: &Path, cursor: DateTime<Utc>) -> Result<(), String> {
+    fs::create_dir_all(task_dir)
+        .await
+        .map_err(|e| format!("Failed to create task directory: {}", e))?;
+    atomic_write_text(&task_memory_cursor_path(task_dir), &cursor.to_rfc3339()).await
+}
+
+fn parse_rfc3339_utc(value: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|e| format!("Invalid rfc3339 timestamp `{}`: {}", value, e))
+}
+
+fn memory_created_at(frontmatter: &TaskMemoryFrontmatter) -> Option<DateTime<Utc>> {
+    frontmatter
+        .created_at
+        .as_deref()
+        .and_then(|value| parse_rfc3339_utc(value).ok())
+}
+
+#[derive(Debug, Clone)]
+struct TaskMemoryInboxEntry {
+    path: PathBuf,
+    frontmatter: TaskMemoryFrontmatter,
+    body: String,
+    created_at: DateTime<Utc>,
+}
+
+impl TaskMemoryInboxEntry {
+    fn memory_id(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
+    fn title(&self) -> String {
+        self.frontmatter
+            .title
+            .clone()
+            .or_else(|| {
+                self.body.lines().find_map(|line| {
+                    line.trim()
+                        .strip_prefix("# ")
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                })
+            })
+            .or_else(|| memory_slug_from_path(&self.path))
+            .unwrap_or_else(|| "memory".to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DuplicateMemoryPair {
+    left_path: PathBuf,
+    right_path: PathBuf,
+    overlap_percent: usize,
+}
+
+async fn load_task_memory_inbox_entries(
+    memories_dir: &Path,
+) -> Result<Vec<TaskMemoryInboxEntry>, String> {
+    if !memories_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut memories = Vec::new();
+    for entry in WalkDir::new(memories_dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() || !is_memory_markdown_file(path) {
+            continue;
+        }
+        let content = fs::read_to_string(path)
+            .await
+            .map_err(|e| format!("Failed to read memory {}: {}", path.display(), e))?;
+        let (frontmatter, body) = parse_memory_file(&content)?;
+        if matches!(
+            frontmatter.status,
+            MemoryStatus::Archived | MemoryStatus::Superseded
+        ) {
+            continue;
+        }
+        let created_at = memory_created_at(&frontmatter).unwrap_or_else(Utc::now);
+        memories.push(TaskMemoryInboxEntry {
+            path: path.to_path_buf(),
+            frontmatter,
+            body,
+            created_at,
+        });
+    }
+    memories.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.path.cmp(&a.path))
+    });
+    Ok(memories)
+}
+
+fn new_memories_since(
+    memories: &[TaskMemoryInboxEntry],
+    cursor: DateTime<Utc>,
+    limit: usize,
+) -> Vec<TaskMemoryInboxEntry> {
+    memories
+        .iter()
+        .filter(|memory| memory.created_at > cursor)
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+fn stale_memory_candidates(
+    memories: &[TaskMemoryInboxEntry],
+    now: DateTime<Utc>,
+) -> Vec<TaskMemoryInboxEntry> {
+    memories
+        .iter()
+        .filter(|memory| {
+            memory.frontmatter.kind == MemoryKind::Progress
+                && now.signed_duration_since(memory.created_at)
+                    > Duration::days(STALE_PROGRESS_DAYS)
+                && memory.frontmatter.namespace != MemoryNamespace::Global
+        })
+        .cloned()
+        .collect()
+}
+
+fn memory_body_without_frontmatter(content: &str) -> String {
+    split_memory_frontmatter(content)
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_else(|_| content.to_string())
+}
+
+fn content_tokens(content: &str) -> HashSet<String> {
+    memory_body_without_frontmatter(content)
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token.len() >= 3)
+        .collect()
+}
+
+fn token_overlap_percent(left: &str, right: &str) -> usize {
+    let left = content_tokens(left);
+    let right = content_tokens(right);
+    if left.is_empty() || right.is_empty() {
+        return 0;
+    }
+    let overlap = left.intersection(&right).count();
+    let denominator = left.union(&right).count();
+    overlap * 100 / denominator
+}
+
+fn duplicate_memory_pairs(memories: &[TaskMemoryInboxEntry]) -> Vec<DuplicateMemoryPair> {
+    let mut pairs = Vec::new();
+    for left_idx in 0..memories.len() {
+        for right_idx in (left_idx + 1)..memories.len() {
+            let overlap_percent =
+                token_overlap_percent(&memories[left_idx].body, &memories[right_idx].body);
+            if overlap_percent > 70 {
+                pairs.push(DuplicateMemoryPair {
+                    left_path: memories[left_idx].path.clone(),
+                    right_path: memories[right_idx].path.clone(),
+                    overlap_percent,
+                });
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.overlap_percent.cmp(&a.overlap_percent));
+    pairs
+}
+
+fn format_memory_age(now: DateTime<Utc>, timestamp: DateTime<Utc>) -> String {
+    let duration = now.signed_duration_since(timestamp);
+    if duration.num_days() >= 1 {
+        format!("{}d ago", duration.num_days())
+    } else if duration.num_hours() >= 1 {
+        format!("{}h ago", duration.num_hours())
+    } else if duration.num_minutes() >= 1 {
+        format!("{}m ago", duration.num_minutes())
+    } else {
+        "just now".to_string()
+    }
+}
+
+fn format_cursor_age(now: DateTime<Utc>, cursor: DateTime<Utc>) -> String {
+    let duration = now.signed_duration_since(cursor);
+    if duration.num_days() >= 1 {
+        format!("{} days ago", duration.num_days())
+    } else if duration.num_hours() >= 1 {
+        format!("{} hours ago", duration.num_hours())
+    } else if duration.num_minutes() >= 1 {
+        format!("{} minutes ago", duration.num_minutes())
+    } else {
+        "just now".to_string()
+    }
+}
+
+fn render_memory_entry_line(memory: &TaskMemoryInboxEntry, now: DateTime<Utc>) -> String {
+    let card = memory
+        .frontmatter
+        .card_id
+        .clone()
+        .or_else(|| match &memory.frontmatter.namespace {
+            MemoryNamespace::Card(card_id) => Some(card_id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "task".to_string());
+    let short_id = memory_short_id_from_path(&memory.path)
+        .or_else(|| memory_slug_from_path(&memory.path))
+        .unwrap_or_else(|| memory.memory_id());
+    format!(
+        "- {} | {}-{} | {} | \"{}\" [{}]",
+        memory.frontmatter.kind,
+        card,
+        short_id,
+        format_memory_age(now, memory.created_at),
+        memory.title().replace('"', "'"),
+        memory.path.display()
+    )
+}
+
+fn render_memory_inbox(
+    cursor: DateTime<Utc>,
+    now: DateTime<Utc>,
+    new_memories: &[TaskMemoryInboxEntry],
+    stale_candidates: &[TaskMemoryInboxEntry],
+    duplicate_pairs: &[DuplicateMemoryPair],
+) -> String {
+    let mut output = String::from("# Memory Inbox\n\n");
+    output.push_str(&format!(
+        "## New since {} ({})\n",
+        format_cursor_age(now, cursor),
+        new_memories.len()
+    ));
+    if new_memories.is_empty() {
+        output.push_str("- No new memories.\n");
+    } else {
+        for memory in new_memories {
+            output.push_str(&render_memory_entry_line(memory, now));
+            output.push('\n');
+        }
+    }
+
+    output.push_str(&format!(
+        "\n## Stale candidates ({})\n",
+        stale_candidates.len()
+    ));
+    if stale_candidates.is_empty() {
+        output.push_str("- No stale candidates.\n");
+    } else {
+        for memory in stale_candidates {
+            output.push_str(&format!(
+                "- {} | {} | {} — consider archive [{}]\n",
+                memory.frontmatter.kind,
+                memory.memory_id(),
+                format_memory_age(now, memory.created_at),
+                memory.path.display()
+            ));
+        }
+    }
+
+    output.push_str(&format!(
+        "\n## Possible duplicates ({} pairs)\n",
+        duplicate_pairs.len()
+    ));
+    if duplicate_pairs.is_empty() {
+        output.push_str("- No likely duplicates.\n");
+    } else {
+        for pair in duplicate_pairs {
+            output.push_str(&format!(
+                "- [{}] vs [{}] — {}% token overlap\n",
+                pair.left_path.display(),
+                pair.right_path.display(),
+                pair.overlap_percent
+            ));
+        }
+    }
+
+    output.push_str(
+        "\n## Actions\n- task_mem_pin(memory_id) to keep one forever\n- task_mem_archive(memory_id) to hide from auto-inject\n- task_mem_save(content=\"...\", supersedes=\"<old>\") to replace\n- task_mem_triage_done() when finished\n",
+    );
+    output
+}
+
 async fn find_task_memory_path(
     search_dir: &Path,
     reference: &str,
@@ -743,7 +1056,10 @@ async fn find_task_memory_path(
             exact_matches.push(path.to_path_buf());
             continue;
         }
-        let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("");
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
         let slug = memory_slug_from_path(path).unwrap_or_default();
         let short_id = memory_short_id_from_path(path).unwrap_or_default();
         if stem == reference
@@ -780,7 +1096,11 @@ async fn find_task_memory_path(
     let available = if available.is_empty() {
         "none".to_string()
     } else {
-        available.into_iter().take(10).collect::<Vec<_>>().join(", ")
+        available
+            .into_iter()
+            .take(10)
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     Err(format!(
         "Memory not found: `{}` in {} at {}. Available files: {}",
@@ -1246,6 +1566,161 @@ impl ToolTaskMemoryUnarchive {
     }
 }
 
+pub struct ToolTaskMemoryInbox;
+
+impl ToolTaskMemoryInbox {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+pub struct ToolTaskMemoryTriageDone;
+
+impl ToolTaskMemoryTriageDone {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for ToolTaskMemoryInbox {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "task_mem_inbox".to_string(),
+            display_name: "Task Memory Inbox".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Planner-only tool that shows new task memories since the last triage cursor, stale progress candidates, and likely duplicate memories.".to_string(),
+            input_schema: json_schema_from_params(
+                &[
+                    ("since", "string", "Optional rfc3339 timestamp overriding the saved triage cursor."),
+                    ("limit", "number", "Maximum number of new memories to render. Defaults to 20."),
+                ],
+                &[],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let (gcx, task_id) = {
+            let cgcx = ccx.lock().await;
+            (
+                cgcx.app.gcx.clone(),
+                planner_task_id_from_meta(cgcx.task_meta.as_ref(), "task_mem_inbox")?,
+            )
+        };
+        let task_dir = find_task_dir(gcx, &task_id).await?;
+        let now = Utc::now();
+        let cursor = if let Some(since) = optional_string_arg(args, "since")? {
+            parse_rfc3339_utc(&since)?
+        } else {
+            read_memory_inbox_cursor(&task_dir)
+                .await?
+                .unwrap_or_else(|| now - Duration::hours(24))
+        };
+        let limit = optional_usize_arg(args, "limit", DEFAULT_INBOX_LIMIT)?.min(100);
+        let memories = load_task_memory_inbox_entries(&task_dir.join(MEMORIES_DIR)).await?;
+        let new_memories = new_memories_since(&memories, cursor, limit);
+        let stale_candidates = stale_memory_candidates(&memories, now);
+        let duplicate_pairs = duplicate_memory_pairs(&memories);
+        let output = render_memory_inbox(
+            cursor,
+            now,
+            &new_memories,
+            &stale_candidates,
+            &duplicate_pairs,
+        );
+
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(output),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                output_filter: Some(OutputFilter::no_limits()),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+#[async_trait]
+impl Tool for ToolTaskMemoryTriageDone {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "task_mem_triage_done".to_string(),
+            display_name: "Task Memory Triage Done".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Planner-only tool that updates the memory inbox triage cursor."
+                .to_string(),
+            input_schema: json_schema_from_params(
+                &[(
+                    "cursor",
+                    "string",
+                    "Optional rfc3339 timestamp. Defaults to now.",
+                )],
+                &[],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let (gcx, task_id) = {
+            let cgcx = ccx.lock().await;
+            (
+                cgcx.app.gcx.clone(),
+                planner_task_id_from_meta(cgcx.task_meta.as_ref(), "task_mem_triage_done")?,
+            )
+        };
+        let task_dir = find_task_dir(gcx, &task_id).await?;
+        let cursor = optional_string_arg(args, "cursor")?
+            .map(|value| parse_rfc3339_utc(&value))
+            .transpose()?
+            .unwrap_or_else(Utc::now);
+        write_memory_inbox_cursor(&task_dir, cursor).await?;
+        Ok(task_memory_tool_output(
+            tool_call_id,
+            format!(
+                "Memory inbox triage cursor updated.\nTask: {}\nCursor: {}",
+                task_id,
+                cursor.to_rfc3339()
+            ),
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
 #[async_trait]
 impl Tool for ToolTaskMemoryPin {
     fn tool_description(&self) -> ToolDesc {
@@ -1258,7 +1733,8 @@ impl Tool for ToolTaskMemoryPin {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Planner-only tool that pins or unpins a task memory by filename or slug.".to_string(),
+            description: "Planner-only tool that pins or unpins a task memory by filename or slug."
+                .to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("memory_id", "string", "Memory filename or short slug."),
@@ -1327,7 +1803,8 @@ impl Tool for ToolTaskMemoryArchive {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Planner-only tool that archives a task memory by filename or slug.".to_string(),
+            description: "Planner-only tool that archives a task memory by filename or slug."
+                .to_string(),
             input_schema: json_schema_from_params(
                 &[("memory_id", "string", "Memory filename or short slug.")],
                 &["memory_id"],
@@ -1385,9 +1862,15 @@ impl Tool for ToolTaskMemoryUnarchive {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Planner-only tool that restores an archived task memory by filename or slug.".to_string(),
+            description:
+                "Planner-only tool that restores an archived task memory by filename or slug."
+                    .to_string(),
             input_schema: json_schema_from_params(
-                &[("memory_id", "string", "Archived memory filename or short slug.")],
+                &[(
+                    "memory_id",
+                    "string",
+                    "Archived memory filename or short slug.",
+                )],
                 &["memory_id"],
             ),
             output_schema: None,
@@ -1797,8 +2280,17 @@ mod tests {
     }
 
     async fn write_memory(dir: &Path, file_name: &str, frontmatter: TaskMemoryFrontmatter) {
+        write_memory_with_body(dir, file_name, frontmatter, "Body").await;
+    }
+
+    async fn write_memory_with_body(
+        dir: &Path,
+        file_name: &str,
+        frontmatter: TaskMemoryFrontmatter,
+        body: &str,
+    ) {
         tokio::fs::create_dir_all(dir).await.unwrap();
-        tokio::fs::write(dir.join(file_name), render_memory_file(&frontmatter, "Body"))
+        tokio::fs::write(dir.join(file_name), render_memory_file(&frontmatter, body))
             .await
             .unwrap();
     }
@@ -1808,10 +2300,7 @@ mod tests {
         parse_memory_file(&text).unwrap().0
     }
 
-    async fn make_ccx(
-        gcx: Arc<GlobalContext>,
-        role: &str,
-    ) -> Arc<AMutex<AtCommandsContext>> {
+    async fn make_ccx(gcx: Arc<GlobalContext>, role: &str) -> Arc<AMutex<AtCommandsContext>> {
         Arc::new(AMutex::new(
             AtCommandsContext::new_from_app(
                 AppState::from_gcx(gcx).await,
@@ -1861,6 +2350,26 @@ mod tests {
         .await;
         let ccx = make_ccx(gcx.clone(), role).await;
         (temp, gcx, ccx, memories_dir.join(MEMORY_FILE))
+    }
+
+    fn inbox_memory(
+        path: &str,
+        created_at: DateTime<Utc>,
+        kind: MemoryKind,
+        namespace: MemoryNamespace,
+        body: &str,
+    ) -> TaskMemoryInboxEntry {
+        TaskMemoryInboxEntry {
+            path: PathBuf::from(path),
+            frontmatter: TaskMemoryFrontmatter {
+                created_at: Some(created_at.to_rfc3339()),
+                kind,
+                namespace,
+                ..Default::default()
+            },
+            body: body.to_string(),
+            created_at,
+        }
     }
 
     #[test]
@@ -2004,7 +2513,11 @@ mod tests {
         .await
         .unwrap();
 
-        let archived_path = path.parent().unwrap().join(ARCHIVED_MEMORIES_DIR).join(MEMORY_FILE);
+        let archived_path = path
+            .parent()
+            .unwrap()
+            .join(ARCHIVED_MEMORIES_DIR)
+            .join(MEMORY_FILE);
         assert!(!path.exists());
         assert!(archived_path.exists());
         assert_eq!(
@@ -2036,7 +2549,11 @@ mod tests {
             .await
             .unwrap();
 
-        let archived_path = path.parent().unwrap().join(ARCHIVED_MEMORIES_DIR).join(MEMORY_FILE);
+        let archived_path = path
+            .parent()
+            .unwrap()
+            .join(ARCHIVED_MEMORIES_DIR)
+            .join(MEMORY_FILE);
         assert!(path.exists());
         assert!(!archived_path.exists());
         assert_eq!(read_frontmatter(&path).await.status, MemoryStatus::Active);
@@ -2053,6 +2570,252 @@ mod tests {
                 &"call".to_string(),
                 &args(&[("memory_id", json!("master-plan")), ("pinned", json!(true))]),
             )
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("can only be called by the task planner"));
+    }
+
+    #[tokio::test]
+    async fn memory_inbox_cursor_read_write_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let cursor = parse_rfc3339_utc("2026-05-22T00:00:00Z").unwrap();
+
+        assert_eq!(read_memory_inbox_cursor(temp.path()).await.unwrap(), None);
+        write_memory_inbox_cursor(temp.path(), cursor)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read_memory_inbox_cursor(temp.path()).await.unwrap(),
+            Some(cursor)
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(temp.path().join(MEMORY_INBOX_CURSOR_FILE))
+                .await
+                .unwrap(),
+            cursor.to_rfc3339()
+        );
+    }
+
+    #[test]
+    fn new_memories_filter_sorts_and_limits() {
+        let cursor = parse_rfc3339_utc("2026-05-22T00:00:00Z").unwrap();
+        let newer = parse_rfc3339_utc("2026-05-22T02:00:00Z").unwrap();
+        let newest = parse_rfc3339_utc("2026-05-22T03:00:00Z").unwrap();
+        let older = parse_rfc3339_utc("2026-05-21T23:00:00Z").unwrap();
+        let memories = vec![
+            inbox_memory(
+                "newest.md",
+                newest,
+                MemoryKind::Finding,
+                MemoryNamespace::Task,
+                "newest",
+            ),
+            inbox_memory(
+                "newer.md",
+                newer,
+                MemoryKind::Finding,
+                MemoryNamespace::Task,
+                "newer",
+            ),
+            inbox_memory(
+                "older.md",
+                older,
+                MemoryKind::Finding,
+                MemoryNamespace::Task,
+                "older",
+            ),
+        ];
+
+        let filtered = new_memories_since(&memories, cursor, 1);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].memory_id(), "newest.md");
+    }
+
+    #[test]
+    fn stale_candidate_detection_uses_progress_age_and_namespace() {
+        let now = parse_rfc3339_utc("2026-05-22T00:00:00Z").unwrap();
+        let old = now - Duration::days(8);
+        let fresh = now - Duration::days(3);
+        let memories = vec![
+            inbox_memory(
+                "old-progress.md",
+                old,
+                MemoryKind::Progress,
+                MemoryNamespace::Task,
+                "old",
+            ),
+            inbox_memory(
+                "global-progress.md",
+                old,
+                MemoryKind::Progress,
+                MemoryNamespace::Global,
+                "global",
+            ),
+            inbox_memory(
+                "old-decision.md",
+                old,
+                MemoryKind::Decision,
+                MemoryNamespace::Task,
+                "decision",
+            ),
+            inbox_memory(
+                "fresh-progress.md",
+                fresh,
+                MemoryKind::Progress,
+                MemoryNamespace::Task,
+                "fresh",
+            ),
+        ];
+
+        let stale = stale_memory_candidates(&memories, now);
+
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].memory_id(), "old-progress.md");
+    }
+
+    #[test]
+    fn duplicate_pair_detection_uses_body_token_overlap() {
+        let now = parse_rfc3339_utc("2026-05-22T00:00:00Z").unwrap();
+        let left_body = "---\ntitle: Left\n---\n\nalpha beta gamma delta epsilon zeta";
+        let right_body = "---\ntitle: Different\n---\n\nalpha beta gamma delta epsilon extra";
+        let other_body = "kappa lambda mu nu xi omicron";
+        let memories = vec![
+            inbox_memory(
+                "left.md",
+                now,
+                MemoryKind::Finding,
+                MemoryNamespace::Task,
+                left_body,
+            ),
+            inbox_memory(
+                "right.md",
+                now,
+                MemoryKind::Finding,
+                MemoryNamespace::Task,
+                right_body,
+            ),
+            inbox_memory(
+                "other.md",
+                now,
+                MemoryKind::Finding,
+                MemoryNamespace::Task,
+                other_body,
+            ),
+        ];
+
+        let pairs = duplicate_memory_pairs(&memories);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].left_path, PathBuf::from("left.md"));
+        assert_eq!(pairs[0].right_path, PathBuf::from("right.md"));
+        assert!(pairs[0].overlap_percent > 70);
+    }
+
+    #[tokio::test]
+    async fn task_mem_inbox_renders_all_sections() {
+        let (_temp, _gcx, ccx, path) = make_task_with_memory("planner").await;
+        let memories_dir = path.parent().unwrap().to_path_buf();
+        let now = Utc::now();
+        write_memory_with_body(
+            &memories_dir,
+            "new.md",
+            TaskMemoryFrontmatter {
+                created_at: Some((now - Duration::hours(2)).to_rfc3339()),
+                title: Some("New Decision".to_string()),
+                kind: MemoryKind::Decision,
+                namespace: MemoryNamespace::Card("T-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                ..Default::default()
+            },
+            "shared alpha beta gamma delta epsilon zeta",
+        )
+        .await;
+        write_memory_with_body(
+            &memories_dir,
+            "duplicate.md",
+            TaskMemoryFrontmatter {
+                created_at: Some((now - Duration::hours(3)).to_rfc3339()),
+                title: Some("Duplicate Decision".to_string()),
+                kind: MemoryKind::Decision,
+                namespace: MemoryNamespace::Card("T-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                ..Default::default()
+            },
+            "shared alpha beta gamma delta epsilon extra",
+        )
+        .await;
+        write_memory_with_body(
+            &memories_dir,
+            "stale.md",
+            TaskMemoryFrontmatter {
+                created_at: Some((now - Duration::days(8)).to_rfc3339()),
+                title: Some("Old Progress".to_string()),
+                kind: MemoryKind::Progress,
+                namespace: MemoryNamespace::Task,
+                ..Default::default()
+            },
+            "old progress",
+        )
+        .await;
+        let mut tool = ToolTaskMemoryInbox::new();
+
+        let (_, contexts) = tool
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[("since", json!((now - Duration::days(2)).to_rfc3339()))]),
+            )
+            .await
+            .unwrap();
+        let output = match &contexts[0] {
+            ContextEnum::ChatMessage(message) => match &message.content {
+                ChatContent::SimpleText(text) => text.clone(),
+                _ => panic!("expected text output"),
+            },
+            _ => panic!("expected chat message"),
+        };
+
+        assert!(output.contains("# Memory Inbox"));
+        assert!(output.contains("## New since"));
+        assert!(output.contains("New Decision"));
+        assert!(output.contains("## Stale candidates (1)"));
+        assert!(output.contains("stale.md"));
+        assert!(output.contains("## Possible duplicates (1 pairs)"));
+        assert!(output.contains("token overlap"));
+        assert!(output.contains("## Actions"));
+    }
+
+    #[tokio::test]
+    async fn task_mem_triage_done_persists_cursor() {
+        let (_temp, _gcx, ccx, path) = make_task_with_memory("planner").await;
+        let task_dir = path.parent().unwrap().parent().unwrap().to_path_buf();
+        let cursor = parse_rfc3339_utc("2026-05-22T04:05:06Z").unwrap();
+        let mut tool = ToolTaskMemoryTriageDone::new();
+
+        tool.tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(&[("cursor", json!(cursor.to_rfc3339()))]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read_memory_inbox_cursor(&task_dir).await.unwrap(),
+            Some(cursor)
+        );
+    }
+
+    #[tokio::test]
+    async fn task_mem_inbox_rejects_non_planner_role() {
+        let (_temp, _gcx, ccx, _path) = make_task_with_memory("agents").await;
+        let mut tool = ToolTaskMemoryInbox::new();
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args(&[]))
             .await
             .unwrap_err();
 
