@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
+use serde_yaml::Value as YamlValue;
 
 use crate::buddy::observers::{BuddyObserver, ObserverContext};
 use crate::buddy::settings::BuddySettings;
@@ -27,6 +29,60 @@ fn title_hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:x}", h.finish())
+}
+
+fn memory_namespace(content: &str) -> Option<String> {
+    let frontmatter = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))?
+        .split_once("\n---")?
+        .0;
+    match serde_yaml::from_str::<YamlValue>(frontmatter).ok()? {
+        YamlValue::Mapping(mapping) => match mapping.get(&YamlValue::String("namespace".into()))? {
+            YamlValue::String(value) => Some(value.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn detect_orphaned_task_memory_facts(
+    task_id: &str,
+    board: &TaskBoard,
+    memories_dir: &std::path::Path,
+    now: DateTime<Utc>,
+) -> Vec<BuddyFact> {
+    let existing_cards: HashSet<&str> = board.cards.iter().map(|card| card.id.as_str()).collect();
+    let entries = match std::fs::read_dir(memories_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                return None;
+            }
+            let namespace = memory_namespace(&std::fs::read_to_string(&path).ok()?)?;
+            let card_id = namespace.strip_prefix("card:")?.trim().to_string();
+            if card_id.is_empty() || existing_cards.contains(card_id.as_str()) {
+                return None;
+            }
+            Some(BuddyFact {
+                kind: BuddyFactKind::MemoryOrphan,
+                key: format!("task_memory:orphan:{}:{}", task_id, card_id),
+                source: "task_health",
+                payload: serde_json::json!({
+                    "task_id": task_id,
+                    "card_id": card_id,
+                    "namespace": namespace,
+                }),
+                seen_at: now,
+                confidence: 0.85,
+            })
+        })
+        .collect()
 }
 
 pub fn detect_task_health_facts(entries: &[TaskHealthEntry], now: DateTime<Utc>) -> Vec<BuddyFact> {
@@ -174,11 +230,22 @@ impl BuddyObserver for TaskHealthObserver {
             Err(_) => return vec![],
         };
         let mut entries = vec![];
+        let mut memory_facts = vec![];
         for meta in tasks {
             let board = match crate::tasks::storage::load_board(gcx.gcx.clone(), &meta.id).await {
                 Ok(b) => b,
                 Err(_) => continue,
             };
+            if let Ok(task_dir) =
+                crate::tasks::storage::find_task_dir(gcx.gcx.clone(), &meta.id).await
+            {
+                memory_facts.extend(detect_orphaned_task_memory_facts(
+                    &meta.id,
+                    &board,
+                    &task_dir.join("memories"),
+                    ctx.now,
+                ));
+            }
             let mut latest_heartbeat: Option<chrono::DateTime<Utc>> = None;
             for card in &board.cards {
                 if card.column == "doing" {
@@ -217,6 +284,40 @@ impl BuddyObserver for TaskHealthObserver {
                 touched_files,
             });
         }
-        detect_task_health_facts(&entries, ctx.now)
+        let mut facts = detect_task_health_facts(&entries, ctx.now);
+        facts.extend(memory_facts);
+        facts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_orphaned_card_scoped_task_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let memories_dir = temp.path().join(".refact/tasks/task-1/memories");
+        std::fs::create_dir_all(&memories_dir).unwrap();
+        std::fs::write(
+            memories_dir.join("orphan.md"),
+            "---\ntitle: Orphan\nnamespace: card:T-404\n---\n\nBody",
+        )
+        .unwrap();
+
+        let facts = detect_orphaned_task_memory_facts(
+            "task-1",
+            &TaskBoard::default(),
+            &memories_dir,
+            Utc::now(),
+        );
+
+        let fact = facts
+            .iter()
+            .find(|fact| fact.kind == BuddyFactKind::MemoryOrphan)
+            .expect("orphaned memory fact must be emitted");
+        assert_eq!(fact.payload["task_id"], serde_json::json!("task-1"));
+        assert_eq!(fact.payload["card_id"], serde_json::json!("T-404"));
+        assert_eq!(fact.payload["namespace"], serde_json::json!("card:T-404"));
     }
 }
