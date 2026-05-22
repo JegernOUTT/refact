@@ -1,13 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -35,18 +34,6 @@ impl AgentDiffMode {
             "unified" => Ok(Self::Unified),
             "name-only" => Ok(Self::NameOnly),
             other => Err(format!("Invalid mode: {}", other)),
-        }
-    }
-
-    fn git_args(self, range: &str) -> Vec<String> {
-        match self {
-            Self::Stat => vec!["diff".to_string(), "--stat".to_string(), range.to_string()],
-            Self::Unified => vec!["diff".to_string(), range.to_string()],
-            Self::NameOnly => vec![
-                "diff".to_string(),
-                "--name-only".to_string(),
-                range.to_string(),
-            ],
         }
     }
 }
@@ -96,20 +83,46 @@ async fn get_task_id(
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 
-fn resolve_base_branch(
-    worktree_base: Option<String>,
-    task_meta_base: Option<String>,
-) -> Result<String, String> {
-    worktree_base
-        .or(task_meta_base)
-        .ok_or_else(|| "Task has no base branch set".to_string())
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffBase {
+    refish: String,
+    label: String,
 }
 
-async fn base_branch_from_worktree_meta(
+fn present(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_base(
+    worktree_commit: Option<String>,
+    worktree_branch: Option<String>,
+    task_meta_commit: Option<String>,
+    task_meta_branch: Option<String>,
+) -> Result<DiffBase, String> {
+    if let Some(commit) = present(worktree_commit).or_else(|| present(task_meta_commit)) {
+        return Ok(DiffBase {
+            refish: commit.clone(),
+            label: format!("commit {}", commit),
+        });
+    }
+    if let Some(branch) = present(worktree_branch).or_else(|| present(task_meta_branch)) {
+        return Ok(DiffBase {
+            refish: branch.clone(),
+            label: format!("branch {}", branch),
+        });
+    }
+    Err("Task has no base commit or base branch set".to_string())
+}
+
+async fn base_from_worktree_meta(
     gcx: Arc<GlobalContext>,
     card: &BoardCard,
-) -> Option<String> {
-    let worktree_name = card.agent_worktree_name.as_ref()?;
+) -> (Option<String>, Option<String>) {
+    let Some(worktree_name) = card.agent_worktree_name.as_ref() else {
+        return (None, None);
+    };
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     for source_root in project_dirs {
         let Ok(service) = WorktreeService::new(gcx.cache_dir.clone(), source_root) else {
@@ -124,11 +137,14 @@ async fn base_branch_from_worktree_meta(
             .find(|record| record.meta.id == *worktree_name)
         {
             if record.meta.root.exists() {
-                return record.meta.base_branch.clone();
+                return (
+                    record.meta.base_commit.clone(),
+                    record.meta.base_branch.clone(),
+                );
             }
         }
     }
-    None
+    (None, None)
 }
 
 fn canonical_worktree(card: &BoardCard) -> Result<PathBuf, String> {
@@ -151,77 +167,91 @@ fn canonical_worktree(card: &BoardCard) -> Result<PathBuf, String> {
     })
 }
 
-async fn run_git_diff(
-    worktree: &Path,
-    mode: AgentDiffMode,
-    base: &str,
-    branch: &str,
-) -> Result<String, String> {
-    let range = format!("{}..{}", base, branch);
-    let args = mode.git_args(&range);
-    let mut command = Command::new("git");
-    command
-        .args(&args)
+fn join_reader(
+    handle: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>, String> {
+    handle
+        .join()
+        .map_err(|_| format!("Failed to capture git {}", stream_name))?
+        .map_err(|e| format!("Failed to capture git {}: {}", stream_name, e))
+}
+
+fn run_git(worktree: &Path, args: &[&str], deadline: Instant) -> Result<String, String> {
+    if Instant::now() >= deadline {
+        return Err(format!(
+            "git {:?} timed out after {} seconds",
+            args,
+            GIT_DIFF_TIMEOUT.as_secs()
+        ));
+    }
+    let mut child = Command::new("git")
+        .args(args)
         .current_dir(worktree)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to run git diff in '{}': {}", worktree.display(), e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to run git {:?} in '{}': {}",
+                args,
+                worktree.display(),
+                e
+            )
+        })?;
+
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Failed to capture git diff stdout".to_string())?;
+        .ok_or_else(|| "Failed to capture git stdout".to_string())?;
     let mut stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "Failed to capture git diff stderr".to_string())?;
+        .ok_or_else(|| "Failed to capture git stderr".to_string())?;
 
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
-    let stdout_task = tokio::spawn(async move {
-        stdout
-            .read_to_end(&mut stdout_bytes)
-            .await
-            .map(|_| stdout_bytes)
+    let stdout_task = std::thread::spawn(move || {
+        let mut stdout_bytes = Vec::new();
+        stdout.read_to_end(&mut stdout_bytes).map(|_| stdout_bytes)
     });
-    let stderr_task = tokio::spawn(async move {
-        stderr
-            .read_to_end(&mut stderr_bytes)
-            .await
-            .map(|_| stderr_bytes)
+    let stderr_task = std::thread::spawn(move || {
+        let mut stderr_bytes = Vec::new();
+        stderr.read_to_end(&mut stderr_bytes).map(|_| stderr_bytes)
     });
 
-    let status = match tokio::time::timeout(GIT_DIFF_TIMEOUT, child.wait()).await {
-        Ok(result) => result
-            .map_err(|e| format!("Failed to run git diff in '{}': {}", worktree.display(), e))?,
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| {
+            format!(
+                "Failed to run git {:?} in '{}': {}",
+                args,
+                worktree.display(),
+                e
+            )
+        })? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = join_reader(stdout_task, "stdout");
+            let _ = join_reader(stderr_task, "stderr");
             return Err(format!(
-                "git diff timed out after {} seconds",
+                "git {:?} timed out after {} seconds",
+                args,
                 GIT_DIFF_TIMEOUT.as_secs()
             ));
         }
+        std::thread::sleep(Duration::from_millis(10));
     };
 
-    let stdout_bytes = stdout_task
-        .await
-        .map_err(|e| format!("Failed to capture git diff stdout: {}", e))?
-        .map_err(|e| format!("Failed to capture git diff stdout: {}", e))?;
-    let stderr_bytes = stderr_task
-        .await
-        .map_err(|e| format!("Failed to capture git diff stderr: {}", e))?
-        .map_err(|e| format!("Failed to capture git diff stderr: {}", e))?;
+    let stdout_bytes = join_reader(stdout_task, "stdout")?;
+    let stderr_bytes = join_reader(stderr_task, "stderr")?;
 
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
         return Err(format!(
-            "git diff failed in '{}' for range {}: {}",
+            "git {:?} failed in '{}': {}",
+            args,
             worktree.display(),
-            range,
             if stderr.is_empty() {
                 "unknown git error"
             } else {
@@ -231,6 +261,129 @@ async fn run_git_diff(
     }
 
     Ok(String::from_utf8_lossy(&stdout_bytes).to_string())
+}
+
+fn list_untracked(worktree: &Path, deadline: Instant) -> Result<Vec<String>, String> {
+    Ok(run_git(
+        worktree,
+        &["ls-files", "--others", "--exclude-standard"],
+        deadline,
+    )?
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .map(str::to_string)
+    .collect())
+}
+
+fn append_section(output: &mut String, title: &str, body: &str) {
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str("## ");
+    output.push_str(title);
+    output.push_str("\n");
+    if body.trim().is_empty() {
+        output.push_str("(no changes)\n");
+    } else {
+        output.push_str(body.trim_end());
+        output.push('\n');
+    }
+}
+
+fn join_untracked(untracked: &[String]) -> String {
+    if untracked.is_empty() {
+        String::new()
+    } else {
+        let mut output = untracked.join("\n");
+        output.push('\n');
+        output
+    }
+}
+
+fn push_name_only(names: &mut Vec<String>, seen: &mut HashSet<String>, output: &str) {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if seen.insert(line.to_string()) {
+            names.push(line.to_string());
+        }
+    }
+}
+
+fn run_git_diff(worktree: &Path, mode: AgentDiffMode, base: &DiffBase) -> Result<String, String> {
+    let range = format!("{}...HEAD", base.refish);
+    let deadline = Instant::now() + GIT_DIFF_TIMEOUT;
+    match mode {
+        AgentDiffMode::Stat => {
+            let committed = run_git(worktree, &["diff", "--stat", &range], deadline)?;
+            let staged = run_git(worktree, &["diff", "--stat", "--cached"], deadline)?;
+            let unstaged = run_git(worktree, &["diff", "--stat"], deadline)?;
+            let untracked = list_untracked(worktree, deadline)?;
+            if committed.trim().is_empty()
+                && staged.trim().is_empty()
+                && unstaged.trim().is_empty()
+                && untracked.is_empty()
+            {
+                return Ok("(no changes detected)".to_string());
+            }
+            let mut output = String::new();
+            append_section(&mut output, "Committed changes since base", &committed);
+            append_section(&mut output, "Staged changes", &staged);
+            append_section(&mut output, "Unstaged changes", &unstaged);
+            append_section(&mut output, "Untracked files", &join_untracked(&untracked));
+            Ok(output)
+        }
+        AgentDiffMode::Unified => {
+            let committed = run_git(worktree, &["diff", &range], deadline)?;
+            let staged = run_git(worktree, &["diff", "--cached"], deadline)?;
+            let unstaged = run_git(worktree, &["diff"], deadline)?;
+            let untracked = list_untracked(worktree, deadline)?;
+            if committed.trim().is_empty()
+                && staged.trim().is_empty()
+                && unstaged.trim().is_empty()
+                && untracked.is_empty()
+            {
+                return Ok("(no changes detected)".to_string());
+            }
+            let mut output = String::new();
+            append_section(&mut output, "Committed changes since base", &committed);
+            append_section(&mut output, "Staged changes", &staged);
+            append_section(&mut output, "Unstaged changes", &unstaged);
+            append_section(&mut output, "Untracked files", &join_untracked(&untracked));
+            Ok(output)
+        }
+        AgentDiffMode::NameOnly => {
+            let committed = run_git(worktree, &["diff", "--name-only", &range], deadline)?;
+            let staged = run_git(worktree, &["diff", "--name-only", "--cached"], deadline)?;
+            let unstaged = run_git(worktree, &["diff", "--name-only"], deadline)?;
+            let untracked = list_untracked(worktree, deadline)?;
+            let mut names = Vec::new();
+            let mut seen = HashSet::new();
+            push_name_only(&mut names, &mut seen, &committed);
+            push_name_only(&mut names, &mut seen, &staged);
+            push_name_only(&mut names, &mut seen, &unstaged);
+            for path in untracked {
+                if seen.insert(path.clone()) {
+                    names.push(path);
+                }
+            }
+            if names.is_empty() {
+                Ok("(no changes detected)".to_string())
+            } else {
+                Ok(names.join("\n"))
+            }
+        }
+    }
+}
+
+fn output_fence(mode: AgentDiffMode) -> &'static str {
+    match mode {
+        AgentDiffMode::Unified => "diff",
+        AgentDiffMode::Stat | AgentDiffMode::NameOnly => "text",
+    }
 }
 
 fn truncate_lines(output: &str, max_lines: usize) -> String {
@@ -258,19 +411,25 @@ fn truncate_lines(output: &str, max_lines: usize) -> String {
 fn render_agent_diff(
     card: &BoardCard,
     branch: &str,
-    base: &str,
+    base: &DiffBase,
+    mode: AgentDiffMode,
     output: &str,
     max_lines: usize,
 ) -> String {
     let rendered = truncate_lines(output, max_lines);
     let diff = if rendered.trim().is_empty() {
-        "(no diff)".to_string()
+        "(no changes detected)".to_string()
     } else {
         rendered
     };
     format!(
-        "# Agent Diff for {}\n\n**Card:** {}\n**Branch:** {}\n**Base:** {}\n\n```diff\n{}\n```",
-        card.id, card.title, branch, base, diff
+        "# Agent Diff for {}\n\n**Card:** {}\n**Branch:** {}\n**Base:** {}\n\n```{}\n{}\n```",
+        card.id,
+        card.title,
+        branch,
+        base.label,
+        output_fence(mode),
+        diff
     )
 }
 
@@ -286,7 +445,7 @@ impl Tool for ToolAgentDiff {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Show the real git diff for a task agent worktree against the task base branch. Planner-only; use this to inspect actual agent changes instead of relying on final reports.".to_string(),
+            description: "Show the real git diff for a task agent worktree against the task base commit or branch, including committed, staged, unstaged, and untracked changes. Planner-only; use this to inspect actual agent changes instead of relying on final reports.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -334,15 +493,20 @@ impl Tool for ToolAgentDiff {
             .get_card(&card_id)
             .ok_or_else(|| format!("Card {} not found", card_id))?;
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
-        let worktree_base = base_branch_from_worktree_meta(gcx.clone(), card).await;
-        let base = resolve_base_branch(worktree_base, task_meta.base_branch)?;
+        let (worktree_commit, worktree_branch) = base_from_worktree_meta(gcx.clone(), card).await;
+        let base = resolve_base(
+            worktree_commit,
+            worktree_branch,
+            task_meta.base_commit,
+            task_meta.base_branch,
+        )?;
         let branch = card
             .agent_branch
             .as_ref()
             .ok_or_else(|| format!("Card {} has no agent branch", card.id))?;
         let worktree = canonical_worktree(card)?;
-        let output = run_git_diff(&worktree, mode, &base, branch).await?;
-        let result = render_agent_diff(card, branch, &base, &output, max_lines);
+        let output = run_git_diff(&worktree, mode, &base)?;
+        let result = render_agent_diff(card, branch, &base, mode, &output, max_lines);
 
         Ok((
             false,
@@ -396,10 +560,11 @@ mod tests {
         run_git(root, &["commit", "-m", "initial"]);
     }
 
-    fn commit_file(root: &Path, name: &str, content: &str, message: &str) {
+    fn commit_file(root: &Path, name: &str, content: &str, message: &str) -> String {
         std::fs::write(root.join(name), content).unwrap();
         run_git(root, &["add", name]);
         run_git(root, &["commit", "-m", message]);
+        run_git(root, &["rev-parse", "HEAD"]).trim().to_string()
     }
 
     fn test_card(branch: Option<String>, worktree: Option<String>) -> BoardCard {
@@ -428,7 +593,26 @@ mod tests {
         }
     }
 
+    fn write_file(root: &Path, path: &str, content: &str) {
+        let full_path = root.join(path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full_path, content).unwrap();
+    }
+
+    fn assert_name_only_has(output: &str, expected: &[&str]) {
+        let paths = output.lines().map(str::trim).collect::<Vec<_>>();
+        for path in expected {
+            assert!(paths.contains(path), "missing {path} in {output}");
+        }
+    }
+
     fn task_meta() -> TaskMeta {
+        task_meta_with_base(Some("main"), None)
+    }
+
+    fn task_meta_with_base(base_branch: Option<&str>, base_commit: Option<&str>) -> TaskMeta {
         let now = chrono::Utc::now().to_rfc3339();
         TaskMeta {
             schema_version: 1,
@@ -441,8 +625,8 @@ mod tests {
             cards_done: 1,
             cards_failed: 0,
             agents_active: 0,
-            base_branch: Some("main".to_string()),
-            base_commit: None,
+            base_branch: base_branch.map(str::to_string),
+            base_commit: base_commit.map(str::to_string),
             default_agent_model: None,
             is_name_generated: false,
             last_agents_summary_at: None,
@@ -451,6 +635,14 @@ mod tests {
     }
 
     async fn write_task(root: &Path, card: BoardCard) -> Arc<crate::global_context::GlobalContext> {
+        write_task_with_meta(root, card, task_meta()).await
+    }
+
+    async fn write_task_with_meta(
+        root: &Path,
+        card: BoardCard,
+        meta: TaskMeta,
+    ) -> Arc<crate::global_context::GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let task_dir = root.join(".refact").join("tasks").join("task-1");
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
@@ -458,7 +650,7 @@ mod tests {
         board.cards.push(card);
         tokio::fs::write(
             task_dir.join("meta.yaml"),
-            serde_yaml::to_string(&task_meta()).unwrap(),
+            serde_yaml::to_string(&meta).unwrap(),
         )
         .await
         .unwrap();
@@ -468,7 +660,8 @@ mod tests {
         )
         .await
         .unwrap();
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.canonicalize().unwrap()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![root.canonicalize().unwrap()];
         gcx
     }
 
@@ -584,7 +777,7 @@ mod tests {
         );
         assert!(stat.contains("# Agent Diff for T-1"));
         assert!(stat.contains("**Branch:** agent-branch"));
-        assert!(stat.contains("**Base:** main"));
+        assert!(stat.contains("**Base:** branch main"));
         assert!(stat.contains("file.txt"));
 
         let unified = tool_output_text(
@@ -616,12 +809,184 @@ mod tests {
         assert!(name_only.contains("file.txt"));
     }
 
+    #[tokio::test]
+    async fn tool_agent_diff_name_only_includes_all_worktree_states() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        commit_file(&repo, "unstaged.txt", "base\n", "add tracked unstaged file");
+        run_git(&repo, &["checkout", "-b", "agent-branch"]);
+        commit_file(&repo, "committed.txt", "committed\n", "committed change");
+        write_file(&repo, "staged.txt", "staged\n");
+        run_git(&repo, &["add", "staged.txt"]);
+        write_file(&repo, "unstaged.txt", "base\nunstaged\n");
+        write_file(&repo, "untracked.txt", "untracked\n");
+        let card = test_card(
+            Some("agent-branch".to_string()),
+            Some(repo.to_string_lossy().to_string()),
+        );
+        let gcx = write_task(&repo, card).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+        let mut tool = ToolAgentDiff::new();
+
+        let name_only = tool_output_text(
+            tool.tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([
+                    ("card_id".to_string(), json!("T-1")),
+                    ("mode".to_string(), json!("name-only")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_name_only_has(
+            &name_only,
+            &[
+                "committed.txt",
+                "staged.txt",
+                "unstaged.txt",
+                "untracked.txt",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_agent_diff_unified_sections_include_dirty_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        run_git(&repo, &["checkout", "-b", "agent-branch"]);
+        commit_file(&repo, "committed.txt", "committed\n", "committed change");
+        write_file(&repo, "staged.txt", "staged\n");
+        run_git(&repo, &["add", "staged.txt"]);
+        std::fs::write(repo.join("file.txt"), "hello\nunstaged\n").unwrap();
+        write_file(&repo, "untracked.txt", "untracked\n");
+        let card = test_card(
+            Some("agent-branch".to_string()),
+            Some(repo.to_string_lossy().to_string()),
+        );
+        let gcx = write_task(&repo, card).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+        let mut tool = ToolAgentDiff::new();
+
+        let unified = tool_output_text(
+            tool.tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([
+                    ("card_id".to_string(), json!("T-1")),
+                    ("mode".to_string(), json!("unified")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert!(unified.contains("## Committed changes since base"));
+        assert!(unified.contains("## Staged changes"));
+        assert!(unified.contains("## Unstaged changes"));
+        assert!(unified.contains("## Untracked files"));
+        assert!(unified.contains("+committed"));
+        assert!(unified.contains("+staged"));
+        assert!(unified.contains("+unstaged"));
+        assert!(unified.contains("untracked.txt"));
+    }
+
+    #[tokio::test]
+    async fn tool_agent_diff_prefers_original_base_commit_after_base_branch_advances() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let base_commit = run_git(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        run_git(&repo, &["checkout", "-b", "agent-branch"]);
+        commit_file(&repo, "agent.txt", "agent\n", "agent change");
+        run_git(&repo, &["checkout", "main"]);
+        commit_file(&repo, "main.txt", "main advanced\n", "advance main");
+        run_git(&repo, &["checkout", "agent-branch"]);
+        let card = test_card(
+            Some("agent-branch".to_string()),
+            Some(repo.to_string_lossy().to_string()),
+        );
+        let gcx = write_task_with_meta(
+            &repo,
+            card,
+            task_meta_with_base(Some("main"), Some(&base_commit)),
+        )
+        .await;
+        let ccx = planner_ccx(gcx, "planner").await;
+        let mut tool = ToolAgentDiff::new();
+
+        let name_only = tool_output_text(
+            tool.tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([
+                    ("card_id".to_string(), json!("T-1")),
+                    ("mode".to_string(), json!("name-only")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert!(name_only.contains(&format!("**Base:** commit {}", base_commit)));
+        assert!(name_only.contains("agent.txt"));
+        assert!(!name_only.contains("main.txt"));
+    }
+
+    #[tokio::test]
+    async fn tool_agent_diff_reports_no_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        run_git(&repo, &["checkout", "-b", "agent-branch"]);
+        let card = test_card(
+            Some("agent-branch".to_string()),
+            Some(repo.to_string_lossy().to_string()),
+        );
+        let gcx = write_task(&repo, card).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+        let mut tool = ToolAgentDiff::new();
+
+        let output = tool_output_text(
+            tool.tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([
+                    ("card_id".to_string(), json!("T-1")),
+                    ("mode".to_string(), json!("stat")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert!(output.contains("(no changes detected)"));
+    }
+
     #[test]
     fn tool_agent_diff_truncates_output() {
         let card = test_card(Some("agent".to_string()), Some("/tmp/wt".to_string()));
         let output = "a\nb\nc\nd\n";
 
-        let rendered = render_agent_diff(&card, "agent", "main", output, 2);
+        let rendered = render_agent_diff(
+            &card,
+            "agent",
+            &DiffBase {
+                refish: "main".to_string(),
+                label: "branch main".to_string(),
+            },
+            AgentDiffMode::Unified,
+            output,
+            2,
+        );
 
         assert!(
             rendered.contains("a\nb\n... (2 more lines, use mode='name-only' to see all files)")
