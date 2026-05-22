@@ -459,6 +459,7 @@ mod tests {
             assignee: None,
             agent_chat_id: None,
             status_updates: Vec::new(),
+            comments: vec![],
             final_report: Some("done".to_string()),
             final_report_structured: None,
             verifier_report: None,
@@ -470,6 +471,7 @@ mod tests {
             agent_worktree: None,
             agent_worktree_name: None,
             ab_variants: None,
+            team_members: vec![],
             target_files: Vec::new(),
             scope_guard_mode: ScopeGuardMode::Off,
         }

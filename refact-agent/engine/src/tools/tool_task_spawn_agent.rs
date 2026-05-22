@@ -1026,6 +1026,7 @@ mod tests {
             assignee: None,
             agent_chat_id: None,
             status_updates: vec![],
+            comments: vec![],
             final_report: None,
             final_report_structured: None,
             verifier_report: None,
@@ -1037,6 +1038,7 @@ mod tests {
             agent_worktree: worktree,
             agent_worktree_name: None,
             ab_variants: None,
+            team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }

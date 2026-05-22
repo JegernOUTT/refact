@@ -895,6 +895,7 @@ mod tests {
                 assignee: None,
                 agent_chat_id: Some("chat".to_string()),
                 status_updates: vec![],
+                comments: vec![],
                 final_report: None,
                 final_report_structured: None,
                 verifier_report: None,
@@ -906,6 +907,7 @@ mod tests {
                 agent_worktree: None,
                 agent_worktree_name: None,
                 ab_variants: None,
+                team_members: vec![],
                 target_files: vec!["src/allowed.rs".to_string()],
                 scope_guard_mode: mode,
             }

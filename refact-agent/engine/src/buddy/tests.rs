@@ -3351,6 +3351,7 @@ fn make_board_card(
         assignee: assignee.map(|s| s.to_string()),
         agent_chat_id: None,
         status_updates: vec![],
+        comments: vec![],
         final_report: None,
         final_report_structured: None,
         verifier_report: None,
@@ -3362,6 +3363,7 @@ fn make_board_card(
         agent_worktree: None,
         agent_worktree_name: None,
         ab_variants: None,
+        team_members: vec![],
         target_files: vec![],
         scope_guard_mode: Default::default(),
     }
@@ -7205,6 +7207,7 @@ async fn task_abandoned_not_emitted_when_only_session_missing() {
         assignee: Some("agent-1".to_string()),
         agent_chat_id: Some("gone-session-xyz".to_string()),
         status_updates: vec![],
+        comments: vec![],
         final_report: None,
         final_report_structured: None,
         verifier_report: None,
@@ -7216,6 +7219,7 @@ async fn task_abandoned_not_emitted_when_only_session_missing() {
         agent_worktree: None,
         agent_worktree_name: None,
         ab_variants: None,
+        team_members: vec![],
         target_files: vec![],
         scope_guard_mode: Default::default(),
     });
@@ -7268,6 +7272,7 @@ async fn task_cluster_duplicate_emits_with_real_touched_files() {
             assignee: None,
             agent_chat_id: None,
             status_updates: vec![],
+            comments: vec![],
             final_report: None,
             final_report_structured: None,
             verifier_report: None,
@@ -7279,6 +7284,7 @@ async fn task_cluster_duplicate_emits_with_real_touched_files() {
             agent_worktree: None,
             agent_worktree_name: None,
             ab_variants: None,
+            team_members: vec![],
             target_files: vec!["src/auth.rs".to_string()],
             scope_guard_mode: Default::default(),
         });

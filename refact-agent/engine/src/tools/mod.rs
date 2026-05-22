@@ -20,6 +20,7 @@ mod tool_agent_steer;
 mod tool_ast_definition;
 mod tool_cat;
 mod tool_chrome;
+mod tool_card_comment;
 #[cfg(test)]
 pub mod tool_cmdline;
 mod tool_code_review;

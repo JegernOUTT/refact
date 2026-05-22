@@ -546,6 +546,7 @@ mod tests {
             assignee: Some("agent-1".to_string()),
             agent_chat_id: Some(format!("agent-chat-{}", id)),
             status_updates,
+            comments: vec![],
             final_report: None,
             final_report_structured: None,
             verifier_report: None,
@@ -557,6 +558,7 @@ mod tests {
             agent_worktree: None,
             agent_worktree_name: None,
             ab_variants: None,
+            team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }

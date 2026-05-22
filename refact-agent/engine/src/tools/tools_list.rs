@@ -421,6 +421,8 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_agent_planner_qna::ToolAgentAskPlanner::new()),
         Box::new(crate::tools::tool_agent_planner_qna::ToolPlannerReply::new()),
         Box::new(crate::tools::tool_agent_planner_qna::ToolTaskQuestionsList::new()),
+        Box::new(crate::tools::tool_card_comment::ToolCardCommentAdd::new()),
+        Box::new(crate::tools::tool_card_comment::ToolCardCommentList::new()),
         Box::new(crate::tools::tool_task_broadcast::ToolTaskBroadcast::new()),
         Box::new(crate::tools::tool_agent_lifecycle::ToolCancelAgent::new()),
         Box::new(crate::tools::tool_agent_lifecycle::ToolPauseAgent::new()),

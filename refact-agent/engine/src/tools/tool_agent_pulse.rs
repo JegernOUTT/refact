@@ -551,6 +551,7 @@ mod tests {
                 timestamp: created_at.clone(),
                 message: "started".to_string(),
             }],
+            comments: vec![],
             final_report: None,
             final_report_structured: None,
             verifier_report: None,
@@ -562,6 +563,7 @@ mod tests {
             agent_worktree: None,
             agent_worktree_name: None,
             ab_variants: None,
+            team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }

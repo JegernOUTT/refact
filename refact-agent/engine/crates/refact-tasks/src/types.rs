@@ -176,6 +176,16 @@ pub struct TeamMember {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardComment {
+    pub id: String,
+    pub author_role: String,
+    pub author_id: Option<String>,
+    pub timestamp: String,
+    pub body: String,
+    pub reply_to: Option<String>,
+}
+
 impl FinalReport {
     pub fn to_markdown(&self) -> String {
         let mut output = String::new();
@@ -344,6 +354,8 @@ pub struct BoardCard {
     pub agent_chat_id: Option<String>,
     #[serde(default)]
     pub status_updates: Vec<StatusUpdate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<CardComment>,
     #[serde(default)]
     pub final_report: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,6 +499,7 @@ mod tests {
             assignee: None,
             agent_chat_id: None,
             status_updates: vec![],
+            comments: vec![],
             final_report: None,
             final_report_structured: None,
             verifier_report: None,
@@ -576,6 +589,26 @@ mod tests {
         assert!(card.final_report_structured.is_none());
         assert!(card.verifier_report.is_none());
         assert!(card.ab_variants.is_none());
+        assert!(card.comments.is_empty());
+    }
+
+    #[test]
+    fn board_card_without_comments_deserializes_with_empty_vec() {
+        let card: BoardCard = serde_json::from_str(
+            r#"{
+                "id": "T-1",
+                "title": "Legacy card",
+                "column": "planned",
+                "created_at": "2026-05-16T00:00:00Z",
+                "started_at": null,
+                "completed_at": null,
+                "assignee": null,
+                "agent_chat_id": null
+            }"#,
+        )
+        .unwrap();
+
+        assert!(card.comments.is_empty());
     }
 
     #[test]

@@ -761,6 +761,7 @@ mod tests {
                 timestamp: "2024-01-01T10:00:00Z".to_string(),
                 message: "Agent started".to_string(),
             }],
+            comments: vec![],
             final_report: Some("FAILED: network error after 3 retries".to_string()),
             final_report_structured: None,
             verifier_report: None,
@@ -772,6 +773,7 @@ mod tests {
             agent_worktree: worktree,
             agent_worktree_name: None,
             ab_variants: None,
+            team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }
@@ -849,6 +851,7 @@ mod tests {
             assignee: Some("active-agent".to_string()),
             agent_chat_id: Some("agent-T-3-active".to_string()),
             status_updates: vec![],
+            comments: vec![],
             final_report: None,
             final_report_structured: None,
             verifier_report: None,
@@ -860,6 +863,7 @@ mod tests {
             agent_worktree: None,
             agent_worktree_name: None,
             ab_variants: None,
+            team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
         };

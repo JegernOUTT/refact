@@ -178,6 +178,8 @@ tools:
   - doc_list
   - doc_get
   - agent_ask_planner
+  - card_comment_add
+  - card_comment_list
   - propose_card_split
   - agent_milestone
 

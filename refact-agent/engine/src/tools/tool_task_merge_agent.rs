@@ -927,6 +927,7 @@ mod worktree_merge_tool_tests {
             assignee: Some("agent-1".to_string()),
             agent_chat_id: Some("agent-chat-1".to_string()),
             status_updates: vec![],
+            comments: vec![],
             final_report: Some("done".to_string()),
             final_report_structured: None,
             verifier_report: None,
@@ -938,6 +939,7 @@ mod worktree_merge_tool_tests {
             agent_worktree: Some(root.to_string_lossy().to_string()),
             agent_worktree_name: Some(worktree_id.to_string()),
             ab_variants: None,
+            team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }
