@@ -224,6 +224,7 @@ pub async fn handle_create_task(
             ab_variants: None,
             target_files: req.target_files,
             scope_guard_mode: Default::default(),
+            team_members: vec![],
         });
         storage::save_board(gcx, &meta.id, &board)
             .await
@@ -418,6 +419,7 @@ pub async fn handle_patch_board(
                 ab_variants: None,
                 target_files,
                 scope_guard_mode: Default::default(),
+                team_members: vec![],
             });
         }
         BoardPatch::UpdateCard {

@@ -819,6 +819,7 @@ impl Tool for ToolTaskBoardCreateCard {
             ab_variants: None,
             target_files,
             scope_guard_mode: Default::default(),
+            team_members: vec![],
         });
         board.rev += 1;
 
@@ -1311,6 +1312,7 @@ mod tests {
             ab_variants: None,
             target_files: vec![],
             scope_guard_mode: Default::default(),
+            team_members: vec![],
         }
     }
 
