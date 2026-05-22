@@ -10,7 +10,9 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ContextEnum};
 use crate::tasks::storage;
 use crate::tasks::types::BoardCard;
-use crate::tools::tool_task_check_agents::planner_bound_task_id;
+use crate::tools::task_tool_helpers::{
+    human_age, required_string, require_bound_planner_task, truncate_chars,
+};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionFacade, ChatSessionSnapshot, SessionState};
@@ -57,15 +59,6 @@ struct AgentPulse {
     last_assistant_preview: Option<String>,
     last_tool_call: Option<String>,
     session_note: Option<String>,
-}
-
-fn required_string(args: &HashMap<String, Value>, key: &str) -> Result<String, String> {
-    args.get(key)
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| format!("Missing '{}'", key))
 }
 
 async fn fetch_session_snapshot(
@@ -147,7 +140,10 @@ fn render_agent_pulse(pulse: &AgentPulse) -> String {
 fn render_agent_pulse_at(pulse: &AgentPulse, now: DateTime<Utc>) -> String {
     let last_activity = pulse
         .last_activity_at
-        .map(|timestamp| format_age_ago(now, timestamp))
+        .map(|timestamp| {
+            let seconds = now.signed_duration_since(timestamp).num_seconds().max(0);
+            human_age(Utc::now() - chrono::Duration::seconds(seconds))
+        })
         .unwrap_or_else(|| "unknown".to_string());
     let currently_editing = pulse.currently_editing.as_deref().unwrap_or("unknown");
     let assistant = pulse.last_assistant_preview.as_deref().unwrap_or("(none)");
@@ -350,14 +346,6 @@ fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_chars(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let take = limit.saturating_sub(1);
-    format!("{}…", text.chars().take(take).collect::<String>())
-}
-
 fn markdown_quote_text(text: &str) -> String {
     text.replace('\n', "\n> ")
 }
@@ -390,21 +378,6 @@ fn latest_timestamp(
     times: impl IntoIterator<Item = Option<DateTime<Utc>>>,
 ) -> Option<DateTime<Utc>> {
     times.into_iter().flatten().max()
-}
-
-fn format_age_ago(now: DateTime<Utc>, timestamp: DateTime<Utc>) -> String {
-    let seconds = now.signed_duration_since(timestamp).num_seconds().max(0);
-    if seconds == 0 {
-        "now".to_string()
-    } else if seconds < 60 {
-        format!("{}s ago", seconds)
-    } else if seconds < 60 * 60 {
-        format!("{}m ago", seconds / 60)
-    } else if seconds < 60 * 60 * 24 {
-        format!("{}h ago", seconds / (60 * 60))
-    } else {
-        format!("{}d ago", seconds / (60 * 60 * 24))
-    }
 }
 
 #[async_trait]
@@ -455,7 +428,7 @@ impl Tool for ToolAgentPulse {
         }
 
         let card_id = required_string(args, "card_id")?;
-        let task_id = planner_bound_task_id(&ccx, args).await?;
+        let task_id = require_bound_planner_task(&ccx, args).await?;
         let (gcx, chat_facade, fallback_token_cap) = {
             let ccx_lock = ccx.lock().await;
             (

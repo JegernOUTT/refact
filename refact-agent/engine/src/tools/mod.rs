@@ -7,6 +7,7 @@ pub mod subagent_phases;
 mod tests_schema;
 pub mod tool_helpers;
 pub mod tool_name_alias;
+pub(crate) mod task_tool_helpers;
 
 mod tool_activate_skill;
 mod tool_add_workspace_folder;

@@ -10,6 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, TaskBoard};
+use crate::tools::task_tool_helpers::{human_age, require_bound_planner_task, truncate_chars};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_runtime_api::{ChatSessionFacade, SessionState};
 
@@ -29,43 +30,6 @@ pub(crate) async fn get_task_id(
     }
     storage::infer_task_id_from_chat_id(&ccx_lock.chat_id)
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
-}
-
-pub(crate) async fn planner_bound_task_id(
-    ccx: &Arc<AMutex<AtCommandsContext>>,
-    args: &HashMap<String, Value>,
-) -> Result<String, String> {
-    let requested_task_id = match args.get("task_id") {
-        Some(value) if value.is_null() => None,
-        Some(value) => Some(
-            value
-                .as_str()
-                .ok_or_else(|| "task_id must be a string".to_string())?
-                .trim()
-                .to_string(),
-        ),
-        None => None,
-    };
-    let ccx_lock = ccx.lock().await;
-    if let Some(meta) = &ccx_lock.task_meta {
-        if meta.role != "planner" {
-            return Err(
-                "task observability tools can only be called by the task planner.".to_string(),
-            );
-        }
-        if requested_task_id.as_deref().is_some_and(|task_id| task_id != meta.task_id) {
-            return Err("task_id override is not allowed from this planner chat".to_string());
-        }
-        return Ok(meta.task_id.clone());
-    }
-
-    let inferred_task_id = storage::infer_task_id_from_chat_id(&ccx_lock.chat_id);
-    match (requested_task_id, inferred_task_id) {
-        (Some(requested), Some(inferred)) if requested == inferred => Ok(inferred),
-        (Some(_), _) => Err("task_id override is not allowed from this planner chat".to_string()),
-        (None, Some(inferred)) => Ok(inferred),
-        (None, None) => Err("Missing 'task_id' (and chat is not bound to a task)".to_string()),
-    }
 }
 
 pub struct ToolTaskCheckAgents;
@@ -966,14 +930,6 @@ fn compact_title(title: &str, limit: usize) -> String {
     truncate_chars(&slug, limit)
 }
 
-fn truncate_chars(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let take = limit.saturating_sub(1);
-    format!("{}…", text.chars().take(take).collect::<String>())
-}
-
 fn age_minutes(status: &AgentStatus, now: DateTime<Utc>) -> Option<i64> {
     status
         .last_activity_at
@@ -981,17 +937,8 @@ fn age_minutes(status: &AgentStatus, now: DateTime<Utc>) -> Option<i64> {
 }
 
 fn format_age_ago(now: DateTime<Utc>, timestamp: DateTime<Utc>) -> String {
-    let duration = now.signed_duration_since(timestamp);
-    let minutes = duration.num_minutes().max(0);
-    if minutes == 0 {
-        "now".to_string()
-    } else if minutes < 60 {
-        format!("{}m ago", minutes)
-    } else if minutes < 60 * 24 {
-        format!("{}h ago", minutes / 60)
-    } else {
-        format!("{}d ago", minutes / (60 * 24))
-    }
+    let minutes = now.signed_duration_since(timestamp).num_minutes().max(0);
+    human_age(Utc::now() - Duration::minutes(minutes))
 }
 
 fn format_duration_short(now: DateTime<Utc>, timestamp: DateTime<Utc>) -> String {
@@ -1065,7 +1012,7 @@ impl Tool for ToolTaskCheckAgents {
         drop(ccx_lock);
 
         let query = parse_agent_status_query(args)?;
-        let task_id = planner_bound_task_id(&ccx, args).await?;
+        let task_id = require_bound_planner_task(&ccx, args).await?;
         let (gcx, chat_facade) = {
             let ccx_lock = ccx.lock().await;
             (ccx_lock.app.gcx.clone(), ccx_lock.app.chat.facade.clone())

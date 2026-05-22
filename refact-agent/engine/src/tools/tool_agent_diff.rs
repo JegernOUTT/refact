@@ -14,7 +14,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::BoardCard;
-use crate::tools::tool_task_check_agents::planner_bound_task_id;
+use crate::tools::task_tool_helpers::{required_string, require_bound_planner_task};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
 
@@ -45,15 +45,6 @@ impl ToolAgentDiff {
     pub fn new() -> Self {
         Self
     }
-}
-
-fn required_string(args: &HashMap<String, Value>, key: &str) -> Result<String, String> {
-    args.get(key)
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| format!("Missing '{}'", key))
 }
 
 fn parse_max_lines(args: &HashMap<String, Value>) -> Result<usize, String> {
@@ -471,7 +462,7 @@ impl Tool for ToolAgentDiff {
         let card_id = required_string(args, "card_id")?;
         let mode = AgentDiffMode::parse(args.get("mode"))?;
         let max_lines = parse_max_lines(args)?;
-        let task_id = planner_bound_task_id(&ccx, args).await?;
+        let task_id = require_bound_planner_task(&ccx, args).await?;
         let gcx = ccx.lock().await.app.gcx.clone();
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
