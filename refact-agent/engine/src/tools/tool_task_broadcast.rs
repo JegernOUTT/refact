@@ -554,6 +554,7 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            ab_variants: None,
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }

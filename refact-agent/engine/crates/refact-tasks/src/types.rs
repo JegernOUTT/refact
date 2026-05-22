@@ -145,6 +145,25 @@ pub struct SuggestedCard {
     pub target_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbVariantInfo {
+    pub agent_id: String,
+    pub chat_id: String,
+    pub worktree: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbVariants {
+    pub a: AbVariantInfo,
+    pub b: AbVariantInfo,
+}
+
 impl FinalReport {
     pub fn to_markdown(&self) -> String {
         let mut output = String::new();
@@ -330,6 +349,8 @@ pub struct BoardCard {
     pub agent_worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_worktree_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ab_variants: Option<AbVariants>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_files: Vec<String>,
     #[serde(default)]
@@ -462,6 +483,7 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            ab_variants: None,
             target_files: vec![],
             scope_guard_mode: ScopeGuardMode::Off,
         }
@@ -537,6 +559,26 @@ mod tests {
         assert_eq!(card.final_report.as_deref(), Some("legacy markdown report"));
         assert!(card.final_report_structured.is_none());
         assert!(card.verifier_report.is_none());
+        assert!(card.ab_variants.is_none());
+    }
+
+    #[test]
+    fn ab_variants_field_defaults_to_none() {
+        let card: BoardCard = serde_json::from_str(
+            r#"{
+                "id": "T-1",
+                "title": "Legacy card",
+                "column": "planned",
+                "created_at": "2026-05-16T00:00:00Z",
+                "started_at": null,
+                "completed_at": null,
+                "assignee": null,
+                "agent_chat_id": null
+            }"#,
+        )
+        .unwrap();
+
+        assert!(card.ab_variants.is_none());
     }
 
     #[test]

@@ -308,6 +308,8 @@ tools:
   - task_board_move_card
   - task_ready_cards
   - task_spawn_agent
+  - spawn_ab
+  - pick_ab_winner
   - task_check_agents
   - agent_diff
   - task_verify_card

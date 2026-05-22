@@ -196,6 +196,7 @@ pub async fn handle_create_task(
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            ab_variants: None,
             target_files: req.target_files,
             scope_guard_mode: Default::default(),
         });
@@ -308,6 +309,7 @@ pub async fn handle_patch_board(
                 agent_branch: None,
                 agent_worktree: None,
                 agent_worktree_name: None,
+                ab_variants: None,
                 target_files,
                 scope_guard_mode: Default::default(),
             });

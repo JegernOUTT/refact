@@ -905,6 +905,7 @@ mod tests {
                 agent_branch: None,
                 agent_worktree: None,
                 agent_worktree_name: None,
+                ab_variants: None,
                 target_files: vec!["src/allowed.rs".to_string()],
                 scope_guard_mode: mode,
             }

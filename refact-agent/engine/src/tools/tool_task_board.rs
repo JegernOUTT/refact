@@ -12,7 +12,7 @@ use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
 use crate::tasks::storage;
-use crate::tasks::types::{BoardCard, ScopeGuardMode, TaskBoard};
+use crate::tasks::types::{AbVariants, BoardCard, ScopeGuardMode, TaskBoard};
 use crate::tasks::events::{TaskEvent, emit_task_event};
 
 fn make_source() -> ToolSource {
@@ -108,6 +108,7 @@ struct CardBrief {
     completed_at: Option<String>,
     agent_branch: Option<String>,
     agent_worktree_name: Option<String>,
+    ab_variants: Option<AbVariants>,
     target_files: Vec<String>,
     scope_guard_mode: ScopeGuardMode,
 }
@@ -260,6 +261,7 @@ fn render_card_details(card: &BoardCard, verbosity: BoardVerbosity) -> Result<St
             completed_at: card.completed_at.clone(),
             agent_branch: card.agent_branch.clone(),
             agent_worktree_name: card.agent_worktree_name.clone(),
+            ab_variants: card.ab_variants.clone(),
             target_files: card.target_files.clone(),
             scope_guard_mode: card.scope_guard_mode,
         })
@@ -813,6 +815,7 @@ impl Tool for ToolTaskBoardCreateCard {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            ab_variants: None,
             target_files,
             scope_guard_mode: Default::default(),
         });
@@ -1302,6 +1305,7 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            ab_variants: None,
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }

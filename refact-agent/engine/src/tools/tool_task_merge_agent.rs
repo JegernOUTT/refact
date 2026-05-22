@@ -816,6 +816,7 @@ mod worktree_merge_tool_tests {
             agent_branch: Some(branch.to_string()),
             agent_worktree: Some(root.to_string_lossy().to_string()),
             agent_worktree_name: Some(worktree_id.to_string()),
+            ab_variants: None,
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }

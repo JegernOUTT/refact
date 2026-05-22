@@ -162,6 +162,27 @@ pub(crate) async fn prepare_agent_worktree(
     card_id: &str,
     agent_chat_id: &str,
 ) -> Result<PreparedWorktree, String> {
+    prepare_agent_worktree_with_suffix(
+        gcx,
+        task_meta,
+        task_id,
+        agent_id,
+        card_id,
+        agent_chat_id,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_agent_worktree_with_suffix(
+    gcx: Arc<GlobalContext>,
+    task_meta: &StoredTaskMeta,
+    task_id: &str,
+    agent_id: &str,
+    card_id: &str,
+    agent_chat_id: &str,
+    branch_suffix: Option<&str>,
+) -> Result<PreparedWorktree, String> {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     let workspace_root = project_dirs.first().cloned().ok_or_else(|| {
         "No workspace folder found; task agents require an isolated git worktree".to_string()
@@ -169,8 +190,11 @@ pub(crate) async fn prepare_agent_worktree(
 
     let agent_id_short = &agent_id[..agent_id.len().min(8)];
     let branch_name = format!(
-        "refact/task/{}/card/{}/{}",
-        task_id, card_id, agent_id_short
+        "refact/task/{}/card/{}/{}{}",
+        task_id,
+        card_id,
+        agent_id_short,
+        branch_suffix.unwrap_or("")
     );
     let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new(cache_dir, workspace_root.clone())?;
@@ -1012,6 +1036,7 @@ mod tests {
             agent_branch: None,
             agent_worktree: worktree,
             agent_worktree_name: None,
+            ab_variants: None,
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }

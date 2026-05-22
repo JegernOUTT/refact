@@ -802,6 +802,7 @@ mod tests {
             agent_branch: Some("legacy-branch".to_string()),
             agent_worktree: worktree,
             agent_worktree_name: Some("legacy-id".to_string()),
+            ab_variants: None,
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }
