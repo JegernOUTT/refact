@@ -114,24 +114,36 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
-  const success = finalReportSuccess(content);
+  const reportSuccess = finalReportSuccess(content);
+  const status = toolFailed || reportSuccess === false ? "error" : "success";
+  const statusIcon =
+    status === "error" ? (
+      <CrossCircledIcon data-testid="final-report-tool-error-icon" />
+    ) : (
+      <CheckCircledIcon data-testid="final-report-tool-success-icon" />
+    );
 
   return (
-    <div data-testid="final-report-tool" style={{ display: "contents" }}>
+    <>
+      <span data-testid="final-report-tool" hidden />
       <ToolCard
-        icon={success === false ? <CrossCircledIcon /> : <CheckCircledIcon />}
+        icon={statusIcon}
         summary="Task agent final report"
         meta={
-          success === false ? "failed" : success === true ? "success" : undefined
+          reportSuccess === false
+            ? "failed"
+            : reportSuccess === true
+              ? "success"
+              : undefined
         }
-        status={toolFailed ? "error" : "success"}
+        status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
       >
         <FinalReportView content={content} />
       </ToolCard>
-    </div>
+    </>
   );
 };
 

@@ -67,23 +67,27 @@ const DOC_GET_OUTPUT = [
   "- Ship document renderer",
 ].join("\n");
 
-const STRUCTURED_FINAL_REPORT = JSON.stringify({
-  summary: "Added routing tests.",
-  success: true,
-  files_changed: ["src/components/ChatContent/ToolsContent.test.tsx"],
-  tests_added_or_updated: ["ToolsContent.test.tsx"],
-  verification: [
-    {
-      command: "npm run test -- ToolsContent --run",
-      exit_code: 0,
-      passed: true,
-      output_tail: "passed",
-    },
-  ],
-  followup_cards: [],
-  risks: [],
-  assumptions: [],
-});
+function structuredFinalReport(success: boolean) {
+  return JSON.stringify({
+    summary: "Added routing tests.",
+    success,
+    files_changed: ["src/components/ChatContent/ToolsContent.test.tsx"],
+    tests_added_or_updated: ["ToolsContent.test.tsx"],
+    verification: [
+      {
+        command: "npm run test -- ToolsContent --run",
+        exit_code: 0,
+        passed: true,
+        output_tail: "passed",
+      },
+    ],
+    followup_cards: [],
+    risks: [],
+    assumptions: [],
+  });
+}
+
+const STRUCTURED_FINAL_REPORT = structuredFinalReport(true);
 
 const TASK_DONE_OUTPUT = JSON.stringify({
   type: "task_done",
@@ -145,11 +149,47 @@ describe("ToolsContent routing", () => {
   it("routes plain-text task_agent_finish results through FinalReportView legacy fallback", () => {
     renderToolContent("task_agent_finish", "Plain legacy report");
 
-    // FinalReportView renders plain text via its legacy markdown fallback path,
-    // so we expect no structured testid but the GenericTool fallback should not show either.
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
     expect(screen.queryByTestId("final-report-view")).not.toBeInTheDocument();
     expect(screen.getByTestId("final-report-tool")).toBeInTheDocument();
     expect(screen.getByText("Plain legacy report")).toBeInTheDocument();
+  });
+
+  it("final_report_tool_card_uses_hidden_marker_not_display_contents", () => {
+    const { container } = renderToolContent(
+      "task_agent_finish",
+      STRUCTURED_FINAL_REPORT,
+    );
+
+    expect(screen.getByTestId("final-report-tool")).toHaveAttribute("hidden");
+    expect(
+      Array.from(container.querySelectorAll<HTMLElement>("[style]")).some(
+        (element) => element.style.display === "contents",
+      ),
+    ).toBe(false);
+  });
+
+  it("final_report_tool_card_shows_error_when_success_false", () => {
+    renderToolContent("task_agent_finish", structuredFinalReport(false));
+
+    expect(
+      screen.getByTestId("final-report-tool-error-icon"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("final-report-tool-success-icon"),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText("failed")).not.toHaveLength(0);
+  });
+
+  it("final_report_tool_card_shows_success_when_success_true", () => {
+    renderToolContent("task_agent_finish", structuredFinalReport(true));
+
+    expect(
+      screen.getByTestId("final-report-tool-success-icon"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("final-report-tool-error-icon"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("success")).toBeInTheDocument();
   });
 });
