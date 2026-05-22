@@ -12,7 +12,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
-use crate::tools::tool_task_check_agents::planner_bound_task_id;
+use crate::tools::task_tool_helpers::require_bound_planner_task;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 const ASK_PREFIX: &str = "[ASK:";
@@ -173,7 +173,7 @@ async fn planner_task_id(
     tool_name: &str,
 ) -> Result<String, String> {
     require_planner_role(ccx, tool_name).await?;
-    planner_bound_task_id(ccx, args).await
+    require_bound_planner_task(ccx, args).await
 }
 
 fn parse_status_id<'a>(message: &'a str, prefix: &str) -> Option<(&'a str, &'a str)> {
