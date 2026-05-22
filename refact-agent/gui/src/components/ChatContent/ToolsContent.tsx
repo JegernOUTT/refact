@@ -78,6 +78,8 @@ import {
   CompressReportTool,
 } from "./ToolCard";
 import { AgentStatusView } from "./AgentStatusView";
+import { AgentPulseView } from "./AgentPulseView";
+import { AgentDiffView } from "./AgentDiffView";
 
 function parseProgressEntry(entry: string): { step?: string; text: string } {
   const m = entry.match(/^(\d+\/\d+):\s*([\s\S]+)$/);
@@ -854,6 +856,42 @@ function processToolCalls(
     const elem = (
       <AgentStatusView
         key={`agent-status-tool-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+    );
+  }
+
+  if (headName === "agent_pulse") {
+    const elem = (
+      <AgentPulseView
+        key={`agent-pulse-tool-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+    );
+  }
+
+  if (headName === "agent_diff") {
+    const elem = (
+      <AgentDiffView
+        key={`agent-diff-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
       />
     );

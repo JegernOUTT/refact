@@ -1,0 +1,121 @@
+.root {
+  width: 100%;
+  overflow: hidden;
+}
+
+.header {
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  background: var(--gray-a2);
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stateBadge {
+  flex-shrink: 0;
+}
+
+.stateText {
+  font-weight: 500;
+}
+
+.stateRunning {
+  color: var(--blue-11);
+}
+
+.statePaused,
+.stateWaiting {
+  color: var(--amber-11);
+}
+
+.stateDone {
+  color: var(--green-11);
+}
+
+.stateError {
+  color: var(--red-11);
+}
+
+.stateIdle,
+.stateUnknown {
+  color: var(--gray-11);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.metaItem {
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a3);
+  border-radius: var(--radius-2);
+  background: var(--gray-a1);
+}
+
+.label {
+  display: block;
+  color: var(--gray-11);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.value {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note {
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-2);
+  background: var(--amber-a2);
+  color: var(--amber-12);
+}
+
+.section {
+  margin-top: var(--space-3);
+}
+
+.sectionLabel {
+  margin-bottom: var(--space-1);
+  color: var(--gray-11);
+  font-size: 11px;
+}
+
+.quote,
+.toolCall {
+  padding: var(--space-2);
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.toolCall {
+  font-family: var(--code-font-family);
+}
+
+.actions {
+  margin-top: var(--space-3);
+}
+
+.dialogContent {
+  max-width: 520px;
+}
+
+.dialogInput {
+  min-height: 120px;
+}

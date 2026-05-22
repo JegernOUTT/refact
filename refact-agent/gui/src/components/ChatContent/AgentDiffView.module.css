@@ -1,0 +1,115 @@
+.root {
+  width: 100%;
+  overflow: hidden;
+}
+
+.summary {
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  background: var(--gray-a2);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.metaItem {
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a3);
+  border-radius: var(--radius-2);
+  background: var(--gray-a1);
+}
+
+.label {
+  display: block;
+  color: var(--gray-11);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.value {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats {
+  margin-top: var(--space-2);
+}
+
+.added {
+  color: var(--green-11);
+}
+
+.removed {
+  color: var(--red-11);
+}
+
+.truncation {
+  margin-top: var(--space-2);
+}
+
+.content {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) minmax(0, 1fr);
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.fileTree {
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a3);
+  border-radius: var(--radius-2);
+  background: var(--gray-a1);
+}
+
+.fileList {
+  margin-top: var(--space-2);
+}
+
+.fileButton {
+  width: 100%;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.fileButtonInner {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diffPane {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.diffPaneFull {
+  grid-column: 1 / -1;
+}
+
+.rawDiff {
+  max-height: 520px;
+  overflow: auto;
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+}
+
+.empty {
+  margin-top: var(--space-3);
+  color: var(--gray-11);
+}
+
+@media (max-width: 720px) {
+  .content {
+    grid-template-columns: 1fr;
+  }
+}

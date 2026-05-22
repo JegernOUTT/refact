@@ -8,7 +8,7 @@ export type AgentStatusState =
 export type AgentStatusTab = AgentStatusState | "all";
 export type PriorityFilter = "all" | "P0" | "P1" | "P2";
 export type AgeFilter = "all" | "15" | "60" | "240";
-export type AgentAction = "pulse" | "diff" | "steer" | "cancel";
+export type AgentAction = "pulse" | "diff" | "steer" | "pause" | "cancel";
 
 export type AgentAlerts = {
   stuck: number;
@@ -46,6 +46,7 @@ export type AgentStatusFilters = {
 const EMPTY_ALERTS: AgentAlerts = { stuck: 0, failed: 0, paused: 0 };
 
 export const DEFAULT_CANCEL_REASON = "Cancelled from agent status view.";
+export const DEFAULT_PAUSE_REASON = "Paused from agent pulse view.";
 export const STATUS_TABS: AgentStatusTab[] = [
   "all",
   "running",
@@ -372,6 +373,10 @@ export function formatAgentActionCommand(
     case "steer":
       return `agent_steer(card_id=${card}, message=${JSON.stringify(
         value ?? "",
+      )})`;
+    case "pause":
+      return `pause_agent(card_id=${card}, reason=${JSON.stringify(
+        value ?? DEFAULT_PAUSE_REASON,
       )})`;
     case "cancel":
       return `cancel_agent(card_id=${card}, reason=${JSON.stringify(
