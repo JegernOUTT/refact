@@ -1,5 +1,14 @@
 import React, { useCallback, useState } from "react";
-import { Badge, Box, Button, Card, Dialog, Flex, Text } from "@radix-ui/themes";
+import {
+  Badge,
+  Box,
+  Button,
+  Card,
+  Dialog,
+  Flex,
+  Spinner,
+  Text,
+} from "@radix-ui/themes";
 import classNames from "classnames";
 import type { TaskMemoryEntry } from "../../../services/refact/taskMemoriesApi";
 import styles from "./MemoryInboxPanel.module.css";
@@ -25,6 +34,7 @@ type MemoryCardProps = {
   onPin: (filename: string, pinned: boolean) => void | Promise<void>;
   onArchive: (filename: string) => void | Promise<void>;
   disabled?: boolean;
+  pending?: boolean;
 };
 
 export const MemoryCard: React.FC<MemoryCardProps> = ({
@@ -32,6 +42,7 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
   onPin,
   onArchive,
   disabled = false,
+  pending = false,
 }) => {
   const [viewOpen, setViewOpen] = useState(false);
 
@@ -107,6 +118,14 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
           <Button size="1" variant="ghost" onClick={() => setViewOpen(true)}>
             View full
           </Button>
+          {pending && (
+            <Flex align="center" gap="1" className={styles.pendingState}>
+              <Spinner size="1" />
+              <Text size="1" color="gray">
+                Updating
+              </Text>
+            </Flex>
+          )}
         </Flex>
       </Flex>
 

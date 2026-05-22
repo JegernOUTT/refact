@@ -147,7 +147,7 @@ describe("MemoryInboxPanel", () => {
     });
   });
 
-  it("keeps stale selected tags visible and removable when filters change", async () => {
+  it("memory_inbox_filter_options_persist_under_active_filters", async () => {
     server.use(
       http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", ({ request }) => {
         const url = new URL(request.url);
@@ -164,25 +164,20 @@ describe("MemoryInboxPanel", () => {
     });
 
     await screen.findByText("Use scoped memory index");
-    await user.click(screen.getByRole("button", { name: "planner" }));
     await user.click(screen.getByRole("combobox", { name: "Memory kind filter" }));
     await user.click(await screen.findByRole("option", { name: "risk" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "planner" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
-      expect(screen.getByText("No memories match the current filters.")).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: "planner" }));
-
-    await waitFor(() => {
+      expect(screen.queryByText("Use scoped memory index")).not.toBeInTheDocument();
       expect(screen.getByText("Archive stale notes")).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "planner" })).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Clear filters" }),
-      ).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "planner" })).toBeInTheDocument();
     });
+
+    await user.click(
+      screen.getByRole("combobox", { name: "Memory namespace filter" }),
+    );
+
+    expect(await screen.findByRole("option", { name: "task" })).toBeInTheDocument();
   });
 
   it("search filters client-side", async () => {
@@ -231,6 +226,54 @@ describe("MemoryInboxPanel", () => {
 
     expect(await screen.findByRole("button", { name: "Pin" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Unpin" })).not.toBeInTheDocument();
+  });
+
+  it("memory_inbox_pin_disabled_while_in_flight", async () => {
+    const pinRequests: unknown[] = [];
+    let resolvePin: (response: HttpResponse) => void = () => undefined;
+    mockMemories({
+      ...memoriesResponse,
+      memories: [memoriesResponse.memories[0]],
+    });
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        async ({ request }) => {
+          pinRequests.push(await request.json());
+          return new Promise<HttpResponse>((resolve) => {
+            resolvePin = resolve;
+          });
+        },
+      ),
+    );
+
+    const { user } = render(<MemoryInboxPanel taskId="task-1" />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "Pin" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Unpin" })).toBeDisabled();
+      expect(screen.getByText("Updating")).toBeInTheDocument();
+      expect(pinRequests).toEqual([{ pinned: true }]);
+    });
+
+    await user.click(screen.getByRole("button", { name: "Unpin" }));
+    expect(pinRequests).toHaveLength(1);
+
+    resolvePin(
+      HttpResponse.json({
+        ok: true,
+        filename: "decision.md",
+        pinned: true,
+        changed: true,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("Updating")).not.toBeInTheDocument();
+    });
   });
 
   it("mark all triaged calls triage mutation", async () => {

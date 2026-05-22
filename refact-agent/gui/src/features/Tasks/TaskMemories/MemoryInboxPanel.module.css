@@ -92,6 +92,10 @@
   flex-shrink: 0;
 }
 
+.pendingState {
+  color: var(--gray-11);
+}
+
 .dialogContent {
   max-width: 720px;
 }

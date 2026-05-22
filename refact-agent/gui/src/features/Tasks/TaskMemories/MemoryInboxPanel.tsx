@@ -16,6 +16,7 @@ import {
   taskMemoriesApi,
   type TaskMemoryEntry,
   useArchiveTaskMemoryMutation,
+  useGetTaskMemoryFacetsQuery,
   useListTaskMemoriesQuery,
   usePinTaskMemoryMutation,
   useTriageTaskMemoriesMutation,
@@ -85,11 +86,15 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
     ReadonlyMap<string, boolean>
   >(() => new Map());
   const [archived, setArchived] = useState<ReadonlySet<string>>(() => new Set());
+  const [pendingMemoryKeys, setPendingMemoryKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const debouncedSearch = useDebouncedValue(search, 200);
 
   useEffect(() => {
     setOptimisticPinned(new Map());
     setArchived(new Set());
+    setPendingMemoryKeys(new Set());
   }, [taskId]);
 
   const serverSearch = debouncedSearch.trim();
@@ -103,8 +108,9 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
     [kind, namespace, serverSearch, taskId],
   );
   const { data, isFetching, error } = useListTaskMemoriesQuery(query);
-  const [pinMemory, pinState] = usePinTaskMemoryMutation();
-  const [archiveMemory, archiveState] = useArchiveTaskMemoryMutation();
+  const { data: facets } = useGetTaskMemoryFacetsQuery({ taskId });
+  const [pinMemory] = usePinTaskMemoryMutation();
+  const [archiveMemory] = useArchiveTaskMemoryMutation();
   const [triageDone, triageState] = useTriageTaskMemoriesMutation();
 
   const memoriesWithOptimisticState = useMemo(() => {
@@ -118,19 +124,8 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
       }));
   }, [archived, data?.memories, optimisticPinned, taskId]);
 
-  const namespaces = useMemo(() => {
-    const values = new Set<string>();
-    for (const memory of data?.memories ?? []) values.add(memory.namespace);
-    return [...values].sort((a, b) => a.localeCompare(b));
-  }, [data?.memories]);
-
-  const tags = useMemo(() => {
-    const values = new Set<string>();
-    for (const memory of data?.memories ?? []) {
-      for (const tag of memory.tags) values.add(tag);
-    }
-    return [...values].sort((a, b) => a.localeCompare(b));
-  }, [data?.memories]);
+  const namespaces = facets?.namespaces ?? [];
+  const tags = facets?.tags ?? [];
 
   const selectedTagList = useMemo(
     () => [...selectedTags].sort((a, b) => a.localeCompare(b)),
@@ -173,11 +168,18 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
   const handlePin = useCallback(
     async (filename: string, pinned: boolean) => {
       const key = optimisticKey(taskId, filename);
+      setPendingMemoryKeys((previous) => new Set(previous).add(key));
       setOptimisticPinned((previous) => new Map(previous).set(key, pinned));
       try {
         await pinMemory({ taskId, filename, pinned }).unwrap();
       } catch {
         setOptimisticPinned((previous) => new Map(previous).set(key, !pinned));
+      } finally {
+        setPendingMemoryKeys((previous) => {
+          const next = new Set(previous);
+          next.delete(key);
+          return next;
+        });
       }
     },
     [pinMemory, taskId],
@@ -186,11 +188,18 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
   const handleArchive = useCallback(
     async (filename: string) => {
       const key = optimisticKey(taskId, filename);
+      setPendingMemoryKeys((previous) => new Set(previous).add(key));
       setArchived((previous) => new Set(previous).add(key));
       try {
         await archiveMemory({ taskId, filename }).unwrap();
       } catch {
         setArchived((previous) => {
+          const next = new Set(previous);
+          next.delete(key);
+          return next;
+        });
+      } finally {
+        setPendingMemoryKeys((previous) => {
           const next = new Set(previous);
           next.delete(key);
           return next;
@@ -223,8 +232,6 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
       patch.undo();
     }
   }, [dispatch, query, taskId, triageDone]);
-
-  const busy = pinState.isLoading || archiveState.isLoading || triageState.isLoading;
 
   return (
     <Box className={styles.root}>
@@ -349,15 +356,21 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({ taskId }) =>
             <Spinner />
           </Flex>
         ) : visibleMemories.length > 0 ? (
-          visibleMemories.map((memory) => (
-            <MemoryCard
-              key={memory.filename}
-              memory={memory}
-              onPin={handlePin}
-              onArchive={handleArchive}
-              disabled={busy}
-            />
-          ))
+          visibleMemories.map((memory) => {
+            const pending = pendingMemoryKeys.has(
+              optimisticKey(taskId, memory.filename),
+            );
+            return (
+              <MemoryCard
+                key={memory.filename}
+                memory={memory}
+                onPin={handlePin}
+                onArchive={handleArchive}
+                disabled={triageState.isLoading || pending}
+                pending={pending}
+              />
+            );
+          })
         ) : (
           <Text color="gray" size="2" className={styles.emptyState}>
             No memories match the current filters.

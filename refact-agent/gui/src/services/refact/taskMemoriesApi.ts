@@ -53,6 +53,12 @@ export interface TaskMemoriesQuery {
   search?: string;
 }
 
+export interface TaskMemoryFacetsResponse {
+  task_id: string;
+  namespaces: string[];
+  tags: string[];
+}
+
 export interface PinTaskMemoryRequest {
   taskId: string;
   filename: string;
@@ -129,6 +135,38 @@ export const taskMemoriesApi = createApi({
       ],
     }),
 
+    getTaskMemoryFacets: builder.query<
+      TaskMemoryFacetsResponse,
+      { taskId: string }
+    >({
+      queryFn: async ({ taskId }, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildTaskMemoriesUrl(state.config.lspPort, { taskId }),
+        });
+        if (result.error) return { error: result.error };
+
+        const namespaces = new Set<string>();
+        const tags = new Set<string>();
+        const response = result.data as TaskMemoriesResponse;
+        for (const memory of response.memories) {
+          namespaces.add(memory.namespace);
+          for (const tag of memory.tags) tags.add(tag);
+        }
+
+        return {
+          data: {
+            task_id: response.task_id,
+            namespaces: [...namespaces].sort((a, b) => a.localeCompare(b)),
+            tags: [...tags].sort((a, b) => a.localeCompare(b)),
+          },
+        };
+      },
+      providesTags: (_result, _error, { taskId }) => [
+        { type: "TaskMemories", id: taskId },
+      ],
+    }),
+
     pinTaskMemory: builder.mutation<
       PinTaskMemoryResponse,
       PinTaskMemoryRequest
@@ -195,6 +233,7 @@ export const taskMemoriesApi = createApi({
 
 export const {
   useListTaskMemoriesQuery,
+  useGetTaskMemoryFacetsQuery,
   usePinTaskMemoryMutation,
   useArchiveTaskMemoryMutation,
   useTriageTaskMemoriesMutation,
