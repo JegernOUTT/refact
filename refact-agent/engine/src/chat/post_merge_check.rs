@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::process::Command;
 
+use crate::chat::verify_cmd::parse_safe_argv;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, BoardColumn, StatusUpdate};
@@ -38,7 +39,10 @@ pub struct PostMergeCheckResult {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PostMergeCommand {
-    Shell(String),
+    Verify {
+        cwd: Option<PathBuf>,
+        argv: Vec<String>,
+    },
     Git(Vec<String>),
 }
 
@@ -70,10 +74,22 @@ impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
         timeout: Duration,
     ) -> PostMergeCommandOutput {
         match command {
-            PostMergeCommand::Shell(shell) => {
-                let mut cmd = Command::new("sh");
-                cmd.arg("-c").arg(&shell).current_dir(workspace_root);
-                run_command(cmd, &shell, timeout).await
+            PostMergeCommand::Verify { cwd, argv } => {
+                let label = argv.join(" ");
+                let Some(program) = argv.first() else {
+                    return PostMergeCommandOutput {
+                        exit_code: None,
+                        success: false,
+                        output: "empty verification command".to_string(),
+                    };
+                };
+                let mut cmd = Command::new(program);
+                cmd.args(&argv[1..]);
+                cmd.current_dir(cwd.map_or_else(
+                    || workspace_root.to_path_buf(),
+                    |cwd| workspace_root.join(cwd),
+                ));
+                run_command(cmd, &label, timeout).await
             }
             PostMergeCommand::Git(args) => {
                 let label = format!("git {}", args.join(" "));
@@ -149,19 +165,31 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
     if commands.is_empty() {
         return Ok(skipped_result("no verification command found"));
     }
-    let Some(command) = commands
-        .into_iter()
-        .find(|command| is_supported_deterministic_command(command))
-    else {
+    let mut rejected = None;
+    let mut selected = None;
+    for command in commands {
+        match parse_safe_argv(&command) {
+            Ok((cwd, argv)) => {
+                selected = Some((command, cwd, argv));
+                break;
+            }
+            Err(reason) => {
+                rejected.get_or_insert((command, reason));
+            }
+        }
+    }
+    let Some((command, cwd, argv)) = selected else {
+        if let Some((command, reason)) = rejected {
+            return Ok(rejected_result(command, reason));
+        }
         return Ok(skipped_result(
             "no supported deterministic verification command found",
         ));
     };
-
     let verification = runner
         .run(
             &request.workspace_root,
-            PostMergeCommand::Shell(command.clone()),
+            PostMergeCommand::Verify { cwd, argv },
             request.timeout,
         )
         .await;
@@ -254,6 +282,20 @@ fn skipped_result(reason: &str) -> PostMergeCheckResult {
         revert_commit: None,
         fix_card_id: None,
         skipped_reason: Some(reason.to_string()),
+    }
+}
+
+fn rejected_result(command: String, reason: String) -> PostMergeCheckResult {
+    PostMergeCheckResult {
+        checked: true,
+        auto_reverted: false,
+        command: Some(command),
+        exit_code: None,
+        output_tail: format!("Rejected by command filter: {}", reason),
+        merge_commit: None,
+        revert_commit: None,
+        fix_card_id: None,
+        skipped_reason: None,
     }
 }
 
@@ -350,63 +392,7 @@ pub fn is_supported_deterministic_command(command: &str) -> bool {
     {
         return false;
     }
-    let parts = command
-        .split("&&")
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return false;
-    }
-    let mut saw_verification = false;
-    for part in parts {
-        let part = strip_env_assignments(part);
-        if part.starts_with("cd ") {
-            if saw_verification {
-                return false;
-            }
-            continue;
-        }
-        if is_supported_verification_part(part) {
-            saw_verification = true;
-            continue;
-        }
-        return false;
-    }
-    saw_verification
-}
-
-fn is_supported_verification_part(command: &str) -> bool {
-    [
-        "cargo test",
-        "cargo check",
-        "cargo build",
-        "npm test",
-        "npm run lint",
-    ]
-    .iter()
-    .any(|allowed| command == *allowed || command.starts_with(&format!("{} ", allowed)))
-}
-
-fn strip_env_assignments(mut command: &str) -> &str {
-    loop {
-        let trimmed = command.trim_start();
-        let Some(index) = trimmed.find(char::is_whitespace) else {
-            return trimmed;
-        };
-        let token = &trimmed[..index];
-        if !is_env_assignment(token) {
-            return trimmed;
-        }
-        command = &trimmed[index..];
-    }
-}
-
-fn is_env_assignment(token: &str) -> bool {
-    let Some((key, _)) = token.split_once('=') else {
-        return false;
-    };
-    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    parse_safe_argv(command).is_ok()
 }
 
 async fn store_regression_result(
@@ -716,15 +702,12 @@ mod tests {
     fn post_merge_check_allows_only_supported_commands() {
         assert!(is_supported_deterministic_command("cargo test --lib"));
         assert!(is_supported_deterministic_command(
-            "cd refact-agent/engine && CI=true npm test -- --run"
-        ));
-        assert!(is_supported_deterministic_command(
-            "cd refact-agent/engine && cargo test --lib && cargo test --doc"
+            "cd refact-agent/engine && npm test -- --run"
         ));
         assert!(is_supported_deterministic_command(
             "npm run lint -- --quiet"
         ));
-        assert!(!is_supported_deterministic_command("pytest -q"));
+        assert!(is_supported_deterministic_command("pytest -q"));
         assert!(!is_supported_deterministic_command(
             "cargo test && rm -rf target"
         ));
@@ -775,11 +758,43 @@ mod tests {
         assert!(!result.auto_reverted);
         assert_eq!(
             runner.calls,
-            vec![PostMergeCommand::Shell("cargo test --lib".to_string())]
+            vec![PostMergeCommand::Verify {
+                cwd: None,
+                argv: vec!["cargo".to_string(), "test".to_string(), "--lib".to_string()]
+            }]
         );
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         assert_eq!(board.get_card("T-1").unwrap().column, "done");
         assert!(board.get_card("T-1-fix").is_none());
+    }
+
+    #[tokio::test]
+    async fn post_merge_runs_argv_not_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `cd refact-agent/engine && cargo check`"),
+        )
+        .await;
+        let mut runner = MockRunner {
+            outputs: VecDeque::from([output(true, Some(0), "ok")]),
+            calls: Vec::new(),
+        };
+
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut runner)
+            .await
+            .unwrap();
+
+        assert!(result.checked);
+        assert_eq!(
+            runner.calls,
+            vec![PostMergeCommand::Verify {
+                cwd: Some(PathBuf::from("refact-agent/engine")),
+                argv: vec!["cargo".to_string(), "check".to_string()]
+            }]
+        );
     }
 
     #[tokio::test]

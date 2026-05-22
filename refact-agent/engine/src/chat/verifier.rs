@@ -3,11 +3,13 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::call_validation::ChatMessage;
+use crate::chat::verify_cmd::parse_safe_argv;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate, VerificationResult, VerifierReport};
@@ -20,6 +22,32 @@ const MAX_DIFF_LINES: usize = 200;
 pub struct VerifyCardRequest {
     pub task_id: String,
     pub card_id: String,
+}
+
+#[async_trait]
+trait VerificationCommandRunner: Send {
+    async fn run(
+        &mut self,
+        worktree: &Path,
+        command: &str,
+        cwd: Option<PathBuf>,
+        argv: Vec<String>,
+    ) -> VerificationResult;
+}
+
+struct SystemVerificationCommandRunner;
+
+#[async_trait]
+impl VerificationCommandRunner for SystemVerificationCommandRunner {
+    async fn run(
+        &mut self,
+        worktree: &Path,
+        command: &str,
+        cwd: Option<PathBuf>,
+        argv: Vec<String>,
+    ) -> VerificationResult {
+        run_verification_argv(worktree, command, cwd, argv).await
+    }
 }
 
 fn append_verifier_status(card: &mut BoardCard, report: &VerifierReport) {
@@ -110,7 +138,9 @@ pub async fn verify_card(
     let mut concerns = Vec::new();
 
     if commands.is_empty() {
-        concerns.push("No verification commands found in card instructions or final report".to_string());
+        concerns.push(
+            "No verification commands found in card instructions or final report".to_string(),
+        );
     }
 
     for command in commands {
@@ -155,13 +185,7 @@ pub async fn verify_card(
         concerns,
         recommendation,
     };
-    store_verifier_report(
-        gcx,
-        &request.task_id,
-        &request.card_id,
-        report.clone(),
-    )
-    .await?;
+    store_verifier_report(gcx, &request.task_id, &request.card_id, report.clone()).await?;
     Ok(report)
 }
 
@@ -269,10 +293,46 @@ fn parse_verify_line(line: &str) -> Option<String> {
 }
 
 async fn run_verification_command(worktree: &Path, command: &str) -> VerificationResult {
-    let mut child = match Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(worktree)
+    let mut runner = SystemVerificationCommandRunner;
+    run_verification_command_with_runner(worktree, command, &mut runner).await
+}
+
+async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
+    worktree: &Path,
+    command: &str,
+    runner: &mut R,
+) -> VerificationResult {
+    let (cwd, argv) = match parse_safe_argv(command) {
+        Ok(parsed) => parsed,
+        Err(reason) => {
+            return VerificationResult {
+                command: command.to_string(),
+                exit_code: None,
+                passed: false,
+                output_tail: format!("Rejected by command filter: {}", reason),
+            };
+        }
+    };
+    runner.run(worktree, command, cwd, argv).await
+}
+
+async fn run_verification_argv(
+    worktree: &Path,
+    command: &str,
+    cwd: Option<PathBuf>,
+    argv: Vec<String>,
+) -> VerificationResult {
+    let Some(program) = argv.first() else {
+        return VerificationResult {
+            command: command.to_string(),
+            exit_code: None,
+            passed: false,
+            output_tail: "empty verification command".to_string(),
+        };
+    };
+    let mut child = match Command::new(program)
+        .args(&argv[1..])
+        .current_dir(cwd.map_or_else(|| worktree.to_path_buf(), |cwd| worktree.join(cwd)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -284,7 +344,7 @@ async fn run_verification_command(worktree: &Path, command: &str) -> Verificatio
                 exit_code: None,
                 passed: false,
                 output_tail: format!("failed to spawn command: {}", error),
-            }
+            };
         }
     };
     let mut stdout = child.stdout.take();
@@ -320,7 +380,10 @@ async fn run_verification_command(worktree: &Path, command: &str) -> Verificatio
                 command: command.to_string(),
                 exit_code: None,
                 passed: false,
-                output_tail: format!("command timed out after {} seconds", VERIFY_TIMEOUT.as_secs()),
+                output_tail: format!(
+                    "command timed out after {} seconds",
+                    VERIFY_TIMEOUT.as_secs()
+                ),
             };
         }
     };
@@ -350,7 +413,11 @@ async fn git_diff_200_lines(worktree: &Path) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     let diff = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(diff.lines().take(MAX_DIFF_LINES).collect::<Vec<_>>().join("\n"))
+    Ok(diff
+        .lines()
+        .take(MAX_DIFF_LINES)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn verifier_prompt(card: &BoardCard, commands: &[VerificationResult], diff: &str) -> String {
@@ -448,6 +515,31 @@ mod tests {
     use super::*;
     use crate::tasks::types::{FinalReport, ScopeGuardMode};
 
+    #[derive(Default)]
+    struct MockVerificationRunner {
+        calls: Vec<(PathBuf, String, Option<PathBuf>, Vec<String>)>,
+    }
+
+    #[async_trait]
+    impl VerificationCommandRunner for MockVerificationRunner {
+        async fn run(
+            &mut self,
+            worktree: &Path,
+            command: &str,
+            cwd: Option<PathBuf>,
+            argv: Vec<String>,
+        ) -> VerificationResult {
+            self.calls
+                .push((worktree.to_path_buf(), command.to_string(), cwd, argv));
+            VerificationResult {
+                command: command.to_string(),
+                exit_code: Some(0),
+                passed: true,
+                output_tail: "ok".to_string(),
+            }
+        }
+    }
+
     fn card(instructions: &str) -> BoardCard {
         BoardCard {
             id: "T-verify".to_string(),
@@ -527,7 +619,10 @@ mod tests {
             ..Default::default()
         };
         append_verifier_status(&mut fail_card, &fail);
-        assert_eq!(fail_card.status_updates[0].message, "Verifier: FAIL — command failed");
+        assert_eq!(
+            fail_card.status_updates[0].message,
+            "Verifier: FAIL — command failed"
+        );
     }
 
     #[test]
@@ -564,6 +659,41 @@ mod tests {
 
         assert!(!report.passed);
         assert_eq!(report.recommendation, "fix-needed");
+    }
+
+    #[tokio::test]
+    async fn verifier_runs_argv_not_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runner = MockVerificationRunner::default();
+
+        let result = run_verification_command_with_runner(
+            temp.path(),
+            "cd refact-agent/engine && cargo check",
+            &mut runner,
+        )
+        .await;
+
+        assert!(result.passed);
+        assert_eq!(runner.calls.len(), 1);
+        assert_eq!(runner.calls[0].0, temp.path());
+        assert_eq!(runner.calls[0].1, "cd refact-agent/engine && cargo check");
+        assert_eq!(
+            runner.calls[0].2,
+            Some(PathBuf::from("refact-agent/engine"))
+        );
+        assert_eq!(runner.calls[0].3, vec!["cargo", "check"]);
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_shell_syntax() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let result = run_verification_command(temp.path(), "cargo test | tee f").await;
+
+        assert!(!result.passed);
+        assert!(result
+            .output_tail
+            .starts_with("Rejected by command filter:"));
     }
 
     #[tokio::test]

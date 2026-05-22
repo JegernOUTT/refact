@@ -27,6 +27,7 @@ pub mod tools;
 pub mod trajectories;
 pub mod trajectory_ops;
 pub mod types;
+pub(crate) mod verify_cmd;
 pub mod verifier;
 
 pub use session::{
