@@ -428,6 +428,7 @@ pub fn compress_in_place(
     crate::history_limit::remove_invalid_tool_calls_and_tool_calls_results(messages);
 
     if opts.strip_metering {
+        messages.retain(|msg| !is_ui_only_message(msg));
         for msg in messages.iter_mut() {
             msg.usage = None;
             msg.extra.clear();
@@ -600,6 +601,57 @@ mod tests {
         assert!(sanitized
             .iter()
             .all(|msg| !msg.content.content_text_only().contains("reactive compaction report")));
+    }
+
+    #[test]
+    fn compress_in_place_strip_metering_drops_ui_only_message() {
+        let mut messages = vec![
+            make_user_msg("visible"),
+            make_ui_only_msg("context_length_exceeded"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            strip_metering: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let persisted: Vec<_> = messages
+            .iter()
+            .filter(|msg| msg.role != "cd_instruction")
+            .collect();
+        assert_eq!(persisted.len(), 2);
+        assert!(persisted.iter().all(|msg| !is_ui_only_message(msg)));
+        assert!(persisted.iter().all(|msg| msg.extra.is_empty()));
+        assert!(messages
+            .iter()
+            .all(|msg| !msg.content.content_text_only().contains("context_length_exceeded")));
+    }
+
+    #[test]
+    fn compress_in_place_no_strip_keeps_ui_only() {
+        let mut messages = vec![
+            make_user_msg("visible"),
+            make_ui_only_msg("context_length_exceeded"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            strip_metering: false,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let persisted: Vec<_> = messages
+            .iter()
+            .filter(|msg| msg.role != "cd_instruction")
+            .collect();
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(persisted.iter().filter(|msg| is_ui_only_message(msg)).count(), 1);
+        assert!(messages
+            .iter()
+            .any(|msg| msg.content.content_text_only().contains("context_length_exceeded")));
     }
 
     #[test]
