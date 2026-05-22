@@ -14,6 +14,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::BoardCard;
+use crate::tools::tool_task_check_agents::planner_bound_task_id;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
 
@@ -66,21 +67,6 @@ fn parse_max_lines(args: &HashMap<String, Value>) -> Result<usize, String> {
         return Err("max_lines must be a non-negative number".to_string());
     };
     usize::try_from(n).map_err(|_| "max_lines is too large".to_string())
-}
-
-async fn get_task_id(
-    ccx: &Arc<AMutex<AtCommandsContext>>,
-    args: &HashMap<String, Value>,
-) -> Result<String, String> {
-    if let Some(id) = args.get("task_id").and_then(|v| v.as_str()) {
-        return Ok(id.to_string());
-    }
-    let ccx_lock = ccx.lock().await;
-    if let Some(ref meta) = ccx_lock.task_meta {
-        return Ok(meta.task_id.clone());
-    }
-    storage::infer_task_id_from_chat_id(&ccx_lock.chat_id)
-        .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,7 +471,7 @@ impl Tool for ToolAgentDiff {
         let card_id = required_string(args, "card_id")?;
         let mode = AgentDiffMode::parse(args.get("mode"))?;
         let max_lines = parse_max_lines(args)?;
-        let task_id = get_task_id(&ccx, args).await?;
+        let task_id = planner_bound_task_id(&ccx, args).await?;
         let gcx = ccx.lock().await.app.gcx.clone();
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
@@ -748,6 +734,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_agent_diff_rejects_mismatched_task_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(temp.path(), test_card(None, None)).await;
+        let ccx = planner_ccx(gcx, "planner").await;
+        let mut tool = ToolAgentDiff::new();
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("task_id".to_string(), json!("task-2")),
+        ]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "task_id override is not allowed from this planner chat");
+    }
+
+    #[tokio::test]
     async fn tool_agent_diff_git_diff_between_branches_works() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
@@ -769,6 +774,7 @@ mod tests {
                 &"call".to_string(),
                 &HashMap::from([
                     ("card_id".to_string(), json!("T-1")),
+                    ("task_id".to_string(), json!("task-1")),
                     ("mode".to_string(), json!("stat")),
                 ]),
             )
@@ -951,7 +957,7 @@ mod tests {
             Some("agent-branch".to_string()),
             Some(repo.to_string_lossy().to_string()),
         );
-        let gcx = write_task(&repo, card).await;
+        let gcx = write_task(temp.path(), card).await;
         let ccx = planner_ccx(gcx, "planner").await;
         let mut tool = ToolAgentDiff::new();
 

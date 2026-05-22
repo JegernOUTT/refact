@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ContextEnum};
 use crate::tasks::storage;
 use crate::tasks::types::BoardCard;
-use crate::tools::tool_task_check_agents::get_task_id;
+use crate::tools::tool_task_check_agents::planner_bound_task_id;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionFacade, ChatSessionSnapshot, SessionState};
@@ -455,7 +455,7 @@ impl Tool for ToolAgentPulse {
         }
 
         let card_id = required_string(args, "card_id")?;
-        let task_id = get_task_id(&ccx, args).await?;
+        let task_id = planner_bound_task_id(&ccx, args).await?;
         let (gcx, chat_facade, fallback_token_cap) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -730,7 +730,10 @@ mod tests {
         let gcx = write_task(temp.path(), test_card(Some("agent-chat-1".to_string()))).await;
         let ccx = planner_ccx(gcx, "planner", facade).await;
         let mut tool = ToolAgentPulse::new();
-        let args = HashMap::from([("card_id".to_string(), json!("T-29"))]);
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-29")),
+            ("task_id".to_string(), json!("task-1")),
+        ]);
 
         let output = tool_output_text(
             tool.tool_execute(ccx, &"call".to_string(), &args)
@@ -743,6 +746,24 @@ mod tests {
         assert!(output.contains("Session snapshot unavailable"));
         assert!(output.contains("## Last assistant message\n> (none)"));
         assert!(output.contains("## Last tool call\n(none)"));
+    }
+
+    #[tokio::test]
+    async fn tool_agent_pulse_rejects_mismatched_task_id() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ccx = planner_ccx(gcx, "planner", Arc::new(MockChatSessionFacade::default())).await;
+        let mut tool = ToolAgentPulse::new();
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-29")),
+            ("task_id".to_string(), json!("task-2")),
+        ]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "task_id override is not allowed from this planner chat");
     }
 
     #[tokio::test]
