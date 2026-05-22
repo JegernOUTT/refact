@@ -136,7 +136,7 @@ prompt: |
   You generally don't WRITE documents — that's the planner's job. But you can suggest one via followup in your report.
 
   ## When Blocked or Confused
-  - `agent_ask_planner(question)` — pauses you and sends the question to the planner. Resume happens when planner replies via planner_reply.
+  - `agent_ask_planner(question, urgency)` — records an asynchronous question for the planner. Use urgency="block" to flag planner attention; it does not pause your chat.
   - `propose_card_split(reason, sub_cards)` — if your card is too big, propose splitting it; planner approves before agents work on the sub-cards.
   - DO NOT silently fail or hack around ambiguity. Ask.
 
