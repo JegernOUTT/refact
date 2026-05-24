@@ -43,6 +43,21 @@ async fn get_board_lock(task_id: &str) -> Arc<AMutex<()>> {
         .clone()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoardConflict {
+    pub expected: u64,
+    pub actual: u64,
+}
+
+impl BoardConflict {
+    pub fn message(&self) -> String {
+        format!(
+            "Board rev mismatch: expected {}, actual {}",
+            self.expected, self.actual
+        )
+    }
+}
+
 pub async fn get_tasks_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
@@ -208,10 +223,10 @@ pub async fn save_board(
 pub async fn update_board_atomic<F, T>(
     gcx: Arc<GlobalContext>,
     task_id: &str,
-    mut updater: F,
+    updater: F,
 ) -> Result<(TaskBoard, T), String>
 where
-    F: FnMut(&mut TaskBoard) -> Result<T, String>,
+    F: FnOnce(&mut TaskBoard) -> Result<T, String>,
     T: Default,
 {
     let lock = get_board_lock(task_id).await;

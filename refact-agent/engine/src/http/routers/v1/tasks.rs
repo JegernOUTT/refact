@@ -360,167 +360,165 @@ pub async fn handle_get_board(
     Ok(Json(board))
 }
 
+fn map_patch_board_error(error: String) -> (StatusCode, String) {
+    if error.starts_with("Board rev mismatch:") {
+        return (StatusCode::CONFLICT, error);
+    }
+    if error.contains(" not found") {
+        return (StatusCode::NOT_FOUND, error);
+    }
+    if error.starts_with("Card ") || error.starts_with("Invalid column:") {
+        return (StatusCode::BAD_REQUEST, error);
+    }
+    (StatusCode::INTERNAL_SERVER_ERROR, error)
+}
+
 pub async fn handle_patch_board(
     State(app): State<AppState>,
     Path(task_id): Path<String>,
     Json(req): Json<UpdateBoardRequest>,
 ) -> Result<Json<TaskBoard>, (StatusCode, String)> {
     let gcx = app.gcx.clone();
-    let mut board = storage::load_board(gcx.clone(), &task_id)
-        .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-
-    if board.rev != req.rev {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "Board rev mismatch: expected {}, got {}",
-                board.rev, req.rev
-            ),
-        ));
-    }
-
+    let expected_rev = req.rev;
+    let patch = req.patch;
     let now = Utc::now().to_rfc3339();
 
-    match req.patch {
-        BoardPatch::CreateCard {
-            id,
-            title,
-            priority,
-            depends_on,
-            instructions,
-            target_files,
-        } => {
-            if board.cards.iter().any(|c| c.id == id) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("Card {} already exists", id),
-                ));
-            }
-            board.cards.push(BoardCard {
+    let update_result = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+        if board.rev != expected_rev {
+            let conflict = storage::BoardConflict {
+                expected: expected_rev,
+                actual: board.rev,
+            };
+            return Err(conflict.message());
+        }
+
+        match patch {
+            BoardPatch::CreateCard {
                 id,
                 title,
-                column: "planned".into(),
-                priority: priority.unwrap_or_else(|| "P1".into()),
+                priority,
                 depends_on,
                 instructions,
-                assignee: None,
-                agent_chat_id: None,
-                status_updates: vec![],
-                comments: vec![],
-                final_report: None,
-                final_report_structured: None,
-                verifier_report: None,
-                created_at: now.clone(),
-                started_at: None,
-                last_heartbeat_at: None,
-                completed_at: None,
-                agent_branch: None,
-                agent_worktree: None,
-                agent_worktree_name: None,
-                ab_variants: None,
                 target_files,
-                scope_guard_mode: Default::default(),
-                team_members: vec![],
-            });
+            } => {
+                if board.cards.iter().any(|c| c.id == id) {
+                    return Err(format!("Card {} already exists", id));
+                }
+                board.cards.push(BoardCard {
+                    id,
+                    title,
+                    column: "planned".into(),
+                    priority: priority.unwrap_or_else(|| "P1".into()),
+                    depends_on,
+                    instructions,
+                    assignee: None,
+                    agent_chat_id: None,
+                    status_updates: vec![],
+                    comments: vec![],
+                    final_report: None,
+                    final_report_structured: None,
+                    verifier_report: None,
+                    created_at: now.clone(),
+                    started_at: None,
+                    last_heartbeat_at: None,
+                    completed_at: None,
+                    agent_branch: None,
+                    agent_worktree: None,
+                    agent_worktree_name: None,
+                    ab_variants: None,
+                    target_files,
+                    scope_guard_mode: Default::default(),
+                    team_members: vec![],
+                });
+            }
+            BoardPatch::UpdateCard {
+                id,
+                title,
+                priority,
+                depends_on,
+                instructions,
+                target_files,
+            } => {
+                let card = board
+                    .get_card_mut(&id)
+                    .ok_or_else(|| format!("Card {} not found", id))?;
+                if let Some(t) = title {
+                    card.title = t;
+                }
+                if let Some(p) = priority {
+                    card.priority = p;
+                }
+                if let Some(d) = depends_on {
+                    card.depends_on = d;
+                }
+                if let Some(i) = instructions {
+                    card.instructions = i;
+                }
+                if let Some(files) = target_files {
+                    card.target_files = files;
+                }
+            }
+            BoardPatch::MoveCard { id, column } => {
+                let card = board
+                    .get_card_mut(&id)
+                    .ok_or_else(|| format!("Card {} not found", id))?;
+                let valid_columns = ["planned", "doing", "done", "failed", "regressed"];
+                if !valid_columns.contains(&column.as_str()) {
+                    return Err(format!("Invalid column: {}", column));
+                }
+                if column == "doing" && card.started_at.is_none() {
+                    card.started_at = Some(now.clone());
+                }
+                if (column == "done" || column == "failed" || column == "regressed")
+                    && card.completed_at.is_none()
+                {
+                    card.completed_at = Some(now.clone());
+                }
+                card.column = column;
+            }
+            BoardPatch::AssignAgent {
+                card_id,
+                agent_id,
+                agent_chat_id,
+            } => {
+                let card = board
+                    .get_card_mut(&card_id)
+                    .ok_or_else(|| format!("Card {} not found", card_id))?;
+                card.assignee = Some(agent_id);
+                card.agent_chat_id = Some(agent_chat_id);
+                if card.started_at.is_none() {
+                    card.started_at = Some(now.clone());
+                }
+            }
+            BoardPatch::AddStatusUpdate { card_id, message } => {
+                let card = board
+                    .get_card_mut(&card_id)
+                    .ok_or_else(|| format!("Card {} not found", card_id))?;
+                card.status_updates.push(StatusUpdate {
+                    timestamp: now.clone(),
+                    message,
+                });
+            }
+            BoardPatch::SetFinalReport { card_id, report } => {
+                let card = board
+                    .get_card_mut(&card_id)
+                    .ok_or_else(|| format!("Card {} not found", card_id))?;
+                card.final_report = Some(report);
+                card.final_report_structured = None;
+            }
+            BoardPatch::DeleteCard { id } => {
+                board.cards.retain(|c| c.id != id);
+            }
         }
-        BoardPatch::UpdateCard {
-            id,
-            title,
-            priority,
-            depends_on,
-            instructions,
-            target_files,
-        } => {
-            let card = board
-                .get_card_mut(&id)
-                .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Card {} not found", id)))?;
-            if let Some(t) = title {
-                card.title = t;
-            }
-            if let Some(p) = priority {
-                card.priority = p;
-            }
-            if let Some(d) = depends_on {
-                card.depends_on = d;
-            }
-            if let Some(i) = instructions {
-                card.instructions = i;
-            }
-            if let Some(files) = target_files {
-                card.target_files = files;
-            }
-        }
-        BoardPatch::MoveCard { id, column } => {
-            let card = board
-                .get_card_mut(&id)
-                .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Card {} not found", id)))?;
-            let valid_columns = ["planned", "doing", "done", "failed", "regressed"];
-            if !valid_columns.contains(&column.as_str()) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid column: {}", column),
-                ));
-            }
-            if column == "doing" && card.started_at.is_none() {
-                card.started_at = Some(now.clone());
-            }
-            if (column == "done" || column == "failed" || column == "regressed")
-                && card.completed_at.is_none()
-            {
-                card.completed_at = Some(now.clone());
-            }
-            card.column = column;
-        }
-        BoardPatch::AssignAgent {
-            card_id,
-            agent_id,
-            agent_chat_id,
-        } => {
-            let card = board
-                .get_card_mut(&card_id)
-                .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Card {} not found", card_id)))?;
-            card.assignee = Some(agent_id);
-            card.agent_chat_id = Some(agent_chat_id);
-            if card.started_at.is_none() {
-                card.started_at = Some(now.clone());
-            }
-        }
-        BoardPatch::AddStatusUpdate { card_id, message } => {
-            let card = board
-                .get_card_mut(&card_id)
-                .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Card {} not found", card_id)))?;
-            card.status_updates.push(StatusUpdate {
-                timestamp: now.clone(),
-                message,
-            });
-        }
-        BoardPatch::SetFinalReport { card_id, report } => {
-            let card = board
-                .get_card_mut(&card_id)
-                .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Card {} not found", card_id)))?;
-            card.final_report = Some(report);
-            card.final_report_structured = None;
-        }
-        BoardPatch::DeleteCard { id } => {
-            board.cards.retain(|c| c.id != id);
-        }
-    }
 
-    board.rev += 1;
-    storage::save_board(gcx.clone(), &task_id, &board)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    crate::tasks::events::emit_task_event(
-        gcx.clone(),
-        TaskEvent::BoardChanged {
-            task_id: task_id.clone(),
-            rev: board.rev,
-            board: board.clone(),
-        },
-    )
+        Ok(())
+    })
     .await;
+
+    let (board, _) = match update_result {
+        Ok(result) => result,
+        Err(e) => return Err(map_patch_board_error(e)),
+    };
 
     storage::update_task_stats(gcx, &task_id)
         .await
@@ -962,6 +960,7 @@ pub async fn handle_tasks_subscribe(
 mod tests {
     use super::*;
     use crate::chat::trajectories::save_trajectory_snapshot;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use refact_chat_api::{ChatMessage, TaskMeta as ChatTaskMeta};
     use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 
@@ -1062,6 +1061,127 @@ mod tests {
             Ok(_) => panic!("expected request to fail"),
             Err((status, _)) => status,
         }
+    }
+
+    fn create_card_request(rev: u64, id: &str) -> UpdateBoardRequest {
+        UpdateBoardRequest {
+            rev,
+            patch: BoardPatch::CreateCard {
+                id: id.to_string(),
+                title: format!("Card {}", id),
+                priority: None,
+                depends_on: Vec::new(),
+                instructions: String::new(),
+                target_files: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_patch_board_serial_patches_increment_rev() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_task(temp.path(), "task-serial").await;
+
+        let first = handle_patch_board(
+            State(app(gcx.clone())),
+            Path("task-serial".to_string()),
+            Json(create_card_request(0, "card-a")),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(first.rev, 1);
+        assert!(first.get_card("card-a").is_some());
+
+        let second = handle_patch_board(
+            State(app(gcx.clone())),
+            Path("task-serial".to_string()),
+            Json(create_card_request(1, "card-b")),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(second.rev, 2);
+        assert!(second.get_card("card-a").is_some());
+        assert!(second.get_card("card-b").is_some());
+    }
+
+    #[tokio::test]
+    async fn handle_patch_board_concurrent_patches_one_succeeds_one_409() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = setup_task(temp.path(), "task-concurrent").await;
+        let mut board = storage::load_board(gcx.clone(), "task-concurrent").await.unwrap();
+        board.rev = 5;
+        storage::save_board(gcx.clone(), "task-concurrent", &board)
+            .await
+            .unwrap();
+
+        static GATE_READY: AtomicUsize = AtomicUsize::new(0);
+        GATE_READY.store(0, AtomicOrdering::SeqCst);
+        async fn wait_for_both_ready() {
+            GATE_READY.fetch_add(1, AtomicOrdering::SeqCst);
+            while GATE_READY.load(AtomicOrdering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let first = {
+            let gcx = gcx.clone();
+            tokio::spawn(async move {
+                wait_for_both_ready().await;
+                handle_patch_board(
+                    State(app(gcx)),
+                    Path("task-concurrent".to_string()),
+                    Json(create_card_request(5, "card-a")),
+                )
+                .await
+            })
+        };
+        let second = {
+            let gcx = gcx.clone();
+            tokio::spawn(async move {
+                wait_for_both_ready().await;
+                handle_patch_board(
+                    State(app(gcx)),
+                    Path("task-concurrent".to_string()),
+                    Json(create_card_request(5, "card-b")),
+                )
+                .await
+            })
+        };
+
+        let results = vec![first.await.unwrap(), second.await.unwrap()];
+        let successes = results.iter().filter(|result| result.is_ok()).count();
+        let conflicts = results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Err((StatusCode::CONFLICT, message)) if message.contains("actual 6")
+                )
+            })
+            .count();
+
+        assert_eq!(successes, 1);
+        assert_eq!(conflicts, 1);
+
+        let successful_board = results
+            .into_iter()
+            .find_map(Result::ok)
+            .map(|json| json.0)
+            .unwrap();
+        assert_eq!(successful_board.rev, 6);
+        let has_card_a = successful_board.get_card("card-a").is_some();
+        let has_card_b = successful_board.get_card("card-b").is_some();
+        assert_ne!(has_card_a, has_card_b);
+
+        let stored = storage::load_board(gcx, "task-concurrent").await.unwrap();
+        assert_eq!(stored.rev, 6);
+        assert_eq!(stored.cards.len(), 1);
+        assert_eq!(stored.get_card("card-a").is_some(), has_card_a);
+        assert_eq!(stored.get_card("card-b").is_some(), has_card_b);
     }
 
     #[tokio::test]
