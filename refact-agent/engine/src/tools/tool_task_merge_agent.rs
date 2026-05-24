@@ -185,15 +185,42 @@ fn verifier_merge_block_message(card_id: &str, concerns: &[String]) -> String {
     )
 }
 
+fn verifier_force_warning(card_id: &str, concerns: &[String]) -> String {
+    let rendered = if concerns.is_empty() {
+        "- verifier failed without concerns".to_string()
+    } else {
+        concerns
+            .iter()
+            .map(|concern| format!("- {}", concern))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "Card {} verifier failed and requires human review. Merge is continuing only because force=true. Concerns:\n{}",
+        card_id, rendered
+    )
+}
+
+fn append_verifier_warning(message: &mut String, warning: Option<&str>) {
+    if let Some(warning) = warning {
+        message.push_str("\n\n## Verifier Warning\n\n");
+        message.push_str(warning);
+    }
+}
+
 fn ensure_verifier_allows_merge(
     card: &crate::tasks::types::BoardCard,
     force: bool,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let Some(report) = card.verifier_report.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
-    if report.passed || force {
-        return Ok(());
+    if report.passed {
+        return Ok(None);
+    }
+    if force {
+        return Ok((report.recommendation == "human-review")
+            .then(|| verifier_force_warning(&card.id, &report.concerns)));
     }
     Err(verifier_merge_block_message(&card.id, &report.concerns))
 }
@@ -245,7 +272,7 @@ async fn merge_registered_task_worktree(
     let Some(card) = board.get_card(card_id) else {
         return Err(format!("Card {} not found", card_id));
     };
-    ensure_verifier_allows_merge(card, force)?;
+    let verifier_warning = ensure_verifier_allows_merge(card, force)?;
     let Some(worktree_id) = card.agent_worktree_name.clone() else {
         return Ok(None);
     };
@@ -325,15 +352,13 @@ async fn merge_registered_task_worktree(
     } else {
         None
     };
+    let mut message = merge_response_message(card_id, &response, post_merge_check.as_ref());
+    append_verifier_warning(&mut message, verifier_warning.as_deref());
     Ok(Some((
         false,
         vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
-            content: ChatContent::SimpleText(merge_response_message(
-                card_id,
-                &response,
-                post_merge_check.as_ref(),
-            )),
+            content: ChatContent::SimpleText(message),
             tool_calls: None,
             tool_call_id: tool_call_id.to_string(),
             ..Default::default()
@@ -436,7 +461,7 @@ impl Tool for ToolTaskMergeAgent {
         let card = board
             .get_card(card_id)
             .ok_or(format!("Card {} not found", card_id))?;
-        ensure_verifier_allows_merge(card, force)?;
+        let verifier_warning = ensure_verifier_allows_merge(card, force)?;
 
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
         let base_branch = task_meta
@@ -577,12 +602,15 @@ impl Tool for ToolTaskMergeAgent {
                 format!("Cleanup: {}.", cleanup_status.join(", "))
             };
 
+            let mut message = format!(
+                "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {}\n**Commits ahead of base:** 0\n\n**Diagnostic:** {}\n\n{}",
+                card_id, agent_branch, diagnostic, cleanup_msg
+            );
+            append_verifier_warning(&mut message, verifier_warning.as_deref());
+
             return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText(format!(
-                    "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {}\n**Commits ahead of base:** 0\n\n**Diagnostic:** {}\n\n{}",
-                    card_id, agent_branch, diagnostic, cleanup_msg
-                )),
+                content: ChatContent::SimpleText(message),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
                 ..Default::default()
@@ -849,6 +877,7 @@ Use `cat <file>` to see conflict markers in each file."#,
 The agent's work has been successfully merged back to the main branch."#,
             card_id, strategy, agent_branch, base_branch, cleanup_info
         );
+        append_verifier_warning(&mut result_message, verifier_warning.as_deref());
         if let Some(post_merge_check) = post_merge_check.as_ref() {
             append_post_merge_check_message(&mut result_message, post_merge_check);
         }
@@ -945,6 +974,18 @@ mod worktree_merge_tool_tests {
         }
     }
 
+    fn launch_failure_verifier_report() -> VerifierReport {
+        VerifierReport {
+            passed: false,
+            concerns: vec![
+                "Verifier failed to launch; human review recommended: no verifier model"
+                    .to_string(),
+            ],
+            recommendation: "human-review".to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn merge_agent_refuses_when_verifier_failed_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
@@ -973,6 +1014,18 @@ mod worktree_merge_tool_tests {
         });
 
         assert!(ensure_verifier_allows_merge(&card, true).is_ok());
+    }
+
+    #[test]
+    fn merge_agent_blocks_when_verifier_launch_failed() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(launch_failure_verifier_report());
+
+        let err = ensure_verifier_allows_merge(&card, false).unwrap_err();
+
+        assert!(err.contains("verifier failed"));
+        assert!(err.contains("Verifier failed to launch"));
+        assert!(err.contains("force=true"));
     }
 
     #[test]
@@ -1009,6 +1062,67 @@ mod worktree_merge_tool_tests {
             parse_auto_revert_timeout(&args).unwrap(),
             Duration::from_secs(120)
         );
+    }
+
+    #[tokio::test]
+    async fn merge_agent_allows_with_force_when_launch_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/task/task-1/card/T-1/agent".to_string()),
+                kind: Some("task_agent".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                chat_id: Some("agent-chat-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+        commit_file(&root, "file.txt", "merged after human review\n", "agent change");
+        let mut card = test_card(&created.worktree.meta.id, &branch, &root);
+        card.verifier_report = Some(launch_failure_verifier_report());
+        write_task(gcx.clone(), &source, card).await;
+
+        let result = merge_registered_task_worktree(
+            gcx,
+            &source.canonicalize().unwrap(),
+            "task-1",
+            "T-1",
+            "squash",
+            "tool-call",
+            Some("task merge".to_string()),
+            true,
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "merged after human review\n"
+        );
+        let ContextEnum::ChatMessage(message) = &result.1[0] else {
+            panic!("expected chat message")
+        };
+        let ChatContent::SimpleText(text) = &message.content else {
+            panic!("expected simple text")
+        };
+        assert!(text.contains("Verifier Warning"));
+        assert!(text.contains("requires human review"));
+        assert!(text.contains("force=true"));
+        assert!(text.contains("Verifier failed to launch"));
     }
 
     async fn write_task(gcx: Arc<GlobalContext>, source: &Path, card: BoardCard) {

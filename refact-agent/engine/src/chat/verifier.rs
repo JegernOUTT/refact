@@ -191,7 +191,7 @@ pub async fn verify_card(
 
 fn launch_failure_report(error: String) -> VerifierReport {
     VerifierReport {
-        passed: true,
+        passed: false,
         command_results: Vec::new(),
         concerns: vec![format!(
             "Verifier failed to launch; human review recommended: {}",
@@ -623,6 +623,17 @@ mod tests {
             fail_card.status_updates[0].message,
             "Verifier: FAIL — command failed"
         );
+    }
+
+    #[test]
+    fn launch_failure_report_returns_passed_false() {
+        let report = launch_failure_report("no model configured".to_string());
+
+        assert!(!report.passed);
+        assert_eq!(report.recommendation, "human-review");
+        assert!(report.command_results.is_empty());
+        assert!(report.concerns[0].contains("Verifier failed to launch"));
+        assert!(report.concerns[0].contains("no model configured"));
     }
 
     #[test]
