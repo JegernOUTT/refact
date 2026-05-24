@@ -29,6 +29,7 @@ pub mod trajectory_ops;
 pub mod types;
 pub(crate) mod verify_cmd;
 pub mod verifier;
+mod verifier_diff;
 
 pub use session::{
     SessionsMap, create_sessions_map, start_session_cleanup_task,

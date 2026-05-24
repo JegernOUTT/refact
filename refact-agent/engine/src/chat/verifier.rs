@@ -9,6 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::call_validation::ChatMessage;
+use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
 use crate::chat::verify_cmd::parse_safe_argv;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::tasks::storage;
@@ -115,6 +116,7 @@ pub async fn verify_card(
     gcx: Arc<GlobalContext>,
     request: VerifyCardRequest,
 ) -> Result<VerifierReport, String> {
+    let task_meta = storage::load_task_meta(gcx.clone(), &request.task_id).await?;
     let board = storage::load_board(gcx.clone(), &request.task_id).await?;
     let card = board
         .get_card(&request.card_id)
@@ -151,7 +153,8 @@ pub async fn verify_card(
         command_results.push(result);
     }
 
-    let diff = git_diff_200_lines(&worktree)
+    let diff_base = resolve_verifier_diff_base(task_meta.base_commit, task_meta.base_branch)?;
+    let diff = git_changed_files_summary(&worktree, &diff_base, MAX_DIFF_LINES)
         .await
         .unwrap_or_else(|error| format!("diff unavailable: {}", error));
     let prompt = verifier_prompt(&card, &command_results, &diff);
@@ -402,27 +405,9 @@ async fn run_verification_argv(
     }
 }
 
-async fn git_diff_200_lines(worktree: &Path) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["diff", "HEAD~1..HEAD"])
-        .current_dir(worktree)
-        .output()
-        .await
-        .map_err(|e| format!("failed to run git diff: {}", e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    let diff = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(diff
-        .lines()
-        .take(MAX_DIFF_LINES)
-        .collect::<Vec<_>>()
-        .join("\n"))
-}
-
 fn verifier_prompt(card: &BoardCard, commands: &[VerificationResult], diff: &str) -> String {
     format!(
-        "Review this completed task card. Return concise concerns only. If the diff looks safe and commands passed, answer exactly PASS.\n\nCard: {} - {}\n\nInstructions:\n{}\n\nFinal report:\n{}\n\nCommand results:\n{}\n\nDiff sample:\n{}",
+        "Review this completed task card. Return concise concerns only. If the changed files look safe and commands passed, answer exactly PASS.\n\nCard: {} - {}\n\nInstructions:\n{}\n\nFinal report:\n{}\n\nCommand results:\n{}\n\nChanged files:\n{}",
         card.id,
         card.title,
         card.instructions,
