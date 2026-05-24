@@ -1091,6 +1091,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn knowledge_index_skips_archived_dir_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let memories_dir = dir.path().join(".refact/tasks/T-1/memories");
+        let active_path = memories_dir.join("active.md");
+        let archived_path = memories_dir.join("archived/old.md");
+        tokio::fs::create_dir_all(memories_dir.join("archived"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &active_path,
+            "---\ntitle: Active\ntask_id: T-1\nkind: finding\n---\n\nactive body",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &archived_path,
+            "---\ntitle: Old\ntask_id: T-1\nkind: finding\n---\n\nold body",
+        )
+        .await
+        .unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let indexed_paths = build_knowledge_index(gcx)
+            .await
+            .all_cards()
+            .into_iter()
+            .map(|card| card.file_path)
+            .collect::<Vec<_>>();
+
+        assert!(indexed_paths.contains(&active_path));
+        assert!(!indexed_paths.contains(&archived_path));
+    }
+
+    #[tokio::test]
+    async fn knowledge_index_skips_status_archived_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let memories_dir = dir.path().join(".refact/tasks/T-1/memories");
+        let active_path = memories_dir.join("active.md");
+        let old_path = memories_dir.join("old.md");
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+        tokio::fs::write(
+            &active_path,
+            "---\ntitle: Active\ntask_id: T-1\nkind: finding\n---\n\nactive body",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &old_path,
+            "---\ntitle: Old\ntask_id: T-1\nkind: finding\nstatus: archived\n---\n\nold body",
+        )
+        .await
+        .unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let indexed_paths = build_knowledge_index(gcx)
+            .await
+            .all_cards()
+            .into_iter()
+            .map(|card| card.file_path)
+            .collect::<Vec<_>>();
+
+        assert!(indexed_paths.contains(&active_path));
+        assert!(!indexed_paths.contains(&old_path));
+    }
+
+    #[tokio::test]
     async fn indexes_workspace_under_absolute_archive_parent() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("archive/project");

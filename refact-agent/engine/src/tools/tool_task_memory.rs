@@ -1845,6 +1845,8 @@ impl ToolTaskMemoryPin {
     }
 }
 
+/// `task_mem_archive` marks frontmatter as `status: archived` and moves the file into
+/// the task memory `archived/` directory.
 pub struct ToolTaskMemoryArchive;
 
 impl ToolTaskMemoryArchive {
