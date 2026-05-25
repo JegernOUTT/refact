@@ -139,6 +139,10 @@ mod task_types_tests {
                         id: "failed".into(),
                         title: "Failed".into(),
                     },
+                    BoardColumn {
+                        id: "regressed".into(),
+                        title: "Regressed".into(),
+                    },
                 ],
                 cards: vec![],
             }
