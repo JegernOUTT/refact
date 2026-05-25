@@ -290,6 +290,73 @@ pub async fn get_all_trajectories_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> 
     dirs
 }
 
+async fn get_all_task_roots(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .map(|p| p.join(".refact").join("tasks"))
+        .collect();
+
+    dirs.push(crate::tasks::storage::get_global_tasks_dir(gcx).await);
+    dirs
+}
+
+async fn get_all_task_roots_from_weak(gcx_weak: &Weak<GlobalContext>) -> Vec<PathBuf> {
+    match gcx_weak.upgrade() {
+        Some(gcx) => get_all_task_roots(gcx).await,
+        None => vec![],
+    }
+}
+
+pub(crate) async fn list_task_trajectory_dirs(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for tasks_dir in crate::tasks::storage::get_all_tasks_dirs(gcx.clone()).await {
+        if !tasks_dir.exists() {
+            continue;
+        }
+        let mut task_entries = match fs::read_dir(&tasks_dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        while let Ok(Some(task_entry)) = task_entries.next_entry().await {
+            let task_dir = task_entry.path();
+            if !task_dir.is_dir() {
+                continue;
+            }
+            for role in ["planner", "agents"] {
+                collect_existing_dirs(task_dir.join("trajectories").join(role), &mut dirs).await;
+            }
+        }
+    }
+    dirs
+}
+
+async fn collect_existing_dirs(root: PathBuf, dirs: &mut Vec<PathBuf>) {
+    let mut pending = vec![root];
+    while let Some(dir) = pending.pop() {
+        if !dir.is_dir() {
+            continue;
+        }
+        dirs.push(dir.clone());
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+}
+
+pub(crate) async fn list_trajectory_dirs(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut dirs = get_all_trajectories_dirs(gcx.clone()).await;
+    dirs.extend(list_task_trajectory_dirs(gcx).await);
+    dirs
+}
+
 async fn get_all_trajectories_dirs_from_weak(gcx_weak: &Weak<GlobalContext>) -> Vec<PathBuf> {
     match gcx_weak.upgrade() {
         Some(gcx) => get_all_trajectories_dirs(gcx).await,
@@ -1391,13 +1458,57 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
     }
 }
 
+fn task_trajectory_context_from_path(
+    path: &Path,
+    task_roots: &[PathBuf],
+) -> Option<(String, String, Option<String>)> {
+    for root in task_roots {
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let parts: Vec<String> = relative
+            .components()
+            .filter_map(|component| component.as_os_str().to_str().map(|s| s.to_string()))
+            .collect();
+        if parts.len() < 4 || parts.get(1).map(|s| s.as_str()) != Some("trajectories") {
+            continue;
+        }
+        let role = parts[2].as_str();
+        if role != "planner" && role != "agents" {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let agent_id = if role == "agents" && parts.len() >= 5 {
+            Some(parts[3].clone())
+        } else {
+            None
+        };
+        return Some((parts[0].clone(), role.to_string(), agent_id));
+    }
+    None
+}
+
+fn should_dispatch_trajectory_path(path: &Path, task_roots: &[PathBuf]) -> bool {
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        return false;
+    }
+    let is_under_tasks = task_roots.iter().any(|root| path.starts_with(root));
+    if !is_under_tasks {
+        return true;
+    }
+    task_trajectory_context_from_path(path, task_roots).is_some()
+}
+
 pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
     let gcx_weak = Arc::downgrade(&gcx);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
 
     tokio::spawn(async move {
         let trajectories_dirs = get_all_trajectories_dirs_from_weak(&gcx_weak).await;
-        if trajectories_dirs.is_empty() {
+        let task_roots = get_all_task_roots_from_weak(&gcx_weak).await;
+        if trajectories_dirs.is_empty() && task_roots.is_empty() {
             warn!("No trajectories directories found, trajectory watcher not started");
             return;
         }
@@ -1410,8 +1521,14 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                 );
             }
         }
+        for dir in &task_roots {
+            if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                warn!("Failed to create tasks dir {:?} for watcher: {}", dir, e);
+            }
+        }
 
         let tx_clone = tx.clone();
+        let task_roots_for_callback = task_roots.clone();
         let event_callback = move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
                 let dominated = matches!(
@@ -1428,10 +1545,11 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                     if path.extension().map(|e| e == "tmp").unwrap_or(false) {
                         continue;
                     }
+                    if !should_dispatch_trajectory_path(&path, &task_roots_for_callback) {
+                        continue;
+                    }
                     if let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) {
-                        if path.extension().map(|e| e == "json").unwrap_or(false) {
-                            let _ = tx_clone.send((chat_id.to_string(), is_remove));
-                        }
+                        let _ = tx_clone.send((chat_id.to_string(), is_remove));
                     }
                 }
             }
@@ -1453,10 +1571,16 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                     warn!("Failed to watch trajectories dir {:?}: {}", dir, e);
                 }
             }
+            for dir in &task_roots {
+                if let Err(e) = w.watch(dir, RecursiveMode::Recursive) {
+                    warn!("Failed to watch tasks dir {:?}: {}", dir, e);
+                }
+            }
         }
         info!(
-            "Trajectory watcher started for {} directories",
-            trajectories_dirs.len()
+            "Trajectory watcher started for {} trajectory directories and {} task roots",
+            trajectories_dirs.len(),
+            task_roots.len()
         );
 
         let mut pending: std::collections::HashMap<String, (Instant, bool)> =
@@ -2302,6 +2426,24 @@ async fn trajectory_data_to_meta_validated(app: AppState, data: &TrajectoryData)
     meta
 }
 
+fn apply_task_trajectory_context(
+    path: &Path,
+    task_roots: &[PathBuf],
+    meta: &mut TrajectoryMeta,
+) {
+    if let Some((task_id, role, agent_id)) = task_trajectory_context_from_path(path, task_roots) {
+        if meta.task_id.is_none() {
+            meta.task_id = Some(task_id);
+        }
+        if meta.task_role.is_none() {
+            meta.task_role = Some(role);
+        }
+        if meta.agent_id.is_none() {
+            meta.agent_id = agent_id;
+        }
+    }
+}
+
 pub async fn handle_v1_trajectories_list(
     State(app): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<TrajectoriesListQuery>,
@@ -2324,8 +2466,9 @@ pub async fn handle_v1_trajectories_list(
 
     let mut all_items: Vec<TrajectoryMeta> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
+    let task_roots = get_all_task_roots(gcx.clone()).await;
 
-    for trajectories_dir in get_all_trajectories_dirs(gcx.clone()).await {
+    for trajectories_dir in list_trajectory_dirs(&gcx).await {
         if !trajectories_dir.exists() {
             continue;
         }
@@ -2344,7 +2487,9 @@ pub async fn handle_v1_trajectories_list(
                         continue;
                     }
                     if seen_ids.insert(data.id.clone()) {
-                        all_items.push(trajectory_data_to_meta_validated(app.clone(), &data).await);
+                        let mut meta = trajectory_data_to_meta_validated(app.clone(), &data).await;
+                        apply_task_trajectory_context(&path, &task_roots, &mut meta);
+                        all_items.push(meta);
                     }
                 }
             }
@@ -2411,8 +2556,9 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
     let gcx = app.gcx.clone();
     let mut result: Vec<TrajectoryMeta> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
+    let task_roots = get_all_task_roots(gcx.clone()).await;
 
-    for trajectories_dir in get_all_trajectories_dirs(gcx.clone()).await {
+    for trajectories_dir in list_trajectory_dirs(&gcx).await {
         if !trajectories_dir.exists() {
             continue;
         }
@@ -2431,39 +2577,9 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
                         continue;
                     }
                     if seen_ids.insert(data.id.clone()) {
-                        result.push(trajectory_data_to_meta_validated(app.clone(), &data).await);
-                    }
-                }
-            }
-        }
-    }
-
-    for tasks_dir in crate::tasks::storage::get_all_tasks_dirs(gcx.clone()).await {
-        if !tasks_dir.exists() {
-            continue;
-        }
-        let mut task_entries = match fs::read_dir(&tasks_dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        while let Ok(Some(task_entry)) = task_entries.next_entry().await {
-            let task_dir = task_entry.path();
-            if !task_dir.is_dir() {
-                continue;
-            }
-            let task_id = task_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            for role in &["planner", "agents"] {
-                let role_dir = task_dir.join("trajectories").join(role);
-                if !role_dir.exists() {
-                    continue;
-                }
-                for traj in collect_task_trajectories(&role_dir, &task_id, role, None).await {
-                    if seen_ids.insert(traj.id.clone()) {
-                        result.push(traj);
+                        let mut meta = trajectory_data_to_meta_validated(app.clone(), &data).await;
+                        apply_task_trajectory_context(&path, &task_roots, &mut meta);
+                        result.push(meta);
                     }
                 }
             }
@@ -2509,58 +2625,6 @@ async fn enrich_with_session_state(app: AppState, trajectories: &mut Vec<Traject
             trajectories[idx].worktree = session.thread.worktree.clone();
         }
     }
-}
-
-async fn collect_task_trajectories(
-    dir: &PathBuf,
-    task_id: &str,
-    role: &str,
-    agent_id: Option<&str>,
-) -> Vec<TrajectoryMeta> {
-    let mut result = Vec::new();
-
-    let Ok(mut entries) = fs::read_dir(dir).await else {
-        return result;
-    };
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-
-        if path.is_dir() {
-            let sub_agent_id = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let sub_trajectories = Box::pin(collect_task_trajectories(
-                &path,
-                task_id,
-                role,
-                Some(sub_agent_id),
-            ))
-            .await;
-            result.extend(sub_trajectories);
-            continue;
-        }
-
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-
-        if let Ok(content) = fs::read_to_string(&path).await {
-            if let Ok(data) = serde_json::from_str::<TrajectoryData>(&content) {
-                let mut meta = trajectory_data_to_meta(&data);
-                if meta.task_id.is_none() {
-                    meta.task_id = Some(task_id.to_string());
-                }
-                if meta.task_role.is_none() {
-                    meta.task_role = Some(role.to_string());
-                }
-                if meta.agent_id.is_none() && agent_id.is_some() {
-                    meta.agent_id = agent_id.map(|s| s.to_string());
-                }
-                result.push(meta);
-            }
-        }
-    }
-
-    result
 }
 
 pub async fn handle_v1_trajectories_get(
@@ -2820,6 +2884,86 @@ mod tests {
         run_git(root, &["commit", "-m", "initial"]);
     }
 
+    async fn make_app_with_workspace(root: &Path) -> (Arc<GlobalContext>, AppState) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![root.to_path_buf()];
+        (gcx, app)
+    }
+
+    fn sample_trajectory(id: &str, title: &str, updated_at: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "title": title,
+            "model": "model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": [],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": updated_at,
+            "include_project_info": true,
+            "checkpoints_enabled": true
+        })
+    }
+
+    async fn write_trajectory_file(path: &Path, id: &str, title: &str, updated_at: &str) {
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(
+            path,
+            serde_json::to_string(&sample_trajectory(id, title, updated_at)).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn wait_for_watcher_start() {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+
+    async fn wait_for_trajectory_event(
+        rx: &mut broadcast::Receiver<TrajectoryEvent>,
+        id: &str,
+    ) -> TrajectoryEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Ok(event) if event.id == id => return event,
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(err) => panic!("trajectory event channel closed: {}", err),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for trajectory event {id}"))
+    }
+
+    async fn drain_trajectory_events(rx: &mut broadcast::Receiver<TrajectoryEvent>) {
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+                Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
+            }
+        }
+    }
+
+    async fn assert_no_trajectory_event_for(
+        rx: &mut broadcast::Receiver<TrajectoryEvent>,
+        duration: std::time::Duration,
+    ) {
+        match tokio::time::timeout(duration, rx.recv()).await {
+            Err(_) | Ok(Err(broadcast::error::RecvError::Closed)) => {}
+            Ok(Ok(event)) => panic!("unexpected trajectory event: {:?}", event),
+            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                panic!("unexpected trajectory event lag, skipped {skipped}")
+            }
+        }
+    }
+
     fn trajectory_worktree_sample() -> WorktreeMeta {
         WorktreeMeta {
             id: "wt-1".to_string(),
@@ -2835,6 +2979,156 @@ mod tests {
             agent_id: Some("agent-1".to_string()),
             enforce: true,
         }
+    }
+
+    #[tokio::test]
+    async fn watcher_picks_up_external_edit_to_task_planner_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+
+        start_trajectory_watcher(gcx);
+        wait_for_watcher_start().await;
+        drain_trajectory_events(&mut rx).await;
+
+        let chat_id = "planner-watch-chat";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-watch")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{}.json", chat_id));
+        write_trajectory_file(&path, chat_id, "Planner Watch", "2024-01-01T00:00:01Z").await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Planner Watch"));
+    }
+
+    #[tokio::test]
+    async fn watcher_ignores_non_trajectory_files_in_tasks_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+
+        start_trajectory_watcher(gcx);
+        wait_for_watcher_start().await;
+        drain_trajectory_events(&mut rx).await;
+
+        let task_dir = dir.path().join(".refact").join("tasks").join("task-ignore");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        tokio::fs::write(task_dir.join("meta.yaml"), "id: task-ignore\n")
+            .await
+            .unwrap();
+
+        assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(700)).await;
+    }
+
+    #[tokio::test]
+    async fn watcher_picks_up_new_task_dir_created_after_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+
+        start_trajectory_watcher(gcx);
+        wait_for_watcher_start().await;
+        drain_trajectory_events(&mut rx).await;
+
+        let chat_id = "new-task-agent-chat";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-created-later")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-1")
+            .join(format!("{}.json", chat_id));
+        write_trajectory_file(&path, chat_id, "New Task Agent", "2024-01-01T00:00:02Z").await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("New Task Agent"));
+    }
+
+    #[tokio::test]
+    async fn paginated_list_includes_task_planner_and_agent_trajectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let root = dir.path().join(".refact");
+
+        write_trajectory_file(
+            &root.join("trajectories").join("project-chat.json"),
+            "project-chat",
+            "Project Chat",
+            "2024-01-01T00:00:03Z",
+        )
+        .await;
+        write_trajectory_file(
+            &root
+                .join("tasks")
+                .join("task-list")
+                .join("trajectories")
+                .join("planner")
+                .join("planner-chat.json"),
+            "planner-chat",
+            "Planner Chat",
+            "2024-01-01T00:00:02Z",
+        )
+        .await;
+        write_trajectory_file(
+            &root
+                .join("tasks")
+                .join("task-list")
+                .join("trajectories")
+                .join("agents")
+                .join("agent-1")
+                .join("agent-chat.json"),
+            "agent-chat",
+            "Agent Chat",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+
+        let response = handle_v1_trajectories_list(
+            State(app),
+            axum::extract::Query(TrajectoriesListQuery {
+                limit: Some(10),
+                cursor: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let items = payload["items"].as_array().unwrap();
+        let ids: std::collections::HashSet<_> = items
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+
+        assert_eq!(payload["total_count"].as_u64(), Some(3));
+        assert!(ids.contains("project-chat"));
+        assert!(ids.contains("planner-chat"));
+        assert!(ids.contains("agent-chat"));
+
+        let planner = items
+            .iter()
+            .find(|item| item["id"].as_str() == Some("planner-chat"))
+            .unwrap();
+        assert_eq!(planner["task_id"].as_str(), Some("task-list"));
+        assert_eq!(planner["task_role"].as_str(), Some("planner"));
+
+        let agent = items
+            .iter()
+            .find(|item| item["id"].as_str() == Some("agent-chat"))
+            .unwrap();
+        assert_eq!(agent["task_id"].as_str(), Some("task-list"));
+        assert_eq!(agent["task_role"].as_str(), Some("agents"));
+        assert_eq!(agent["agent_id"].as_str(), Some("agent-1"));
     }
 
     #[test]
