@@ -64,6 +64,7 @@ async fn atomic_write_json_with_tmp_path(
 }
 
 use super::types::{ThreadParams, SessionState, ChatSession};
+use super::diagnostics::is_ui_only_message;
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
 use super::SessionsMap;
@@ -216,6 +217,7 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
     let messages = session
         .messages
         .iter()
+        .filter(|message| !is_ui_only_message(message))
         .filter(|message| message.role != "assistant" || has_displayable_assistant_content(message))
         .cloned()
         .collect();
@@ -1090,29 +1092,7 @@ pub async fn save_trajectory_snapshot(
         trajectories_dir.join(format!("{}.json", snapshot.chat_id))
     };
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let updated_at = match tokio::fs::read_to_string(&file_path).await {
-        Ok(existing_content) => {
-            match serde_json::from_str::<serde_json::Value>(&existing_content) {
-                Ok(existing) => {
-                    let existing_messages = existing.get("messages");
-                    let same_messages =
-                        existing_messages == Some(&serde_json::Value::Array(messages_json.clone()));
-                    if same_messages {
-                        existing
-                            .get("updated_at")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&now)
-                            .to_string()
-                    } else {
-                        now.clone()
-                    }
-                }
-                Err(_) => now.clone(),
-            }
-        }
-        Err(_) => now.clone(),
-    };
+    let updated_at = chrono::Utc::now().to_rfc3339();
     trajectory["updated_at"] = serde_json::Value::String(updated_at.clone());
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
@@ -1906,8 +1886,9 @@ fn spawn_title_generation_task(
             info!("Title already generated for {}, skipping", id);
             return;
         }
-        let updated_at = data.updated_at.clone();
+        let updated_at = chrono::Utc::now().to_rfc3339();
         data.title = title.clone();
+        data.updated_at = updated_at.clone();
         data.extra
             .insert("isTitleGenerated".to_string(), serde_json::json!(true));
         if let Err(e) = atomic_write_json(&file_path, &data).await {
@@ -2851,6 +2832,7 @@ pub async fn handle_v1_trajectories_subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::diagnostics::make_ui_only_error_message;
     use crate::chat::types::ActiveCommandContext;
     use std::path::Path;
     use std::process::Command;
@@ -2920,6 +2902,45 @@ mod tests {
 
     async fn wait_for_watcher_start() {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+
+    fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
+        TrajectorySnapshot {
+            chat_id: chat_id.to_string(),
+            title: title.to_string(),
+            model: "model".to_string(),
+            mode: "agent".to_string(),
+            tool_use: "agent".to_string(),
+            messages,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            boost_reasoning: false,
+            checkpoints_enabled: true,
+            context_tokens_cap: None,
+            include_project_info: true,
+            is_title_generated: true,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
+            autonomous_no_confirm: false,
+            version: 1,
+            task_meta: None,
+            worktree: None,
+            parent_id: None,
+            link_type: None,
+            root_chat_id: None,
+            reasoning_effort: None,
+            thinking_budget: None,
+            temperature: None,
+            frequency_penalty: None,
+            max_tokens: None,
+            parallel_tool_calls: None,
+            previous_response_id: None,
+            active_skill: None,
+            auto_enrichment_enabled: None,
+            buddy_meta: None,
+            auto_compact_enabled: None,
+            wake_up_at: None,
+            waiting_for_card_ids: Vec::new(),
+        }
     }
 
     async fn wait_for_trajectory_event(
@@ -3954,6 +3975,23 @@ mod tests {
     }
 
     #[test]
+    fn trajectory_snapshot_from_session_filters_ui_only_messages() {
+        let mut session = ChatSession::new("ui-only-snapshot".to_string());
+        session
+            .messages
+            .push(ChatMessage::new("user".to_string(), "visible".to_string()));
+        session
+            .messages
+            .push(make_ui_only_error_message("context_length_exceeded"));
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+
+        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(snapshot.messages[0].role, "user");
+        assert_eq!(snapshot.messages[0].content.content_text_only(), "visible");
+    }
+
+    #[test]
     fn trajectory_snapshot_from_session_filters_metadata_only_assistant_messages() {
         use crate::call_validation::ChatUsage;
 
@@ -4220,62 +4258,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_trajectory_preserves_updated_at_when_messages_do_not_change() {
+    async fn trajectory_updated_at_changes_when_title_changes_without_messages() {
         let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
-        {
-            *app.workspace
-                .documents_state
-                .workspace_folders
-                .lock()
-                .unwrap() = vec![dir.path().to_path_buf()];
-        }
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
 
-        fn snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
-            TrajectorySnapshot {
-                chat_id: chat_id.to_string(),
-                title: title.to_string(),
-                model: "model".to_string(),
-                mode: "agent".to_string(),
-                tool_use: "agent".to_string(),
-                messages,
-                created_at: "2024-01-01T00:00:00Z".to_string(),
-                boost_reasoning: false,
-                checkpoints_enabled: true,
-                context_tokens_cap: None,
-                include_project_info: true,
-                is_title_generated: true,
-                auto_approve_editing_tools: false,
-                auto_approve_dangerous_commands: false,
-                autonomous_no_confirm: false,
-                version: 1,
-                task_meta: None,
-                worktree: None,
-                parent_id: None,
-                link_type: None,
-                root_chat_id: None,
-                reasoning_effort: None,
-                thinking_budget: None,
-                temperature: None,
-                frequency_penalty: None,
-                max_tokens: None,
-                parallel_tool_calls: None,
-                previous_response_id: None,
-                active_skill: None,
-                auto_enrichment_enabled: None,
-                buddy_meta: None,
-                auto_compact_enabled: None,
-                wake_up_at: None,
-                waiting_for_card_ids: Vec::new(),
-            }
-        }
-
-        let chat_id = "updated-at-message-activity";
+        let chat_id = "updated-at-title-change";
         let messages = vec![ChatMessage::new("user".to_string(), "Hello".to_string())];
-        save_trajectory_snapshot(gcx.clone(), snapshot(chat_id, "First", messages.clone()))
-            .await
-            .unwrap();
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(chat_id, "First", messages.clone()),
+        )
+        .await
+        .unwrap();
         let path = dir
             .path()
             .join(".refact")
@@ -4285,31 +4279,96 @@ mod tests {
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         let first_updated_at = first_raw["updated_at"].as_str().unwrap().to_string();
 
-        save_trajectory_snapshot(gcx.clone(), snapshot(chat_id, "Retitled", messages.clone()))
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        save_trajectory_snapshot(gcx, test_snapshot(chat_id, "Retitled", messages))
             .await
             .unwrap();
         let retitled_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
-        assert_eq!(
+        assert_ne!(
             retitled_raw["updated_at"].as_str().unwrap(),
             first_updated_at
         );
+    }
 
+    #[tokio::test]
+    async fn trajectory_updated_at_changes_when_worktree_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+
+        let chat_id = "updated-at-worktree-change";
+        let messages = vec![ChatMessage::new("user".to_string(), "Hello".to_string())];
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(chat_id, "Title", messages.clone()),
+        )
+        .await
+        .unwrap();
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{}.json", chat_id));
+        let first_raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        let first_updated_at = first_raw["updated_at"].as_str().unwrap().to_string();
+
+        let mut snapshot = test_snapshot(chat_id, "Title", messages);
+        snapshot.worktree = Some(trajectory_worktree_sample());
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        let mut changed_messages = messages;
-        changed_messages.push(ChatMessage::new(
-            "assistant".to_string(),
-            "Generated".to_string(),
-        ));
-        save_trajectory_snapshot(gcx, snapshot(chat_id, "Retitled", changed_messages))
-            .await
-            .unwrap();
+        save_trajectory_snapshot(gcx, snapshot).await.unwrap();
         let changed_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         assert_ne!(
             changed_raw["updated_at"].as_str().unwrap(),
             first_updated_at
         );
+    }
+
+    #[tokio::test]
+    async fn trajectory_persistence_filters_ui_only_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let mut session = ChatSession::new("ui-only-roundtrip".to_string());
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        session.add_message(ChatMessage::new("user".to_string(), "hello".to_string()));
+        session.add_message(make_ui_only_error_message("context_length_exceeded"));
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+        save_trajectory_snapshot(gcx.clone(), snapshot).await.unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "ui-only-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].role, "user");
+        assert!(loaded
+            .messages
+            .iter()
+            .all(|message| !is_ui_only_message(message)));
+    }
+
+    #[tokio::test]
+    async fn trajectory_persistence_keeps_normal_error_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let mut session = ChatSession::new("normal-error-roundtrip".to_string());
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        session.add_message(ChatMessage::new("user".to_string(), "hello".to_string()));
+        session.add_message(ChatMessage::new(
+            "error".to_string(),
+            "LLM failed".to_string(),
+        ));
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+        save_trajectory_snapshot(gcx.clone(), snapshot).await.unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "normal-error-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[1].role, "error");
+        assert_eq!(loaded.messages[1].content.content_text_only(), "LLM failed");
     }
 
     #[test]

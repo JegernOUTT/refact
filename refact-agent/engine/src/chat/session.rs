@@ -440,6 +440,10 @@ impl ChatSession {
     pub fn set_runtime_state(&mut self, state: SessionState, error: Option<String>) {
         let old_state = self.runtime.state;
         let old_error = self.runtime.error.clone();
+        if old_state == state && old_error == error {
+            return;
+        }
+
         let was_paused = old_state == SessionState::Paused;
         let had_pause_reasons = !self.runtime.pause_reasons.is_empty();
 
@@ -458,6 +462,7 @@ impl ChatSession {
         self.runtime.error = error.clone();
         self.runtime.queue_size = self.command_queue.len();
         self.runtime.queued_items = self.build_queued_items();
+        self.touch();
 
         if state != SessionState::Paused && (was_paused || had_pause_reasons) {
             self.runtime.pause_reasons.clear();
@@ -482,15 +487,11 @@ impl ChatSession {
             }
         }
 
-        let state_changed = old_state != state;
-        let error_changed = old_error != error;
-        if state_changed || error_changed {
-            self.emit(ChatEvent::RuntimeUpdated {
-                state,
-                error: error.clone(),
-            });
-            self.emit_trajectory_state_change();
-        }
+        self.emit(ChatEvent::RuntimeUpdated {
+            state,
+            error: error.clone(),
+        });
+        self.emit_trajectory_state_change();
     }
 
     fn emit_trajectory_state_change(&self) {
@@ -894,12 +895,25 @@ impl ChatSession {
             }
         }
 
+        let before_len = self.runtime.pause_reasons.len();
         self.runtime.pause_reasons.retain(|r| {
             !accepted_ids.contains(&r.tool_call_id) && !denied_ids.contains(&r.tool_call_id)
         });
+        let after_len = self.runtime.pause_reasons.len();
 
-        if self.runtime.pause_reasons.is_empty() {
-            self.set_runtime_state(SessionState::Idle, None);
+        if before_len != after_len {
+            self.touch();
+            if self.runtime.pause_reasons.is_empty() {
+                self.set_runtime_state(SessionState::Idle, None);
+            } else {
+                self.emit(ChatEvent::PauseRequired {
+                    reasons: self.runtime.pause_reasons.clone(),
+                });
+                self.emit(ChatEvent::RuntimeUpdated {
+                    state: self.runtime.state,
+                    error: self.runtime.error.clone(),
+                });
+            }
         }
 
         accepted_ids
@@ -1670,6 +1684,29 @@ mod tests {
     }
 
     #[test]
+    fn set_runtime_state_updates_last_activity_on_change() {
+        let mut session = make_session();
+        let before = session.last_activity;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        session.set_runtime_state(SessionState::Generating, None);
+
+        assert!(session.last_activity > before);
+    }
+
+    #[test]
+    fn set_runtime_state_no_op_does_not_touch_activity() {
+        let mut session = make_session();
+        let before = session.last_activity;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        session.set_runtime_state(SessionState::Idle, None);
+
+        assert_eq!(session.last_activity, before);
+        assert_eq!(session.event_seq, 0);
+    }
+
+    #[test]
     fn test_set_runtime_state_clears_pause_on_transition() {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
@@ -1824,6 +1861,86 @@ mod tests {
         assert_eq!(accepted, vec!["tc1"]);
         assert_eq!(session.runtime.pause_reasons.len(), 1);
         assert_eq!(session.runtime.state, SessionState::Paused);
+    }
+
+    #[test]
+    fn process_tool_decisions_emits_runtime_updated_when_partial() {
+        let mut session = make_session();
+        session.runtime.pause_reasons.push(PauseReason {
+            reason_type: "test".into(),
+            tool_name: "test_tool".into(),
+            command: "cmd".into(),
+            rule: "rule".into(),
+            tool_call_id: "tc1".into(),
+            integr_config_path: None,
+        });
+        session.runtime.pause_reasons.push(PauseReason {
+            reason_type: "test".into(),
+            tool_name: "test_tool".into(),
+            command: "cmd".into(),
+            rule: "rule".into(),
+            tool_call_id: "tc2".into(),
+            integr_config_path: None,
+        });
+        session.set_runtime_state(SessionState::Paused, None);
+        let mut rx = session.subscribe();
+        let before = session.last_activity;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "tc1".into(),
+            accepted: true,
+        }]);
+
+        assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert!(session.last_activity > before);
+        let mut saw_runtime_updated = false;
+        let mut saw_pause_required = false;
+        while let Ok(json) = rx.try_recv() {
+            let env: EventEnvelope = serde_json::from_str(&json).unwrap();
+            match env.event {
+                ChatEvent::RuntimeUpdated { state, error } => {
+                    assert_eq!(state, SessionState::Paused);
+                    assert_eq!(error, None);
+                    saw_runtime_updated = true;
+                }
+                ChatEvent::PauseRequired { reasons } => {
+                    assert_eq!(reasons.len(), 1);
+                    assert_eq!(reasons[0].tool_call_id, "tc2");
+                    saw_pause_required = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_runtime_updated);
+        assert!(saw_pause_required);
+    }
+
+    #[test]
+    fn process_tool_decisions_no_change_no_event() {
+        let mut session = make_session();
+        session.runtime.pause_reasons.push(PauseReason {
+            reason_type: "test".into(),
+            tool_name: "test_tool".into(),
+            command: "cmd".into(),
+            rule: "rule".into(),
+            tool_call_id: "tc1".into(),
+            integr_config_path: None,
+        });
+        session.set_runtime_state(SessionState::Paused, None);
+        let mut rx = session.subscribe();
+        let before = session.last_activity;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let accepted = session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "unknown".into(),
+            accepted: true,
+        }]);
+
+        assert!(accepted.is_empty());
+        assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert_eq!(session.last_activity, before);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
