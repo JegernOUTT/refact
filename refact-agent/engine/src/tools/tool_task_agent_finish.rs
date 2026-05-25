@@ -426,6 +426,13 @@ fn clear_finished_agent_session(card: &mut BoardCard) {
     card.assignee = None;
 }
 
+fn agents_active(cards: &[BoardCard]) -> usize {
+    cards
+        .iter()
+        .filter(|c| c.column == "doing" && c.agent_chat_id.is_some())
+        .count()
+}
+
 async fn auto_commit_worktree(
     gcx: Arc<GlobalContext>,
     worktree_path: &Path,
@@ -636,11 +643,7 @@ impl Tool for ToolTaskAgentFinish {
 
                 mark_finished_card(card, success_clone, &report_clone, commit_hash.as_deref());
 
-                let agents_active = board
-                    .cards
-                    .iter()
-                    .filter(|c| c.column == "doing" && c.assignee.is_some())
-                    .count();
+                let agents_active = agents_active(&board.cards);
                 let all_finished = agents_active == 0;
 
                 Ok((card_title, all_finished))
@@ -829,6 +832,14 @@ mod tests {
 
     async fn test_gcx() -> Arc<GlobalContext> {
         crate::global_context::tests::make_test_gcx().await
+    }
+
+    #[test]
+    fn agents_active_uses_chat_id_not_assignee() {
+        let mut card = test_card(None);
+        card.agent_chat_id = None;
+
+        assert_eq!(agents_active(&[card]), 0);
     }
 
     #[test]
