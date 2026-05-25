@@ -7,6 +7,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::types::TaskMeta;
+use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
 use crate::tasks::storage;
 
 pub(crate) fn required_string(args: &HashMap<String, Value>, key: &str) -> Result<String, String> {
@@ -107,6 +108,29 @@ pub(crate) async fn require_agent_task_meta(
         return Err("task agent context is required".to_string());
     }
     Ok(meta)
+}
+
+pub(crate) async fn preflight_agent_model(
+    gcx: Arc<GlobalContext>,
+    model_name: &str,
+) -> Result<(), String> {
+    let caps = try_load_caps_quickly_if_not_present(gcx, 0)
+        .await
+        .map_err(|e| format!("Cannot spawn agent: failed to check model availability: {e}"))?;
+    if caps.chat_models.contains_key(model_name) {
+        return Ok(());
+    }
+    let available: Vec<&str> = caps.chat_models.keys().map(|s| s.as_str()).take(5).collect();
+    let alternatives = if available.is_empty() {
+        "no chat models configured".to_string()
+    } else {
+        available.join(", ")
+    };
+    Err(format!(
+        "Cannot spawn agent: model '{model_name}' is not configured for chat. \
+        Available chat models: {alternatives}. \
+        Set task default with `update_task_meta(default_agent_model=\"...\")` or pass a different model."
+    ))
 }
 
 #[cfg(test)]
@@ -234,5 +258,63 @@ mod tests {
         let planner_ccx = ccx_with_meta(Some(task_meta("planner")), "planner-chat").await;
         let err = require_agent_task_meta(&planner_ccx).await.unwrap_err();
         assert_eq!(err, "task agent context is required");
+    }
+
+    async fn gcx_with_chat_models(model_names: &[&str]) -> Arc<crate::global_context::GlobalContext> {
+        use crate::caps::{ChatModelRecord, CodeAssistantCaps};
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut caps = CodeAssistantCaps::default();
+        for &name in model_names {
+            caps.chat_models.insert(name.to_string(), Arc::new(ChatModelRecord::default()));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        {
+            let mut state = gcx.caps_state.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = now;
+        }
+        gcx
+    }
+
+    #[tokio::test]
+    async fn preflight_passes_for_configured_chat_model() {
+        let gcx = gcx_with_chat_models(&["provider/test-model"]).await;
+        preflight_agent_model(gcx, "provider/test-model").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preflight_fails_with_helpful_message_for_unknown_model() {
+        let gcx = gcx_with_chat_models(&["provider/available-model"]).await;
+        let err = preflight_agent_model(gcx, "provider/missing-model").await.unwrap_err();
+        assert!(err.contains("'provider/missing-model'"), "error should name the model: {err}");
+        assert!(err.contains("provider/available-model"), "error should list alternatives: {err}");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_fails_before_worktree_when_model_unavailable() {
+        let gcx = gcx_with_chat_models(&[]).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let err = preflight_agent_model(gcx, "unavailable/model").await.unwrap_err();
+        assert!(err.contains("'unavailable/model'"), "error should name the model: {err}");
+        assert!(err.contains("no chat models configured"), "error should indicate no models: {err}");
+        assert!(
+            !cache_dir.join("worktrees").exists(),
+            "no worktree directory should be created before preflight passes"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_agent_fails_before_worktree_when_model_unavailable() {
+        let gcx = gcx_with_chat_models(&[]).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let err = preflight_agent_model(gcx, "unavailable/model").await.unwrap_err();
+        assert!(err.contains("'unavailable/model'"), "error should name the model: {err}");
+        assert!(
+            !cache_dir.join("worktrees").exists(),
+            "no worktree directory should be created before preflight passes"
+        );
     }
 }

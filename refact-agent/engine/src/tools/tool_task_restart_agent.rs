@@ -329,6 +329,7 @@ impl Tool for ToolTaskRestartAgent {
             &current_model,
         )
         .await?;
+        crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model).await?;
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
         let card = board

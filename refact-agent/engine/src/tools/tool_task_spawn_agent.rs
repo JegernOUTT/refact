@@ -578,6 +578,7 @@ impl Tool for ToolTaskSpawnAgent {
         let task_default_model = task_meta.default_agent_model.as_deref();
 
         let model = resolve_agent_model(gcx.clone(), task_default_model, &current_model).await?;
+        crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model).await?;
 
         fn validate_id(id: &str, name: &str) -> Result<(), String> {
             if id
