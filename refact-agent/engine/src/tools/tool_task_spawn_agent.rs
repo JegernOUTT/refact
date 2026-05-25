@@ -20,6 +20,9 @@ use refact_chat_api::{ChatCommand, TaskMeta, ThreadParams};
 use crate::worktrees::types::{CreateWorktreeRequest, WorktreeMeta};
 use refact_runtime_api::CreateSessionRequest;
 
+const FILES_TO_OPEN_PER_FILE_LIMIT: usize = 256 * 1024;
+const FILES_TO_OPEN_TOTAL_LIMIT: usize = 1024 * 1024;
+
 async fn get_task_id(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
@@ -403,6 +406,7 @@ async fn context_files_from_files_to_open(
         )
     })?;
     let mut context_files = Vec::new();
+    let mut total_bytes = 0usize;
     for path_str in files_to_open {
         let resolved = resolve_files_to_open_path(worktree_root, source_root, path_str);
         let canonical_resolved = dunce::canonicalize(&resolved).map_err(|e| {
@@ -426,15 +430,29 @@ async fn context_files_from_files_to_open(
                     path_str, e
                 )
             })?;
-        let content = tokio::fs::read_to_string(&canonical_resolved)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Could not read files_to_open '{}': {}",
-                    canonical_resolved.display(),
-                    e
-                )
-            })?;
+        if total_bytes >= FILES_TO_OPEN_TOTAL_LIMIT {
+            context_files.push(ContextFile {
+                file_name: canonical_resolved.to_string_lossy().to_string(),
+                ..Default::default()
+            });
+            continue;
+        }
+        let bytes = tokio::fs::read(&canonical_resolved).await.map_err(|e| {
+            format!(
+                "Could not read files_to_open '{}': {}",
+                canonical_resolved.display(),
+                e
+            )
+        })?;
+        let remaining_total = FILES_TO_OPEN_TOTAL_LIMIT - total_bytes;
+        let read_limit = FILES_TO_OPEN_PER_FILE_LIMIT.min(remaining_total);
+        let bytes_to_include = bytes.len().min(read_limit);
+        let omitted_bytes = bytes.len().saturating_sub(bytes_to_include);
+        let mut content = String::from_utf8_lossy(&bytes[..bytes_to_include]).to_string();
+        if omitted_bytes > 0 {
+            content.push_str(&format!("\n... (truncated, {} more bytes)", omitted_bytes));
+        }
+        total_bytes += bytes_to_include;
         let line_count = content.lines().count().max(1);
         context_files.push(ContextFile {
             file_name: canonical_resolved.to_string_lossy().to_string(),
@@ -1487,6 +1505,63 @@ mod tests {
         assert_eq!(files[0].line1, 1);
         assert_eq!(files[0].line2, 2);
         assert!(files[0].file_name.ends_with("safe.txt"));
+    }
+
+    #[tokio::test]
+    async fn files_to_open_truncates_oversized_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(worktree.join("large.txt"), vec![b'a'; 1024 * 1024]).unwrap();
+        let gcx = test_gcx_with_privacy(vec![]).await;
+
+        let files =
+            context_files_from_files_to_open(gcx, &worktree, &source, &["large.txt".to_string()])
+                .await
+                .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert!(files[0]
+            .file_content
+            .starts_with(&"a".repeat(FILES_TO_OPEN_PER_FILE_LIMIT)));
+        assert!(files[0]
+            .file_content
+            .contains("... (truncated, 786432 more bytes)"));
+        assert!(files[0].file_name.ends_with("large.txt"));
+    }
+
+    #[tokio::test]
+    async fn files_to_open_drops_remaining_after_total_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let paths = (0..5)
+            .map(|idx| {
+                let name = format!("file-{idx}.txt");
+                std::fs::write(worktree.join(&name), vec![b'a' + idx as u8; 256 * 1024]).unwrap();
+                name
+            })
+            .collect::<Vec<_>>();
+        let gcx = test_gcx_with_privacy(vec![]).await;
+
+        let files = context_files_from_files_to_open(gcx, &worktree, &source, &paths)
+            .await
+            .unwrap();
+
+        assert_eq!(files.len(), 5);
+        for file in files.iter().take(4) {
+            assert_eq!(file.file_content.len(), 256 * 1024);
+            assert_eq!(file.line1, 1);
+            assert_eq!(file.line2, 1);
+        }
+        assert!(files[4].file_name.ends_with("file-4.txt"));
+        assert!(files[4].file_content.is_empty());
+        assert_eq!(files[4].line1, 0);
+        assert_eq!(files[4].line2, 0);
     }
 
     #[test]

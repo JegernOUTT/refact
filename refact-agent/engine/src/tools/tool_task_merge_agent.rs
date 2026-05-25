@@ -819,13 +819,29 @@ Use `cat <file>` to see conflict markers in each file."#,
             .map(|head| head.trim().to_string())
             .unwrap_or_default();
 
-        let (worktree_removed, branch_deleted) = if agent_branch != base_branch {
-            let wr = run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
-            let bd = run_git(&["branch", "-D", agent_branch]).is_ok();
-            (wr, bd)
+        let agent_worktree_dirty = if agent_branch != base_branch {
+            match Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(agent_worktree)
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+                }
+                _ => true,
+            }
         } else {
-            (false, false)
+            false
         };
+
+        let (worktree_removed, branch_deleted) =
+            if agent_branch != base_branch && !agent_worktree_dirty {
+                let wr = run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
+                let bd = run_git(&["branch", "-D", agent_branch]).is_ok();
+                (wr, bd)
+            } else {
+                (false, false)
+            };
 
         drop(_guard);
 
@@ -876,11 +892,18 @@ Use `cat <file>` to see conflict markers in each file."#,
         }
 
         let cleanup_info = if agent_branch != base_branch {
-            match (worktree_removed, branch_deleted) {
-                (true, true) => "Worktree and branch cleaned up.".to_string(),
-                (true, false) => "Worktree removed, branch deletion failed.".to_string(),
-                (false, true) => "Worktree removal failed, branch deleted.".to_string(),
-                (false, false) => "Cleanup failed (worktree and branch still exist).".to_string(),
+            if agent_worktree_dirty {
+                "Worktree retained (uncommitted changes detected; use restart_agent or inspect manually)"
+                    .to_string()
+            } else {
+                match (worktree_removed, branch_deleted) {
+                    (true, true) => "Worktree and branch cleaned up.".to_string(),
+                    (true, false) => "Worktree removed, branch deletion failed.".to_string(),
+                    (false, true) => "Worktree removal failed, branch deleted.".to_string(),
+                    (false, false) => {
+                        "Cleanup failed (worktree and branch still exist).".to_string()
+                    }
+                }
             }
         } else {
             "Cleanup skipped because agent branch matches base branch.".to_string()
@@ -970,6 +993,14 @@ mod worktree_merge_tool_tests {
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
+    }
+
+    fn create_legacy_agent_worktree(source: &Path, worktree: &Path, branch: &str) {
+        run_git(source, &["branch", branch]);
+        run_git(
+            source,
+            &["worktree", "add", worktree.to_str().unwrap(), branch],
+        );
     }
 
     fn tool_text(result: &(bool, Vec<ContextEnum>)) -> String {
@@ -1148,7 +1179,10 @@ mod worktree_merge_tool_tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err, "task_id override is not allowed from this planner chat");
+        assert_eq!(
+            err,
+            "task_id override is not allowed from this planner chat"
+        );
     }
 
     #[tokio::test]
@@ -1237,6 +1271,91 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
+    async fn merge_agent_with_commits_ahead_and_dirty_worktree_retains_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-committed-dirty");
+        let branch = "refact/task/task-1/card/T-1/agent-committed-dirty";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        run_git(
+            &agent_worktree,
+            &["commit", "--allow-empty", "-m", "agent empty change"],
+        );
+        std::fs::write(agent_worktree.join("dirty.txt"), "uncommitted\n").unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert!(!source.join("dirty.txt").exists());
+        assert!(agent_worktree.exists());
+        assert!(branch_exists(&source, branch));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.agent_branch.as_deref(), Some(branch));
+        assert_eq!(
+            card.agent_worktree.as_deref(),
+            Some(agent_worktree.to_str().unwrap())
+        );
+        assert!(card.agent_worktree_name.is_none());
+        assert!(tool_text(&result).contains("retained"));
+    }
+
+    #[tokio::test]
+    async fn merge_agent_with_commits_ahead_and_clean_worktree_cleans_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-committed-clean");
+        let branch = "refact/task/task-1/card/T-1/agent-committed-clean";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        run_git(
+            &agent_worktree,
+            &["commit", "--allow-empty", "-m", "agent empty change"],
+        );
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(tool_text(&result).contains("cleaned up"));
+    }
+
+    #[tokio::test]
     async fn task_merge_agent_preserves_dirty_zero_commit_legacy_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
@@ -1244,16 +1363,7 @@ mod worktree_merge_tool_tests {
         init_repo(&source);
         let agent_worktree = temp.path().join("agent-worktree");
         let branch = "refact/task/task-1/card/T-1/agent";
-        run_git(&source, &["branch", branch]);
-        run_git(
-            &source,
-            &[
-                "worktree",
-                "add",
-                agent_worktree.to_str().unwrap(),
-                branch,
-            ],
-        );
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
         std::fs::write(agent_worktree.join("dirty.txt"), "uncommitted\n").unwrap();
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1294,16 +1404,7 @@ mod worktree_merge_tool_tests {
         init_repo(&source);
         let agent_worktree = temp.path().join("agent-worktree-clean");
         let branch = "refact/task/task-1/card/T-1/agent-clean";
-        run_git(&source, &["branch", branch]);
-        run_git(
-            &source,
-            &[
-                "worktree",
-                "add",
-                agent_worktree.to_str().unwrap(),
-                branch,
-            ],
-        );
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
         set_workspace(gcx.clone(), &source).await;
@@ -1433,5 +1534,70 @@ mod worktree_merge_tool_tests {
         assert!(card.agent_worktree.is_none());
         assert!(card.agent_worktree_name.is_none());
         assert!(card.target_files.contains(&"file.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn merge_agent_registered_path_refuses_dirty_worktree_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/task/task-1/card/T-1/agent-dirty".to_string()),
+                kind: Some("task_agent".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                chat_id: Some("agent-chat-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+        commit_file(&root, "file.txt", "registered committed\n", "agent change");
+        std::fs::write(root.join("dirty.txt"), "registered dirty\n").unwrap();
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card(&created.worktree.meta.id, &branch, &root),
+        )
+        .await;
+
+        let err = merge_registered_task_worktree(
+            gcx.clone(),
+            &source.canonicalize().unwrap(),
+            "task-1",
+            "T-1",
+            "squash",
+            "tool-call",
+            Some("task merge".to_string()),
+            false,
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("uncommitted changes"), "{err}");
+        assert!(root.exists());
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_ok());
+        assert!(branch_exists(&source, &branch));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.agent_branch.as_deref(), Some(branch.as_str()));
+        assert_eq!(card.agent_worktree.as_deref(), Some(root.to_str().unwrap()));
+        assert_eq!(
+            card.agent_worktree_name.as_deref(),
+            Some(created.worktree.meta.id.as_str())
+        );
     }
 }
