@@ -378,6 +378,7 @@ pub async fn handle_handoff_apply(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: None,
         auto_compact_enabled: thread.auto_compact_enabled,
+        wake_up_at: None,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "handoff")
@@ -532,6 +533,7 @@ pub async fn handle_mode_transition_apply(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: None,
         auto_compact_enabled: thread.auto_compact_enabled,
+        wake_up_at: None,
     };
 
     save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "mode_transition")
@@ -664,6 +666,7 @@ pub async fn handle_planner_from_transition(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: None,
         auto_compact_enabled: thread.auto_compact_enabled,
+        wake_up_at: None,
     };
 
     // task_meta is set, so this saves into the task's planner directory
@@ -765,6 +768,7 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            wake_up_at: None,
         };
 
         save_trajectory_snapshot_with_parent(gcx, snapshot, "source-chat", "mode_transition")

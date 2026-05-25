@@ -564,13 +564,17 @@ impl Tool for ToolTaskMergeAgent {
             let diagnostic = if main_dirty && !worktree_dirty {
                 "Main workspace has uncommitted changes but agent worktree is clean. Agent likely edited files in the wrong directory."
             } else if worktree_dirty {
-                "Agent worktree has uncommitted changes. The agent may have forgotten to commit, or task_agent_finish auto-commit failed."
+                "Agent worktree has uncommitted changes. The worktree and branch are preserved; inspect the worktree or use restart_agent(mode=resume)."
             } else {
                 "Both main workspace and agent worktree are clean. Agent may not have made any changes."
             };
 
             let mut cleanup_status = Vec::new();
-            if agent_branch != base_branch {
+            if worktree_dirty {
+                cleanup_status.push(
+                    "cleanup skipped; dirty agent worktree preserved for inspection or restart_agent(mode=resume)",
+                );
+            } else if agent_branch != base_branch {
                 let _guard = git_merge_lock().lock().await;
                 let worktree_removed =
                     run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
@@ -959,6 +963,25 @@ mod worktree_merge_tool_tests {
         run_git(root, &["commit", "-m", message]);
     }
 
+    fn branch_exists(root: &Path, branch: &str) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--verify", branch])
+            .current_dir(root)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    fn tool_text(result: &(bool, Vec<ContextEnum>)) -> String {
+        let ContextEnum::ChatMessage(message) = &result.1[0] else {
+            panic!("expected chat message")
+        };
+        let ChatContent::SimpleText(text) = &message.content else {
+            panic!("expected simple text")
+        };
+        text.clone()
+    }
+
     async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
         let root = root.canonicalize().unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
@@ -988,7 +1011,7 @@ mod worktree_merge_tool_tests {
         ))
     }
 
-    fn test_card(worktree_id: &str, branch: &str, root: &Path) -> BoardCard {
+    fn test_card_with_branch(worktree_id: Option<&str>, branch: &str, root: &Path) -> BoardCard {
         BoardCard {
             id: "T-1".to_string(),
             title: "Card T-1".to_string(),
@@ -1009,12 +1032,16 @@ mod worktree_merge_tool_tests {
             completed_at: Some(chrono::Utc::now().to_rfc3339()),
             agent_branch: Some(branch.to_string()),
             agent_worktree: Some(root.to_string_lossy().to_string()),
-            agent_worktree_name: Some(worktree_id.to_string()),
+            agent_worktree_name: worktree_id.map(str::to_string),
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }
+    }
+
+    fn test_card(worktree_id: &str, branch: &str, root: &Path) -> BoardCard {
+        test_card_with_branch(Some(worktree_id), branch, root)
     }
 
     fn launch_failure_verifier_report() -> VerifierReport {
@@ -1207,6 +1234,101 @@ mod worktree_merge_tool_tests {
         assert!(text.contains("requires human review"));
         assert!(text.contains("force=true"));
         assert!(text.contains("Verifier failed to launch"));
+    }
+
+    #[tokio::test]
+    async fn task_merge_agent_preserves_dirty_zero_commit_legacy_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree");
+        let branch = "refact/task/task-1/card/T-1/agent";
+        run_git(&source, &["branch", branch]);
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                agent_worktree.to_str().unwrap(),
+                branch,
+            ],
+        );
+        std::fs::write(agent_worktree.join("dirty.txt"), "uncommitted\n").unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert!(agent_worktree.exists());
+        assert!(branch_exists(&source, branch));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.agent_branch.as_deref(), Some(branch));
+        assert_eq!(
+            card.agent_worktree.as_deref(),
+            Some(agent_worktree.to_str().unwrap())
+        );
+        assert!(card.agent_worktree_name.is_none());
+        let text = tool_text(&result);
+        assert!(text.contains("preserved") || text.contains("retained"));
+    }
+
+    #[tokio::test]
+    async fn task_merge_agent_cleans_empty_zero_commit_legacy_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-clean");
+        let branch = "refact/task/task-1/card/T-1/agent-clean";
+        run_git(&source, &["branch", branch]);
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                agent_worktree.to_str().unwrap(),
+                branch,
+            ],
+        );
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(tool_text(&result).contains("Cleanup:"));
     }
 
     async fn write_task(gcx: Arc<GlobalContext>, source: &Path, card: BoardCard) {

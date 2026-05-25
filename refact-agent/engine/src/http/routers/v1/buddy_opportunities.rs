@@ -1045,6 +1045,7 @@ async fn create_investigation_chat(
             workflow_id: None,
         }),
         auto_compact_enabled: None,
+        wake_up_at: None,
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx, snapshot)

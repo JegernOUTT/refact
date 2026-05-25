@@ -169,6 +169,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
                 workflow_id: None,
             }),
             auto_compact_enabled: None,
+            wake_up_at: None,
         };
 
         chat_facade

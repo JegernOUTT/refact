@@ -204,6 +204,7 @@ pub struct LoadedTrajectory {
     pub thread: ThreadParams,
     pub created_at: String,
     pub updated_at: String,
+    pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub auto_approve_editing_tools_present: bool,
     pub auto_approve_dangerous_commands_present: bool,
 }
@@ -218,13 +219,15 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
         .cloned()
         .collect();
 
-    TrajectorySnapshot::from_thread_parts(
+    let mut snapshot = TrajectorySnapshot::from_thread_parts(
         session.chat_id.clone(),
         &session.thread,
         messages,
         session.created_at.clone(),
         session.trajectory_version,
-    )
+    );
+    snapshot.wake_up_at = session.wake_up_at;
+    snapshot
 }
 
 pub async fn apply_mode_defaults_to_thread(
@@ -613,6 +616,10 @@ pub async fn load_trajectory_for_chat(
         None
     };
 
+    let wake_up_at = t
+        .get("wake_up_at")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
     let thread = ThreadParams {
         id: chat_id.to_string(),
         title: t
@@ -748,6 +755,7 @@ pub async fn load_trajectory_for_chat(
         thread,
         created_at,
         updated_at,
+        wake_up_at,
         auto_approve_editing_tools_present,
         auto_approve_dangerous_commands_present,
     })
@@ -831,6 +839,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         active_skill: None,
         buddy_meta: None,
         auto_compact_enabled: None,
+        wake_up_at: None,
     };
 
     save_trajectory_snapshot(gcx, snapshot).await
@@ -877,6 +886,7 @@ pub async fn save_trajectory_as(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: thread.buddy_meta.clone(),
         auto_compact_enabled: thread.auto_compact_enabled,
+        wake_up_at: None,
     };
     if let Err(e) = save_trajectory_snapshot(gcx, snapshot).await {
         warn!("Failed to save trajectory: {}", e);
@@ -949,6 +959,9 @@ pub async fn save_trajectory_snapshot(
     }
     if let Some(auto_compact) = snapshot.auto_compact_enabled {
         trajectory["auto_compact_enabled"] = json!(auto_compact);
+    }
+    if let Some(wake_up_at) = snapshot.wake_up_at {
+        trajectory["wake_up_at"] = json!(wake_up_at);
     }
     if let Some(ref worktree) = snapshot.worktree {
         trajectory["worktree"] = serde_json::to_value(worktree).unwrap_or_default();
@@ -1176,6 +1189,7 @@ pub async fn check_external_reload_pending(
             session.messages = loaded.messages;
             session.thread = loaded.thread;
             session.created_at = loaded.created_at;
+            session.wake_up_at = loaded.wake_up_at;
             session.external_reload_pending = false;
             let snapshot = session.snapshot();
             session.emit(snapshot);
@@ -1355,6 +1369,7 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
         session.messages = loaded.messages;
         session.thread = loaded.thread;
         session.created_at = loaded.created_at;
+        session.wake_up_at = loaded.wake_up_at;
         session.external_reload_pending = false;
         let snapshot = session.snapshot();
         session.emit(snapshot);
@@ -3462,6 +3477,86 @@ mod tests {
     }
 
     #[test]
+    fn trajectory_snapshot_from_session_captures_wake_up_at() {
+        let wake_up_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let mut session = ChatSession::new("wake-snapshot".to_string());
+        session.wake_up_at = Some(wake_up_at);
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+
+        assert_eq!(snapshot.wake_up_at, Some(wake_up_at));
+    }
+
+    #[tokio::test]
+    async fn wake_up_at_round_trips_through_trajectory_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        {
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let wake_up_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let mut session = ChatSession::new("wake-roundtrip".to_string());
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        session.wake_up_at = Some(wake_up_at);
+        session.add_message(ChatMessage::new("user".to_string(), "wait".to_string()));
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+        save_trajectory_snapshot(gcx.clone(), snapshot).await.unwrap();
+
+        drop(session);
+
+        let loaded = load_trajectory_for_chat(gcx, "wake-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(loaded.wake_up_at, Some(wake_up_at));
+    }
+
+    #[tokio::test]
+    async fn wake_up_at_is_none_in_trajectories_created_before_field_existed() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        {
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let trajectories_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&trajectories_dir).await.unwrap();
+        tokio::fs::write(
+            trajectories_dir.join("legacy-wake.json"),
+            r#"{
+                "id":"legacy-wake",
+                "title":"Legacy",
+                "created_at":"2024-01-01T00:00:00Z",
+                "updated_at":"2024-01-01T00:00:00Z",
+                "model":"model",
+                "mode":"agent",
+                "tool_use":"agent",
+                "messages":[{"role":"user","content":"hello"}],
+                "include_project_info":true,
+                "checkpoints_enabled":true
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "legacy-wake")
+            .await
+            .unwrap();
+        assert!(loaded.wake_up_at.is_none());
+    }
+
+    #[test]
     fn test_trajectory_load_without_active_skill_field() {
         let json_str = r#"{"id":"chat-1","title":"T","model":"m","mode":"agent","tool_use":"agent","messages":[],"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","include_project_info":true,"checkpoints_enabled":true}"#;
         let t: serde_json::Value = serde_json::from_str(json_str).unwrap();
@@ -3747,6 +3842,7 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            wake_up_at: None,
         };
 
         save_trajectory_snapshot(gcx.clone(), snapshot)
@@ -3821,6 +3917,7 @@ mod tests {
                 auto_enrichment_enabled: None,
                 buddy_meta: None,
                 auto_compact_enabled: None,
+                wake_up_at: None,
             }
         }
 

@@ -106,6 +106,7 @@ impl ChatSession {
         messages: Vec<ChatMessage>,
         mut thread: ThreadParams,
         created_at: String,
+        wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Self {
         // active_skill is runtime state — if the server restarted mid-skill, the compaction
         // anchor (started_at_index) is lost. Clear it so the session starts cleanly rather
@@ -147,7 +148,7 @@ impl ChatSession {
             pending_skill_deactivation: None,
             stop_hook_handle: None,
             suppress_auto_enrichment_for_next_turn: false,
-            wake_up_at: None,
+            wake_up_at,
         }
     }
 
@@ -168,6 +169,11 @@ impl ChatSession {
 
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
+    }
+
+    pub(crate) fn mark_persisted_runtime_changed(&mut self) {
+        self.increment_version();
+        self.touch();
     }
 
     pub fn is_idle_for_cleanup(&self) -> bool {
@@ -413,7 +419,10 @@ impl ChatSession {
         }
 
         if old_state == SessionState::WaitingUserInput && state != SessionState::WaitingUserInput {
-            self.wake_up_at = None;
+            if self.wake_up_at.is_some() {
+                self.wake_up_at = None;
+                self.increment_version();
+            }
         }
 
         let state_changed = old_state != state;
@@ -531,45 +540,88 @@ impl ChatSession {
     }
 
     pub fn emit_stream_delta(&mut self, ops: Vec<DeltaOp>) {
-        let message_id = match &mut self.draft_message {
+        let (message_id, applied) = match &mut self.draft_message {
             Some(draft) => {
+                let mut applied = false;
                 for op in &ops {
                     match op {
                         DeltaOp::AppendContent { text } => match &mut draft.content {
-                            ChatContent::SimpleText(s) => s.push_str(text),
-                            _ => draft.content = ChatContent::SimpleText(text.clone()),
+                            ChatContent::SimpleText(s) => {
+                                if !text.is_empty() {
+                                    s.push_str(text);
+                                    applied = true;
+                                }
+                            }
+                            _ => {
+                                if !text.is_empty() {
+                                    draft.content = ChatContent::SimpleText(text.clone());
+                                    applied = true;
+                                }
+                            }
                         },
                         DeltaOp::AppendReasoning { text } => {
-                            let r = draft.reasoning_content.get_or_insert_with(String::new);
-                            r.push_str(text);
+                            if !text.is_empty() {
+                                let r = draft.reasoning_content.get_or_insert_with(String::new);
+                                r.push_str(text);
+                                applied = true;
+                            }
                         }
                         DeltaOp::SetToolCalls { tool_calls } => {
-                            draft.tool_calls = serde_json::from_value(json!(tool_calls)).ok();
+                            let had_tool_calls = draft
+                                .tool_calls
+                                .as_ref()
+                                .map_or(false, |calls| !calls.is_empty());
+                            if !tool_calls.is_empty() || had_tool_calls {
+                                if let Ok(parsed) = serde_json::from_value(json!(tool_calls)) {
+                                    draft.tool_calls = Some(parsed);
+                                    applied = true;
+                                }
+                            }
                         }
                         DeltaOp::SetThinkingBlocks { blocks } => {
-                            draft.thinking_blocks = Some(blocks.clone());
+                            let had_blocks = draft
+                                .thinking_blocks
+                                .as_ref()
+                                .map_or(false, |current| !current.is_empty());
+                            if !blocks.is_empty() || had_blocks {
+                                draft.thinking_blocks = Some(blocks.clone());
+                                applied = true;
+                            }
                         }
                         DeltaOp::AddCitation { citation } => {
-                            draft.citations.push(citation.clone());
+                            if !citation.is_null() {
+                                draft.citations.push(citation.clone());
+                                applied = true;
+                            }
                         }
                         DeltaOp::AddServerContentBlock { block } => {
-                            draft.server_content_blocks.push(block.clone());
+                            if !block.is_null() {
+                                draft.server_content_blocks.push(block.clone());
+                                applied = true;
+                            }
                         }
                         DeltaOp::SetUsage { usage } => {
                             if let Ok(u) = serde_json::from_value(usage.clone()) {
                                 draft.usage = Some(u);
+                                applied = true;
                             }
                         }
                         DeltaOp::MergeExtra { extra } => {
-                            draft.extra.extend(extra.clone());
+                            if !extra.is_empty() {
+                                draft.extra.extend(extra.clone());
+                                applied = true;
+                            }
                         }
                     }
                 }
-                draft.message_id.clone()
+                (draft.message_id.clone(), applied)
             }
             None => return,
         };
         self.emit(ChatEvent::StreamDelta { message_id, ops });
+        if applied {
+            self.touch();
+        }
     }
 
     pub fn finish_stream(&mut self, finish_reason: Option<String>) {
@@ -846,6 +898,7 @@ pub async fn get_or_create_session_with_trajectory(
                 loaded.messages,
                 loaded.thread,
                 loaded.created_at,
+                loaded.wake_up_at,
             ),
             false,
         )
@@ -1076,6 +1129,7 @@ mod tests {
             vec![msg.clone()],
             thread,
             "2024-01-01T00:00:00Z".into(),
+            None,
         );
         assert_eq!(session.chat_id, "traj-1");
         assert_eq!(session.thread.title, "Old Chat");
@@ -1551,6 +1605,19 @@ mod tests {
     }
 
     #[test]
+    fn test_set_runtime_state_clears_wake_up_at_and_marks_dirty() {
+        let mut session = make_session();
+        session.runtime.state = SessionState::WaitingUserInput;
+        session.wake_up_at = Some(chrono::Utc::now());
+        session.trajectory_dirty = false;
+
+        session.set_runtime_state(SessionState::Idle, None);
+
+        assert!(session.wake_up_at.is_none());
+        assert!(session.trajectory_dirty);
+    }
+
+    #[test]
     fn test_set_paused_with_reasons_and_auto_approved() {
         let mut session = make_session();
         let mut rx = session.subscribe();
@@ -1804,6 +1871,32 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         session.touch();
         assert!(session.last_activity > before);
+    }
+
+    #[tokio::test]
+    async fn stream_delta_updates_last_activity() {
+        let mut session = make_session();
+        session.start_stream();
+        let before = session.last_activity;
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "hello".into(),
+        }]);
+
+        assert!(session.last_activity > before);
+    }
+
+    #[tokio::test]
+    async fn empty_stream_delta_does_not_update_last_activity() {
+        let mut session = make_session();
+        session.start_stream();
+        let before = session.last_activity;
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        session.emit_stream_delta(vec![]);
+
+        assert_eq!(session.last_activity, before);
     }
 
     #[test]
@@ -2138,6 +2231,7 @@ mod tests {
             vec![msg],
             thread,
             "2024-01-01T00:00:00Z".into(),
+            None,
         );
         assert!(session.active_command.context_fork.is_none());
         assert!(session.active_command.model_override.is_none());
@@ -2386,6 +2480,7 @@ mod tests {
             vec![],
             thread,
             "2024-01-01T00:00:00Z".into(),
+            None,
         );
         assert!(
             session.thread.active_skill.is_none(),

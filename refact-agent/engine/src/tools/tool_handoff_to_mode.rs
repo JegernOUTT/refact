@@ -351,6 +351,7 @@ impl Tool for ToolHandoffToMode {
             auto_enrichment_enabled: thread.auto_enrichment_enabled,
             buddy_meta: None,
             auto_compact_enabled: thread.auto_compact_enabled,
+            wake_up_at: None,
         };
 
         chat_facade

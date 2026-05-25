@@ -951,6 +951,7 @@ async fn sweep_planner_wake_ups(app: AppState) -> Result<(), String> {
             {
                 let mut session = session_arc.lock().await;
                 session.wake_up_at = None;
+                session.mark_persisted_runtime_changed();
             }
 
             let statuses = crate::tools::tool_task_check_agents::get_agent_statuses(

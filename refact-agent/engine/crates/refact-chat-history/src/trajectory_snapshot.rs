@@ -35,6 +35,7 @@ pub struct TrajectorySnapshot {
     pub auto_enrichment_enabled: Option<bool>,
     pub buddy_meta: Option<BuddyThreadMeta>,
     pub auto_compact_enabled: Option<bool>,
+    pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl TrajectorySnapshot {
@@ -78,6 +79,7 @@ impl TrajectorySnapshot {
             auto_enrichment_enabled: thread.auto_enrichment_enabled,
             buddy_meta: thread.buddy_meta.clone(),
             auto_compact_enabled: thread.auto_compact_enabled,
+            wake_up_at: None,
         }
     }
 }

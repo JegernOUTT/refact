@@ -652,6 +652,7 @@ pub async fn handle_v1_buddy_conversations_create(
             workflow_id: None,
         }),
         auto_compact_enabled: None,
+        wake_up_at: None,
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), snapshot)

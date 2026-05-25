@@ -1213,6 +1213,7 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            wake_up_at: None,
         }
     }
 

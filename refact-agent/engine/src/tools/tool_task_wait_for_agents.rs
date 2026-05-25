@@ -146,6 +146,7 @@ impl Tool for ToolTaskWaitForAgents {
             if let Some(session_arc) = sessions.get(&chat_id) {
                 let mut session = session_arc.lock().await;
                 session.wake_up_at = Some(wake_at);
+                session.mark_persisted_runtime_changed();
             }
         }
 
@@ -229,13 +230,16 @@ mod tests {
             if let Some(sa) = sessions.get(&chat_id) {
                 let mut s = sa.lock().await;
                 s.wake_up_at = Some(wake_at);
+                s.mark_persisted_runtime_changed();
             }
         }
 
-        let stored = session_arc.lock().await.wake_up_at.unwrap();
+        let session = session_arc.lock().await;
+        let stored = session.wake_up_at.unwrap();
         let expected = before + chrono::Duration::seconds(secs as i64);
         let diff = (stored - expected).num_seconds().abs();
         assert!(diff <= 2, "wake_up_at set within ±2s, diff={}", diff);
+        assert!(session.trajectory_dirty);
     }
 
     #[test]
