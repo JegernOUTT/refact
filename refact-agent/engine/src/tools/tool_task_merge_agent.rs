@@ -239,6 +239,48 @@ fn ensure_verifier_allows_merge(
     Err(verifier_merge_block_message(&card.id, &report.concerns))
 }
 
+fn ensure_card_done_allows_merge(
+    card: &crate::tasks::types::BoardCard,
+    force: bool,
+) -> Result<Option<String>, String> {
+    let column_ok = card.column == "done";
+    let report_present = card
+        .final_report
+        .as_deref()
+        .map(|r| !r.trim().is_empty())
+        .unwrap_or(false);
+    if !force {
+        if !column_ok {
+            return Err(format!(
+                "Card {} is in column '{}', not 'done'. \
+                 Wait for the agent to finish, or pass force=true to merge anyway.",
+                card.id, card.column
+            ));
+        }
+        if !report_present {
+            return Err(format!(
+                "Card {} has no final report. \
+                 Wait for the agent to call task_agent_finish, or pass force=true to merge anyway.",
+                card.id
+            ));
+        }
+    }
+    if force && (!column_ok || !report_present) {
+        return Ok(Some(format!(
+            "⚠️ Force-merged card {} in column '{}'. This bypasses normal completion checks; verify the merged code carefully.",
+            card.id, card.column
+        )));
+    }
+    Ok(None)
+}
+
+fn append_completion_warning(message: &mut String, warning: Option<&str>) {
+    if let Some(warning) = warning {
+        message.push_str("\n\n");
+        message.push_str(warning);
+    }
+}
+
 async fn clear_board_mirrors_after_registered_merge(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -287,6 +329,7 @@ async fn merge_registered_task_worktree(
         return Err(format!("Card {} not found", card_id));
     };
     let verifier_warning = ensure_verifier_allows_merge(card, force)?;
+    let completion_warning = ensure_card_done_allows_merge(card, force)?;
     let Some(worktree_id) = card.agent_worktree_name.clone() else {
         return Ok(None);
     };
@@ -368,6 +411,7 @@ async fn merge_registered_task_worktree(
     };
     let mut message = merge_response_message(card_id, &response, post_merge_check.as_ref());
     append_verifier_warning(&mut message, verifier_warning.as_deref());
+    append_completion_warning(&mut message, completion_warning.as_deref());
     Ok(Some((
         false,
         vec![ContextEnum::ChatMessage(ChatMessage {
@@ -470,6 +514,7 @@ impl Tool for ToolTaskMergeAgent {
             .get_card(card_id)
             .ok_or(format!("Card {} not found", card_id))?;
         let verifier_warning = ensure_verifier_allows_merge(card, force)?;
+        let completion_warning = ensure_card_done_allows_merge(card, force)?;
 
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
         let base_branch = task_meta
@@ -921,6 +966,7 @@ The agent's work has been successfully merged back to the main branch."#,
             card_id, strategy, agent_branch, base_branch, cleanup_info
         );
         append_verifier_warning(&mut result_message, verifier_warning.as_deref());
+        append_completion_warning(&mut result_message, completion_warning.as_deref());
         if let Some(post_merge_check) = post_merge_check.as_ref() {
             append_post_merge_check_message(&mut result_message, post_merge_check);
         }
@@ -1599,5 +1645,155 @@ mod worktree_merge_tool_tests {
             card.agent_worktree_name.as_deref(),
             Some(created.worktree.meta.id.as_str())
         );
+    }
+
+    #[test]
+    fn task_merge_agent_refuses_doing_card_without_force() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+
+        let err = ensure_card_done_allows_merge(&card, false).unwrap_err();
+
+        assert!(err.contains("not 'done'"), "{err}");
+        assert!(err.contains("doing"), "{err}");
+        assert!(err.contains("force=true"), "{err}");
+    }
+
+    #[test]
+    fn task_merge_agent_refuses_failed_card_without_force() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "failed".to_string();
+
+        let err = ensure_card_done_allows_merge(&card, false).unwrap_err();
+
+        assert!(err.contains("not 'done'"), "{err}");
+        assert!(err.contains("failed"), "{err}");
+        assert!(err.contains("force=true"), "{err}");
+    }
+
+    #[test]
+    fn task_merge_agent_refuses_done_card_with_empty_final_report_without_force() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.final_report = None;
+
+        let err = ensure_card_done_allows_merge(&card, false).unwrap_err();
+
+        assert!(err.contains("no final report"), "{err}");
+        assert!(err.contains("force=true"), "{err}");
+    }
+
+    #[test]
+    fn task_merge_agent_allows_done_card_with_final_report() {
+        let card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+
+        assert!(ensure_card_done_allows_merge(&card, false).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn task_merge_agent_force_true_allows_doing_card_with_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/task/task-1/card/T-1/agent-force-doing".to_string()),
+                kind: Some("task_agent".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                chat_id: Some("agent-chat-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+        commit_file(&root, "file.txt", "force doing\n", "agent change");
+        let mut card = test_card(&created.worktree.meta.id, &branch, &root);
+        card.column = "doing".to_string();
+        card.final_report = None;
+        write_task(gcx.clone(), &source, card).await;
+
+        let result = merge_registered_task_worktree(
+            gcx,
+            &source.canonicalize().unwrap(),
+            "task-1",
+            "T-1",
+            "squash",
+            "tool-call",
+            Some("force merge doing".to_string()),
+            true,
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "force doing\n"
+        );
+        let text = tool_text(&result);
+        assert!(text.contains("Force-merged"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn task_merge_agent_force_true_allows_failed_card_with_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/task/task-1/card/T-1/agent-force-failed".to_string()),
+                kind: Some("task_agent".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                chat_id: Some("agent-chat-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+        commit_file(&root, "file.txt", "force failed\n", "agent change");
+        let mut card = test_card(&created.worktree.meta.id, &branch, &root);
+        card.column = "failed".to_string();
+        card.final_report = None;
+        write_task(gcx.clone(), &source, card).await;
+
+        let result = merge_registered_task_worktree(
+            gcx,
+            &source.canonicalize().unwrap(),
+            "task-1",
+            "T-1",
+            "squash",
+            "tool-call",
+            Some("force merge failed".to_string()),
+            true,
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "force failed\n"
+        );
+        let text = tool_text(&result);
+        assert!(text.contains("Force-merged"), "{text}");
     }
 }
