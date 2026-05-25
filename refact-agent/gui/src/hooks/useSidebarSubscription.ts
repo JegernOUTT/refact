@@ -33,6 +33,7 @@ import {
 } from "../features/Chat/Thread";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
 import { tasksApi, type TaskMeta } from "../services/refact/tasks";
+import { taskSseEventReceived } from "../features/Tasks/tasksSlice";
 import {
   setBuddySnapshot,
   setBuddyUnavailable,
@@ -401,6 +402,7 @@ export function useSidebarSubscription() {
 
   const processTaskEvent = useCallback(
     (event: Extract<SidebarSectionUpdate, { type: string }>) => {
+      dispatch(taskSseEventReceived(event as Parameters<typeof taskSseEventReceived>[0]));
       switch (event.type) {
         case "snapshot":
           tasksSnapshotRef.current = event.tasks;

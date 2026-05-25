@@ -7,6 +7,7 @@ import {
   resolveCardWorktree,
 } from "./TaskWorkspace";
 import type { PlannerInfo } from "./tasksSlice";
+import { taskSseEventReceived } from "./tasksSlice";
 import type { ChatThreadRuntime } from "../Chat/Thread/types";
 import type {
   BoardCard,
@@ -749,5 +750,168 @@ describe("TaskWorkspace worktree actions", () => {
         ...openedIds(mergeWorktreeModalProps),
       ]).not.toContain(LEGACY_PATH);
     }
+  });
+});
+
+describe("TaskWorkspace SSE invalidation", () => {
+  it("simulated_board_changed_event_refreshes_board", async () => {
+    const card = makeCard();
+    let boardFetchCount = 0;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () => {
+        boardFetchCount++;
+        return HttpResponse.json(makeBoard(card));
+      }),
+    );
+
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    const initialCount = boardFetchCount;
+
+    store.dispatch(
+      taskSseEventReceived({
+        type: "board_changed",
+        task_id: TASK_ID,
+        rev: 2,
+        board: makeBoard(card),
+      }),
+    );
+
+    await waitFor(() => expect(boardFetchCount).toBeGreaterThan(initialCount));
+  });
+
+  it("selected_card_modal_shows_latest_data_after_board_refresh", async () => {
+    const card = makeCard({ status_updates: [] });
+    const updatedCard = makeCard({
+      status_updates: [
+        { timestamp: "2026-01-01T00:00:00Z", message: "Agent progress update" },
+      ],
+    });
+    let returnUpdated = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () =>
+        HttpResponse.json(makeBoard(returnUpdated ? updatedCard : card)),
+      ),
+    );
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+    expect(screen.queryByText(/Agent progress update/)).not.toBeInTheDocument();
+
+    returnUpdated = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "board_changed",
+        task_id: TASK_ID,
+        rev: 2,
+        board: makeBoard(updatedCard),
+      }),
+    );
+
+    await screen.findByText(/Agent progress update/);
+  });
+
+  it("selected_card_modal_closes_with_notification_when_card_deleted", async () => {
+    const card = makeCard({
+      agent_worktree: undefined,
+      agent_worktree_name: undefined,
+      agent_branch: undefined,
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () =>
+        HttpResponse.json({ ...makeBoard(card), cards: [] }),
+      ),
+    );
+
+    store.dispatch(
+      taskSseEventReceived({
+        type: "board_changed",
+        task_id: TASK_ID,
+        rev: 2,
+        board: { ...makeBoard(card), cards: [] },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Close" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText("Card was deleted by another planner."),
+    ).toBeInTheDocument();
+  });
+
+  it("task_updated_event_refreshes_task_meta", async () => {
+    const card = makeCard();
+    let returnActive = false;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks/task-1", () =>
+        HttpResponse.json({
+          meta: {
+            ...makeTask(),
+            status: returnActive ? "active" : "planning",
+          },
+        }),
+      ),
+    );
+
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+
+    returnActive = true;
+    store.dispatch(
+      taskSseEventReceived({
+        type: "task_updated",
+        task_id: TASK_ID,
+        meta: { ...makeTask(), status: "active" },
+      }),
+    );
+
+    await screen.findByText("Planning complete! You can now spawn agents.");
+  });
+
+  it("visibilitychange_to_visible_invalidates_board", async () => {
+    const card = makeCard();
+    let boardFetchCount = 0;
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () => {
+        boardFetchCount++;
+        return HttpResponse.json(makeBoard(card));
+      }),
+    );
+
+    render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await screen.findAllByText(card.title);
+    const initialCount = boardFetchCount;
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    await waitFor(() => expect(boardFetchCount).toBeGreaterThan(initialCount));
   });
 });

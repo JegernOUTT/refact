@@ -78,6 +78,7 @@ import {
   openTask,
   addPlannerChat,
   setTaskActiveChat,
+  taskSseEventReceived,
 } from "../features/Tasks/tasksSlice";
 import { closeThread } from "../features/Chat/Thread";
 import { createChatWithId } from "../features/Chat/Thread/actions";
@@ -1301,6 +1302,37 @@ startListening({
     }
 
     listenerApi.dispatch(closeTask(taskId));
+  },
+});
+
+startListening({
+  actionCreator: taskSseEventReceived,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    switch (event.type) {
+      case "task_created":
+        listenerApi.dispatch(
+          tasksApi.util.invalidateTags([{ type: "Tasks", id: "LIST" }]),
+        );
+        break;
+      case "task_updated":
+        listenerApi.dispatch(
+          tasksApi.util.invalidateTags([{ type: "Tasks", id: event.task_id }]),
+        );
+        break;
+      case "task_deleted":
+        listenerApi.dispatch(
+          tasksApi.util.invalidateTags([{ type: "Tasks", id: "LIST" }]),
+        );
+        break;
+      case "board_changed":
+        listenerApi.dispatch(
+          tasksApi.util.invalidateTags([
+            { type: "Board", id: event.task_id },
+          ]),
+        );
+        break;
+    }
   },
 });
 

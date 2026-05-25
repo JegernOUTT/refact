@@ -762,16 +762,33 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const activeChat = useAppSelector((state) =>
     selectTaskActiveChat(state, taskId),
   );
-  const [selectedCard, setSelectedCard] = useState<BoardCard | null>(null);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const selectedCard = useMemo(
+    () =>
+      selectedCardId
+        ? (board?.cards.find((c) => c.id === selectedCardId) ?? null)
+        : null,
+    [board, selectedCardId],
+  );
   const [diffTarget, setDiffTarget] = useState<CardWorktreeTarget | null>(null);
-  const [mergeTarget, setMergeTarget] = useState<{
-    card: BoardCard;
-    worktree: CardWorktreeTarget;
-  } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{
-    card: BoardCard;
-    worktree: CardWorktreeTarget;
-  } | null>(null);
+  const [mergeTargetId, setMergeTargetId] = useState<string | null>(null);
+  const [mergeTargetWorktree, setMergeTargetWorktree] =
+    useState<CardWorktreeTarget | null>(null);
+  const mergeTarget = useMemo(() => {
+    if (!mergeTargetId || !mergeTargetWorktree) return null;
+    const card = board?.cards.find((c) => c.id === mergeTargetId) ?? null;
+    if (!card) return null;
+    return { card, worktree: mergeTargetWorktree };
+  }, [board, mergeTargetId, mergeTargetWorktree]);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [deleteTargetWorktree, setDeleteTargetWorktree] =
+    useState<CardWorktreeTarget | null>(null);
+  const deleteTarget = useMemo(() => {
+    if (!deleteTargetId || !deleteTargetWorktree) return null;
+    const card = board?.cards.find((c) => c.id === deleteTargetId) ?? null;
+    if (!card) return null;
+    return { card, worktree: deleteTargetWorktree };
+  }, [board, deleteTargetId, deleteTargetWorktree]);
   const [deleteBranch, setDeleteBranch] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const [layout, setLayout] = useState(() =>
@@ -950,7 +967,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   }, [dispatch]);
 
   const handleCardClick = useCallback((card: BoardCard) => {
-    setSelectedCard(card);
+    setSelectedCardId(card.id);
   }, []);
 
   const handleNewPlanner = useCallback(() => {
@@ -1058,7 +1075,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     (card: BoardCard) => {
       if (!card.agent_chat_id) return;
       handleSelectAgent(card.id, card.agent_chat_id);
-      setSelectedCard(null);
+      setSelectedCardId(null);
     },
     [handleSelectAgent],
   );
@@ -1167,6 +1184,24 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     window.setTimeout(() => setNotification(null), 3000);
   }, []);
 
+  useEffect(() => {
+    if (!board || !selectedCardId) return;
+    if (!board.cards.some((c) => c.id === selectedCardId)) {
+      setSelectedCardId(null);
+      showNotification("Card was deleted by another planner.");
+    }
+  }, [board, selectedCardId, showNotification]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        dispatch(tasksApi.util.invalidateTags([{ type: "Board", id: taskId }]));
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [dispatch, taskId]);
+
   const invalidateTaskQueries = useCallback(() => {
     dispatch(
       tasksApi.util.invalidateTags([
@@ -1185,7 +1220,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const handleMergeCardWorktree = useCallback(
     (worktree: CardWorktreeTarget) => {
       if (!selectedCard || !isActionableWorktree(worktree)) return;
-      setMergeTarget({ card: selectedCard, worktree });
+      setMergeTargetId(selectedCard.id);
+      setMergeTargetWorktree(worktree);
     },
     [selectedCard],
   );
@@ -1228,7 +1264,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     (worktree: CardWorktreeTarget) => {
       if (!selectedCard || !isActionableWorktree(worktree)) return;
       setDeleteBranch(false);
-      setDeleteTarget({ card: selectedCard, worktree });
+      setDeleteTargetId(selectedCard.id);
+      setDeleteTargetWorktree(worktree);
     },
     [selectedCard],
   );
@@ -1251,7 +1288,8 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           }),
         );
       }
-      setDeleteTarget(null);
+      setDeleteTargetId(null);
+      setDeleteTargetWorktree(null);
       invalidateTaskQueries();
       showNotification("Worktree deleted.");
     } catch (error) {
@@ -1561,7 +1599,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           worktree={selectedCardWorktree}
           worktreeLabel={selectedCardWorktreeLabel}
           isWorktreeLoading={worktreesLoading}
-          onClose={() => setSelectedCard(null)}
+          onClose={() => setSelectedCardId(null)}
           onInternalLink={handleInternalLink}
           onViewDiff={handleViewCardDiff}
           onMerge={handleMergeCardWorktree}
@@ -1588,7 +1626,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         taskId={taskId}
         defaultTargetBranch={task.base_branch}
         onOpenChange={(open) => {
-          if (!open) setMergeTarget(null);
+          if (!open) {
+            setMergeTargetId(null);
+            setMergeTargetWorktree(null);
+          }
         }}
         onMerged={handleCardMergeCompleted}
         onAskRefact={handleAskRefactForMerge}
@@ -1600,7 +1641,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       <Dialog.Root
         open={Boolean(deleteTarget)}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
+          if (!open) {
+            setDeleteTargetId(null);
+            setDeleteTargetWorktree(null);
+          }
         }}
       >
         <Dialog.Content maxWidth="420px">

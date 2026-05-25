@@ -1,5 +1,6 @@
-import { createSlice, PayloadAction } from "@reduxjs/toolkit";
+import { createAction, createSlice, PayloadAction } from "@reduxjs/toolkit";
 import { RootState } from "../../app/store";
+import type { TaskEvent } from "../../services/refact/sidebarSubscription";
 import {
   loadPersistedTasksUIState,
   savePersistedTasksUIState,
@@ -164,6 +165,10 @@ export const tasksSlice = createSlice({
     selectOpenTasks: (state) => state.openTasks,
   },
 });
+
+export const taskSseEventReceived = createAction<TaskEvent>(
+  "tasks/sseEventReceived",
+);
 
 export const {
   openTask,
