@@ -284,7 +284,8 @@ impl AgentFailureKind {
     }
 
     fn should_cleanup_worktree(self) -> bool {
-        matches!(self, AgentFailureKind::Permanent)
+        let _ = self;
+        false
     }
 
     fn final_report_reason(self, error_message: &str) -> String {
@@ -305,7 +306,7 @@ impl AgentFailureKind {
             AgentFailureKind::ContextLimit => {
                 "Provider context limit was reached; worktree retained so the task can be retried after compaction or with a smaller history."
             }
-            AgentFailureKind::Permanent => "Worktree cleanup may run after this report.",
+            AgentFailureKind::Permanent => "Worktree retained for inspection or retry via restart_agent.",
             AgentFailureKind::Cancelled => "The task was cancelled before the agent finished.",
         };
 
@@ -379,7 +380,7 @@ async fn mark_agent_as_failed(
     expected_agent_id: Option<&str>,
     planner_chat_id: Option<&str>,
     reason: &str,
-    failure_kind: AgentFailureKind,
+    _failure_kind: AgentFailureKind,
 ) -> Result<(), String> {
     let _ = update_card_heartbeat(app.clone(), task_id, card_id).await;
 
@@ -462,40 +463,31 @@ async fn mark_agent_as_failed(
         app.buddy_event_sink.enqueue_event(ev).await;
     }
 
-    if failure_kind.should_cleanup_worktree() {
-        if let Some(card) = board.get_card(card_id) {
-            if let (Some(ref wt), Some(ref branch)) = (&card.agent_worktree, &card.agent_branch) {
-                let diff_report = cleanup_failed_agent_worktree(
-                    app.clone(),
-                    wt,
-                    branch,
-                    card.agent_worktree_name.as_deref(),
-                )
-                .await;
-                let card_id_for_cleanup = card_id.to_string();
-                let _ = storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
-                    if let Some(c) = board.get_card_mut(&card_id_for_cleanup) {
-                        if !diff_report.is_empty() {
-                            if let Some(ref mut report) = c.final_report {
-                                report.push_str(&diff_report);
-                            }
-                        }
-                        c.agent_worktree = None;
-                        c.agent_branch = None;
-                        c.agent_worktree_name = None;
-                    }
-                    Ok(())
-                })
-                .await;
-            }
-        }
-    } else {
+    {
+        let (worktree, branch, worktree_name) = if let Some(card) = board.get_card(card_id) {
+            (
+                card.agent_worktree.clone(),
+                card.agent_branch.clone(),
+                card.agent_worktree_name.clone(),
+            )
+        } else {
+            (None, None, None)
+        };
+        let diff_report = if let (Some(ref wt), Some(ref br)) = (&worktree, &branch) {
+            capture_failed_agent_diff(app.clone(), wt, br, worktree_name.as_deref()).await
+        } else {
+            String::new()
+        };
         let card_id_for_retain = card_id.to_string();
         let _ = storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
             if let Some(c) = board.get_card_mut(&card_id_for_retain) {
                 if let Some(ref mut report) = c.final_report {
-                    report
-                        .push_str("\n\nWorktree and branch were retained for inspection or retry.");
+                    if !diff_report.is_empty() {
+                        report.push_str(&diff_report);
+                    }
+                    report.push_str(
+                        "\n\nWorktree and branch retained for inspection or retry via `restart_agent`.",
+                    );
                 }
             }
             Ok(())
@@ -732,8 +724,8 @@ pub(crate) async fn remove_agent_worktree_and_branch(
     }
 }
 
-pub(crate) async fn cleanup_failed_agent_worktree(
-    app: AppState,
+pub(crate) async fn capture_failed_agent_diff(
+    _app: AppState,
     agent_worktree: &str,
     agent_branch: &str,
     _agent_worktree_name: Option<&str>,
@@ -793,25 +785,6 @@ pub(crate) async fn cleanup_failed_agent_worktree(
                 }
                 diff_report.push_str("\n```\n");
             }
-        }
-    }
-
-    let _ = remove_agent_worktree_and_branch(
-        app.clone(),
-        agent_worktree,
-        agent_branch,
-        _agent_worktree_name,
-    )
-    .await;
-
-    let parent = Path::new(agent_worktree).parent();
-    if let Some(p) = parent {
-        if p.exists()
-            && p.read_dir()
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(false)
-        {
-            let _ = std::fs::remove_dir(p);
         }
     }
 
@@ -1557,11 +1530,29 @@ mod tests {
     }
 
     #[test]
-    fn task_agent_monitor_permanent_failure_can_cleanup_worktree() {
+    fn task_agent_monitor_permanent_failure_retains_worktree() {
         let kind = AgentFailureKind::from_error("LLM error (401 Unauthorized): invalid api key");
+        let report = kind.final_report_reason("LLM error (401 Unauthorized): invalid api key");
 
         assert_eq!(kind, AgentFailureKind::Permanent);
-        assert!(kind.should_cleanup_worktree());
+        assert!(!kind.should_cleanup_worktree());
+        assert!(report.contains("retained"));
+    }
+
+    #[test]
+    fn task_agent_monitor_all_failure_kinds_retain_worktree() {
+        for kind in [
+            AgentFailureKind::TransientExhausted,
+            AgentFailureKind::ContextLimit,
+            AgentFailureKind::Permanent,
+            AgentFailureKind::Cancelled,
+        ] {
+            assert!(
+                !kind.should_cleanup_worktree(),
+                "{:?} should not cleanup worktree",
+                kind
+            );
+        }
     }
 
     #[test]
