@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { render, screen, waitFor } from "../../../utils/test-utils";
+import {
+  render,
+  screen,
+  waitFor,
+  createDefaultChatState,
+} from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
+import { setUpStore } from "../../../app/store";
+import { tasksApi } from "../../../services/refact/tasks";
 import { MemoryInboxPanel } from "./MemoryInboxPanel";
+import { TaskWorkspace } from "../TaskWorkspace";
 import type { TaskMemoriesResponse } from "../../../services/refact/taskMemoriesApi";
 
 HTMLElement.prototype.hasPointerCapture = () => false;
@@ -141,6 +149,9 @@ describe("MemoryInboxPanel", () => {
     await waitFor(() => expect(pinRequests).toEqual([{ pinned: true }]));
 
     await user.click(screen.getAllByRole("button", { name: "Archive" })[0]);
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm archive" }),
+    );
     await waitFor(() => expect(archiveRequests).toEqual(["decision.md"]));
   });
 
@@ -336,6 +347,88 @@ describe("MemoryInboxPanel", () => {
     await waitFor(() => {
       expect(screen.queryByText("Updating")).not.toBeInTheDocument();
     });
+  });
+
+  it("header does not show Memories label when on memories tab", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/tasks/:taskId", () =>
+        HttpResponse.json({
+          id: "task-1",
+          name: "Test Task",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          cards_total: 0,
+          cards_done: 0,
+          cards_failed: 0,
+          agents_active: 0,
+        }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/tasks/:taskId/board", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          rev: 1,
+          columns: [],
+          cards: [],
+        }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/worktrees", () =>
+        HttpResponse.json({ worktrees: [] }),
+      ),
+      http.get(
+        "http://127.0.0.1:8001/v1/tasks/:taskId/trajectories/:role",
+        () => HttpResponse.json([]),
+      ),
+      http.get("http://127.0.0.1:8001/v1/ping", () =>
+        HttpResponse.json({ pong: "pong" }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/chat-modes", () =>
+        HttpResponse.json({ chat_modes: [], error: null }),
+      ),
+    );
+    mockMemories({ ...memoriesResponse, memories: [] });
+
+    const store = setUpStore({
+      config: CONFIG_STATE.config,
+      chat: createDefaultChatState(),
+    });
+    void store.dispatch(
+      tasksApi.util.upsertQueryData("getTask", "task-1", {
+        id: "task-1",
+        name: "Test Task",
+        status: "active",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        cards_total: 0,
+        cards_done: 0,
+        cards_failed: 0,
+        agents_active: 0,
+      }),
+    );
+    void store.dispatch(
+      tasksApi.util.upsertQueryData("getBoard", "task-1", {
+        schema_version: 1,
+        rev: 1,
+        columns: [],
+        cards: [],
+      }),
+    );
+
+    const { user } = render(<TaskWorkspace taskId="task-1" />, { store });
+
+    const expandChatBtn = await screen.findByRole("button", {
+      name: "Expand chat",
+    });
+
+    const chatHeaderDiv = expandChatBtn.parentElement ?? document.body;
+    const memoriesTabEl = Array.from(
+      chatHeaderDiv.querySelectorAll('button[role="tab"]'),
+    ).find((el) => el.textContent?.includes("Memories"));
+
+    expect(memoriesTabEl).toBeDefined();
+    await user.click(memoriesTabEl as HTMLElement);
+
+    expect(expandChatBtn.textContent).not.toContain("Memories");
   });
 
   it("mark all triaged calls triage mutation", async () => {

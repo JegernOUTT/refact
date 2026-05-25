@@ -30,6 +30,7 @@
 }
 
 .tagChips {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   min-width: 0;
   max-height: 72px;
   overflow: hidden auto;
@@ -59,6 +60,8 @@
 .card {
   border: 1px solid var(--gray-a5);
   background: var(--color-background);
+  padding: var(--space-3);
+  min-height: 72px;
 }
 
 .cardPinned {
@@ -66,8 +69,13 @@
   box-shadow: 0 0 0 1px var(--amber-a7);
 }
 
-.cardTopRow {
-  min-width: 0;
+.cardControls {
+  flex-shrink: 0;
+}
+
+.cardIconButton {
+  width: 22px;
+  height: 22px;
 }
 
 .cardTitleBlock {
@@ -76,11 +84,12 @@
 }
 
 .cardTitle {
-  display: block;
+  display: -webkit-box;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
 }
 
 .cardMeta {
@@ -102,6 +111,10 @@
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cardFooterRight {
+  flex-shrink: 0;
 }
 
 .preview {

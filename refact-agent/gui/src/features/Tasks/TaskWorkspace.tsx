@@ -1393,9 +1393,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               >
                 Task
               </Text>
-              <Text size="1" color="gray" className={styles.chatHeaderLabel}>
-                {workspaceTab === "chat" ? chatLabel : "Memories"}
-              </Text>
+              {workspaceTab === "chat" && (
+                <Text size="1" color="gray" className={styles.chatHeaderLabel}>
+                  {chatLabel}
+                </Text>
+              )}
             </button>
             <Tabs.List size="1">
               <Tabs.Trigger value="chat">Chat</Tabs.Trigger>

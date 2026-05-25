@@ -5,9 +5,18 @@ import {
   Button,
   Card,
   Flex,
+  IconButton,
+  Popover,
   Spinner,
   Text,
+  Tooltip,
 } from "@radix-ui/themes";
+import {
+  ArchiveIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  DrawingPinIcon,
+} from "@radix-ui/react-icons";
 import classNames from "classnames";
 import type { TaskMemoryEntry } from "../../../services/refact/taskMemoriesApi";
 import styles from "./MemoryInboxPanel.module.css";
@@ -81,39 +90,95 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
       data-testid={`memory-card-${memory.filename}`}
     >
       <Flex direction="column" gap="2">
-        <Flex
-          justify="between"
-          align="start"
-          gap="2"
-          className={styles.cardTopRow}
-        >
-          <Box className={styles.cardTitleBlock}>
-            <Text weight="medium" size="2" className={styles.cardTitle}>
-              {title}
-            </Text>
-            <Flex
-              gap="1"
-              align="center"
-              wrap="wrap"
-              className={styles.cardMeta}
-            >
-              <Badge color={KIND_COLORS[memory.kind]} variant="soft">
-                {memory.kind}
+        <Flex justify="between" align="start" gap="2">
+          <Flex gap="1" align="center" wrap="wrap">
+            <Badge color={KIND_COLORS[memory.kind]} variant="soft">
+              {memory.kind}
+            </Badge>
+            {memory.pinned && (
+              <Badge color="amber" variant="solid">
+                pinned
               </Badge>
-              {memory.pinned && (
-                <Badge color="amber" variant="solid">
-                  pinned
-                </Badge>
-              )}
-              <Text size="1" color="gray" className={styles.cardMetaText}>
-                {memory.namespace}
-              </Text>
-            </Flex>
-          </Box>
-          <Text size="1" color="gray" className={styles.cardDate}>
-            {createdAt}
-          </Text>
+            )}
+            <Text size="1" color="gray" className={styles.cardMetaText}>
+              {memory.namespace}
+            </Text>
+          </Flex>
+          <Flex gap="1" align="center" className={styles.cardControls}>
+            <Tooltip content={memory.pinned ? "Unpin" : "Pin memory"}>
+              <IconButton
+                size="1"
+                variant="ghost"
+                aria-label={memory.pinned ? "Unpin" : "Pin"}
+                color={memory.pinned ? "amber" : "gray"}
+                onClick={handlePin}
+                disabled={disabled}
+                className={styles.cardIconButton}
+              >
+                <DrawingPinIcon />
+              </IconButton>
+            </Tooltip>
+            <Popover.Root>
+              <Tooltip content="Archive">
+                <Popover.Trigger>
+                  <IconButton
+                    size="1"
+                    variant="ghost"
+                    aria-label="Archive"
+                    color="gray"
+                    disabled={disabled}
+                    className={styles.cardIconButton}
+                  >
+                    <ArchiveIcon />
+                  </IconButton>
+                </Popover.Trigger>
+              </Tooltip>
+              <Popover.Content width="220px">
+                <Flex direction="column" gap="3">
+                  <Text size="2">Archive this memory?</Text>
+                  <Flex gap="2">
+                    <Popover.Close>
+                      <Button
+                        size="1"
+                        variant="solid"
+                        color="amber"
+                        onClick={handleArchive}
+                      >
+                        Confirm archive
+                      </Button>
+                    </Popover.Close>
+                    <Popover.Close>
+                      <Button size="1" variant="soft" color="gray">
+                        Cancel
+                      </Button>
+                    </Popover.Close>
+                  </Flex>
+                </Flex>
+              </Popover.Content>
+            </Popover.Root>
+            {canExpand && (
+              <Tooltip
+                content={expanded ? "Collapse preview" : "Expand preview"}
+              >
+                <IconButton
+                  size="1"
+                  variant="ghost"
+                  aria-label={expanded ? "Collapse" : "Expand"}
+                  color="gray"
+                  onClick={() => setExpanded((v) => !v)}
+                  aria-expanded={expanded}
+                  className={styles.cardIconButton}
+                >
+                  {expanded ? <ChevronUpIcon /> : <ChevronDownIcon />}
+                </IconButton>
+              </Tooltip>
+            )}
+          </Flex>
         </Flex>
+
+        <Text weight="medium" size="2" className={styles.cardTitle}>
+          {title}
+        </Text>
 
         <Box
           className={classNames(
@@ -126,74 +191,53 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
           </Text>
         </Box>
 
-        {memory.tags.length > 0 && (
-          <Flex gap="1" wrap="wrap" align="center" className={styles.tags}>
-            {visibleTags.map((tag) => (
-              <Badge key={tag} color="gray" variant="outline">
-                {tag}
-              </Badge>
-            ))}
-            {hiddenTagCount > 0 && (
-              <Button
-                type="button"
-                size="1"
-                variant="ghost"
-                className={styles.tagsToggle}
-                onClick={() => setTagsExpanded(true)}
-              >
-                Show {hiddenTagCount} more
-              </Button>
-            )}
-            {tagsExpanded && memory.tags.length > MAX_COLLAPSED_TAGS && (
-              <Button
-                type="button"
-                size="1"
-                variant="ghost"
-                className={styles.tagsToggle}
-                onClick={() => setTagsExpanded(false)}
-              >
-                Show fewer
-              </Button>
-            )}
-          </Flex>
-        )}
-
-        <Flex gap="2" wrap="wrap" align="center" className={styles.actions}>
-          <Button
-            size="1"
-            variant="soft"
-            onClick={handlePin}
-            disabled={disabled}
-          >
-            {memory.pinned ? "Unpin" : "Pin"}
-          </Button>
-          <Button
-            size="1"
-            variant="soft"
-            color="amber"
-            onClick={handleArchive}
-            disabled={disabled}
-          >
-            Archive
-          </Button>
-          {canExpand && (
-            <Button
-              size="1"
-              variant="ghost"
-              onClick={() => setExpanded((value) => !value)}
-              aria-expanded={expanded}
-            >
-              {expanded ? "Collapse" : "Expand"}
-            </Button>
-          )}
-          {pending && (
-            <Flex align="center" gap="1" className={styles.pendingState}>
-              <Spinner size="1" />
-              <Text size="1" color="gray">
-                Updating
-              </Text>
+        <Flex justify="between" align="start" gap="2">
+          {memory.tags.length > 0 ? (
+            <Flex gap="1" wrap="wrap" align="center" className={styles.tags}>
+              {visibleTags.map((tag) => (
+                <Badge key={tag} color="gray" variant="outline">
+                  {tag}
+                </Badge>
+              ))}
+              {hiddenTagCount > 0 && (
+                <Button
+                  type="button"
+                  size="1"
+                  variant="ghost"
+                  className={styles.tagsToggle}
+                  onClick={() => setTagsExpanded(true)}
+                >
+                  Show {hiddenTagCount} more
+                </Button>
+              )}
+              {tagsExpanded && memory.tags.length > MAX_COLLAPSED_TAGS && (
+                <Button
+                  type="button"
+                  size="1"
+                  variant="ghost"
+                  className={styles.tagsToggle}
+                  onClick={() => setTagsExpanded(false)}
+                >
+                  Show fewer
+                </Button>
+              )}
             </Flex>
+          ) : (
+            <Box />
           )}
+          <Flex align="center" gap="2" className={styles.cardFooterRight}>
+            {pending && (
+              <Flex align="center" gap="1" className={styles.pendingState}>
+                <Spinner size="1" />
+                <Text size="1" color="gray">
+                  Updating
+                </Text>
+              </Flex>
+            )}
+            <Text size="1" color="gray" className={styles.cardDate}>
+              {createdAt}
+            </Text>
+          </Flex>
         </Flex>
       </Flex>
     </Card>
