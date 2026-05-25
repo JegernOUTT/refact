@@ -96,11 +96,7 @@ impl BuddyObserver for ProviderHealthObserver {
         settings.observers.provider_health && settings.proactive_enabled
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        _ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, _ctx: &ObserverContext) -> Vec<BuddyFact> {
         let caps_state = gcx.model.caps.read().await;
         let caps = match &caps_state.caps {
             Some(c) => c.clone(),

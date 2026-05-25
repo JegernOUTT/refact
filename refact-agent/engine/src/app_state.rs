@@ -116,7 +116,8 @@ pub struct BuddyServices {
 
 #[derive(Clone)]
 pub struct IntegrationServices {
-    pub integration_sessions: Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
+    pub integration_sessions:
+        Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
     pub browser_runtimes: Arc<AMutex<HashMap<String, Arc<AMutex<BrowserRuntime>>>>>,
     pub ext_cache_generation: Arc<AtomicU64>,
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
@@ -141,7 +142,8 @@ impl ChatSessionFacade for EngineChatSessionFacade {
     async fn session_snapshot(&self, chat_id: &str) -> Result<ChatSessionSnapshot, String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let session_arc =
-            chat::get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id).await;
+            chat::get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id)
+                .await;
         let session = session_arc.lock().await;
         Ok(ChatSessionSnapshot {
             messages: session.messages.clone(),
@@ -153,9 +155,11 @@ impl ChatSessionFacade for EngineChatSessionFacade {
     async fn update_session(&self, chat_id: &str, update: ChatSessionUpdate) -> Result<(), String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let session_arc =
-            chat::get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id).await;
+            chat::get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id)
+                .await;
         let mut session = session_arc.lock().await;
         session.messages = update.messages;
+        session.cache_guard_force_next = true;
         session.increment_version();
         let snapshot = session.snapshot();
         session.emit(snapshot);
@@ -185,15 +189,20 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         command: refact_chat_api::ChatCommand,
     ) -> Result<(), String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
-        let session_arc =
-            chat::get_or_create_session_with_trajectory(app.clone(), &self.gcx.chat_sessions, chat_id)
-                .await;
+        let session_arc = chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &self.gcx.chat_sessions,
+            chat_id,
+        )
+        .await;
         let mut session = session_arc.lock().await;
-        session.command_queue.push_back(refact_chat_api::CommandRequest {
-            client_request_id: uuid::Uuid::new_v4().to_string(),
-            priority: false,
-            command,
-        });
+        session
+            .command_queue
+            .push_back(refact_chat_api::CommandRequest {
+                client_request_id: uuid::Uuid::new_v4().to_string(),
+                priority: false,
+                command,
+            });
         session.touch();
         let processor_running = session.queue_processor_running.clone();
         let queue_notify = session.queue_notify.clone();
@@ -226,7 +235,11 @@ impl ChatSessionFacade for EngineChatSessionFacade {
             sessions.get(chat_id).cloned()
         };
         if let Some(session_arc) = session_arc {
-            trajectories::maybe_save_trajectory(AppState::from_gcx(self.gcx.clone()).await, session_arc).await;
+            trajectories::maybe_save_trajectory(
+                AppState::from_gcx(self.gcx.clone()).await,
+                session_arc,
+            )
+            .await;
         }
         Ok(())
     }
@@ -285,7 +298,11 @@ impl AppToolRegistry {
 
 #[async_trait]
 impl ToolRegistry for AppToolRegistry {
-    async fn get_tools_for_mode(&self, mode: &str, model_id: Option<&str>) -> Vec<refact_tool_api::ToolDesc> {
+    async fn get_tools_for_mode(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> Vec<refact_tool_api::ToolDesc> {
         crate::tools::tools_list::apply_mcp_lazy_filter(
             crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await,
         )
@@ -295,7 +312,11 @@ impl ToolRegistry for AppToolRegistry {
         .collect()
     }
 
-    async fn get_tools_index_for_mode(&self, mode: &str, model_id: Option<&str>) -> ToolRegistryIndex {
+    async fn get_tools_index_for_mode(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> ToolRegistryIndex {
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
             crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await,
         );
@@ -323,10 +344,15 @@ impl ToolRegistry for AppToolRegistry {
             .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
         {
             Some(ccx) => ccx.clone(),
-            None => return Some(Err("invalid AtCommandsContext passed to ToolRegistry".to_string())),
+            None => {
+                return Some(Err(
+                    "invalid AtCommandsContext passed to ToolRegistry".to_string()
+                ))
+            }
         };
         let args: HashMap<String, serde_json::Value> = args.into_iter().collect();
-        let raw_tools = crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
+        let raw_tools =
+            crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for tool in tools {
@@ -347,8 +373,13 @@ impl ToolRegistry for AppToolRegistry {
         None
     }
 
-    async fn get_tool_policy_info(&self, mode: &str, model_id: Option<&str>) -> Vec<ToolPolicyInfo> {
-        let raw_tools = crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
+    async fn get_tool_policy_info(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> Vec<ToolPolicyInfo> {
+        let raw_tools =
+            crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
         crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools)
             .tools
             .into_iter()
@@ -389,7 +420,8 @@ impl ToolRegistry for AppToolRegistry {
             let cgcx = ccx.lock().await;
             cgcx.app.gcx.clone()
         };
-        let raw_tools = crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode, model_id).await;
+        let raw_tools =
+            crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         let args: HashMap<String, serde_json::Value> = args.into_iter().collect();
@@ -400,13 +432,19 @@ impl ToolRegistry for AppToolRegistry {
                     let mut cgcx = ccx.lock().await;
                     cgcx.app = AppState::from_gcx(gcx.clone()).await;
                 }
-                let result = tool.tool_execute(ccx, &tool_call_id.to_string(), &args).await?;
+                let result = tool
+                    .tool_execute(ccx, &tool_call_id.to_string(), &args)
+                    .await?;
                 let mut messages = Vec::new();
                 let mut context_files = Vec::new();
                 for item in result.1 {
                     match item {
-                        crate::call_validation::ContextEnum::ChatMessage(message) => messages.push(message),
-                        crate::call_validation::ContextEnum::ContextFile(file) => context_files.push(file),
+                        crate::call_validation::ContextEnum::ChatMessage(message) => {
+                            messages.push(message)
+                        }
+                        crate::call_validation::ContextEnum::ContextFile(file) => {
+                            context_files.push(file)
+                        }
                     }
                 }
                 return Ok(Some(ToolExecutionResult {
@@ -537,7 +575,10 @@ impl BuddyEventSink for AppBuddyEventSink {
     }
 
     async fn build_pulse_message(&self) -> Option<ChatMessage> {
-        crate::buddy::pulse_inject::build_buddy_pulse_message(AppState::from_gcx(self.gcx.clone()).await).await
+        crate::buddy::pulse_inject::build_buddy_pulse_message(
+            AppState::from_gcx(self.gcx.clone()).await,
+        )
+        .await
     }
 }
 

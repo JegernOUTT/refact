@@ -80,7 +80,10 @@ impl TreeNode {
     pub fn build_relative(paths: &[PathBuf], base: &Path) -> Self {
         let mut root = TreeNode::new();
         for path in paths {
-            let display_path = path.strip_prefix(base).unwrap_or(path.as_path()).to_path_buf();
+            let display_path = path
+                .strip_prefix(base)
+                .unwrap_or(path.as_path())
+                .to_path_buf();
             if should_skip_path(&display_path) {
                 continue;
             }

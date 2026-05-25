@@ -55,7 +55,7 @@ pub async fn handle_v1_chat_subscribe(
     State(app): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Response<Body>, ScratchError> {
-        let chat_id = params
+    let chat_id = params
         .get("chat_id")
         .ok_or_else(|| ScratchError::new(StatusCode::BAD_REQUEST, "chat_id required".to_string()))?
         .clone();
@@ -158,7 +158,7 @@ pub async fn handle_v1_chat_command(
     Path(chat_id): Path<String>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
-        validate_trajectory_id(&chat_id)?;
+    validate_trajectory_id(&chat_id)?;
 
     let request: CommandRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
@@ -450,7 +450,11 @@ pub async fn handle_v1_chat_command(
     drop(session);
 
     if !processor_running.swap(true, Ordering::SeqCst) {
-        tokio::spawn(process_command_queue(app.clone(), session_arc, processor_running));
+        tokio::spawn(process_command_queue(
+            app.clone(),
+            session_arc,
+            processor_running,
+        ));
     } else {
         queue_notify.notify_one();
     }
@@ -466,7 +470,7 @@ pub async fn handle_v1_chat_cancel_queued(
     State(app): State<AppState>,
     Path((chat_id, client_request_id)): Path<(String, String)>,
 ) -> Result<Response<Body>, ScratchError> {
-        validate_trajectory_id(&chat_id)?;
+    validate_trajectory_id(&chat_id)?;
 
     let sessions = app.chat.sessions.clone();
 

@@ -11,7 +11,6 @@ use crate::at_commands::execute_at::AtCommandMember;
 use crate::call_validation::{ContextEnum, ContextFile};
 use crate::vecdb;
 
-
 pub fn text_on_clip(query: &String, from_tool_call: bool) -> String {
     if !from_tool_call {
         return query.clone();

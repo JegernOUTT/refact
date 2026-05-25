@@ -44,7 +44,10 @@ impl AstBasedFileSplitter {
         let (mut parser, language) = match get_ast_parser_by_filename(path) {
             Ok(parser) => parser,
             Err(_e) => {
-                return self.fallback_file_splitter.vectorization_split(text, path, tokenizer.clone(), tokens_limit).await;
+                return self
+                    .fallback_file_splitter
+                    .vectorization_split(text, path, tokenizer.clone(), tokens_limit)
+                    .await;
             }
         };
 
@@ -62,8 +65,15 @@ impl AstBasedFileSplitter {
         let ast_markup: FileASTMarkup = match lowlevel_file_markup(&doc, &symbols_struct) {
             Ok(x) => x,
             Err(e) => {
-                tracing::info!("lowlevel_file_markup failed for {:?}, using simple file splitter: {}", path, e);
-                return self.fallback_file_splitter.vectorization_split(text, path, tokenizer.clone(), tokens_limit).await;
+                tracing::info!(
+                    "lowlevel_file_markup failed for {:?}, using simple file splitter: {}",
+                    path,
+                    e
+                );
+                return self
+                    .fallback_file_splitter
+                    .vectorization_split(text, path, tokenizer.clone(), tokens_limit)
+                    .await;
             }
         };
 
@@ -85,8 +95,18 @@ impl AstBasedFileSplitter {
             |unused_symbols_cluster_accumulator_: &mut Vec<&SymbolInformation>,
              chunks_: &mut Vec<SplitResult>| {
                 if !unused_symbols_cluster_accumulator_.is_empty() {
-                    let top_row = unused_symbols_cluster_accumulator_.first().unwrap().full_range.start_point.row;
-                    let bottom_row = unused_symbols_cluster_accumulator_.last().unwrap().full_range.end_point.row;
+                    let top_row = unused_symbols_cluster_accumulator_
+                        .first()
+                        .unwrap()
+                        .full_range
+                        .start_point
+                        .row;
+                    let bottom_row = unused_symbols_cluster_accumulator_
+                        .last()
+                        .unwrap()
+                        .full_range
+                        .end_point
+                        .row;
                     let content = doc_lines[top_row..bottom_row + 1].join("\n");
                     let chunks__ = get_chunks(
                         &content,
@@ -136,12 +156,20 @@ impl AstBasedFileSplitter {
             if symbol.symbol_type == SymbolType::StructDeclaration {
                 if let Some(children) = guid_to_children.get(&symbol.guid) {
                     if !children.is_empty() {
-                        let skeleton_line = formatter.make_skeleton(&symbol, &text.to_string(), &guid_to_children, &guid_to_info);
+                        let skeleton_line = formatter.make_skeleton(
+                            &symbol,
+                            &text.to_string(),
+                            &guid_to_children,
+                            &guid_to_info,
+                        );
                         let chunks_ = get_chunks(
                             &skeleton_line,
                             &symbol.file_path,
                             &symbol.symbol_path,
-                            (symbol.full_range.start_point.row, symbol.full_range.end_point.row),
+                            (
+                                symbol.full_range.start_point.row,
+                                symbol.full_range.end_point.row,
+                            ),
                             tokenizer.clone(),
                             tokens_limit,
                             LINES_OVERLAP,
@@ -152,7 +180,12 @@ impl AstBasedFileSplitter {
                 }
             }
 
-            let (declaration, top_bottom_rows) = formatter.get_declaration_with_comments(&symbol, &text.to_string(), &guid_to_children, &guid_to_info);
+            let (declaration, top_bottom_rows) = formatter.get_declaration_with_comments(
+                &symbol,
+                &text.to_string(),
+                &guid_to_children,
+                &guid_to_info,
+            );
             if !declaration.is_empty() {
                 let chunks_ = get_chunks(
                     &declaration,

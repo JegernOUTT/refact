@@ -163,11 +163,7 @@ async fn run_hooks_from_list(hooks: &[HookConfig], payload: &HookPayload) -> Vec
     futures::future::join_all(futs).await
 }
 
-pub async fn run_hooks(
-    app: AppState,
-    event: HookEvent,
-    payload: HookPayload,
-) -> Vec<HookResult> {
+pub async fn run_hooks(app: AppState, event: HookEvent, payload: HookPayload) -> Vec<HookResult> {
     let tool_name = payload.tool_name.clone();
     let matching_hooks = get_hooks_for_event(app, event, tool_name.as_deref()).await;
     run_hooks_from_list(&matching_hooks, &payload).await

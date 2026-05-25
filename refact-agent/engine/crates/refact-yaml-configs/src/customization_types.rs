@@ -231,7 +231,6 @@ impl ModeConfig {
     }
 }
 
-
 pub use refact_core::subagent_config::{
     GatherFilesConfig, MessageTemplate, SubagentConfig, SubagentMessages, SubagentPrompts,
     SubagentToolSchema, SubchatConfig, ToolParameter,

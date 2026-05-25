@@ -65,10 +65,7 @@ fn project_root_hash(path: &std::path::Path) -> String {
     format!("{:x}", h.finish())
 }
 
-async fn detect_customization_drift(
-    gcx: AppState,
-    ctx: &ObserverContext,
-) -> Vec<BuddyFact> {
+async fn detect_customization_drift(gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
     let mut facts = vec![];
     let now = ctx.now;
 
@@ -79,12 +76,9 @@ async fn detect_customization_drift(
     facts
 }
 
-async fn detect_mode_overlap(
-    gcx: AppState,
-    now: DateTime<Utc>,
-    facts: &mut Vec<BuddyFact>,
-) {
-    let registry = crate::yaml_configs::customization_registry::get_project_registry(gcx.gcx.clone()).await;
+async fn detect_mode_overlap(gcx: AppState, now: DateTime<Utc>, facts: &mut Vec<BuddyFact>) {
+    let registry =
+        crate::yaml_configs::customization_registry::get_project_registry(gcx.gcx.clone()).await;
     let modes = match registry {
         Some(r) => r.modes,
         None => return,
@@ -130,11 +124,7 @@ async fn detect_mode_overlap(
     }
 }
 
-async fn detect_skill_trigger_weak(
-    gcx: AppState,
-    now: DateTime<Utc>,
-    facts: &mut Vec<BuddyFact>,
-) {
+async fn detect_skill_trigger_weak(gcx: AppState, now: DateTime<Utc>, facts: &mut Vec<BuddyFact>) {
     let ext_dirs = crate::ext::config_dirs::get_ext_dirs(gcx.clone()).await;
     let indices = crate::ext::skills::load_skill_indices(&ext_dirs).await;
     for idx in indices {
@@ -223,11 +213,7 @@ impl BuddyObserver for CustomizationDriftObserver {
             && settings.proactive_enabled
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         detect_customization_drift(gcx, ctx).await
     }
 }

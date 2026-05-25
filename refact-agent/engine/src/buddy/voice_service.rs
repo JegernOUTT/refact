@@ -71,11 +71,7 @@ struct VoiceRenderRequest {
 
 #[async_trait]
 trait VoiceRenderer: Send + Sync {
-    async fn render_voice(
-        &self,
-        gcx: AppState,
-        request: VoiceRenderRequest,
-    ) -> Option<String>;
+    async fn render_voice(&self, gcx: AppState, request: VoiceRenderRequest) -> Option<String>;
 }
 
 struct SubchatVoiceRenderer;
@@ -109,11 +105,7 @@ impl TestVoiceRenderer {
 #[cfg(test)]
 #[async_trait]
 impl VoiceRenderer for TestVoiceRenderer {
-    async fn render_voice(
-        &self,
-        _gcx: AppState,
-        request: VoiceRenderRequest,
-    ) -> Option<String> {
+    async fn render_voice(&self, _gcx: AppState, request: VoiceRenderRequest) -> Option<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.intent_kinds.lock().unwrap().push(request.intent_kind);
         let mut responses = self.responses.lock().unwrap();
@@ -127,11 +119,7 @@ impl VoiceRenderer for TestVoiceRenderer {
 
 #[async_trait]
 impl VoiceRenderer for SubchatVoiceRenderer {
-    async fn render_voice(
-        &self,
-        gcx: AppState,
-        request: VoiceRenderRequest,
-    ) -> Option<String> {
+    async fn render_voice(&self, gcx: AppState, request: VoiceRenderRequest) -> Option<String> {
         render_via_subchat(gcx, request).await
     }
 }
@@ -302,11 +290,7 @@ impl VoiceService {
         (title, description)
     }
 
-    pub async fn render_chat_title(
-        &self,
-        gcx: AppState,
-        ctx: VoiceCtx<'_>,
-    ) -> String {
+    pub async fn render_chat_title(&self, gcx: AppState, ctx: VoiceCtx<'_>) -> String {
         self.render_line(gcx, &ctx, VoiceIntent::ChatTitle.as_str())
             .await
     }
@@ -318,12 +302,7 @@ impl VoiceService {
         normalize_voice_line(&format!("{}: {}", style, phrases[idx]))
     }
 
-    async fn render_line(
-        &self,
-        gcx: AppState,
-        ctx: &VoiceCtx<'_>,
-        intent_kind: &str,
-    ) -> String {
+    async fn render_line(&self, gcx: AppState, ctx: &VoiceCtx<'_>, intent_kind: &str) -> String {
         self.render_line_with_timeout(gcx, ctx, intent_kind, VOICE_TIMEOUT)
             .await
     }
@@ -440,10 +419,7 @@ impl VoiceRenderRequest {
     }
 }
 
-async fn render_via_subchat(
-    gcx: AppState,
-    request: VoiceRenderRequest,
-) -> Option<String> {
+async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Option<String> {
     let mut config = match crate::subchat::resolve_subchat_config(
         gcx.gcx.clone(),
         "follow_up",

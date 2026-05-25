@@ -79,9 +79,7 @@ pub struct ToolGroupResponse {
     pub tools: Vec<ToolResponse>,
 }
 
-pub async fn handle_v1_get_tools(
-    State(app): State<AppState>,
-) -> Json<Vec<ToolGroupResponse>> {
+pub async fn handle_v1_get_tools(State(app): State<AppState>) -> Json<Vec<ToolGroupResponse>> {
     let gcx = app.gcx.clone();
     let tool_groups = get_available_tool_groups(gcx.clone()).await;
 

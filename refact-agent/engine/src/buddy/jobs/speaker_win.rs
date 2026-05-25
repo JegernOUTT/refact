@@ -30,19 +30,11 @@ impl BuddyJob for SpeakerWinJob {
         19
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         crossed_milestone(ctx).is_some()
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(summary) = crossed_milestone(&ctx) else {
             return BuddyJobResult::default();
         };

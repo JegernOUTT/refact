@@ -39,13 +39,11 @@ pub fn preprocess_path_for_normalization(p: String) -> String {
             format!(r"\\.\{}", parts_iter.join(r"\"))
         }
         Some(pref) if pref.contains(":") => parts_iter.join(r"\"),
-        Some(_) => {
-            match starting_slashes {
-                0 => parts_iter.join(r"\"),
-                1 => format!(r"\{}", parts_iter.join(r"\")),
-                _ => format!(r"\\{}", parts_iter.join(r"\")),
-            }
-        }
+        Some(_) => match starting_slashes {
+            0 => parts_iter.join(r"\"),
+            1 => format!(r"\{}", parts_iter.join(r"\")),
+            _ => format!(r"\\{}", parts_iter.join(r"\")),
+        },
         None => p,
     }
 }
@@ -160,7 +158,10 @@ impl CommandSimplifiedDirExt for Command {
     }
 }
 
-pub fn shortify_paths_from_indexed(cache_correction: &CacheCorrection, paths: &[String]) -> Vec<String> {
+pub fn shortify_paths_from_indexed(
+    cache_correction: &CacheCorrection,
+    paths: &[String],
+) -> Vec<String> {
     paths
         .iter()
         .map(|path| {

@@ -75,10 +75,7 @@ fn generate_filename(content: &str) -> String {
     }
 }
 
-async fn load_parent_id_from_trajectory(
-    gcx: Arc<GlobalContext>,
-    path: &PathBuf,
-) -> Option<String> {
+async fn load_parent_id_from_trajectory(gcx: Arc<GlobalContext>, path: &PathBuf) -> Option<String> {
     let text = get_file_text_from_memory_or_disk(gcx, path).await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     v.get("parent_id")
@@ -1507,7 +1504,9 @@ pub async fn rewrite_memory_document(
     }
 
     gcx.documents_state
-        .memory_document_map.lock().await
+        .memory_document_map
+        .lock()
+        .await
         .remove(&path_buf);
 
     Ok(())
@@ -1571,7 +1570,9 @@ pub async fn delete_document_from_disk(
     }
 
     gcx.documents_state
-        .memory_document_map.lock().await
+        .memory_document_map
+        .lock()
+        .await
         .remove(doc_path);
 
     Ok(())
@@ -1933,8 +1934,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            *gcx.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
 
         let first = memories_add_preference_if_new(
@@ -1978,8 +1978,7 @@ mod tests {
             .unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            *gcx.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
 
         deprecate_document(

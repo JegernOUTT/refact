@@ -94,7 +94,11 @@ async fn ast_indexer_thread(
                     "started",
                     None,
                 );
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                    ev,
+                )
+                .await;
             }
             let mut doc = Document {
                 doc_path: cpath.clone().into(),
@@ -338,7 +342,11 @@ async fn ast_indexer_thread(
                     "completed",
                     None,
                 );
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx(gcx).await,
+                    ev,
+                )
+                .await;
             }
         }
 

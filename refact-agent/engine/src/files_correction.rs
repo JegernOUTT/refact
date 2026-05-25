@@ -9,13 +9,8 @@ use crate::fuzzy_search::fuzzy_search;
 use crate::worktrees::scope::ExecutionScope;
 
 pub use refact_files::path_utils::{
-    preprocess_path_for_normalization,
-    canonical_path,
-    canonicalize_normalized_path,
-    any_glob_matches_path,
-    serialize_path,
-    deserialize_path,
-    CommandSimplifiedDirExt,
+    preprocess_path_for_normalization, canonical_path, canonicalize_normalized_path,
+    any_glob_matches_path, serialize_path, deserialize_path, CommandSimplifiedDirExt,
     shortify_paths_from_indexed,
 };
 
@@ -23,7 +18,9 @@ pub async fn paths_from_anywhere(global_context: Arc<GlobalContext>) -> Vec<Path
     let (file_paths_from_memory, paths_from_workspace, paths_from_jsonl) = {
         let documents_state = &global_context.documents_state; // somehow keeps lock until out of scope
         let file_paths_from_memory = documents_state
-            .memory_document_map.lock().await
+            .memory_document_map
+            .lock()
+            .await
             .keys()
             .cloned()
             .collect::<Vec<_>>();
@@ -49,7 +46,12 @@ pub async fn files_cache_rebuild_as_needed(
     global_context: Arc<GlobalContext>,
 ) -> Arc<CacheCorrection> {
     let cache_dirty_arc = global_context.documents_state.cache_dirty.clone();
-    let mut cache_correction_arc = global_context.documents_state.cache_correction.lock().unwrap().clone();
+    let mut cache_correction_arc = global_context
+        .documents_state
+        .cache_correction
+        .lock()
+        .unwrap()
+        .clone();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -276,8 +278,6 @@ pub async fn shortify_paths(gcx: Arc<GlobalContext>, paths: &Vec<String>) -> Vec
     shortify_paths_from_indexed(&cache_correction_arc, paths)
 }
 
-
-
 pub async fn check_if_its_inside_a_workspace_or_config(
     gcx: Arc<GlobalContext>,
     path: &Path,
@@ -293,7 +293,6 @@ pub async fn check_if_its_inside_a_workspace_or_config(
         ))
     }
 }
-
 
 #[cfg(test)]
 mod tests {

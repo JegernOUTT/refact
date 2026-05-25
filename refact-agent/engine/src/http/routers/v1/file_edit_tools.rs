@@ -1,4 +1,3 @@
-
 use crate::app_state::AppState;
 use crate::call_validation::DiffChunk;
 use crate::custom_error::ScratchError;

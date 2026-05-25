@@ -739,7 +739,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err, "task_id override is not allowed from this planner chat");
+        assert_eq!(
+            err,
+            "task_id override is not allowed from this planner chat"
+        );
     }
 
     #[tokio::test]

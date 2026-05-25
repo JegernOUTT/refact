@@ -15,8 +15,10 @@ const CLEANUP_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
 const TRAJECTORY_MAX_AGE_DAYS: i64 = 90;
 const STALE_DOC_AGE_DAYS: i64 = 180;
 
-pub type KgFileDeleter = Arc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
-pub type KgGraphBuilder = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = KnowledgeGraph> + Send>> + Send + Sync>;
+pub type KgFileDeleter =
+    Arc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+pub type KgGraphBuilder =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = KnowledgeGraph> + Send>> + Send + Sync>;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct CleanupState {

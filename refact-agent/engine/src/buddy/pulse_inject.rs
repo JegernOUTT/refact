@@ -81,9 +81,7 @@ struct LessonCandidate {
     score: f64,
 }
 
-pub async fn build_buddy_pulse_payload(
-    gcx: AppState,
-) -> Option<BuddyPulsePayload> {
+pub async fn build_buddy_pulse_payload(gcx: AppState) -> Option<BuddyPulsePayload> {
     let buddy_arc = gcx.buddy.buddy.clone();
     let project_root = {
         let lock = buddy_arc.lock().await;

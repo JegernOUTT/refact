@@ -1,4 +1,4 @@
 pub mod ast;
-pub mod fuzzy_search;
 mod document;
+pub mod fuzzy_search;
 pub use document::Document;

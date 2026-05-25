@@ -1212,7 +1212,8 @@ pub async fn list_task_memories_for_api(
         .since
         .or(read_memory_inbox_cursor(&task_dir).await?)
         .unwrap_or_else(|| now - Duration::hours(24));
-    let (mut memories, warnings) = load_task_memory_inbox_entries(&task_dir.join(MEMORIES_DIR)).await?;
+    let (mut memories, warnings) =
+        load_task_memory_inbox_entries(&task_dir.join(MEMORIES_DIR)).await?;
     let new_count = memories
         .iter()
         .filter(|memory| memory.created_at_known && memory.created_at > since)

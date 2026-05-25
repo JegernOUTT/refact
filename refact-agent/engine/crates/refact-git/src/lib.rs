@@ -7,7 +7,9 @@ fn serialize_path<S: serde::Serializer>(path: &PathBuf, serializer: S) -> Result
     serializer.serialize_str(&path.to_string_lossy())
 }
 
-fn deserialize_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+fn deserialize_path<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PathBuf, D::Error> {
     Ok(PathBuf::from(String::deserialize(deserializer)?))
 }
 
@@ -24,16 +26,25 @@ impl CommitInfo {
         self.project_path
             .to_file_path()
             .ok()
-            .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| "".to_string())
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileChange {
-    #[serde(serialize_with = "serialize_path", deserialize_with = "deserialize_path")]
+    #[serde(
+        serialize_with = "serialize_path",
+        deserialize_with = "deserialize_path"
+    )]
     pub relative_path: PathBuf,
-    #[serde(serialize_with = "serialize_path", deserialize_with = "deserialize_path")]
+    #[serde(
+        serialize_with = "serialize_path",
+        deserialize_with = "deserialize_path"
+    )]
     pub absolute_path: PathBuf,
     pub status: FileChangeStatus,
 }

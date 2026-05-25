@@ -37,14 +37,22 @@ pub async fn get_embedding_with_retries(
                 if text.len() > 1 {
                     if e.contains("503") {
                         tracing::info!("normal sleep on 503");
-                        tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BIG_BATCH)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BIG_BATCH))
+                            .await;
                     } else {
-                        tracing::info!("embedding retry #{} for {} texts: {}", attempt_n, text.len(), e);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BIG_BATCH)).await;
+                        tracing::info!(
+                            "embedding retry #{} for {} texts: {}",
+                            attempt_n,
+                            text.len(),
+                            e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BIG_BATCH))
+                            .await;
                     }
                 } else {
                     tracing::info!("embedding retry #{} for 1 text: {}", attempt_n, e);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BATCH_ONE)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(SLEEP_ON_BATCH_ONE))
+                        .await;
                 }
             }
         }
@@ -80,19 +88,32 @@ async fn get_embedding_openai_style(
         request = request.bearer_auth(&model.api_key);
     }
 
-    let response = request.send().await.map_err(|e| format!("Failed to send embedding request: {}", e))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send embedding request: {}", e))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Embedding request failed with status {}: {}", status, body));
+        return Err(format!(
+            "Embedding request failed with status {}: {}",
+            status, body
+        ));
     }
 
-    let response_json: serde_json::Value = response.json().await.map_err(|e| format!("Failed to parse embedding response: {}", e))?;
-    let data = response_json.get("data").and_then(|d| d.as_array()).ok_or("Missing 'data' in embedding response")?;
+    let response_json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse embedding response: {}", e))?;
+    let data = response_json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or("Missing 'data' in embedding response")?;
 
     let mut results: Vec<Vec<f32>> = Vec::new();
     for item in data {
-        let embedding = item.get("embedding")
+        let embedding = item
+            .get("embedding")
             .and_then(|e| e.as_array())
             .ok_or("Missing 'embedding' in response item")?
             .iter()
@@ -102,7 +123,11 @@ async fn get_embedding_openai_style(
     }
 
     if results.len() != text.len() {
-        return Err(format!("Embedding response length mismatch: expected {}, got {}", text.len(), results.len()));
+        return Err(format!(
+            "Embedding response length mismatch: expected {}, got {}",
+            text.len(),
+            results.len()
+        ));
     }
 
     Ok(results)

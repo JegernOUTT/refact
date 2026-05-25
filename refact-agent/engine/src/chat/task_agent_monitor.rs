@@ -72,9 +72,7 @@ fn make_runtime_event(
     }
 }
 
-fn idle_agent_nudge_updates(
-    card: &BoardCard,
-) -> (usize, Option<chrono::DateTime<Utc>>) {
+fn idle_agent_nudge_updates(card: &BoardCard) -> (usize, Option<chrono::DateTime<Utc>>) {
     let mut count = 0usize;
     let mut latest = None;
 
@@ -226,7 +224,9 @@ async fn enqueue_idle_agent_nudge_command(
         if session.closed {
             return Err(format!("Session {} is closed", session.chat_id));
         }
-        session.command_queue.push_back(make_idle_agent_nudge_request());
+        session
+            .command_queue
+            .push_back(make_idle_agent_nudge_request());
         session.emit_queue_update();
         session.touch();
         session.queue_notify.notify_one();
@@ -324,8 +324,12 @@ impl AgentFailureKind {
 fn format_user_error_action(action: &str) -> &'static str {
     match action {
         "retry" => "Retry the task or wait for the provider/network to recover.",
-        "compact" => "Compact the chat, reduce attached context, or switch to a larger-context model.",
-        "check_auth" => "Check provider credentials, OAuth login, token scope, and provider configuration.",
+        "compact" => {
+            "Compact the chat, reduce attached context, or switch to a larger-context model."
+        }
+        "check_auth" => {
+            "Check provider credentials, OAuth login, token scope, and provider configuration."
+        }
         "switch_model" => "Select an available model or update the provider route configuration.",
         "check_billing" => "Check provider billing, credits, quota, and usage limits.",
         _ => "Review the raw provider error and adjust the request or task before retrying.",
@@ -1174,7 +1178,9 @@ mod tests {
         session.last_activity = Instant::now()
             .checked_sub(idle_for)
             .unwrap_or_else(Instant::now);
-        session.queue_processor_running.store(true, Ordering::SeqCst);
+        session
+            .queue_processor_running
+            .store(true, Ordering::SeqCst);
         session
     }
 
@@ -1193,8 +1199,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx.clone()).await;
-        *app.workspace.documents_state.workspace_folders.lock().unwrap() =
-            vec![temp.path().to_path_buf()];
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![temp.path().to_path_buf()];
         let task = crate::tasks::storage::create_task(gcx.clone(), "Nudge task")
             .await
             .unwrap();
@@ -1258,17 +1267,14 @@ mod tests {
 
     #[tokio::test]
     async fn idle_doing_agent_without_finish_gets_nudged() {
-        let (_temp, app, task_id, agent_chat_id, session_arc) = setup_monitor_case(
-            "doing",
-            SessionState::Idle,
-            Duration::from_secs(90),
-            vec![],
-        )
-        .await;
+        let (_temp, app, task_id, agent_chat_id, session_arc) =
+            setup_monitor_case("doing", SessionState::Idle, Duration::from_secs(90), vec![]).await;
 
         check_for_stuck_agents(app.clone()).await.unwrap();
 
-        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
         let card = board.get_card("T-1").unwrap();
         assert!(card.status_updates.iter().any(|update| {
             update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
@@ -1297,21 +1303,19 @@ mod tests {
             SessionState::WaitingUserInput,
             SessionState::WaitingIde,
         ] {
-            let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
-                "doing",
-                state,
-                Duration::from_secs(90),
-                vec![],
-            )
-            .await;
+            let (_temp, app, task_id, _agent_chat_id, session_arc) =
+                setup_monitor_case("doing", state, Duration::from_secs(90), vec![]).await;
 
             check_for_stuck_agents(app.clone()).await.unwrap();
 
-            let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+            let board = storage::load_board(app.gcx.clone(), &task_id)
+                .await
+                .unwrap();
             let card = board.get_card("T-1").unwrap();
-            assert!(card.status_updates.iter().all(|update| {
-                !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
-            }));
+            assert!(card
+                .status_updates
+                .iter()
+                .all(|update| { !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX) }));
             assert!(session_arc.lock().await.command_queue.is_empty());
         }
     }
@@ -1319,21 +1323,20 @@ mod tests {
     #[tokio::test]
     async fn done_or_failed_card_is_not_nudged() {
         for column in ["done", "failed"] {
-            let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
-                column,
-                SessionState::Idle,
-                Duration::from_secs(90),
-                vec![],
-            )
-            .await;
+            let (_temp, app, task_id, _agent_chat_id, session_arc) =
+                setup_monitor_case(column, SessionState::Idle, Duration::from_secs(90), vec![])
+                    .await;
 
             check_for_stuck_agents(app.clone()).await.unwrap();
 
-            let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+            let board = storage::load_board(app.gcx.clone(), &task_id)
+                .await
+                .unwrap();
             let card = board.get_card("T-1").unwrap();
-            assert!(card.status_updates.iter().all(|update| {
-                !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
-            }));
+            assert!(card
+                .status_updates
+                .iter()
+                .all(|update| { !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX) }));
             assert!(session_arc.lock().await.command_queue.is_empty());
         }
     }
@@ -1354,7 +1357,9 @@ mod tests {
 
         check_for_stuck_agents(app.clone()).await.unwrap();
 
-        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
         let card = board.get_card("T-1").unwrap();
         assert_eq!(idle_agent_nudge_updates(card).0, 1);
         assert!(session_arc.lock().await.command_queue.is_empty());
@@ -1376,9 +1381,14 @@ mod tests {
 
         check_for_stuck_agents(app.clone()).await.unwrap();
 
-        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
         let card = board.get_card("T-1").unwrap();
-        assert_eq!(idle_agent_nudge_updates(card).0, MAX_IDLE_AGENT_NUDGES_PER_CARD);
+        assert_eq!(
+            idle_agent_nudge_updates(card).0,
+            MAX_IDLE_AGENT_NUDGES_PER_CARD
+        );
         assert!(session_arc.lock().await.command_queue.is_empty());
     }
 
@@ -1393,8 +1403,13 @@ mod tests {
         .await;
         check_for_stuck_agents(app.clone()).await.unwrap();
 
-        let board = storage::load_board(app.gcx.clone(), &task_id).await.unwrap();
-        assert_eq!(idle_agent_nudge_updates(board.get_card("T-1").unwrap()).0, 1);
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            idle_agent_nudge_updates(board.get_card("T-1").unwrap()).0,
+            1
+        );
         let session = session_arc.lock().await;
         assert_eq!(session.command_queue.len(), 1);
         assert_eq!(session.runtime.queue_size, 1);
@@ -1554,9 +1569,8 @@ mod tests {
         let kind = AgentFailureKind::from_error(
             "LLM error (413 Payload Too Large): context length exceeded",
         );
-        let report = kind.final_report_reason(
-            "LLM error (413 Payload Too Large): context length exceeded",
-        );
+        let report =
+            kind.final_report_reason("LLM error (413 Payload Too Large): context length exceeded");
 
         assert_eq!(kind, AgentFailureKind::ContextLimit);
         assert!(!kind.should_cleanup_worktree());

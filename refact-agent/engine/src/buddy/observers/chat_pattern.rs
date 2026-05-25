@@ -89,11 +89,7 @@ impl BuddyObserver for ChatPatternObserver {
             && settings.proactive_enabled
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let sessions_map = gcx.chat.sessions.clone();
         let sessions_read = sessions_map.read().await;
         let mut facts = vec![];

@@ -32,12 +32,7 @@ pub async fn scratchpad_interaction_not_stream_json(
 ) -> Result<serde_json::Value, ScratchError> {
     let t2 = std::time::SystemTime::now();
     let gcx = ccx.lock().await.global_context.clone();
-    let (client, slowdown_arc) = {
-        (
-            gcx.http_client.clone(),
-            gcx.http_client_slowdown.clone(),
-        )
-    };
+    let (client, slowdown_arc) = { (gcx.http_client.clone(), gcx.http_client_slowdown.clone()) };
 
     let mut save_url: String = String::new();
     let _ = slowdown_arc.acquire().await;

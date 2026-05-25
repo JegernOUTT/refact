@@ -85,10 +85,7 @@ pub async fn get_all_tasks_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     dirs
 }
 
-pub async fn find_task_dir(
-    gcx: Arc<GlobalContext>,
-    task_id: &str,
-) -> Result<PathBuf, String> {
+pub async fn find_task_dir(gcx: Arc<GlobalContext>, task_id: &str) -> Result<PathBuf, String> {
     validate_task_id(task_id)?;
     for tasks_dir in get_all_tasks_dirs(gcx).await {
         let candidate = tasks_dir.join(task_id);
@@ -168,10 +165,7 @@ async fn load_task_meta_from_path(path: &PathBuf) -> Result<TaskMeta, String> {
     serde_yaml::from_str(&content).map_err(|e| e.to_string())
 }
 
-pub async fn load_task_meta(
-    gcx: Arc<GlobalContext>,
-    task_id: &str,
-) -> Result<TaskMeta, String> {
+pub async fn load_task_meta(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskMeta, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
     let meta_path = task_dir.join("meta.yaml");
     load_task_meta_from_path(&meta_path).await
@@ -190,10 +184,7 @@ pub async fn save_task_meta(
         .map_err(|e| e.to_string())
 }
 
-pub async fn load_board(
-    gcx: Arc<GlobalContext>,
-    task_id: &str,
-) -> Result<TaskBoard, String> {
+pub async fn load_board(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskBoard, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
     let board_path = task_dir.join("board.yaml");
     if !board_path.exists() {
@@ -401,7 +392,11 @@ pub async fn create_task(gcx: Arc<GlobalContext>, name: &str) -> Result<TaskMeta
             "completed",
             None,
         );
-        crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx).await, ev).await;
+        crate::buddy::actor::buddy_enqueue_event(
+            crate::app_state::AppState::from_gcx(gcx).await,
+            ev,
+        )
+        .await;
     }
 
     Ok(meta)
@@ -443,10 +438,7 @@ pub async fn update_task_name(
     Ok(meta)
 }
 
-pub async fn update_task_stats(
-    gcx: Arc<GlobalContext>,
-    task_id: &str,
-) -> Result<TaskMeta, String> {
+pub async fn update_task_stats(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskMeta, String> {
     let mut meta = load_task_meta(gcx.clone(), task_id).await?;
     let board = load_board(gcx.clone(), task_id).await?;
 

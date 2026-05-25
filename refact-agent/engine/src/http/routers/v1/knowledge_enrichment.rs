@@ -5,9 +5,7 @@ use axum::Json;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::knowledge::enrichment::{
-    model_gather_and_rewrite, EnrichmentItem, MAX_QUERY_LENGTH,
-};
+use crate::knowledge::enrichment::{model_gather_and_rewrite, EnrichmentItem, MAX_QUERY_LENGTH};
 
 /// Request body for the manual memory enrichment preview endpoint.
 #[derive(Deserialize)]

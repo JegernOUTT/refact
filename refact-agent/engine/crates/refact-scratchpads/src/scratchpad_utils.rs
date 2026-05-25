@@ -1,7 +1,8 @@
 use serde_json::Value;
 
 pub use refact_core::chat_types::{
-    calculate_image_tokens_openai, image_reader_from_b64string, parse_image_b64_from_image_url_openai,
+    calculate_image_tokens_openai, image_reader_from_b64string,
+    parse_image_b64_from_image_url_openai,
 };
 use refact_postprocessing::pp_context_files::RESERVE_FOR_QUESTION_AND_FOLLOWUP;
 

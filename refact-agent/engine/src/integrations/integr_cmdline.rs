@@ -328,10 +328,7 @@ impl Tool for ToolCmdline {
 
         let (gcx, chat_id) = {
             let cgcx = ccx.lock().await;
-            (
-                cgcx.global_context.clone(),
-                cgcx.chat_id.clone(),
-            )
+            (cgcx.global_context.clone(), cgcx.chat_id.clone())
         };
         let user_activity = gcx.user_activity.clone();
         if let Ok(mut ring) = user_activity.try_lock() {

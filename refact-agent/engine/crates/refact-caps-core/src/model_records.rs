@@ -331,7 +331,10 @@ mod tests {
         };
 
         let value = serde_json::to_value(&record).unwrap();
-        assert_eq!(value.get("model_family").and_then(|v| v.as_str()), Some("qwen2.5-coder-base"));
+        assert_eq!(
+            value.get("model_family").and_then(|v| v.as_str()),
+            Some("qwen2.5-coder-base")
+        );
         assert_eq!(value.get("n_ctx").and_then(|v| v.as_u64()), Some(8192));
 
         let decoded: CompletionModelRecord = serde_json::from_value(value).unwrap();
@@ -340,10 +343,16 @@ mod tests {
         assert_eq!(decoded.base.tokenizer, "hf://tokenizer");
         assert_eq!(decoded.scratchpad, "custom");
         assert_eq!(
-            decoded.scratchpad_patch.get("fim_prefix").and_then(|v| v.as_str()),
+            decoded
+                .scratchpad_patch
+                .get("fim_prefix")
+                .and_then(|v| v.as_str()),
             Some("<fim>")
         );
-        assert_eq!(decoded.model_family, Some(CompletionModelFamily::Qwen2_5CoderBase));
+        assert_eq!(
+            decoded.model_family,
+            Some(CompletionModelFamily::Qwen2_5CoderBase)
+        );
     }
 
     #[test]

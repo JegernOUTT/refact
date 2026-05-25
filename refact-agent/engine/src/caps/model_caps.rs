@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-
 use crate::caps::models_dev::load_models_dev_catalog;
 use crate::global_context::GlobalContext;
 

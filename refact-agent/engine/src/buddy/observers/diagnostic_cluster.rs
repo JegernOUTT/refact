@@ -116,11 +116,7 @@ impl BuddyObserver for DiagnosticClusterObserver {
         settings.observers.diagnostic_cluster
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let buddy_arc = gcx.buddy.buddy.clone();
         let lock = buddy_arc.lock().await;
         let diagnostics = match lock.as_ref() {

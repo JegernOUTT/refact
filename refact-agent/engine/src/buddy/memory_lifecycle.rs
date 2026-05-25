@@ -2655,10 +2655,7 @@ async fn apply_create_memory(
     Ok(MemoryApplyOutcome::applied(vec![path]))
 }
 
-async fn apply_retag(
-    gcx: AppState,
-    op: &MemoryLifecycleOp,
-) -> Result<MemoryApplyOutcome, String> {
+async fn apply_retag(gcx: AppState, op: &MemoryLifecycleOp) -> Result<MemoryApplyOutcome, String> {
     let tags = op
         .payload
         .tags
@@ -2856,7 +2853,8 @@ async fn apply_merge_archive(
     }
     frontmatter.source_tool = Some(format!("buddy_memory_lifecycle:{}", op.source.as_str()));
 
-    let canonical_path = memories_add(gcx.gcx.clone(), &frontmatter, canonical.content.trim()).await?;
+    let canonical_path =
+        memories_add(gcx.gcx.clone(), &frontmatter, canonical.content.trim()).await?;
     let canonical_id = frontmatter
         .id
         .clone()
@@ -3215,7 +3213,13 @@ mod tests {
     async fn test_gcx_with_workspace(dir: &Path) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            *crate::app_state::AppState::from_gcx(gcx.clone()).await.workspace.documents_state.workspace_folders.lock().unwrap() = vec![dir.to_path_buf()];
+            *crate::app_state::AppState::from_gcx(gcx.clone())
+                .await
+                .workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.to_path_buf()];
         }
         AppState::from_gcx(gcx).await
     }
@@ -4796,8 +4800,13 @@ mod buddy_memory_tools_checked_tests {
         tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            *crate::app_state::AppState::from_gcx(gcx.clone()).await.workspace.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *crate::app_state::AppState::from_gcx(gcx.clone())
+                .await
+                .workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
         }
         let gcx = AppState::from_gcx(gcx).await;
         let path = knowledge_dir

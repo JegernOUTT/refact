@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 use indexmap::IndexMap;
 
 use crate::caps::{
-    BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord,
-    HasBaseModelRecord, strip_model_from_finetune,
+    BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord, HasBaseModelRecord,
+    strip_model_from_finetune,
 };
 use crate::custom_error::YamlError;
 

@@ -65,9 +65,20 @@ pub async fn init_vecdb_fail_safe(
         }
 
         attempt += 1;
-        info!("VecDb init attempt {}/{}", attempt, init_config.max_attempts);
+        info!(
+            "VecDb init attempt {}/{}",
+            attempt, init_config.max_attempts
+        );
 
-        match VecDb::init(vecdb_dir, legacy_cache_dir, workspace_folder.clone(), insecure, constants.clone()).await {
+        match VecDb::init(
+            vecdb_dir,
+            legacy_cache_dir,
+            workspace_folder.clone(),
+            insecure,
+            constants.clone(),
+        )
+        .await
+        {
             Ok(vecdb) => {
                 info!("Successfully initialized VecDb on attempt {}", attempt);
                 if init_config.test_search_after_init {
@@ -89,7 +100,10 @@ pub async fn init_vecdb_fail_safe(
             }
             Err(err) => {
                 if attempt >= init_config.max_attempts {
-                    error!("VecDb initialization failed after {} attempts. Last error: {}", attempt, err);
+                    error!(
+                        "VecDb initialization failed after {} attempts. Last error: {}",
+                        attempt, err
+                    );
                     return Err(VecDbInitError::InitializationError(err));
                 } else {
                     warn!("VecDb initialization attempt {} failed with error: {}. Retrying in {:?}...", attempt, err, delay);

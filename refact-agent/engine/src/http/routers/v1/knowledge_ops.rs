@@ -325,7 +325,7 @@ pub async fn handle_v1_knowledge_update_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
-        use hyper::body::Bytes;
+    use hyper::body::Bytes;
     use serde_json::json;
 
     fn strings(values: &[&str]) -> Vec<String> {

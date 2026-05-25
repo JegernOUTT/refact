@@ -195,19 +195,11 @@ impl BuddyJob for QuestPromptJob {
         true
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         pick_quest(ctx).is_some()
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(kind) = pick_quest(&ctx) else {
             return BuddyJobResult::default();
         };

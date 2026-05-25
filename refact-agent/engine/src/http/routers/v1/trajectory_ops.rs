@@ -13,9 +13,7 @@ use crate::chat::trajectory_ops::{
     sanitize_messages_for_new_thread,
 };
 use crate::integrations::browser_runtime::find_runtime_by_chat_id;
-use crate::agentic::mode_transition::{
-    AgenticPathContext, analyze_mode_transition, assemble_new_chat,
-};
+use crate::agentic::mode_transition::{AgenticPathContext, analyze_mode_transition, assemble_new_chat};
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
@@ -30,8 +28,8 @@ async fn create_initial_plan_document_for_transition(
         return;
     };
     let result = async {
-        let documents_dir = crate::tools::tool_task_documents::documents_dir_for_task(gcx.clone(), task_id)
-            .await?;
+        let documents_dir =
+            crate::tools::tool_task_documents::documents_dir_for_task(gcx.clone(), task_id).await?;
         let slug = crate::tools::tool_task_documents::next_available_slug_at(
             &documents_dir,
             "initial-plan",
@@ -179,7 +177,12 @@ pub async fn handle_transform_preview(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &sessions,
+        &chat_id,
+    )
+    .await;
 
     let mut messages = {
         let session = session_arc.lock().await;
@@ -213,7 +216,12 @@ pub async fn handle_transform_apply(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &sessions,
+        &chat_id,
+    )
+    .await;
 
     let stats = {
         let mut session = session_arc.lock().await;
@@ -240,7 +248,11 @@ pub async fn handle_transform_apply(
         stats
     };
 
-    crate::chat::trajectories::maybe_save_trajectory(AppState::from_gcx(gcx.clone()).await, session_arc).await;
+    crate::chat::trajectories::maybe_save_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        session_arc,
+    )
+    .await;
 
     let response = TransformApplyResponse { stats };
 
@@ -263,7 +275,12 @@ pub async fn handle_handoff_preview(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &sessions,
+        &chat_id,
+    )
+    .await;
 
     let messages = {
         let session = session_arc.lock().await;
@@ -299,7 +316,12 @@ pub async fn handle_handoff_apply(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &sessions,
+        &chat_id,
+    )
+    .await;
 
     let (messages, thread, task_meta) = {
         let session = session_arc.lock().await;
@@ -362,8 +384,11 @@ pub async fn handle_handoff_apply(
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let browser_runtime_id = if let Some((runtime_id, runtime_arc)) =
-        find_runtime_by_chat_id(crate::app_state::AppState::from_gcx(gcx.clone()).await, &chat_id).await
+    let browser_runtime_id = if let Some((runtime_id, runtime_arc)) = find_runtime_by_chat_id(
+        crate::app_state::AppState::from_gcx(gcx.clone()).await,
+        &chat_id,
+    )
+    .await
     {
         let mut rt = runtime_arc.lock().await;
         rt.detach();
@@ -421,7 +446,12 @@ pub async fn handle_mode_transition_apply(
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
     let sessions = gcx.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &sessions,
+        &chat_id,
+    )
+    .await;
 
     let (messages, thread, task_meta, session_state) = {
         let session = session_arc.lock().await;
@@ -457,9 +487,7 @@ pub async fn handle_mode_transition_apply(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let path_context = {
-        AgenticPathContext::from_context(&*gcx)
-    };
+    let path_context = { AgenticPathContext::from_context(&*gcx) };
     let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -539,8 +567,12 @@ pub async fn handle_planner_from_transition(
         .map_err(|e| ScratchError::new(StatusCode::NOT_FOUND, e))?;
 
     let sessions = gcx.chat_sessions.clone();
-    let session_arc =
-        get_or_create_session_with_trajectory(AppState::from_gcx(gcx.clone()).await, &sessions, &req.source_chat_id).await;
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &sessions,
+        &req.source_chat_id,
+    )
+    .await;
 
     let (messages, thread, session_state) = {
         let session = session_arc.lock().await;
@@ -576,9 +608,7 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let path_context = {
-        AgenticPathContext::from_context(&*gcx)
-    };
+    let path_context = { AgenticPathContext::from_context(&*gcx) };
     let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -697,8 +727,7 @@ mod tests {
         )
         .await;
         {
-            *gcx.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
         let snapshot = TrajectorySnapshot {
             chat_id: "transition-chat".to_string(),

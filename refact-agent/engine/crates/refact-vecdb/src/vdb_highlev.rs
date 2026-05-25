@@ -6,15 +6,15 @@ use tokio::task::JoinHandle;
 use async_trait::async_trait;
 use tracing::info;
 
-use refact_core::vecdb_types::{EmbeddingModelConfig, FileReader, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch};
+use refact_core::vecdb_types::{
+    EmbeddingModelConfig, FileReader, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
+};
 
 use crate::fetch_embedding;
 use crate::vdb_emb_aux;
 use crate::vdb_sqlite::VecDBSqlite;
 use crate::vdb_structs::{VecdbConstants};
-use crate::vdb_thread::{
-    vecdb_start_background_tasks, vectorizer_enqueue_files, FileVectorizerService,
-};
+use crate::vdb_thread::{vecdb_start_background_tasks, vectorizer_enqueue_files, FileVectorizerService};
 
 pub struct VecDb {
     vecdb_emb_client: Arc<AMutex<reqwest::Client>>,
@@ -48,7 +48,11 @@ impl VecDb {
             if dist0 == 0.0 {
                 dist0 = rec.distance.abs();
             }
-            rec.usefulness = 100.0 - 75.0 * ((rec.distance.abs() - dist0) / (dist0 + 0.01)).max(0.0).min(1.0);
+            rec.usefulness = 100.0
+                - 75.0
+                    * ((rec.distance.abs() - dist0) / (dist0 + 0.01))
+                        .max(0.0)
+                        .min(1.0);
             if rec.distance.abs() < rejection_threshold {
                 filtered_results.push(rec.clone());
             }
@@ -63,7 +67,10 @@ impl VecDb {
         vecdb_scope_filter_mb: Option<String>,
     ) -> Result<Vec<VecdbRecord>, String> {
         let mut handler_locked = self.vecdb_handler.lock().await;
-        let raw = handler_locked.vecdb_search(embedding, top_n, vecdb_scope_filter_mb).await.map_err(|e| e.to_string())?;
+        let raw = handler_locked
+            .vecdb_search(embedding, top_n, vecdb_scope_filter_mb)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(self.compute_usefulness_and_filter(raw))
     }
 
@@ -126,21 +133,38 @@ impl VecdbSearch for VecDb {
     ) -> Result<SearchResult, String> {
         let t0 = std::time::Instant::now();
         let embedding = self.embed_query(&query).await?;
-        info!("search query {:?}, it took {:.3}s to vectorize the query", query, t0.elapsed().as_secs_f64());
+        info!(
+            "search query {:?}, it took {:.3}s to vectorize the query",
+            query,
+            t0.elapsed().as_secs_f64()
+        );
         let t1 = std::time::Instant::now();
-        let results = self.vecdb_search_with_embedding(&embedding, top_n, vecdb_scope_filter_mb).await?;
+        let results = self
+            .vecdb_search_with_embedding(&embedding, top_n, vecdb_scope_filter_mb)
+            .await?;
         info!("search itself {:.3}s", t1.elapsed().as_secs_f64());
-        Ok(SearchResult { query_text: query, results })
+        Ok(SearchResult {
+            query_text: query,
+            results,
+        })
     }
 
     async fn get_status(&self) -> Result<VecDbStatus, String> {
         let (vstatus, vecdb_handler) = {
             let vectorizer_locked = self.vectorizer_service.lock().await;
-            (vectorizer_locked.vstatus.clone(), vectorizer_locked.vecdb_handler.clone())
+            (
+                vectorizer_locked.vstatus.clone(),
+                vectorizer_locked.vecdb_handler.clone(),
+            )
         };
         let mut vstatus_copy = vstatus.lock().await.clone();
         vstatus_copy.db_size = vecdb_handler.lock().await.size().await?;
-        vstatus_copy.db_cache_size = vecdb_handler.lock().await.cache_size().await.map_err(|e| e.to_string())?;
+        vstatus_copy.db_cache_size = vecdb_handler
+            .lock()
+            .await
+            .cache_size()
+            .await
+            .map_err(|e| e.to_string())?;
         if vstatus_copy.state == "done" && vstatus_copy.queue_additions {
             vstatus_copy.state = "cooldown".to_string();
         }
@@ -150,15 +174,25 @@ impl VecdbSearch for VecDb {
     async fn remove_file(&self, file_path: &PathBuf) -> Result<(), String> {
         let mut handler_locked = self.vecdb_handler.lock().await;
         let file_path_str = file_path.to_string_lossy().to_string();
-        handler_locked.vecdb_records_remove(vec![file_path_str]).await
+        handler_locked
+            .vecdb_records_remove(vec![file_path_str])
+            .await
     }
 
     async fn vectorizer_enqueue_files(&self, documents: &[String], process_immediately: bool) {
-        vectorizer_enqueue_files(self.vectorizer_service.clone(), documents, process_immediately).await;
+        vectorizer_enqueue_files(
+            self.vectorizer_service.clone(),
+            documents,
+            process_immediately,
+        )
+        .await;
     }
 
     fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
-        (self.constants.embedding_model.clone(), self.constants.splitter_window_size)
+        (
+            self.constants.embedding_model.clone(),
+            self.constants.splitter_window_size,
+        )
     }
 
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {

@@ -61,8 +61,11 @@ pub async fn get_file_text_from_memory_or_disk(
         &FilePrivacyLevel::AllowToSendAnywhere,
     )?;
 
-    if let Some(doc) = global_context.documents_state
-        .memory_document_map.lock().await
+    if let Some(doc) = global_context
+        .documents_state
+        .memory_document_map
+        .lock()
+        .await
         .get(file_path)
     {
         let doc = doc.read().await;
@@ -216,7 +219,10 @@ pub async fn watcher_init(gcx: Arc<GlobalContext>) {
 
     let new_watcher = Some(Arc::new(ARwLock::new(watcher)));
     let old_watcher = {
-        std::mem::replace(&mut *gcx.documents_state.fs_watcher.lock().unwrap(), new_watcher)
+        std::mem::replace(
+            &mut *gcx.documents_state.fs_watcher.lock().unwrap(),
+            new_watcher,
+        )
     };
     drop(old_watcher);
 }
@@ -715,8 +721,7 @@ async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: 
     if moar_files.len() > 0 {
         info!("this made file cache dirty");
         let dirty_arc = {
-            gcx
-                .documents_state
+            gcx.documents_state
                 .workspace_files
                 .lock()
                 .unwrap()
@@ -736,7 +741,8 @@ pub async fn enqueue_all_files_from_workspace_folders(
     wake_up_indexers: bool,
     vecdb_only: bool,
 ) -> i32 {
-    let folders = gcx.documents_state
+    let folders = gcx
+        .documents_state
         .workspace_folders
         .lock()
         .unwrap()
@@ -812,7 +818,8 @@ pub async fn enqueue_all_files_from_workspace_folders(
 pub async fn on_workspaces_init(gcx: Arc<GlobalContext>) -> i32 {
     // Called from lsp and lsp_like
     // Not called from main.rs as part of initialization
-    let folders = gcx.documents_state
+    let folders = gcx
+        .documents_state
         .workspace_folders
         .lock()
         .unwrap()
@@ -823,7 +830,10 @@ pub async fn on_workspaces_init(gcx: Arc<GlobalContext>) -> i32 {
         *gcx.app_searchable_id.lock().unwrap() = get_app_searchable_id(&folders);
     }
     // Project competitor import runs only here for normal startup and workspace add/remove changes.
-    let _ = crate::ext::competitor_import::run_project_import(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
+    let _ = crate::ext::competitor_import::run_project_import(
+        crate::app_state::AppState::from_gcx(gcx.clone()).await,
+    )
+    .await;
     watcher_init(gcx.clone()).await;
     let files_enqueued = enqueue_all_files_from_workspace_folders(gcx.clone(), false, false).await;
 
@@ -872,7 +882,9 @@ pub async fn on_did_close(gcx: Arc<GlobalContext>, cpath: &PathBuf) {
         let cx = gcx.clone();
         if cx
             .documents_state
-            .memory_document_map.lock().await
+            .memory_document_map
+            .lock()
+            .await
             .remove(cpath)
             .is_none()
         {
@@ -945,7 +957,11 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
 
     let (vec_db_module, ast_service, dirty_arc) = {
         let cx = gcx.clone();
-        cx.documents_state.memory_document_map.lock().await.remove(path);
+        cx.documents_state
+            .memory_document_map
+            .lock()
+            .await
+            .remove(path);
         let ast_service = cx.ast_service.lock().unwrap().clone();
         (
             cx.vec_db.clone(),
@@ -1052,7 +1068,10 @@ async fn on_git_head_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    let last_ms = gcx.documents_state.branch_reindex_last_ts.load(Ordering::Relaxed);
+    let last_ms = gcx
+        .documents_state
+        .branch_reindex_last_ts
+        .load(Ordering::Relaxed);
     if now_ms.saturating_sub(last_ms) < 2000 {
         return;
     }
@@ -1071,8 +1090,12 @@ async fn on_git_head_change(gcx_weak: Weak<GlobalContext>, event: Event) {
                     new_head
                 );
                 match &new_head {
-                    Some(h) => { heads.insert(repo_path.clone(), h.clone()); }
-                    None => { heads.remove(repo_path); }
+                    Some(h) => {
+                        heads.insert(repo_path.clone(), h.clone());
+                    }
+                    None => {
+                        heads.remove(repo_path);
+                    }
                 }
                 any_changed = true;
             }
@@ -1080,7 +1103,9 @@ async fn on_git_head_change(gcx_weak: Weak<GlobalContext>, event: Event) {
     }
 
     if any_changed {
-        gcx.documents_state.branch_reindex_last_ts.store(now_ms, Ordering::Relaxed);
+        gcx.documents_state
+            .branch_reindex_last_ts
+            .store(now_ms, Ordering::Relaxed);
         tracing::info!("Branch switch detected, triggering full workspace reindex");
         enqueue_all_files_from_workspace_folders(gcx, true, false).await;
     }
@@ -1091,15 +1116,21 @@ pub async fn on_explicit_branch_change(gcx: Arc<GlobalContext>, repo_path: &Path
     {
         let mut heads = gcx.documents_state.git_branch_heads.lock().unwrap();
         match &new_head {
-            Some(h) => { heads.insert(repo_path.clone(), h.clone()); }
-            None => { heads.remove(repo_path); }
+            Some(h) => {
+                heads.insert(repo_path.clone(), h.clone());
+            }
+            None => {
+                heads.remove(repo_path);
+            }
         }
     }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    gcx.documents_state.branch_reindex_last_ts.store(now_ms, Ordering::Relaxed);
+    gcx.documents_state
+        .branch_reindex_last_ts
+        .store(now_ms, Ordering::Relaxed);
     tracing::info!(
         "Explicit branch change notification for {}, triggering full workspace reindex",
         repo_path.display()
@@ -1239,7 +1270,8 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
 }
 
 pub async fn files_in_workspace_init_task(gcx: Arc<GlobalContext>) {
-    let previous_folders = gcx.documents_state
+    let previous_folders = gcx
+        .documents_state
         .workspace_folders
         .lock()
         .unwrap()
@@ -1252,9 +1284,14 @@ pub async fn files_in_workspace_init_task(gcx: Arc<GlobalContext>) {
         "started",
         None,
     );
-    crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+    crate::buddy::actor::buddy_enqueue_event(
+        crate::app_state::AppState::from_gcx(gcx.clone()).await,
+        ev,
+    )
+    .await;
     let file_count = enqueue_all_files_from_workspace_folders(gcx.clone(), true, false).await;
-    let current_folders = gcx.documents_state
+    let current_folders = gcx
+        .documents_state
         .workspace_folders
         .lock()
         .unwrap()
@@ -1289,7 +1326,8 @@ pub async fn files_in_workspace_init_task(gcx: Arc<GlobalContext>) {
         "completed",
         None,
     );
-    crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx).await, ev).await;
+    crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx).await, ev)
+        .await;
 }
 
 #[cfg(test)]
@@ -1318,9 +1356,7 @@ mod tests {
     }
 
     async fn cache_dirty_value(gcx: &Arc<GlobalContext>) -> f64 {
-        let dirty = {
-            gcx.documents_state.cache_dirty.clone()
-        };
+        let dirty = { gcx.documents_state.cache_dirty.clone() };
         let value = *dirty.lock().await;
         value
     }
@@ -1395,7 +1431,10 @@ mod tests {
         on_did_open(gcx.clone(), &path, &text, &language_id).await;
 
         let (memory_doc_map, active_fp) = {
-            (gcx.documents_state.memory_document_map.clone(), gcx.documents_state.active_file_path.clone())
+            (
+                gcx.documents_state.memory_document_map.clone(),
+                gcx.documents_state.active_file_path.clone(),
+            )
         };
         let has_doc = memory_doc_map.lock().await.contains_key(&path);
         let active_file_path = active_fp.lock().await.clone();
@@ -1420,7 +1459,11 @@ mod tests {
 
         let (memory_doc_map2, active_fp2, workspace_files_len) = {
             let wf_len = gcx.documents_state.workspace_files.lock().unwrap().len();
-            (gcx.documents_state.memory_document_map.clone(), gcx.documents_state.active_file_path.clone(), wf_len)
+            (
+                gcx.documents_state.memory_document_map.clone(),
+                gcx.documents_state.active_file_path.clone(),
+                wf_len,
+            )
         };
         let has_doc = memory_doc_map2.lock().await.contains_key(&path);
         let active_file_path = active_fp2.lock().await.clone();
@@ -1442,9 +1485,10 @@ mod tests {
         let mut doc = Document::new(&path);
         doc.update_text(&"{}".to_string());
         {
-            gcx
-                .documents_state
-                .memory_document_map.lock().await
+            gcx.documents_state
+                .memory_document_map
+                .lock()
+                .await
                 .insert(path.clone(), Arc::new(ARwLock::new(doc)));
         }
 
@@ -1472,7 +1516,10 @@ mod tests {
         on_did_open(gcx.clone(), &path, &text, &language_id).await;
 
         let (mdm3, afp3) = {
-            (gcx.documents_state.memory_document_map.clone(), gcx.documents_state.active_file_path.clone())
+            (
+                gcx.documents_state.memory_document_map.clone(),
+                gcx.documents_state.active_file_path.clone(),
+            )
         };
         let has_doc = mdm3.lock().await.contains_key(&path);
         let active_file_path = afp3.lock().await.clone();
@@ -1525,10 +1572,8 @@ mod tests {
         write_head(temp.path(), "ref: refs/heads/dev\n");
 
         let head_path = temp.path().join(".git").join("HEAD");
-        let event = notify::Event::new(notify::EventKind::Modify(
-            notify::event::ModifyKind::Any,
-        ))
-        .add_path(head_path);
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(head_path);
 
         on_git_head_change(Arc::downgrade(&gcx), event).await;
 
@@ -1537,8 +1582,14 @@ mod tests {
             heads.get(&canonical_repo),
             Some(&"ref: refs/heads/dev".to_string())
         );
-        let ts = gcx.documents_state.branch_reindex_last_ts.load(Ordering::Relaxed);
-        assert!(ts > 0, "reindex timestamp should be set after branch change");
+        let ts = gcx
+            .documents_state
+            .branch_reindex_last_ts
+            .load(Ordering::Relaxed);
+        assert!(
+            ts > 0,
+            "reindex timestamp should be set after branch change"
+        );
     }
 
     #[tokio::test]
@@ -1554,15 +1605,19 @@ mod tests {
         }
 
         let head_path = temp.path().join(".git").join("HEAD");
-        let event = notify::Event::new(notify::EventKind::Modify(
-            notify::event::ModifyKind::Any,
-        ))
-        .add_path(head_path);
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(head_path);
 
         on_git_head_change(Arc::downgrade(&gcx), event).await;
 
-        let ts = gcx.documents_state.branch_reindex_last_ts.load(Ordering::Relaxed);
-        assert_eq!(ts, 0, "no reindex should occur when HEAD content is unchanged");
+        let ts = gcx
+            .documents_state
+            .branch_reindex_last_ts
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            ts, 0,
+            "no reindex should occur when HEAD content is unchanged"
+        );
     }
 
     #[tokio::test]
@@ -1586,10 +1641,8 @@ mod tests {
         }
 
         let head_path = temp.path().join(".git").join("HEAD");
-        let event = notify::Event::new(notify::EventKind::Modify(
-            notify::event::ModifyKind::Any,
-        ))
-        .add_path(head_path);
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(head_path);
 
         on_git_head_change(Arc::downgrade(&gcx), event).await;
 

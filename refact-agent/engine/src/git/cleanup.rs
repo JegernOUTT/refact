@@ -29,9 +29,7 @@ pub async fn git_shadow_cleanup_background_task(gcx: Arc<GlobalContext>) {
             }
         }
 
-        let cache_dir = {
-            gcx.cache_dir.clone()
-        };
+        let cache_dir = { gcx.cache_dir.clone() };
         let workspace_folders = get_project_dirs(gcx.clone()).await;
         let workspace_folder_hashes: Vec<_> = workspace_folders
             .into_iter()

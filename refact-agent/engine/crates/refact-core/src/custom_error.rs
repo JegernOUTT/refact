@@ -59,7 +59,14 @@ impl From<(&str, &serde_yaml::Error)> for YamlError {
 }
 
 pub fn last_n_chars(msg: &str, n: usize) -> String {
-    let mut result: String = msg.chars().rev().take(n).collect::<String>().chars().rev().collect();
+    let mut result: String = msg
+        .chars()
+        .rev()
+        .take(n)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     if result.len() == n {
         result.insert_str(0, "...");
     }
@@ -73,7 +80,6 @@ pub fn first_n_chars(msg: &str, n: usize) -> String {
     }
     result.replace("\n", "\\n")
 }
-
 
 impl fmt::Display for YamlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

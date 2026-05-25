@@ -1447,7 +1447,9 @@ mod tests {
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].finish_reason, Some("error".into()));
         assert_eq!(session.messages[1].role, "error");
-        assert!(crate::chat::diagnostics::is_ui_only_message(&session.messages[1]));
+        assert!(crate::chat::diagnostics::is_ui_only_message(
+            &session.messages[1]
+        ));
         assert_eq!(session.runtime.state, SessionState::Error);
         assert_eq!(session.runtime.error, Some("timeout".into()));
         assert_eq!(

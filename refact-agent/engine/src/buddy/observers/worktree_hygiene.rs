@@ -1,4 +1,3 @@
-
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
@@ -24,11 +23,7 @@ impl BuddyObserver for WorktreeHygieneObserver {
         settings.observers.git_pressure
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let cache_dir = gcx.paths.cache_dir.clone();
         let Ok(service) =
             crate::worktrees::service::WorktreeService::new(cache_dir, ctx.project_root.clone())

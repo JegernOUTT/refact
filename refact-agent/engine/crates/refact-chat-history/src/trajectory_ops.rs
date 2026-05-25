@@ -148,21 +148,13 @@ pub struct TransformStats {
     pub tool_messages_modified: usize,
 }
 
-pub const TOOLS_TO_PRESERVE: &[&str] = &[
-    "research",
-    "delegate",
-    "plan",
-    "review",
-];
+pub const TOOLS_TO_PRESERVE: &[&str] = &["research", "delegate", "plan", "review"];
 
 fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
 }
 
-fn should_preserve_message(
-    msg: &ChatMessage,
-    tool_call_names: &HashMap<String, String>,
-) -> bool {
+fn should_preserve_message(msg: &ChatMessage, tool_call_names: &HashMap<String, String>) -> bool {
     msg.preserve == Some(true)
         || tool_call_names
             .get(&msg.tool_call_id)
@@ -581,9 +573,10 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert!(messages.iter().all(|msg| !is_ui_only_message(msg)));
-        assert!(messages
-            .iter()
-            .all(|msg| !msg.content.content_text_only().contains("context_length_exceeded")));
+        assert!(messages.iter().all(|msg| !msg
+            .content
+            .content_text_only()
+            .contains("context_length_exceeded")));
     }
 
     #[test]
@@ -598,9 +591,10 @@ mod tests {
 
         assert_eq!(sanitized.len(), 2);
         assert!(sanitized.iter().all(|msg| !is_ui_only_message(msg)));
-        assert!(sanitized
-            .iter()
-            .all(|msg| !msg.content.content_text_only().contains("reactive compaction report")));
+        assert!(sanitized.iter().all(|msg| !msg
+            .content
+            .content_text_only()
+            .contains("reactive compaction report")));
     }
 
     #[test]
@@ -624,9 +618,10 @@ mod tests {
         assert_eq!(persisted.len(), 2);
         assert!(persisted.iter().all(|msg| !is_ui_only_message(msg)));
         assert!(persisted.iter().all(|msg| msg.extra.is_empty()));
-        assert!(messages
-            .iter()
-            .all(|msg| !msg.content.content_text_only().contains("context_length_exceeded")));
+        assert!(messages.iter().all(|msg| !msg
+            .content
+            .content_text_only()
+            .contains("context_length_exceeded")));
     }
 
     #[test]
@@ -648,10 +643,17 @@ mod tests {
             .filter(|msg| msg.role != "cd_instruction")
             .collect();
         assert_eq!(persisted.len(), 3);
-        assert_eq!(persisted.iter().filter(|msg| is_ui_only_message(msg)).count(), 1);
-        assert!(messages
-            .iter()
-            .any(|msg| msg.content.content_text_only().contains("context_length_exceeded")));
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|msg| is_ui_only_message(msg))
+                .count(),
+            1
+        );
+        assert!(messages.iter().any(|msg| msg
+            .content
+            .content_text_only()
+            .contains("context_length_exceeded")));
     }
 
     #[test]
@@ -697,12 +699,7 @@ mod tests {
     #[test]
     fn test_compress_preserves_agentic_tools() {
         let long_content = "x".repeat(1000);
-        for tool_name in &[
-            "research",
-            "delegate",
-            "plan",
-            "review",
-        ] {
+        for tool_name in &["research", "delegate", "plan", "review"] {
             let mut messages = vec![
                 make_user_msg("hello"),
                 make_assistant_with_tool_call("tc1", tool_name),

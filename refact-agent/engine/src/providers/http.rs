@@ -1487,11 +1487,7 @@ async fn update_model_enabled_state(
         let previous_disabled = provider.disabled_models().to_vec();
 
         provider.set_model_enabled(model_id, enabled);
-        (
-            gcx.config_dir.clone(),
-            previous_enabled,
-            previous_disabled,
-        )
+        (gcx.config_dir.clone(), previous_enabled, previous_disabled)
     };
 
     // Try to save updated config

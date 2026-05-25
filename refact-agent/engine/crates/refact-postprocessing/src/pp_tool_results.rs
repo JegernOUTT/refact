@@ -6,7 +6,9 @@ use tokenizers::Tokenizer;
 use tracing::warn;
 
 use refact_ast::ast::chunk_utils::{official_text_hashing_function, count_text_tokens_with_fallback};
-use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, PostprocessSettings, SearchResult, format_search_results};
+use refact_core::chat_types::{
+    ChatContent, ChatMessage, ContextFile, PostprocessSettings, SearchResult, format_search_results,
+};
 use crate::pp_context_files::postprocess_context_files;
 use crate::pp_context_provider::PPContextTrait;
 use crate::pp_plain_text::postprocess_plain_text;
@@ -257,7 +259,9 @@ fn deduplicate_and_merge_context_files(
         let key = if cf.file_name.contains("://") {
             cf.file_name.clone()
         } else {
-            canonical_path_simple(&cf.file_name).to_string_lossy().to_string()
+            canonical_path_simple(&cf.file_name)
+                .to_string_lossy()
+                .to_string()
         };
         file_groups.entry(key).or_default().push(cf);
     }

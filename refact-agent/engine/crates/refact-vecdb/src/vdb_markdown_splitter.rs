@@ -22,7 +22,10 @@ pub struct MarkdownFileSplitter {
 
 impl MarkdownFileSplitter {
     pub fn new(max_tokens: usize) -> Self {
-        Self { max_tokens, overlap_lines: 3 }
+        Self {
+            max_tokens,
+            overlap_lines: 3,
+        }
     }
 
     pub async fn split(&self, text: &str, path: &PathBuf) -> Result<Vec<SplitResult>, String> {
@@ -169,7 +172,11 @@ impl MarkdownFileSplitter {
 
         for (idx, line) in lines.iter().enumerate() {
             if current_chunk.len() + line.len() + 1 > chars_per_chunk && !current_chunk.is_empty() {
-                chunks.push((current_chunk.trim().to_string(), chunk_start, current_line.saturating_sub(1)));
+                chunks.push((
+                    current_chunk.trim().to_string(),
+                    chunk_start,
+                    current_line.saturating_sub(1),
+                ));
                 let overlap_start = idx.saturating_sub(self.overlap_lines);
                 current_chunk = lines[overlap_start..idx].join("\n");
                 if !current_chunk.is_empty() {
@@ -183,7 +190,11 @@ impl MarkdownFileSplitter {
         }
 
         if !current_chunk.trim().is_empty() {
-            chunks.push((current_chunk.trim().to_string(), chunk_start, start_line + lines.len().saturating_sub(1)));
+            chunks.push((
+                current_chunk.trim().to_string(),
+                chunk_start,
+                start_line + lines.len().saturating_sub(1),
+            ));
         }
         chunks
     }

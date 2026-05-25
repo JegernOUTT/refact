@@ -24,24 +24,14 @@ pub struct HumorBatch {
 /// Abstraction over one-liner generation, allowing injection in tests.
 #[async_trait]
 pub trait HumorGenerator: Send + Sync {
-    async fn generate(
-        &self,
-        kind: BuddyFactKind,
-        summary: String,
-        gcx: AppState,
-    ) -> Vec<String>;
+    async fn generate(&self, kind: BuddyFactKind, summary: String, gcx: AppState) -> Vec<String>;
 }
 
 pub struct DefaultHumorGenerator;
 
 #[async_trait]
 impl HumorGenerator for DefaultHumorGenerator {
-    async fn generate(
-        &self,
-        kind: BuddyFactKind,
-        summary: String,
-        gcx: AppState,
-    ) -> Vec<String> {
+    async fn generate(&self, kind: BuddyFactKind, summary: String, gcx: AppState) -> Vec<String> {
         generate_via_voice_service(kind, summary, gcx).await
     }
 }

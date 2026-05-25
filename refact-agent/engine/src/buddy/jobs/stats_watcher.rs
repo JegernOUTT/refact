@@ -27,19 +27,11 @@ impl BuddyJob for StatsWatcherJob {
         true
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         stats_watcher_has_visible_output(ctx)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let runs = ctx.total_workflow_runs;
 
         if runs == 0 {

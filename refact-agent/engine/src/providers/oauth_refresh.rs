@@ -138,12 +138,7 @@ pub async fn oauth_token_refresh_background_task(gcx: Arc<GlobalContext>) {
 }
 
 async fn try_refresh_all_providers(gcx: &Arc<GlobalContext>) -> () {
-    let (http_client, config_dir) = {
-        (
-            gcx.http_client.clone(),
-            gcx.config_dir.clone(),
-        )
-    };
+    let (http_client, config_dir) = { (gcx.http_client.clone(), gcx.config_dir.clone()) };
 
     try_refresh_claude_code_instances(gcx, &http_client, &config_dir).await;
     try_refresh_openai_codex_instances(gcx, &http_client, &config_dir).await;
@@ -238,7 +233,11 @@ async fn try_refresh_claude_code(
                     "completed",
                     None,
                 );
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx((*gcx).clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
             }
         }
         Err(e) => {
@@ -285,7 +284,11 @@ async fn try_refresh_claude_code(
                         "failed",
                         Some("high"),
                     );
-                    crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx((*gcx).clone()).await, ev).await;
+                    crate::buddy::actor::buddy_enqueue_event(
+                        crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                        ev,
+                    )
+                    .await;
                 }
                 return;
             }
@@ -299,7 +302,11 @@ async fn try_refresh_claude_code(
                     "failed",
                     Some("high"),
                 );
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx((*gcx).clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
             } else {
                 tracing::debug!("{}: OAuth token refresh still failing: {}", display_name, e);
             }
@@ -396,7 +403,11 @@ async fn try_refresh_openai_codex(
                     "completed",
                     None,
                 );
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx((*gcx).clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
             }
         }
         Err(e) => {
@@ -446,7 +457,11 @@ async fn try_refresh_openai_codex(
                         "failed",
                         Some("high"),
                     );
-                    crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx((*gcx).clone()).await, ev).await;
+                    crate::buddy::actor::buddy_enqueue_event(
+                        crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                        ev,
+                    )
+                    .await;
                 }
                 return;
             }
@@ -460,7 +475,11 @@ async fn try_refresh_openai_codex(
                     "failed",
                     Some("high"),
                 );
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx((*gcx).clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx((*gcx).clone()).await,
+                    ev,
+                )
+                .await;
             } else {
                 tracing::debug!("{}: OAuth token refresh still failing: {}", display_name, e);
             }

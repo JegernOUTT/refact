@@ -9,27 +9,10 @@ use crate::git::checkpoints::Checkpoint;
 use super::config::{limits, timeouts};
 
 pub use refact_chat_api::{
-    ActiveCommandContext,
-    BrowserMeta,
-    BrowserTabInfo,
-    BuddyThreadMeta,
-    ChatCommand,
-    ChatEvent,
-    CommandRequest,
-    DeltaOp,
-    DiffBox,
-    EventEnvelope,
-    PauseReason,
-    PendingSkillDeactivation,
-    QueuedItem,
-    RuntimeState,
-    SessionState,
-    TaskMeta,
-    ThreadParams,
-    TimelineEntry,
-    ToolDecisionItem,
-    WindowBounds,
-    WorktreeMeta,
+    ActiveCommandContext, BrowserMeta, BrowserTabInfo, BuddyThreadMeta, ChatCommand, ChatEvent,
+    CommandRequest, DeltaOp, DiffBox, EventEnvelope, PauseReason, PendingSkillDeactivation,
+    QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
+    ToolDecisionItem, WindowBounds, WorktreeMeta,
 };
 
 pub fn max_queue_size() -> usize {
@@ -50,7 +33,6 @@ pub fn stream_total_timeout() -> std::time::Duration {
 pub fn stream_heartbeat() -> std::time::Duration {
     timeouts().stream_heartbeat
 }
-
 
 pub struct ChatSession {
     pub chat_id: String,

@@ -59,44 +59,40 @@ impl ClaudeCodeProvider {
         instance_id: &str,
     ) -> Result<(), String> {
         let tokens = self.oauth_tokens.clone();
-        crate::config_store::update_provider_config(
-            config_dir,
-            instance_id,
-            |existing| {
-                let mut yaml_map = match existing {
-                    Some(value) => value.as_mapping().cloned().ok_or_else(|| {
-                        "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
-                    })?,
-                    None => serde_yaml::Mapping::new(),
-                };
+        crate::config_store::update_provider_config(config_dir, instance_id, |existing| {
+            let mut yaml_map = match existing {
+                Some(value) => value.as_mapping().cloned().ok_or_else(|| {
+                    "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
+                })?,
+                None => serde_yaml::Mapping::new(),
+            };
 
-                let mut tokens_map = yaml_map
-                    .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
-                    .and_then(|v| v.as_mapping())
-                    .cloned()
-                    .unwrap_or_default();
+            let mut tokens_map = yaml_map
+                .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
+                .and_then(|v| v.as_mapping())
+                .cloned()
+                .unwrap_or_default();
 
-                tokens_map.insert(
-                    serde_yaml::Value::String("access_token".to_string()),
-                    serde_yaml::Value::String(tokens.access_token),
-                );
-                tokens_map.insert(
-                    serde_yaml::Value::String("refresh_token".to_string()),
-                    serde_yaml::Value::String(tokens.refresh_token),
-                );
-                tokens_map.insert(
-                    serde_yaml::Value::String("expires_at".to_string()),
-                    serde_yaml::Value::Number(serde_yaml::Number::from(tokens.expires_at)),
-                );
+            tokens_map.insert(
+                serde_yaml::Value::String("access_token".to_string()),
+                serde_yaml::Value::String(tokens.access_token),
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("refresh_token".to_string()),
+                serde_yaml::Value::String(tokens.refresh_token),
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("expires_at".to_string()),
+                serde_yaml::Value::Number(serde_yaml::Number::from(tokens.expires_at)),
+            );
 
-                yaml_map.insert(
-                    serde_yaml::Value::String("oauth_tokens".to_string()),
-                    serde_yaml::Value::Mapping(tokens_map),
-                );
+            yaml_map.insert(
+                serde_yaml::Value::String("oauth_tokens".to_string()),
+                serde_yaml::Value::Mapping(tokens_map),
+            );
 
-                Ok(serde_yaml::Value::Mapping(yaml_map))
-            },
-        )
+            Ok(serde_yaml::Value::Mapping(yaml_map))
+        })
         .await
         .map(|_| ())
     }

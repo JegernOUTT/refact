@@ -230,9 +230,7 @@ pub trait AtParam: Send + Sync {
     }
 }
 
-pub async fn at_commands_dict(
-    app: AppState,
-) -> HashMap<String, Arc<dyn AtCommand + Send>> {
+pub async fn at_commands_dict(app: AppState) -> HashMap<String, Arc<dyn AtCommand + Send>> {
     let at_commands_dict = HashMap::from([
         (
             "@file".to_string(),

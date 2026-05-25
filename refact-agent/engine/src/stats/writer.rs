@@ -89,7 +89,9 @@ mod tests {
             "config stats file should not be created when workspace becomes available before the first event"
         );
 
-        let contents = tokio::fs::read_to_string(&workspace_file_path).await.unwrap();
+        let contents = tokio::fs::read_to_string(&workspace_file_path)
+            .await
+            .unwrap();
         let parsed: LlmCallEvent = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(parsed.chat_id, "chat-7");
     }

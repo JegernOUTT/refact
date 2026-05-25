@@ -19,20 +19,12 @@ impl BuddyJob for SpeakerInsightJob {
         18
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         let seen = seen_count(ctx);
         ctx.workflow_summaries.len() > seen
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let current = ctx.workflow_summaries.len();
         let seen = seen_count(&ctx);
         if current <= seen {

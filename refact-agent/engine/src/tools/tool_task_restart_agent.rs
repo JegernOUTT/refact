@@ -342,10 +342,12 @@ impl Tool for ToolTaskRestartAgent {
                     card_id
                 ))
             }
-            "planned" => return Err(format!(
+            "planned" => {
+                return Err(format!(
                 "Card {} is in 'planned' column. Use spawn_agent to start it for the first time.",
                 card_id
-            )),
+            ))
+            }
             "failed" => {}
             "doing" => {
                 if card.agent_chat_id.is_some() && !force {

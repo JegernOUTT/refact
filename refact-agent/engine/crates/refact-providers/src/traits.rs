@@ -7,15 +7,13 @@ use regex::Regex;
 
 pub use refact_core::model_caps::ModelCapabilities;
 pub use refact_core::provider_types::{
-    AvailableModel, CustomModelConfig, ModelPricing, ModelPricingTier, ModelSource, ModelTypeDefaults,
-    ProviderDefaults, ProviderModel, ProviderRuntime, ProviderVariant, derive_endpoint_from_chat_url,
-    extra_headers_mapping_to_hash_map, is_legacy_refact_model, merge_custom_models,
-    normalize_endpoint, parse_custom_models, parse_enabled_models, parse_extra_headers_value,
-    resolve_env_var, set_model_enabled_impl,
+    AvailableModel, CustomModelConfig, ModelPricing, ModelPricingTier, ModelSource,
+    ModelTypeDefaults, ProviderDefaults, ProviderModel, ProviderRuntime, ProviderVariant,
+    derive_endpoint_from_chat_url, extra_headers_mapping_to_hash_map, is_legacy_refact_model,
+    merge_custom_models, normalize_endpoint, parse_custom_models, parse_enabled_models,
+    parse_extra_headers_value, resolve_env_var, set_model_enabled_impl,
 };
 pub use refact_core::llm_types::WireFormat;
-
-
 
 static REGEX_CACHE: OnceLock<std::sync::RwLock<HashMap<&'static str, Regex>>> = OnceLock::new();
 

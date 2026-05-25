@@ -231,8 +231,11 @@ pub async fn get_browser_context_for_chat(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Option<BrowserContextSnapshot> {
-    let (_, runtime_arc) =
-        crate::integrations::browser_runtime::find_runtime_by_chat_id(crate::app_state::AppState::from_gcx(gcx).await, chat_id).await?;
+    let (_, runtime_arc) = crate::integrations::browser_runtime::find_runtime_by_chat_id(
+        crate::app_state::AppState::from_gcx(gcx).await,
+        chat_id,
+    )
+    .await?;
     let rt = runtime_arc.lock().await;
 
     if !rt.is_connected {
@@ -273,8 +276,11 @@ pub async fn get_browser_context_for_chat(
 }
 
 pub async fn commit_browser_cursors(gcx: Arc<GlobalContext>, chat_id: &str) {
-    if let Some((_, runtime_arc)) =
-        crate::integrations::browser_runtime::find_runtime_by_chat_id(crate::app_state::AppState::from_gcx(gcx).await, chat_id).await
+    if let Some((_, runtime_arc)) = crate::integrations::browser_runtime::find_runtime_by_chat_id(
+        crate::app_state::AppState::from_gcx(gcx).await,
+        chat_id,
+    )
+    .await
     {
         let mut rt = runtime_arc.lock().await;
         rt.commit_cursors();

@@ -1,4 +1,3 @@
-
 use chrono::{DateTime, Timelike, Utc};
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_DAILY_DIGEST_WORKFLOW_ID};
@@ -57,11 +56,7 @@ impl BuddyJob for BuddyDailyDigestJob {
         should_run_at(ctx, Utc::now())
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         execute_autonomous_spec(gcx, &ctx, build_daily_digest_spec(&ctx, Utc::now())).await
     }
 }

@@ -1,4 +1,3 @@
-
 use super::super::actor::make_runtime_event;
 use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use super::super::types::{BuddyActivity, BuddyRuntimeEvent, BuddySuggestion};
@@ -25,20 +24,12 @@ impl BuddyJob for HealthWatcherJob {
         true
     }
 
-    async fn should_run(
-        &self,
-        gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, gcx: AppState, ctx: &BuddyJobContext) -> bool {
         let caps = gcx.model.caps.read().await.caps.clone();
         health_watcher_has_visible_output(caps.as_deref(), ctx)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let caps_result = gcx
             .model
             .caps

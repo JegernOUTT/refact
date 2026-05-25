@@ -874,8 +874,11 @@ mod tests {
                 .join("reviewer.md"),
             "---\nname: Reviewer\ndescription: Reviews code\n---\nReview code.",
         );
-        *app.workspace.documents_state.workspace_folders.lock().unwrap() =
-            vec![workspace.path().to_path_buf()];
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![workspace.path().to_path_buf()];
 
         let summary = run_project_import(app.clone()).await;
         let generation_after_first = app
@@ -903,8 +906,11 @@ mod tests {
         let source_path = workspace.path().join(".claude/commands/review.md");
         let dest_path = workspace.path().join(".refact/commands/review.md");
         write(&source_path, "Review.");
-        *app.workspace.documents_state.workspace_folders.lock().unwrap() =
-            vec![workspace.path().to_path_buf()];
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![workspace.path().to_path_buf()];
 
         let first = run_project_import(app.clone()).await;
         fs::remove_file(&source_path).unwrap();

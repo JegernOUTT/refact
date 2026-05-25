@@ -94,11 +94,7 @@ impl BuddyJob for RefactCompileSnifferJob {
             .unwrap_or(false)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let logs_dir = gcx.paths.cache_dir.join("logs");
         let evidence = tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir))
             .await
@@ -136,7 +132,11 @@ mod tests {
     }
 
     async fn gcx_with_cache(cache_dir: &Path) -> AppState {
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache_dir.to_path_buf(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache_dir.to_path_buf(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         let app = AppState::from_gcx(gcx).await;
         app
     }

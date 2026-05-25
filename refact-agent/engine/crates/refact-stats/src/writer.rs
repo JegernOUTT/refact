@@ -7,9 +7,8 @@ use tracing::{info, warn};
 
 use crate::event::LlmCallEvent;
 
-pub type StatsDirFn = Arc<
-    dyn Fn() -> Pin<Box<dyn std::future::Future<Output = PathBuf> + Send>> + Send + Sync,
->;
+pub type StatsDirFn =
+    Arc<dyn Fn() -> Pin<Box<dyn std::future::Future<Output = PathBuf> + Send>> + Send + Sync>;
 
 const MAX_FILE_SIZE: u64 = 1024 * 1024;
 const BATCH_SIZE: usize = 32;

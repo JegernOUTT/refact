@@ -1295,11 +1295,7 @@ pub fn make_runtime_event(
     }
 }
 
-pub async fn buddy_complete_event(
-    gcx: AppState,
-    dedupe_key: &str,
-    status: &str,
-) {
+pub async fn buddy_complete_event(gcx: AppState, dedupe_key: &str, status: &str) {
     let buddy_arc = gcx.buddy.buddy.clone();
     let mut lock = buddy_arc.lock().await;
     if let Some(svc) = lock.as_mut() {
@@ -1422,9 +1418,7 @@ pub async fn report_error_persisted(
     }
 }
 
-pub async fn latest_project_root(
-    gcx: AppState,
-) -> Result<std::path::PathBuf, String> {
+pub async fn latest_project_root(gcx: AppState) -> Result<std::path::PathBuf, String> {
     crate::files_correction::get_project_dirs(gcx.gcx.clone())
         .await
         .into_iter()

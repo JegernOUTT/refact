@@ -1,9 +1,9 @@
-pub mod scratchpad_abstract;
-pub mod completion_cache;
-pub mod multimodality;
-pub mod scratchpad_utils;
 pub mod code_completion_fim;
+pub mod completion_cache;
 pub(crate) mod completon_rag;
+pub mod multimodality;
+pub mod scratchpad_abstract;
+pub mod scratchpad_utils;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock as StdRwLock};
@@ -52,6 +52,8 @@ pub async fn create_code_completion_scratchpad(
             scratchpad_name
         ));
     };
-    result.apply_model_adaptation_patch(scratchpad_patch).await?;
+    result
+        .apply_model_adaptation_patch(scratchpad_patch)
+        .await?;
     Ok(result)
 }

@@ -72,9 +72,7 @@ async fn checkpoint_worktree_for_meta(
     if meta.chat_id.is_empty() {
         return None;
     }
-    let sessions = {
-        gcx.chat_sessions.clone()
-    };
+    let sessions = { gcx.chat_sessions.clone() };
     let session_arc = {
         let sessions_read = sessions.read().await;
         sessions_read.get(&meta.chat_id).cloned()

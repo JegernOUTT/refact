@@ -256,10 +256,7 @@ async fn record_broadcast_delivery_failed(
 ) -> Result<(), String> {
     let card_id_for_update = target.card_id.clone();
     let chat_id_for_update = target.chat_id.clone();
-    let status_message = format!(
-        "Broadcast delivery failed: {}",
-        truncate_chars(error, 120)
-    );
+    let status_message = format!("Broadcast delivery failed: {}", truncate_chars(error, 120));
     let timestamp = Utc::now().to_rfc3339();
     storage::update_board_atomic(gcx, task_id, move |board| {
         let card = board
@@ -339,13 +336,7 @@ async fn broadcast_to_target(
             ),
         },
         Err(error) => {
-            let status = match record_broadcast_delivery_failed(
-                gcx,
-                task_id,
-                &target,
-                &error,
-            )
-            .await
+            let status = match record_broadcast_delivery_failed(gcx, task_id, &target, &error).await
             {
                 Ok(()) => BroadcastStatus::Failed(error),
                 Err(record_error) => BroadcastStatus::Failed(format!(

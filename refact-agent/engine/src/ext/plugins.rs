@@ -320,10 +320,7 @@ async fn add_marketplace_impl(
     Ok(MarketplaceJson { name, ..mj })
 }
 
-pub async fn add_marketplace(
-    app: AppState,
-    source: &str,
-) -> Result<MarketplaceJson, String> {
+pub async fn add_marketplace(app: AppState, source: &str) -> Result<MarketplaceJson, String> {
     let config_dir = app.paths.config_dir.clone();
     let cache_dir = app.paths.cache_dir.clone();
     add_marketplace_impl(&config_dir, &cache_dir, source).await
@@ -366,10 +363,7 @@ pub async fn ensure_default_marketplaces(app: AppState) -> Result<(), String> {
     .await
 }
 
-pub async fn remove_marketplace(
-    app: AppState,
-    name: &str,
-) -> Result<(), String> {
+pub async fn remove_marketplace(app: AppState, name: &str) -> Result<(), String> {
     validate_plugin_name(name)?;
     let config_dir = app.paths.config_dir.clone();
     let mut db = load_plugins_db(&config_dir).await?;
@@ -530,10 +524,7 @@ fn resolve_plugin_source_dir(
     }
 }
 
-pub async fn uninstall_plugin(
-    app: AppState,
-    plugin_name: &str,
-) -> Result<(), String> {
+pub async fn uninstall_plugin(app: AppState, plugin_name: &str) -> Result<(), String> {
     validate_plugin_name(plugin_name)?;
     let config_dir = app.paths.config_dir.clone();
     let mut db = load_plugins_db(&config_dir).await?;

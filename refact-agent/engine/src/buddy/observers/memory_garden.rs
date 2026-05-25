@@ -73,10 +73,7 @@ async fn memory_garden_job_state(gcx: AppState) -> BuddyJobState {
         .unwrap_or_default()
 }
 
-async fn persist_memory_garden_daily_counter(
-    gcx: AppState,
-    counter: &MemoryGardenDailyCounter,
-) {
+async fn persist_memory_garden_daily_counter(gcx: AppState, counter: &MemoryGardenDailyCounter) {
     let Ok(last_result) = serde_json::to_string(counter) else {
         return;
     };
@@ -656,10 +653,7 @@ fn memory_garden_facts_from_entries_with_references(
     facts
 }
 
-async fn detect_memory_garden(
-    gcx: AppState,
-    now: DateTime<Utc>,
-) -> Vec<BuddyFact> {
+async fn detect_memory_garden(gcx: AppState, now: DateTime<Utc>) -> Vec<BuddyFact> {
     let dirs = knowledge_dirs(gcx).await;
     let entries = scan_knowledge_dirs_from_paths(dirs.clone()).await;
     let references = scan_knowledge_references_from_paths(&dirs);
@@ -682,11 +676,7 @@ impl BuddyObserver for MemoryGardenObserver {
             && settings.proactive_enabled
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let facts = detect_memory_garden(gcx.clone(), ctx.now).await;
         let job_state = memory_garden_job_state(gcx.clone()).await;
         let (facts, counter) = apply_daily_cap_to_memory_garden_facts(facts, &job_state, ctx.now);

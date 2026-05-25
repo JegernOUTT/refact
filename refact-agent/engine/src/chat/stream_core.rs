@@ -1606,9 +1606,12 @@ fn should_finish_on_anthropic_stop_reason_eof(
     accumulators: &[ChoiceAccumulator],
 ) -> bool {
     wire_format == WireFormat::AnthropicMessages
-        && accumulators
-            .iter()
-            .any(|acc| matches!(acc.finish_reason.as_deref(), Some("end_turn" | "stop_sequence")))
+        && accumulators.iter().any(|acc| {
+            matches!(
+                acc.finish_reason.as_deref(),
+                Some("end_turn" | "stop_sequence")
+            )
+        })
 }
 
 fn format_llm_error_body(status_label: &str, text: &str) -> String {
@@ -1713,7 +1716,10 @@ mod tests {
             partial_output_emitted: true,
         };
 
-        assert!(matches!(error.retry_decision(), RetryDecision::Retry { .. }));
+        assert!(matches!(
+            error.retry_decision(),
+            RetryDecision::Retry { .. }
+        ));
         assert!(!error.should_retry(0, &abort));
     }
 
@@ -1725,7 +1731,10 @@ mod tests {
             partial_output_emitted: false,
         };
 
-        assert!(matches!(error.retry_decision(), RetryDecision::Retry { .. }));
+        assert!(matches!(
+            error.retry_decision(),
+            RetryDecision::Retry { .. }
+        ));
         assert!(error.should_retry(0, &abort));
     }
 

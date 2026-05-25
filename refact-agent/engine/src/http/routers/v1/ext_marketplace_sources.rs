@@ -1,4 +1,3 @@
-
 use axum::extract::Path;
 use axum::response::Json;
 use axum::extract::State;
@@ -108,9 +107,7 @@ pub async fn handle_v1_ext_marketplace_sources_refresh(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     let gcx = app.gcx.clone();
-    let (config_dir, cache_dir) = {
-        (gcx.config_dir.clone(), gcx.cache_dir.clone())
-    };
+    let (config_dir, cache_dir) = { (gcx.config_dir.clone(), gcx.cache_dir.clone()) };
     refresh_source_cache(&config_dir, &cache_dir, &id)
         .await
         .map_err(|e| {
@@ -162,9 +159,11 @@ mod tests {
         }))
         .unwrap();
 
-        let result =
-            handle_v1_ext_marketplace_sources_post(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), hyper::body::Bytes::from(body))
-                .await;
+        let result = handle_v1_ext_marketplace_sources_post(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            hyper::body::Bytes::from(body),
+        )
+        .await;
         assert!(result.is_err());
     }
 }

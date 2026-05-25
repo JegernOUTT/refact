@@ -788,7 +788,10 @@ async fn collect_knowledge_markdown_paths(knowledge_dirs: Vec<PathBuf>) -> Vec<P
 fn collect_knowledge_markdown_paths_blocking(knowledge_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for dir in knowledge_dirs {
-        for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let path = entry.path();
             if should_index_markdown_path(path, &dir, &["archive", "archived", ".history"]) {
                 paths.push(path.to_path_buf());

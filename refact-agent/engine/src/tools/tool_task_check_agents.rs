@@ -1105,9 +1105,7 @@ mod tests {
         }
     }
 
-    async fn write_empty_task(
-        root: &std::path::Path,
-    ) -> Arc<crate::global_context::GlobalContext> {
+    async fn write_empty_task(root: &std::path::Path) -> Arc<crate::global_context::GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let task_dir = root.join(".refact").join("tasks").join("task-1");
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
@@ -1281,7 +1279,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err, "task_id override is not allowed from this planner chat");
+        assert_eq!(
+            err,
+            "task_id override is not allowed from this planner chat"
+        );
     }
 
     #[tokio::test]
@@ -1298,7 +1299,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err, "task_id override is not allowed from this planner chat");
+        assert_eq!(
+            err,
+            "task_id override is not allowed from this planner chat"
+        );
     }
 
     #[tokio::test]

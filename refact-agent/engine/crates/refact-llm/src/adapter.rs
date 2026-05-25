@@ -50,8 +50,7 @@ static OPENAI_CHAT_ADAPTER: OnceLock<crate::adapters::openai_chat::OpenAiChatAda
 static OPENAI_RESPONSES_ADAPTER: OnceLock<
     crate::adapters::openai_responses::OpenAiResponsesAdapter,
 > = OnceLock::new();
-static ANTHROPIC_ADAPTER: OnceLock<crate::adapters::anthropic::AnthropicAdapter> =
-    OnceLock::new();
+static ANTHROPIC_ADAPTER: OnceLock<crate::adapters::anthropic::AnthropicAdapter> = OnceLock::new();
 static OLLAMA_ADAPTER: OnceLock<crate::adapters::ollama::OllamaAdapter> = OnceLock::new();
 
 pub fn get_adapter(format: WireFormat) -> &'static dyn LlmWireAdapter {

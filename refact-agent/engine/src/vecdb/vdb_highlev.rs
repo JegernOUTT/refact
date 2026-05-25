@@ -10,14 +10,15 @@ use crate::vecdb::vdb_structs::{EmbeddingModelConfig, VecDbStatus, VecdbConstant
 
 pub use refact_vecdb::vdb_highlev::VecDb;
 
-async fn do_i_need_to_reload_vecdb(
-    gcx: Arc<GlobalContext>,
-) -> (bool, Option<VecdbConstants>) {
+async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<VecdbConstants>) {
     let caps =
         match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
             Ok(caps) => caps,
             Err(e) => {
-                info!("vecdb: no caps, will not start or reload vecdb, the error was: {}", e);
+                info!(
+                    "vecdb: no caps, will not start or reload vecdb, the error was: {}",
+                    e
+                );
                 return (false, None);
             }
         };
@@ -38,7 +39,9 @@ async fn do_i_need_to_reload_vecdb(
         None => {}
         Some(ref db) => {
             let (current_emb, current_splitter_window_size) = db.current_constants();
-            if current_emb == consts.embedding_model && current_splitter_window_size == consts.splitter_window_size {
+            if current_emb == consts.embedding_model
+                && current_splitter_window_size == consts.splitter_window_size
+            {
                 return (false, None);
             }
         }
@@ -49,12 +52,16 @@ async fn do_i_need_to_reload_vecdb(
         return (true, None);
     }
 
-    let tokenizer_result = crate::tokens::cached_tokenizer(gcx.clone(), &caps.embedding_model.base).await;
+    let tokenizer_result =
+        crate::tokens::cached_tokenizer(gcx.clone(), &caps.embedding_model.base).await;
 
     consts.tokenizer = match tokenizer_result {
         Ok(tokenizer) => tokenizer,
         Err(err) => {
-            error!("vecdb launch failed, embedding model tokenizer didn't load: {}", err);
+            error!(
+                "vecdb launch failed, embedding model tokenizer didn't load: {}",
+                err
+            );
             return (false, None);
         }
     };
@@ -95,9 +102,15 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
                     "started",
                     None,
                 );
-                crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+                crate::buddy::actor::buddy_enqueue_event(
+                    crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                    ev,
+                )
+                .await;
             }
-            match initialize_vecdb_with_context(gcx.clone(), consts.unwrap(), Some(init_config)).await {
+            match initialize_vecdb_with_context(gcx.clone(), consts.unwrap(), Some(init_config))
+                .await
+            {
                 Ok(_) => {
                     *gcx.vec_db_error.lock().unwrap() = "".to_string();
                     info!("vecdb: initialization successful");
@@ -109,7 +122,11 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
                         "completed",
                         None,
                     );
-                    crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+                    crate::buddy::actor::buddy_enqueue_event(
+                        crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                        ev,
+                    )
+                    .await;
                 }
                 Err(refact_vecdb::vdb_init::VecDbInitError::ShutdownRequested) => break,
                 Err(err) => {
@@ -129,7 +146,9 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
     }
 }
 
-pub async fn get_status(vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>) -> Result<Option<VecDbStatus>, String> {
+pub async fn get_status(
+    vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>,
+) -> Result<Option<VecDbStatus>, String> {
     let db_locked = vec_db.lock().await;
     match db_locked.as_ref() {
         None => Ok(None),
@@ -143,7 +162,11 @@ async fn initialize_vecdb_with_context(
     init_config: Option<refact_vecdb::vdb_init::VecDbInitConfig>,
 ) -> Result<(), refact_vecdb::vdb_init::VecDbInitError> {
     let (legacy_cache_dir, cmdline, shutdown_flag) = {
-        (gcx.cache_dir.clone(), gcx.cmdline.clone(), gcx.shutdown_flag.clone())
+        (
+            gcx.cache_dir.clone(),
+            gcx.cmdline.clone(),
+            gcx.shutdown_flag.clone(),
+        )
     };
 
     let vecdb_dir = if !cmdline.vecdb_force_path.is_empty() {
@@ -177,20 +200,22 @@ async fn initialize_vecdb_with_context(
         })
     });
 
-    let tasks = vec_db.vecdb_start_background_tasks(shutdown_flag2, file_reader).await;
+    let tasks = vec_db
+        .vecdb_start_background_tasks(shutdown_flag2, file_reader)
+        .await;
     let _background_tasks = BackgroundTasksHolder::new(tasks);
 
     let vec_db_arc: Arc<dyn VecdbSearch> = Arc::new(vec_db);
     {
-        let (vec_db, vec_db_error) = {
-            (gcx.vec_db.clone(), gcx.vec_db_error.clone())
-        };
+        let (vec_db, vec_db_error) = { (gcx.vec_db.clone(), gcx.vec_db_error.clone()) };
         *vec_db.lock().await = Some(vec_db_arc);
         *vec_db_error.lock().unwrap() = "".to_string();
     }
 
-    crate::files_in_workspace::enqueue_all_files_from_workspace_folders(gcx.clone(), true, true).await;
-    crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), true, true).await;
+    crate::files_in_workspace::enqueue_all_files_from_workspace_folders(gcx.clone(), true, true)
+        .await;
+    crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), true, true)
+        .await;
 
     info!("VecDb initialization and setup complete");
     Ok(())
@@ -198,5 +223,7 @@ async fn initialize_vecdb_with_context(
 
 async fn get_default_vecdb_dir(gcx: Arc<GlobalContext>) -> Option<std::path::PathBuf> {
     let project_dirs = crate::files_correction::get_project_dirs(gcx).await;
-    project_dirs.first().map(|root| root.join(".refact").join("vecdb"))
+    project_dirs
+        .first()
+        .map(|root| root.join(".refact").join("vecdb"))
 }

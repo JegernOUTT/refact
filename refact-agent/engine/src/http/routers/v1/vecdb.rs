@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 
-
 #[derive(Serialize, Deserialize, Clone)]
 struct VecDBPost {
     query: String,

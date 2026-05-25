@@ -75,7 +75,8 @@ use super::config::{limits, tokens};
 async fn get_effective_n_ctx(app: AppState, thread: &ThreadParams) -> usize {
     let default_n_ctx = tokens().default_n_ctx;
     let model_n_ctx =
-        match crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0).await {
+        match crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0).await
+        {
             Ok(caps) => match crate::caps::resolve_chat_model(caps, &thread.model) {
                 Ok(model_rec) if model_rec.base.n_ctx > 0 => model_rec.base.n_ctx,
                 _ => default_n_ctx,
@@ -477,7 +478,9 @@ mod tests {
             ..Default::default()
         };
 
-        let ccx = build_tool_execution_context(AppState::from_gcx(gcx).await, 4096, &[], &thread, None).await;
+        let ccx =
+            build_tool_execution_context(AppState::from_gcx(gcx).await, 4096, &[], &thread, None)
+                .await;
         let ccx = ccx.lock().await;
 
         assert_eq!(ccx.task_meta, Some(task_meta));
@@ -1004,7 +1007,6 @@ source:
         assert_eq!(renderer.intent_kinds(), vec!["runtime:started".to_string()]);
     }
 
-
     #[test]
     fn tool_runtime_event_lines_falls_back_on_empty_voice() {
         let (title, speech_text) = runtime_event_lines_with_fallback(
@@ -1029,7 +1031,6 @@ source:
             1500
         );
     }
-
 }
 
 pub async fn process_tool_calls_once(
@@ -1787,7 +1788,12 @@ async fn execute_single_tool(
         )
         .await
     {
-        Ok(Some(result)) => (idx, result.had_corrections, result.messages, result.context_files),
+        Ok(Some(result)) => (
+            idx,
+            result.had_corrections,
+            result.messages,
+            result.context_files,
+        ),
         Ok(None) => {
             return (
                 idx,
@@ -2186,14 +2192,7 @@ pub async fn execute_tools(
     for (tc, (_, dedupe_key)) in tool_calls.iter().zip(tool_meta.iter()) {
         let (title, speech_text) =
             tool_runtime_event_lines(app.clone(), &tc.function.name, &chat_label).await;
-        let mut ev = make_runtime_event(
-            "tool_used",
-            &title,
-            "tool",
-            dedupe_key,
-            "started",
-            None,
-        );
+        let mut ev = make_runtime_event("tool_used", &title, "tool", dedupe_key, "started", None);
         ev.speech_text = speech_text;
         ev.scene = Some("working".to_string());
         ev.chat_id = Some(chat_id.to_string());
@@ -2223,7 +2222,9 @@ pub async fn execute_tools(
             ev.chat_id = Some(chat_id.to_string());
             app2.buddy_event_sink.enqueue_event(ev).await;
         } else {
-            app2.buddy_event_sink.complete_event(dedupe_key, "completed").await;
+            app2.buddy_event_sink
+                .complete_event(dedupe_key, "completed")
+                .await;
         }
     }
 

@@ -84,4 +84,3 @@ where
 
     top_n_candidates.into_iter().map(|x| x.0).collect()
 }
-

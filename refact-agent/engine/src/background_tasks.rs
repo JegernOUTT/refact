@@ -85,7 +85,9 @@ pub async fn start_background_tasks(
             crate::providers::oauth_refresh::oauth_token_refresh_background_task(gcx.clone()),
         ),
         tokio::spawn(
-            crate::integrations::browser_runtime::browser_monitor_background_task(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            crate::integrations::browser_runtime::browser_monitor_background_task(
+                crate::app_state::AppState::from_gcx(gcx.clone()).await,
+            ),
         ),
         tokio::spawn(crate::stats::writer::stats_writer_task(
             gcx_for_stats,

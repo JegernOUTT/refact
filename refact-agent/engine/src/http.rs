@@ -25,12 +25,7 @@ pub async fn start_server(
     gcx: Arc<GlobalContext>,
     ask_shutdown_receiver: std::sync::mpsc::Receiver<String>,
 ) -> Option<JoinHandle<()>> {
-    let (port, is_inside_container) = {
-        (
-            gcx.cmdline.http_port,
-            gcx.cmdline.inside_container,
-        )
-    };
+    let (port, is_inside_container) = { (gcx.cmdline.http_port, gcx.cmdline.inside_container) };
     if port == 0 {
         return None;
     }
@@ -54,7 +49,10 @@ pub async fn start_server(
                 let shutdown = async move {
                     crate::global_context::block_until_signal(ask_shutdown_receiver, shutdown_flag)
                         .await;
-                    crate::chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx_for_shutdown).await).await;
+                    crate::chat::close_all_chat_sessions(
+                        crate::app_state::AppState::from_gcx(gcx_for_shutdown).await,
+                    )
+                    .await;
                 };
                 let server = builder
                     .serve(router.into_make_service())

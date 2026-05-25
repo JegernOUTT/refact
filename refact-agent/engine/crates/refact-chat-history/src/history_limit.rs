@@ -19,9 +19,23 @@ fn extract_context_files_from_content(content: &ChatContent) -> Vec<ContextFile>
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactAggression {
+    Standard,
+    Aggressive,
+}
+
 pub fn tier0_deterministic_compact(
     messages: &mut Vec<ChatMessage>,
     preserve_last_n: usize,
+) -> Tier0CompactReport {
+    tier0_deterministic_compact_with(messages, preserve_last_n, CompactAggression::Standard)
+}
+
+pub fn tier0_deterministic_compact_with(
+    messages: &mut Vec<ChatMessage>,
+    preserve_last_n: usize,
+    aggression: CompactAggression,
 ) -> Tier0CompactReport {
     let mut context_files_deduped = 0usize;
     let mut tool_outputs_truncated = 0usize;
@@ -63,9 +77,14 @@ pub fn tier0_deterministic_compact(
         }
     }
 
-    let cutoff = messages.len().saturating_sub(preserve_last_n);
+    let (truncate_threshold, tool_preserve_last_n, ctx_file_keep_lines) = match aggression {
+        CompactAggression::Standard => (200usize, preserve_last_n, None),
+        CompactAggression::Aggressive => (80usize, preserve_last_n.min(2), Some(40usize)),
+    };
+
+    let tool_cutoff = messages.len().saturating_sub(tool_preserve_last_n);
     for (i, msg) in messages.iter_mut().enumerate() {
-        if i >= cutoff {
+        if i >= tool_cutoff {
             break;
         }
         if msg.role != "tool" {
@@ -78,7 +97,7 @@ pub fn tier0_deterministic_compact(
             continue;
         }
         let content_text = msg.content.content_text_only();
-        if content_text.len() <= 200 {
+        if content_text.len() <= truncate_threshold {
             continue;
         }
         let estimated_tokens = content_text.len() / 4;
@@ -88,6 +107,56 @@ pub fn tier0_deterministic_compact(
             "[tool output truncated, was ~{} tokens]",
             estimated_tokens
         ));
+    }
+
+    if let Some(keep_lines) = ctx_file_keep_lines {
+        let ctx_cutoff = messages.len().saturating_sub(preserve_last_n.min(4));
+        for (i, msg) in messages.iter_mut().enumerate() {
+            if i >= ctx_cutoff {
+                break;
+            }
+            if msg.role != "context_file" {
+                continue;
+            }
+            if msg.preserve == Some(true) {
+                continue;
+            }
+            let mut files = extract_context_files_from_content(&msg.content);
+            let mut modified = false;
+            for cf in &mut files {
+                let line_count = cf.file_content.lines().count();
+                if line_count <= keep_lines {
+                    continue;
+                }
+                let original_tokens = cf.file_content.len() / 4 + 1;
+                let head: Vec<&str> = cf.file_content.lines().take(keep_lines / 2).collect();
+                let tail: Vec<&str> = cf
+                    .file_content
+                    .lines()
+                    .rev()
+                    .take(keep_lines / 2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let trimmed_tokens = (head.iter().map(|s| s.len()).sum::<usize>()
+                    + tail.iter().map(|s| s.len()).sum::<usize>())
+                    / 4
+                    + 1;
+                tokens_saved_estimate += original_tokens.saturating_sub(trimmed_tokens);
+                context_files_deduped += 1;
+                cf.file_content = format!(
+                    "{}\n...\n[\u{2702}\u{fe0f} {} lines elided under aggressive compaction]\n...\n{}",
+                    head.join("\n"),
+                    line_count.saturating_sub(head.len() + tail.len()),
+                    tail.join("\n"),
+                );
+                modified = true;
+            }
+            if modified {
+                msg.content = ChatContent::ContextFiles(files);
+            }
+        }
     }
 
     Tier0CompactReport {
@@ -113,7 +182,10 @@ pub struct ContextBudgetReport {
     pub pressure: ContextPressure,
 }
 
-pub fn compute_context_budget(messages: &[ChatMessage], effective_n_ctx: usize) -> ContextBudgetReport {
+pub fn compute_context_budget(
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+) -> ContextBudgetReport {
     let used_tokens_estimate = crate::trajectory_ops::approx_token_count(messages);
     let remaining_estimate = (effective_n_ctx as isize) - (used_tokens_estimate as isize);
     let pressure = if effective_n_ctx == 0 {
@@ -542,9 +614,7 @@ fn validate_chat_history_slice(messages: &[ChatMessage]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_chat_history(
-    messages: &Vec<ChatMessage>,
-) -> Result<Vec<ChatMessage>, String> {
+pub fn validate_chat_history(messages: &Vec<ChatMessage>) -> Result<Vec<ChatMessage>, String> {
     validate_chat_history_slice(messages)?;
     Ok(messages.to_vec())
 }
@@ -613,7 +683,11 @@ mod tests {
         let report = tier0_deterministic_compact(&mut messages, 0);
         assert_eq!(report.context_files_deduped, 2);
         assert!(report.tokens_saved_estimate > 0);
-        let last_ctx = messages.iter().filter(|m| m.role == "context_file").last().unwrap();
+        let last_ctx = messages
+            .iter()
+            .filter(|m| m.role == "context_file")
+            .last()
+            .unwrap();
         let files = extract_context_files_from_content(&last_ctx.content);
         assert_eq!(files[0].file_content, "third version content");
         let first_ctx = messages.iter().find(|m| m.role == "context_file").unwrap();
@@ -644,7 +718,10 @@ mod tests {
         ];
         let report = tier0_deterministic_compact(&mut messages, 2);
         assert_eq!(report.tool_outputs_truncated, 1);
-        assert!(messages[1].content.content_text_only().contains("truncated"));
+        assert!(messages[1]
+            .content
+            .content_text_only()
+            .contains("truncated"));
         assert_eq!(messages[3].content.content_text_only(), long_output);
     }
 
@@ -686,7 +763,10 @@ mod tests {
         ];
         let report = tier0_deterministic_compact(&mut messages, 0);
         assert_eq!(report.tool_outputs_truncated, 1);
-        assert!(messages[1].content.content_text_only().contains("truncated"));
+        assert!(messages[1]
+            .content
+            .content_text_only()
+            .contains("truncated"));
     }
 
     #[test]
@@ -716,7 +796,10 @@ mod tests {
         let deserialized: ChatMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.role, "summarization");
         assert_eq!(deserialized.summarized_range, Some((1, 5)));
-        assert_eq!(deserialized.summarization_tier.as_deref(), Some("tier0_deterministic"));
+        assert_eq!(
+            deserialized.summarization_tier.as_deref(),
+            Some("tier0_deterministic")
+        );
         assert_eq!(deserialized.summarized_token_estimate, Some(1200));
         assert_eq!(deserialized.content.content_text_only(), "Summary text");
     }

@@ -17,8 +17,8 @@ use crate::caps::model_caps::{
 use refact_core::provider_types::AvailableModel;
 
 pub use refact_core::llm_types::{
-    BaseModelRecord, EmbeddingModelRecord, HasBaseModelRecord, WireFormat,
-    default_embedding_batch, default_rejection_threshold, default_true,
+    BaseModelRecord, EmbeddingModelRecord, HasBaseModelRecord, WireFormat, default_embedding_batch,
+    default_rejection_threshold, default_true,
 };
 
 pub use refact_caps_core::model_records::{
@@ -1080,7 +1080,10 @@ mod tests {
     async fn test_models_dev_startup_refresh_flag_is_consumed_once() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let caps_state = gcx.caps_state.clone();
-        caps_state.write().await.models_dev_startup_refresh_attempted = false;
+        caps_state
+            .write()
+            .await
+            .models_dev_startup_refresh_attempted = false;
 
         assert!(take_models_dev_startup_refresh_flag(gcx.clone()).await);
         assert!(!take_models_dev_startup_refresh_flag(gcx).await);

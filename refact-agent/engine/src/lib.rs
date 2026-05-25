@@ -220,7 +220,10 @@ pub async fn run() {
 
     // Buddy starts in background tasks below, so startup import runtime events are best-effort.
     // The persisted last_report is picked up by Buddy pulse after initialization.
-    let _ = ext::competitor_import::run_global_import(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
+    let _ = ext::competitor_import::run_global_import(
+        crate::app_state::AppState::from_gcx(gcx.clone()).await,
+    )
+    .await;
 
     if cmdline.ast {
         let tmp = Some(

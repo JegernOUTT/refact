@@ -151,7 +151,11 @@ pub async fn cached_tokenizer(
                 global_context.caps_state.clone(),
             )
         };
-        let template = caps_state.read().await.caps.clone()
+        let template = caps_state
+            .read()
+            .await
+            .caps
+            .clone()
             .map(|caps| caps.hf_tokenizer_template.clone())
             .unwrap_or_else(default_hf_tokenizer_template);
         (

@@ -621,13 +621,16 @@ impl Tool for ToolTaskMergeAgent {
             );
             append_verifier_warning(&mut message, verifier_warning.as_deref());
 
-            return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(message),
-                tool_calls: None,
-                tool_call_id: tool_call_id.clone(),
-                ..Default::default()
-            })]));
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(message),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                })],
+            ));
         }
 
         let merge_in_progress = run_git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
@@ -1106,7 +1109,12 @@ mod worktree_merge_tool_tests {
             .unwrap();
         let branch = created.worktree.meta.branch.clone().unwrap();
         let root = created.worktree.meta.root.clone();
-        commit_file(&root, "file.txt", "merged after human review\n", "agent change");
+        commit_file(
+            &root,
+            "file.txt",
+            "merged after human review\n",
+            "agent change",
+        );
         let mut card = test_card(&created.worktree.meta.id, &branch, &root);
         card.verifier_report = Some(launch_failure_verifier_report());
         write_task(gcx.clone(), &source, card).await;

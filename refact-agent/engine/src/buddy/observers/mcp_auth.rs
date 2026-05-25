@@ -81,11 +81,7 @@ impl BuddyObserver for McpAuthObserver {
         settings.observers.mcp_auth && settings.proactive_enabled
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        _ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, _ctx: &ObserverContext) -> Vec<BuddyFact> {
         let session_entries = {
             let integration_sessions = gcx.integrations.integration_sessions.clone();
             let integration_sessions = integration_sessions.lock().await;

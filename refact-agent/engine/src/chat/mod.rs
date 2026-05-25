@@ -7,7 +7,6 @@ mod generation;
 mod handlers;
 pub mod history_limit;
 pub mod linearize;
-pub mod summarization;
 mod openai_merge;
 pub mod post_merge_check;
 pub mod prepare;
@@ -17,6 +16,7 @@ mod queue;
 pub(crate) mod retry_policy;
 mod session;
 pub mod stream_core;
+pub mod summarization;
 pub mod system_context;
 pub mod task_agent_monitor;
 #[cfg(test)]
@@ -27,9 +27,9 @@ pub mod tools;
 pub mod trajectories;
 pub mod trajectory_ops;
 pub mod types;
-pub(crate) mod verify_cmd;
 pub mod verifier;
 mod verifier_diff;
+pub(crate) mod verify_cmd;
 
 pub use session::{
     SessionsMap, create_sessions_map, start_session_cleanup_task,

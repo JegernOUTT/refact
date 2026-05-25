@@ -1221,7 +1221,9 @@ mod tests {
         op.status = MemoryOpStatus::Pending;
 
         enqueue_memory_op(root, op.clone()).await.unwrap();
-        let state = apply_queued_memory_ops(root, AppState::from_gcx(gcx).await).await.unwrap();
+        let state = apply_queued_memory_ops(root, AppState::from_gcx(gcx).await)
+            .await
+            .unwrap();
 
         assert_eq!(state.ops.len(), 1);
         assert_eq!(state.ops[0].status, MemoryOpStatus::Pending);

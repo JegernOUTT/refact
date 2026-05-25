@@ -1,4 +1,3 @@
-
 use chrono::{Datelike, Utc};
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_REFACTOR_HUNTER_WORKFLOW_ID};
@@ -48,11 +47,7 @@ impl BuddyJob for BuddyRefactorHunterJob {
         true
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         execute_autonomous_spec(gcx, &ctx, build_refactor_hunter_spec(&ctx)).await
     }
 }

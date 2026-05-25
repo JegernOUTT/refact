@@ -220,11 +220,7 @@ impl BuddyObserver for TaskHealthObserver {
         settings.observers.task_health
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let tasks = match crate::tasks::storage::list_tasks(gcx.gcx.clone()).await {
             Ok(t) => t,
             Err(_) => return vec![],

@@ -289,7 +289,8 @@ pub(crate) async fn dispatch_action(
                         label, label
                     ),
                 };
-                let draft = synthesize_draft(app.gcx.clone(), dk, label.to_string(), content).await?;
+                let draft =
+                    synthesize_draft(app.gcx.clone(), dk, label.to_string(), content).await?;
                 draft.id.clone()
             } else {
                 validate_existing_draft(app.gcx.clone(), draft_id, dk, DraftTarget::Any).await?;
@@ -459,10 +460,7 @@ fn customization_url_kind(kind: CustomizationKind) -> &'static str {
     }
 }
 
-async fn read_effective_ext_file<F>(
-    gcx: &Arc<GlobalContext>,
-    relative_path: F,
-) -> Option<String>
+async fn read_effective_ext_file<F>(gcx: &Arc<GlobalContext>, relative_path: F) -> Option<String>
 where
     F: Fn(&StdPath) -> PathBuf,
 {
@@ -780,10 +778,7 @@ fn diagnostic_severity_label(
     }
 }
 
-pub(crate) async fn enrich_investigation_context(
-    app: &AppState,
-    ctx: &mut InvestigationContext,
-) {
+pub(crate) async fn enrich_investigation_context(app: &AppState, ctx: &mut InvestigationContext) {
     if !ctx.diagnostic_ids.is_empty() {
         let buddy_arc = app.buddy.buddy.clone();
         let lock = buddy_arc.lock().await;

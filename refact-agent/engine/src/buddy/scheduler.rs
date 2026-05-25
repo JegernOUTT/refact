@@ -167,16 +167,8 @@ pub trait BuddyJob: Send + Sync {
     fn is_autonomous(&self) -> bool {
         is_autonomous_workflow_id(self.id())
     }
-    async fn should_run(
-        &self,
-        gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool;
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult;
+    async fn should_run(&self, gcx: AppState, ctx: &BuddyJobContext) -> bool;
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult;
 }
 
 pub(crate) const MAX_UNREAD_SUGGESTIONS: usize = 3;
@@ -490,19 +482,11 @@ mod tests {
             false
         }
 
-        async fn should_run(
-            &self,
-            _gcx: AppState,
-            _ctx: &BuddyJobContext,
-        ) -> bool {
+        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
             true
         }
 
-        async fn execute(
-            &self,
-            _gcx: AppState,
-            _ctx: BuddyJobContext,
-        ) -> BuddyJobResult {
+        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
             BuddyJobResult::default()
         }
     }
@@ -525,19 +509,11 @@ mod tests {
             true
         }
 
-        async fn should_run(
-            &self,
-            _gcx: AppState,
-            _ctx: &BuddyJobContext,
-        ) -> bool {
+        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
             true
         }
 
-        async fn execute(
-            &self,
-            _gcx: AppState,
-            _ctx: BuddyJobContext,
-        ) -> BuddyJobResult {
+        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
             BuddyJobResult {
                 xp: 4,
                 activity: Some(BuddyActivity {
@@ -569,19 +545,11 @@ mod tests {
             0
         }
 
-        async fn should_run(
-            &self,
-            _gcx: AppState,
-            _ctx: &BuddyJobContext,
-        ) -> bool {
+        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
             true
         }
 
-        async fn execute(
-            &self,
-            _gcx: AppState,
-            _ctx: BuddyJobContext,
-        ) -> BuddyJobResult {
+        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
             BuddyJobResult {
                 speech: Some(BuddySpeechItem {
                     id: "no-intent-speech".to_string(),
@@ -623,19 +591,11 @@ mod tests {
             self.priority
         }
 
-        async fn should_run(
-            &self,
-            _gcx: AppState,
-            _ctx: &BuddyJobContext,
-        ) -> bool {
+        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
             true
         }
 
-        async fn execute(
-            &self,
-            _gcx: AppState,
-            _ctx: BuddyJobContext,
-        ) -> BuddyJobResult {
+        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
             BuddyJobResult {
                 speech_intent: Some(self.intent),
                 speech: Some(BuddySpeechItem {

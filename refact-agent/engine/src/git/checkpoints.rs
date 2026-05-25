@@ -11,9 +11,7 @@ use crate::ast::chunk_utils::official_text_hashing_function;
 use crate::background_tasks::BackgroundTasksHolder;
 use crate::custom_error::MapErrToString;
 use crate::files_blocklist::reload_indexing_everywhere_if_needed;
-use crate::files_correction::{
-    get_active_workspace_folder, get_project_dirs,
-};
+use crate::files_correction::{get_active_workspace_folder, get_project_dirs};
 use crate::global_context::GlobalContext;
 use crate::git::{FileChange, FileChangeStatus, from_unix_glob_pattern_to_gitignore};
 use crate::git::operations::{
@@ -338,7 +336,11 @@ pub async fn create_workspace_checkpoint_for_root(
             None,
         );
         ev.chat_id = Some(chat_id.to_string());
-        crate::buddy::actor::buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx.clone()).await, ev).await;
+        crate::buddy::actor::buddy_enqueue_event(
+            crate::app_state::AppState::from_gcx(gcx.clone()).await,
+            ev,
+        )
+        .await;
     }
 
     Ok((checkpoint, repo))
@@ -595,9 +597,7 @@ pub async fn abort_init_shadow_repos(gcx: Arc<GlobalContext>) {
     // NOTE: git2 operations are synchronous and can't be cancelled by tokio abort;
     // we set the abort flag and wait with a timeout to avoid hanging shutdown.
     let holder = {
-        gcx
-            .git_operations_abort_flag
-            .store(true, Ordering::SeqCst);
+        gcx.git_operations_abort_flag.store(true, Ordering::SeqCst);
         BackgroundTasksHolder::default()
     };
     // holder.abort() already has an internal timeout, but we call it here after releasing the lock

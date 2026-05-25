@@ -80,9 +80,8 @@ const AUTHENTICATION_STATUS_CODES: &[&str] = &["401", "403"];
 const BILLING_STATUS_CODES: &[&str] = &["402"];
 const MODEL_UNAVAILABLE_STATUS_CODES: &[&str] = &["404"];
 const CONTENT_POLICY_STATUS_CODES: &[&str] = &["451"];
-const INVALID_REQUEST_STATUS_CODES: &[&str] = &[
-    "400", "405", "409", "415", "422", "423", "424", "426",
-];
+const INVALID_REQUEST_STATUS_CODES: &[&str] =
+    &["400", "405", "409", "415", "422", "423", "424", "426"];
 
 const USER_CANCELLED_PATTERNS: &[&str] = &["aborted", "cancelled", "canceled"];
 
@@ -446,7 +445,9 @@ fn contains_provider_prefixed_status_code(lower: &str, code: &str) -> bool {
             let before = window_before(lower, idx, 40);
             let after = window_after(lower, end, 32);
             if contains_any(before, &provider_context)
-                && status_reasons.iter().any(|reason| after.starts_with(reason))
+                && status_reasons
+                    .iter()
+                    .any(|reason| after.starts_with(reason))
             {
                 return true;
             }
@@ -1180,7 +1181,9 @@ mod tests {
     #[test]
     fn test_partial_output_alone_classifies_as_stream_corrupted() {
         assert_eq!(
-            classify_user_error("Stream interrupted after partial output. Not retrying to avoid corruption."),
+            classify_user_error(
+                "Stream interrupted after partial output. Not retrying to avoid corruption."
+            ),
             UserErrorCategory::StreamCorrupted
         );
     }
@@ -1214,7 +1217,9 @@ mod tests {
     #[test]
     fn classifier_avoids_broad_status_and_context_patterns() {
         assert_eq!(
-            classify_llm_error_for_retry("OpenAI invalid_request_error: max tokens must be positive"),
+            classify_llm_error_for_retry(
+                "OpenAI invalid_request_error: max tokens must be positive"
+            ),
             RetryDecision::DoNotRetry {
                 reason: "non_retryable_error",
             }

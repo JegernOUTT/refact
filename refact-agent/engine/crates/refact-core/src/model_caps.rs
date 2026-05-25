@@ -557,12 +557,24 @@ mod tests {
         assert_eq!(metadata["priced-model"]["generated"], json!(2.5));
         assert_eq!(metadata["priced-model"]["cache_read"], json!(0.25));
         assert_eq!(metadata["priced-model"]["cache_creation"], json!(0.75));
-        assert_eq!(metadata["priced-model"]["context_over_200k"]["prompt"], json!(3.0));
-        assert_eq!(metadata["priced-model"]["context_over_200k"]["generated"], json!(4.0));
-        assert_eq!(metadata["priced-model"]["context_over_200k"]["cache_creation"], json!(1.0));
+        assert_eq!(
+            metadata["priced-model"]["context_over_200k"]["prompt"],
+            json!(3.0)
+        );
+        assert_eq!(
+            metadata["priced-model"]["context_over_200k"]["generated"],
+            json!(4.0)
+        );
+        assert_eq!(
+            metadata["priced-model"]["context_over_200k"]["cache_creation"],
+            json!(1.0)
+        );
         assert_eq!(metadata["priced-model"]["source"], json!("models.dev"));
         assert_eq!(metadata["priced-model"]["tier"], json!("base_text_tokens"));
-        assert_eq!(metadata["priced-model"]["raw_cost"], json!({ "input": 1.25, "output": 2.5 }));
+        assert_eq!(
+            metadata["priced-model"]["raw_cost"],
+            json!({ "input": 1.25, "output": 2.5 })
+        );
         assert!(metadata.get("unpriced-model").is_none());
     }
 }

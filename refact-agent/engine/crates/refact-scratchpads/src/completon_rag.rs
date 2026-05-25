@@ -25,23 +25,22 @@ async fn _render_context_files(
     if postprocessed_messages.is_empty() {
         return "".to_string();
     }
-    let (repo_name, cursor_filepath_stripped) =
-        if let Some(project_dir) = project_dirs.get(0) {
-            let repo_name = project_dir
-                .file_name()
-                .map(|x| x.to_string_lossy().to_string())
-                .unwrap_or("default_repo".to_string());
-            let cursor_filepath_stripped = cursor_filepath
-                .strip_prefix(project_dir)
-                .map(|x| x.to_string_lossy().to_string())
-                .unwrap_or(cursor_filepath.to_string_lossy().to_string());
-            (repo_name, cursor_filepath_stripped)
-        } else {
-            (
-                "default_repo".to_string(),
-                cursor_filepath.to_string_lossy().to_string(),
-            )
-        };
+    let (repo_name, cursor_filepath_stripped) = if let Some(project_dir) = project_dirs.get(0) {
+        let repo_name = project_dir
+            .file_name()
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or("default_repo".to_string());
+        let cursor_filepath_stripped = cursor_filepath
+            .strip_prefix(project_dir)
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or(cursor_filepath.to_string_lossy().to_string());
+        (repo_name, cursor_filepath_stripped)
+    } else {
+        (
+            "default_repo".to_string(),
+            cursor_filepath.to_string_lossy().to_string(),
+        )
+    };
     let mut context_files_prompt = String::new();
     match context_format.as_str() {
         "starcoder" => {

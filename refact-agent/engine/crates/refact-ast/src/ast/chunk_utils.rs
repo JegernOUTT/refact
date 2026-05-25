@@ -102,7 +102,9 @@ pub fn get_chunks(
                 } else {
                     accum.back().unwrap().1 as u64
                 };
-                for chunked_line in split_line_if_needed(&current_line, tokenizer.clone(), tokens_limit) {
+                for chunked_line in
+                    split_line_if_needed(&current_line, tokenizer.clone(), tokens_limit)
+                {
                     chunks.push(SplitResult {
                         file_path: file_path.clone(),
                         window_text: chunked_line.clone(),
@@ -144,7 +146,9 @@ pub fn get_chunks(
                 } else {
                     accum.back().unwrap().1 as u64
                 };
-                for chunked_line in split_line_if_needed(&current_line, tokenizer.clone(), tokens_limit) {
+                for chunked_line in
+                    split_line_if_needed(&current_line, tokenizer.clone(), tokens_limit)
+                {
                     chunks.push(SplitResult {
                         file_path: file_path.clone(),
                         window_text: chunked_line.clone(),
@@ -188,5 +192,8 @@ pub fn get_chunks(
         }
     }
 
-    chunks.into_iter().filter(|c| !c.window_text.is_empty()).collect()
+    chunks
+        .into_iter()
+        .filter(|c| !c.window_text.is_empty())
+        .collect()
 }

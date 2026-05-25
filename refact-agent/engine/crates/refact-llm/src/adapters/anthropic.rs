@@ -35,8 +35,7 @@ impl LlmWireAdapter for AnthropicAdapter {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         let is_cc = claude_code_compat::is_claude_code_oauth(&settings.auth_token);
-        let is_github_copilot =
-            crate::provider_quirks::is_github_copilot_request(req, settings);
+        let is_github_copilot = crate::provider_quirks::is_github_copilot_request(req, settings);
         if is_cc {
             claude_code_compat::apply_oauth_headers(&mut headers, &settings.auth_token)?;
             claude_code_compat::apply_stainless_headers(&mut headers)?;
@@ -62,11 +61,7 @@ impl LlmWireAdapter for AnthropicAdapter {
         let is_effort_mode = settings.reasoning_type.as_deref() == Some("anthropic_effort");
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
-        crate::provider_quirks::apply_github_copilot_request_headers(
-            &mut headers,
-            req,
-            settings,
-        );
+        crate::provider_quirks::apply_github_copilot_request_headers(&mut headers, req, settings);
 
         let context_sanitizer: Option<Box<dyn Fn(&str) -> String>> = if is_cc {
             Some(Box::new(|text: &str| {
@@ -1185,7 +1180,9 @@ mod tests {
         assert!(deltas.iter().any(|d| {
             matches!(d, LlmStreamDelta::SetFinishReason { reason } if reason == "end_turn")
         }));
-        assert!(deltas.iter().any(|d| matches!(d, LlmStreamDelta::SetUsage { .. })));
+        assert!(deltas
+            .iter()
+            .any(|d| matches!(d, LlmStreamDelta::SetUsage { .. })));
         assert!(matches!(deltas.last(), Some(LlmStreamDelta::Done)));
     }
 
@@ -1388,7 +1385,9 @@ mod tests {
             },
             ChatMessage {
                 role: "diff".to_string(),
-                content: refact_core::chat_types::ChatContent::SimpleText("@@ -1 +1 @@".to_string()),
+                content: refact_core::chat_types::ChatContent::SimpleText(
+                    "@@ -1 +1 @@".to_string(),
+                ),
                 tool_call_id: "call_edit".to_string(),
                 ..Default::default()
             },
@@ -1973,7 +1972,9 @@ mod tests {
             ChatMessage::new("user".to_string(), "What's the weather?".to_string()),
             ChatMessage {
                 role: "assistant".to_string(),
-                content: refact_core::chat_types::ChatContent::SimpleText("It's sunny.".to_string()),
+                content: refact_core::chat_types::ChatContent::SimpleText(
+                    "It's sunny.".to_string(),
+                ),
                 server_content_blocks: vec![
                     json!({
                         "type": "server_tool_use",

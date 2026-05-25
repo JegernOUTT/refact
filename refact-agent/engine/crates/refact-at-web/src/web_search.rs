@@ -352,7 +352,6 @@ pub fn clean_ddg_url(href: &str) -> String {
     normalized
 }
 
-
 fn parse_searxng_json(body: &str) -> Result<Vec<SearchResult>, String> {
     let value: Value = serde_json::from_str(body)
         .map_err(|e| format!("Failed to parse SearxNG JSON response: {}", e))?;

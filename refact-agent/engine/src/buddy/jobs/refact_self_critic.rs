@@ -1,4 +1,3 @@
-
 use chrono::Utc;
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, REFACT_SELF_CRITIC_WORKFLOW_ID};
@@ -47,11 +46,7 @@ impl BuddyJob for RefactSelfCriticJob {
         true
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         execute_autonomous_spec(gcx, &ctx, build_self_critic_spec(&ctx)).await
     }
 }

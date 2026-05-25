@@ -18,18 +18,16 @@ use crate::ast_file_splitter::AstBasedFileSplitter;
 use crate::fetch_embedding::get_embedding_with_retries;
 use crate::vdb_markdown_splitter::MarkdownFileSplitter;
 use crate::vdb_sqlite::VecDBSqlite;
-use crate::vdb_structs::{
-    SimpleTextHashVector, SplitResult, VecDbStatus, VecdbConstants, VecdbRecord,
-};
+use crate::vdb_structs::{SimpleTextHashVector, SplitResult, VecDbStatus, VecdbConstants, VecdbRecord};
 use crate::vdb_trajectory_splitter::{TrajectoryFileSplitter, is_trajectory_file};
 
 const DEBUG_WRITE_VECDB_FILES: bool = false;
 const COOLDOWN_SECONDS: u64 = 10;
 
 const SOURCE_FILE_EXTENSIONS: &[&str] = &[
-    "c", "cpp", "cc", "h", "hpp", "cs", "java", "py", "rb", "go", "rs", "ts", "tsx", "js",
-    "jsx", "php", "swift", "kt", "kts", "scala", "r", "m", "mm", "pl", "lua", "sh", "bash",
-    "sql", "html", "css", "md", "mdx", "json", "yaml", "yml", "toml", "xml",
+    "c", "cpp", "cc", "h", "hpp", "cs", "java", "py", "rb", "go", "rs", "ts", "tsx", "js", "jsx",
+    "php", "swift", "kt", "kts", "scala", "r", "m", "mm", "pl", "lua", "sh", "bash", "sql", "html",
+    "css", "md", "mdx", "json", "yaml", "yml", "toml", "xml",
 ];
 
 fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
@@ -79,13 +77,21 @@ async fn vectorize_batch_from_q(
         Ok(res) => res,
         Err(e) => {
             let mut vstatus_locked = vstatus.lock().await;
-            vstatus_locked.vecdb_errors.entry(e.clone()).and_modify(|counter| *counter += 1).or_insert(1);
+            vstatus_locked
+                .vecdb_errors
+                .entry(e.clone())
+                .and_modify(|counter| *counter += 1)
+                .or_insert(1);
             return Err(e);
         }
     };
 
     if batch_result.len() != batch.len() {
-        return Err(format!("vectorize: batch_result.len() != batch.len(): {} vs {}", batch_result.len(), batch.len()));
+        return Err(format!(
+            "vectorize: batch_result.len() != batch.len(): {} vs {}",
+            batch_result.len(),
+            batch.len()
+        ));
     }
 
     {
@@ -116,7 +122,12 @@ async fn vectorize_batch_from_q(
     }
 
     if send_to_cache.len() > 0 {
-        match vecdb_handler_arc.lock().await.cache_add_new_records(send_to_cache).await {
+        match vecdb_handler_arc
+            .lock()
+            .await
+            .cache_add_new_records(send_to_cache)
+            .await
+        {
             Err(e) => warn!("Error adding records to the cacheDB: {}", e),
             _ => {}
         }
@@ -135,8 +146,14 @@ async fn from_splits_to_vecdb_records_applying_cache(
     group_size: usize,
 ) {
     while !splits.is_empty() {
-        let batch: Vec<SplitResult> = splits.drain(..group_size.min(splits.len())).collect::<Vec<_>>();
-        let vectors_maybe = vecdb_handler_arc.lock().await.fetch_vectors_from_cache(&batch).await;
+        let batch: Vec<SplitResult> = splits
+            .drain(..group_size.min(splits.len()))
+            .collect::<Vec<_>>();
+        let vectors_maybe = vecdb_handler_arc
+            .lock()
+            .await
+            .fetch_vectors_from_cache(&batch)
+            .await;
         if let Ok(vectors) = vectors_maybe {
             for (split, maybe_vector) in batch.iter().zip(vectors.iter()) {
                 if maybe_vector.is_none() {
@@ -158,7 +175,10 @@ async fn from_splits_to_vecdb_records_applying_cache(
     }
 }
 
-async fn _send_to_vecdb(vecdb_handler_arc: Arc<AMutex<VecDBSqlite>>, ready_to_vecdb: &mut Vec<VecdbRecord>) {
+async fn _send_to_vecdb(
+    vecdb_handler_arc: Arc<AMutex<VecDBSqlite>>,
+    ready_to_vecdb: &mut Vec<VecdbRecord>,
+) {
     let file_paths: HashSet<PathBuf> = ready_to_vecdb.iter().map(|r| r.file_path.clone()).collect();
     for file_path in &file_paths {
         match vecdb_handler_arc
@@ -171,7 +191,12 @@ async fn _send_to_vecdb(vecdb_handler_arc: Arc<AMutex<VecDBSqlite>>, ready_to_ve
             Err(err) => info!("VECDB Error removing: {}", err),
         }
     }
-    match vecdb_handler_arc.lock().await.vecdb_records_add(ready_to_vecdb).await {
+    match vecdb_handler_arc
+        .lock()
+        .await
+        .vecdb_records_add(ready_to_vecdb)
+        .await
+    {
         Ok(_) => {}
         Err(err) => info!("VECDB Error adding: {}", err),
     }
@@ -226,14 +251,18 @@ async fn vectorize_thread(
             if work_on_one.is_none() {
                 let doc_to_remove = last_updated
                     .iter()
-                    .find(|(_, time)| time.elapsed().unwrap_or_default().as_secs() > COOLDOWN_SECONDS)
+                    .find(|(_, time)| {
+                        time.elapsed().unwrap_or_default().as_secs() > COOLDOWN_SECONDS
+                    })
                     .map(|(doc, _)| doc.clone());
                 if let Some(doc) = doc_to_remove {
                     work_on_one = Some(MessageToVecdbThread::RegularDocument(doc.clone()));
                     last_updated.remove(&doc);
                 }
             }
-            files_unprocessed = vecdb_todo_locked.len() + last_updated.len() + if work_on_one.is_some() { 1 } else { 0 };
+            files_unprocessed = vecdb_todo_locked.len()
+                + last_updated.len()
+                + if work_on_one.is_some() { 1 } else { 0 };
             files_total = files_total.max(files_unprocessed);
             {
                 let mut vstatus_locked = vstatus.lock().await;
@@ -244,7 +273,10 @@ async fn vectorize_thread(
                     vstatus_locked.state = "parsing".to_string();
                     vstatus_changed = true;
                 }
-                if work_on_one.is_none() && files_unprocessed > 0 && vstatus_locked.state != "cooldown" {
+                if work_on_one.is_none()
+                    && files_unprocessed > 0
+                    && vstatus_locked.state != "cooldown"
+                {
                     vstatus_locked.state = "cooldown".to_string();
                     vstatus_changed = true;
                 }
@@ -347,7 +379,12 @@ async fn vectorize_thread(
             Ok(t) => t,
             Err(_) => {
                 info!("{} cannot read, deleting from index", last_30_chars);
-                match vecdb_handler_arc.lock().await.vecdb_records_remove(vec![cpath.clone()]).await {
+                match vecdb_handler_arc
+                    .lock()
+                    .await
+                    .vecdb_records_remove(vec![cpath.clone()])
+                    .await
+                {
                     Ok(_) => {}
                     Err(err) => info!("VECDB Error removing: {}", err),
                 }
@@ -366,23 +403,31 @@ async fn vectorize_thread(
             }
         }
 
-        let is_markdown = doc.doc_path.extension()
+        let is_markdown = doc
+            .doc_path
+            .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .map(|e| e == "md" || e == "mdx")
             .unwrap_or(false);
 
         let mut splits = if is_trajectory {
             let traj_splitter = TrajectoryFileSplitter::new(constants.splitter_window_size);
-            traj_splitter.split(&text, &doc.doc_path).await.unwrap_or_else(|err| {
-                info!("{}", err);
-                vec![]
-            })
+            traj_splitter
+                .split(&text, &doc.doc_path)
+                .await
+                .unwrap_or_else(|err| {
+                    info!("{}", err);
+                    vec![]
+                })
         } else if is_markdown {
             let md_splitter = MarkdownFileSplitter::new(constants.embedding_model.n_ctx);
-            md_splitter.split(&text, &doc.doc_path).await.unwrap_or_else(|err| {
-                info!("{}", err);
-                vec![]
-            })
+            md_splitter
+                .split(&text, &doc.doc_path)
+                .await
+                .unwrap_or_else(|err| {
+                    info!("{}", err);
+                    vec![]
+                })
         } else {
             let file_splitter = AstBasedFileSplitter::new(constants.splitter_window_size);
             file_splitter
@@ -400,7 +445,9 @@ async fn vectorize_thread(
                 splits.push(SplitResult {
                     file_path: doc.doc_path.clone(),
                     window_text: filename_str.clone(),
-                    window_text_hash: refact_ast::ast::chunk_utils::official_text_hashing_function(&filename_str),
+                    window_text_hash: refact_ast::ast::chunk_utils::official_text_hashing_function(
+                        &filename_str,
+                    ),
                     start_line: 0,
                     end_line: 0,
                     symbol_path: "filename".to_string(),
@@ -411,7 +458,11 @@ async fn vectorize_thread(
         if DEBUG_WRITE_VECDB_FILES {
             let _ = std::fs::write(
                 format!("/tmp/vecdb_{}.txt", last_30_chars.replace("/", "_")),
-                splits.iter().map(|s| s.window_text.clone()).collect::<Vec<_>>().join("\n---\n"),
+                splits
+                    .iter()
+                    .map(|s| s.window_text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n---\n"),
             );
         }
 
@@ -473,7 +524,10 @@ fn _filter_docs_to_enqueue(docs: &[String]) -> Vec<String> {
         match is_path_to_enqueue_valid(&path) {
             Ok(_) => filtered_docs.push(d.clone()),
             Err(e) => {
-                rejected_reasons.entry(e.to_string()).and_modify(|x| *x += 1).or_insert(1);
+                rejected_reasons
+                    .entry(e.to_string())
+                    .and_modify(|x| *x += 1)
+                    .or_insert(1);
             }
         }
     }
@@ -504,7 +558,10 @@ pub async fn vectorizer_enqueue_files(
     };
     let mut documents_my_copy = documents.clone();
     if documents_my_copy.len() > vecdb_max_files {
-        info!("that's more than {} allowed in the command line, reduce the number", vecdb_max_files);
+        info!(
+            "that's more than {} allowed in the command line, reduce the number",
+            vecdb_max_files
+        );
         documents_my_copy.truncate(vecdb_max_files);
         vstatus.lock().await.vecdb_max_files_hit = true;
     }
@@ -513,7 +570,9 @@ pub async fn vectorizer_enqueue_files(
             let mut vecdb_todo_locked = vecdb_todo.lock().await;
             for doc in documents.iter() {
                 if process_immediately {
-                    vecdb_todo_locked.push_back(MessageToVecdbThread::ImmediatelyRegularDocument(doc.clone()));
+                    vecdb_todo_locked.push_back(MessageToVecdbThread::ImmediatelyRegularDocument(
+                        doc.clone(),
+                    ));
                 } else {
                     vecdb_todo_locked.push_back(MessageToVecdbThread::RegularDocument(doc.clone()));
                 }

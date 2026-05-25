@@ -67,10 +67,7 @@ impl Tool for ToolMCP {
         let session_key = format!("{}", self.config_path);
         let (gcx, current_model) = {
             let cgcx = ccx.lock().await;
-            (
-                cgcx.global_context.clone(),
-                cgcx.current_model.clone(),
-            )
+            (cgcx.global_context.clone(), cgcx.current_model.clone())
         };
         let (session_maybe, caps_maybe) = {
             let integration_sessions = gcx.integration_sessions.clone();

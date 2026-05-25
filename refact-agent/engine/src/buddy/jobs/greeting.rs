@@ -52,19 +52,11 @@ impl BuddyJob for GreetingJob {
         0
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         !ctx.onboarding.greeted || ctx.job_state.last_run.is_none()
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let fallback_text = greeting_fallback_text(&ctx);
         let controls = greeting_controls(&ctx);
         let mut speech = match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
@@ -137,8 +129,7 @@ mod tests {
         }
     }
 
-    async fn make_gcx_with_buddy() -> AppState
-    {
+    async fn make_gcx_with_buddy() -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let (tx, _) = tokio::sync::broadcast::channel(16);
         let mut state = crate::buddy::state::default_buddy_state();

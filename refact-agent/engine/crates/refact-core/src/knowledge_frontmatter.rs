@@ -109,15 +109,30 @@ impl KnowledgeFrontmatter {
             lines.push(format!("status: {}", status));
         }
         if !self.tags.is_empty() {
-            let tags_str = self.tags.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", ");
+            let tags_str = self
+                .tags
+                .iter()
+                .map(|t| format!("\"{}\"", t))
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(format!("tags: [{}]", tags_str));
         }
         if !self.filenames.is_empty() {
-            let files_str = self.filenames.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>().join(", ");
+            let files_str = self
+                .filenames
+                .iter()
+                .map(|f| format!("\"{}\"", f))
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(format!("filenames: [{}]", files_str));
         }
         if !self.links.is_empty() {
-            let links_str = self.links.iter().map(|l| format!("\"{}\"", l)).collect::<Vec<_>>().join(", ");
+            let links_str = self
+                .links
+                .iter()
+                .map(|l| format!("\"{}\"", l))
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(format!("links: [{}]", links_str));
         }
         if let Some(superseded_by) = &self.superseded_by {
@@ -127,58 +142,103 @@ impl KnowledgeFrontmatter {
             lines.push(format!("deprecated_at: {}", deprecated_at));
         }
         if let Some(source_chat_id) = &self.source_chat_id {
-            lines.push(format!("source_chat_id: \"{}\"", source_chat_id.replace('"', "\\\"")));
+            lines.push(format!(
+                "source_chat_id: \"{}\"",
+                source_chat_id.replace('"', "\\\"")
+            ));
         }
         if let Some(created_at) = &self.created_at {
-            lines.push(format!("created_at: \"{}\"", created_at.replace('"', "\\\"")));
+            lines.push(format!(
+                "created_at: \"{}\"",
+                created_at.replace('"', "\\\"")
+            ));
         }
         if let Some(summary) = &self.summary {
             lines.push(format!("summary: \"{}\"", summary.replace('"', "\\\"")));
         }
         if let Some(description) = &self.description {
-            lines.push(format!("description: \"{}\"", description.replace('"', "\\\"")));
+            lines.push(format!(
+                "description: \"{}\"",
+                description.replace('"', "\\\"")
+            ));
         }
         if !self.entities.is_empty() {
-            let entities_str = self.entities.iter().map(|t| format!("\"{}\"", t.replace('"', "\\\""))).collect::<Vec<_>>().join(", ");
+            let entities_str = self
+                .entities
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(format!("entities: [{}]", entities_str));
         }
         if !self.related_files.is_empty() {
-            let files_str = self.related_files.iter().map(|f| format!("\"{}\"", f.replace('"', "\\\""))).collect::<Vec<_>>().join(", ");
+            let files_str = self
+                .related_files
+                .iter()
+                .map(|f| format!("\"{}\"", f.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(format!("related_files: [{}]", files_str));
         }
         if !self.related_entities.is_empty() {
-            let entities_str = self.related_entities.iter().map(|t| format!("\"{}\"", t.replace('"', "\\\""))).collect::<Vec<_>>().join(", ");
+            let entities_str = self
+                .related_entities
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(format!("related_entities: [{}]", entities_str));
         }
         if let Some(content_hash) = &self.content_hash {
-            lines.push(format!("content_hash: \"{}\"", content_hash.replace('"', "\\\"")));
+            lines.push(format!(
+                "content_hash: \"{}\"",
+                content_hash.replace('"', "\\\"")
+            ));
         }
         if let Some(source_tool) = &self.source_tool {
-            lines.push(format!("source_tool: \"{}\"", source_tool.replace('"', "\\\"")));
+            lines.push(format!(
+                "source_tool: \"{}\"",
+                source_tool.replace('"', "\\\"")
+            ));
         }
         if let Some(source_confidence) = self.source_confidence {
             lines.push(format!("source_confidence: {:.3}", source_confidence));
         }
         if let Some(source_trajectory_id) = &self.source_trajectory_id {
-            lines.push(format!("source_trajectory_id: \"{}\"", source_trajectory_id.replace('"', "\\\"")));
+            lines.push(format!(
+                "source_trajectory_id: \"{}\"",
+                source_trajectory_id.replace('"', "\\\"")
+            ));
         }
         if let Some(source_message_range) = &self.source_message_range {
-            lines.push(format!("source_message_range: \"{}\"", source_message_range.replace('"', "\\\"")));
+            lines.push(format!(
+                "source_message_range: \"{}\"",
+                source_message_range.replace('"', "\\\"")
+            ));
         }
         if let Some(source_commit) = &self.source_commit {
-            lines.push(format!("source_commit: \"{}\"", source_commit.replace('"', "\\\"")));
+            lines.push(format!(
+                "source_commit: \"{}\"",
+                source_commit.replace('"', "\\\"")
+            ));
         }
         if let Some(topic) = &self.topic {
             lines.push(format!("topic: \"{}\"", topic.replace('"', "\\\"")));
         }
         if let Some(last_used_at) = &self.last_used_at {
-            lines.push(format!("last_used_at: \"{}\"", last_used_at.replace('"', "\\\"")));
+            lines.push(format!(
+                "last_used_at: \"{}\"",
+                last_used_at.replace('"', "\\\"")
+            ));
         }
         if self.use_count > 0 {
             lines.push(format!("use_count: {}", self.use_count));
         }
         if let Some(last_injected_at) = &self.last_injected_at {
-            lines.push(format!("last_injected_at: \"{}\"", last_injected_at.replace('"', "\\\"")));
+            lines.push(format!(
+                "last_injected_at: \"{}\"",
+                last_injected_at.replace('"', "\\\"")
+            ));
         }
         if self.dismissed_count > 0 {
             lines.push(format!("dismissed_count: {}", self.dismissed_count));
@@ -204,6 +264,12 @@ impl KnowledgeFrontmatter {
     }
 
     pub fn kind_or_default(&self) -> &str {
-        self.kind.as_deref().unwrap_or(if self.filenames.is_empty() { "domain" } else { "code" })
+        self.kind
+            .as_deref()
+            .unwrap_or(if self.filenames.is_empty() {
+                "domain"
+            } else {
+                "code"
+            })
     }
 }

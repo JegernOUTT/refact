@@ -24,12 +24,7 @@ pub async fn run_at_commands_locally(
 ) -> (Vec<ChatMessage>, bool) {
     let (n_ctx, top_n, is_preview, app) = {
         let cgcx = ccx.lock().await;
-        (
-            cgcx.n_ctx,
-            cgcx.top_n,
-            cgcx.is_preview,
-            cgcx.app.clone(),
-        )
+        (cgcx.n_ctx, cgcx.top_n, cgcx.is_preview, cgcx.app.clone())
     };
     if !is_preview {
         let preview_cache = app.workspace.at_commands_preview_cache.clone();

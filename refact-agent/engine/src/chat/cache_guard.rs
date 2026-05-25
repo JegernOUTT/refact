@@ -128,7 +128,10 @@ pub async fn estimate_extra_cache_miss_usd(
             .ok()?;
         crate::caps::resolve_chat_model(caps, model_id).ok()?
     };
-    let tokenizer = cached_tokenizer(app.gcx, &model_rec.base).await.ok().flatten();
+    let tokenizer = cached_tokenizer(app.gcx, &model_rec.base)
+        .await
+        .ok()
+        .flatten();
     let cached_tokens = count_text_tokens_with_fallback(tokenizer, &previous_pretty);
     let delta_rate = pricing.prompt - cache_read_rate;
     Some((cached_tokens as f64) * delta_rate / 1_000_000.0)

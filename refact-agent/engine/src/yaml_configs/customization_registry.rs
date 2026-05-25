@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::yaml_configs::customization_types::*;

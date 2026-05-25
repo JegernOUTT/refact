@@ -91,11 +91,7 @@ impl BuddyJob for BuddyIdleSuggesterJob {
             .unwrap_or(false)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(last_ts) = latest_activity_ts(gcx.clone()).await else {
             return BuddyJobResult::default();
         };

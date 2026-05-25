@@ -509,10 +509,7 @@ async fn autonomous_runtime_event(
     event
 }
 
-fn apply_autonomous_runtime_chat_notification(
-    event: &mut BuddyRuntimeEvent,
-    description: String,
-) {
+fn apply_autonomous_runtime_chat_notification(event: &mut BuddyRuntimeEvent, description: String) {
     event.description = Some(description.clone());
     event.ttl_ms = Some(30_000);
     event.speech_text = Some(description);
@@ -691,10 +688,7 @@ fn behavior_preference_candidates(snippets: &[TrajectoryUserSnippet]) -> Vec<Pre
     candidates
 }
 
-async fn enqueue_behavior_preferences(
-    gcx: AppState,
-    candidates: &[PreferenceCandidate],
-) -> usize {
+async fn enqueue_behavior_preferences(gcx: AppState, candidates: &[PreferenceCandidate]) -> usize {
     let Some(project_root) = crate::files_correction::get_project_dirs(gcx.gcx.clone())
         .await
         .into_iter()
@@ -1183,9 +1177,7 @@ fn collect_behavior_task_trajectory_dirs(
     dirs
 }
 
-async fn collect_behavior_trajectory_metas(
-    gcx: AppState,
-) -> Vec<BehaviorTrajectoryMeta> {
+async fn collect_behavior_trajectory_metas(gcx: AppState) -> Vec<BehaviorTrajectoryMeta> {
     let mut dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.gcx.clone()).await;
     let tasks_dirs = crate::tasks::storage::get_all_tasks_dirs(gcx.gcx.clone()).await;
     tokio::task::spawn_blocking(move || {
@@ -1605,11 +1597,7 @@ impl BuddyJob for BuddyMemoryGardenerJob {
         !same_signal(ctx, &build_spec(self.id(), evidence).signal_hash)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = memory_gardener_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
@@ -1638,11 +1626,7 @@ impl BuddyJob for BuddyKnowledgeConflictResolverJob {
         !same_signal(ctx, &build_spec(self.id(), evidence).signal_hash)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = knowledge_conflict_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
@@ -1672,11 +1656,7 @@ impl BuddyJob for BuddyBehaviorLearnerJob {
         ctx.pulse.trajectories.total >= 4
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some((evidence, candidates)) = behavior_learner_evidence(gcx.clone()).await else {
             return BuddyJobResult::default();
         };
@@ -1723,11 +1703,7 @@ impl BuddyJob for BuddyUserHabitCoachJob {
         !same_signal(ctx, &build_spec(self.id(), evidence).signal_hash)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = habit_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
@@ -1757,11 +1733,7 @@ impl BuddyJob for BuddyModelCostOptimizerJob {
         ctx.total_workflow_runs >= 5 || ctx.pulse.providers.quota_warnings > 0
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = model_cost_evidence(gcx.clone()).await else {
             return BuddyJobResult::default();
         };
@@ -3088,11 +3060,7 @@ impl BuddyJob for ErrorDetectiveJob {
         !same_signal(ctx, &spec.signal_hash)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = diagnostic_evidence(&ctx) else {
             return BuddyJobResult::default();
         };
@@ -3130,11 +3098,7 @@ impl BuddyJob for SecurityWhispererJob {
             || !diagnostic_security_findings(&ctx.recent_diagnostics).is_empty()
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let root = ctx.project_root.clone();
         let mut findings = tokio::task::spawn_blocking(move || {
             collect_local_git_evidence(&root, true)
@@ -3180,11 +3144,7 @@ impl BuddyJob for SetupCoachJob {
         !same_signal(ctx, &spec.signal_hash)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(evidence) = setup_evidence(&ctx.project_root) else {
             return BuddyJobResult::default();
         };
@@ -3214,11 +3174,7 @@ impl BuddyJob for DependencyRadarJob {
         ctx.pulse.git.uncommitted_files > 0 || ctx.pulse.git.diff_lines_4h > 0
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let root = ctx.project_root.clone();
         let evidence = tokio::task::spawn_blocking(move || {
             let git = collect_local_git_evidence(&root, false);
@@ -3261,11 +3217,7 @@ impl BuddyJob for DocsGardenerJob {
         ctx.pulse.git.uncommitted_files > 0 || ctx.pulse.git.diff_lines_4h > 0
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let root = ctx.project_root.clone();
         let evidence = tokio::task::spawn_blocking(move || {
             let git = collect_local_git_evidence(&root, false);
@@ -3308,11 +3260,7 @@ impl BuddyJob for ArchitectureDriftWatcherJob {
         ctx.pulse.git.uncommitted_files > 0 || ctx.pulse.git.diff_lines_4h > 0
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let root = ctx.project_root.clone();
         let evidence = tokio::task::spawn_blocking(move || {
             collect_local_git_evidence(&root, false).map(|git| architecture_evidence(&git))
@@ -4814,9 +4762,10 @@ mod tests {
         assert_eq!(event.dedupe_key.as_deref(), Some(expected_key.as_str()));
         assert_eq!(event.chat_id.as_deref(), Some("chat-success"));
         assert_eq!(event.ttl_ms, Some(30_000));
-        assert!(event.speech_text.as_deref().is_some_and(|text| {
-            text.contains("Dependency Radar") && text.contains("details")
-        }));
+        assert!(event
+            .speech_text
+            .as_deref()
+            .is_some_and(|text| { text.contains("Dependency Radar") && text.contains("details") }));
         assert!(result.activity.is_some());
         assert!(result.last_result.is_some());
     }
@@ -4832,8 +4781,13 @@ mod tests {
         save_settings(dir.path(), &settings).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
-            *crate::app_state::AppState::from_gcx(gcx.clone()).await.workspace.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *crate::app_state::AppState::from_gcx(gcx.clone())
+                .await
+                .workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
         }
         let gcx = AppState::from_gcx(gcx).await;
         let spec = AutonomousBuddyChatSpec::new(

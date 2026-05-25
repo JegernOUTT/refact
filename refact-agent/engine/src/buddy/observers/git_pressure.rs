@@ -432,11 +432,7 @@ impl BuddyObserver for GitPressureObserver {
         settings.observers.git_pressure
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let root = ctx.project_root.clone();
         let now = ctx.now;
         let facts_root = root.clone();

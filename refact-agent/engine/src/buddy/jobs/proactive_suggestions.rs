@@ -19,19 +19,11 @@ impl BuddyJob for ProactiveSuggestionsJob {
         true
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        _ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
         true
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         if ctx.job_state.run_count == 0 {
             return BuddyJobResult::default();
         }

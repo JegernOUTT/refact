@@ -99,9 +99,7 @@ pub async fn invalidate_slash_cache() {
     }
 }
 
-async fn load_slash_commands_and_skills(
-    app: AppState,
-) -> (Vec<SlashCommand>, Vec<SkillIndex>) {
+async fn load_slash_commands_and_skills(app: AppState) -> (Vec<SlashCommand>, Vec<SkillIndex>) {
     let current_gen = app
         .integrations
         .ext_cache_generation
@@ -555,9 +553,12 @@ pub async fn handle_v1_at_command_execute(
 
     if !post.chat_id.is_empty() && any_context_produced {
         let sessions = global_context.chat_sessions.clone();
-        let session_arc =
-            get_or_create_session_with_trajectory(AppState::from_gcx(global_context.clone()).await, &sessions, &post.chat_id)
-                .await;
+        let session_arc = get_or_create_session_with_trajectory(
+            AppState::from_gcx(global_context.clone()).await,
+            &sessions,
+            &post.chat_id,
+        )
+        .await;
         let mut session = session_arc.lock().await;
         let original_len = post.messages.len();
         for msg in messages.iter().skip(original_len) {

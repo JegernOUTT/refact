@@ -85,7 +85,11 @@ async fn apply_subchat_reactive_compaction(
     attempt: usize,
     preserve_last_message: bool,
 ) {
-    let last = if preserve_last_message { messages.pop() } else { None };
+    let last = if preserve_last_message {
+        messages.pop()
+    } else {
+        None
+    };
     let report = tier0_deterministic_compact(messages, 0);
     append_ui_only_reactive_compaction_diagnostics(messages, error, &report, attempt);
     if let Some(msg) = last {
@@ -677,10 +681,7 @@ pub async fn resolve_subchat_config(
     .await
 }
 
-async fn parent_thread_worktree(
-    gcx: Arc<GlobalContext>,
-    parent_id: &str,
-) -> Option<WorktreeMeta> {
+async fn parent_thread_worktree(gcx: Arc<GlobalContext>, parent_id: &str) -> Option<WorktreeMeta> {
     let sessions = { gcx.chat_sessions.clone() };
     let session_arc = {
         let sessions_read = sessions.read().await;
@@ -875,10 +876,7 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
     }
 }
 
-async fn resolve_subagent_autonomous_no_confirm(
-    gcx: Arc<GlobalContext>,
-    tool_name: &str,
-) -> bool {
+async fn resolve_subagent_autonomous_no_confirm(gcx: Arc<GlobalContext>, tool_name: &str) -> bool {
     crate::yaml_configs::customization_registry::get_subagent_config(gcx, tool_name, None)
         .await
         .and_then(|config| config.subchat.autonomous_no_confirm)
@@ -970,7 +968,10 @@ pub async fn run_subchat(
         let mut thread = stateful_thread_from_config(&chat_id, &config);
         register_stateful_subchat_worktree(gcx.clone(), &chat_id, &mut thread).await;
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
-    } else if current_messages.iter().any(crate::chat::diagnostics::is_ui_only_message) {
+    } else if current_messages
+        .iter()
+        .any(crate::chat::diagnostics::is_ui_only_message)
+    {
         let thread = stateful_thread_from_config(&chat_id, &config);
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
     }
@@ -1653,8 +1654,12 @@ async fn subchat_stream(
 
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
-        let mut attempt_result =
-            run_llm_stream(AppState::from_gcx(gcx.clone()).await, params, &mut collector).await;
+        let mut attempt_result = run_llm_stream(
+            AppState::from_gcx(gcx.clone()).await,
+            params,
+            &mut collector,
+        )
+        .await;
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
 
@@ -1945,7 +1950,9 @@ mod subchat_tests {
     };
     use crate::chat::diagnostics::is_ui_only_message;
     use crate::chat::trajectories::save_trajectory_as;
-    use crate::call_validation::{ChatContent, ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters};
+    use crate::call_validation::{
+        ChatContent, ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters,
+    };
     use crate::chat::types::{TaskMeta, ThreadParams};
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
@@ -2053,10 +2060,7 @@ mod subchat_tests {
         )
     }
 
-    async fn install_caps(
-        gcx: Arc<crate::global_context::GlobalContext>,
-        caps: CodeAssistantCaps,
-    ) {
+    async fn install_caps(gcx: Arc<crate::global_context::GlobalContext>, caps: CodeAssistantCaps) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2113,8 +2117,13 @@ mod subchat_tests {
         )
         .await;
 
-        assert_eq!(messages.last().unwrap().content.content_text_only(), "wrap up");
-        assert!(messages.iter().any(|message| message.role == "error" && is_ui_only_message(message)));
+        assert_eq!(
+            messages.last().unwrap().content.content_text_only(),
+            "wrap up"
+        );
+        assert!(messages
+            .iter()
+            .any(|message| message.role == "error" && is_ui_only_message(message)));
         assert!(messages.iter().any(|message| {
             message.role == "summarization"
                 && message.summarization_tier.as_deref() == Some("tier2_reactive")
@@ -2149,7 +2158,10 @@ mod subchat_tests {
 
         let first = rx.try_recv().unwrap();
         let second = rx.try_recv().unwrap();
-        assert_eq!(first.get("tool_call_id").and_then(|v| v.as_str()), Some("call_1"));
+        assert_eq!(
+            first.get("tool_call_id").and_then(|v| v.as_str()),
+            Some("call_1")
+        );
         assert!(first
             .get("subchat_id")
             .and_then(|v| v.as_str())
@@ -2357,7 +2369,11 @@ mod subchat_tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
@@ -2396,7 +2412,11 @@ mod subchat_tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
@@ -2441,7 +2461,11 @@ mod subchat_tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         let service = crate::worktrees::service::WorktreeService::new(cache, source).unwrap();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest {

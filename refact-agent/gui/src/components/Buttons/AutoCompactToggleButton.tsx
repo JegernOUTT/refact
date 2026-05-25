@@ -69,7 +69,10 @@ export const AutoCompactToggleButton = ({
           {label}
         </Text>
         <Text as="p" size="1" color="gray">
-          Automatically compacts chat context when it grows too large.
+          When on: summarizes older messages as the chat grows, and runs an
+          emergency compaction if the provider returns a context-length error.
+          When off: both behaviors are disabled and you handle compaction
+          manually.
         </Text>
       </HoverCard.Content>
     </HoverCard.Root>

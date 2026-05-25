@@ -213,68 +213,64 @@ impl OpenAICodexProvider {
     ) -> Result<(), String> {
         let tokens = self.oauth_tokens.clone();
         let session_id = self.session_id.clone();
-        crate::config_store::update_provider_config(
-            config_dir,
-            instance_id,
-            |existing| {
-                let mut yaml_map = match existing {
-                    Some(value) => value.as_mapping().cloned().ok_or_else(|| {
-                        "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
-                    })?,
-                    None => serde_yaml::Mapping::new(),
-                };
+        crate::config_store::update_provider_config(config_dir, instance_id, |existing| {
+            let mut yaml_map = match existing {
+                Some(value) => value.as_mapping().cloned().ok_or_else(|| {
+                    "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
+                })?,
+                None => serde_yaml::Mapping::new(),
+            };
 
-                let mut tokens_map = yaml_map
-                    .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
-                    .and_then(|v| v.as_mapping())
-                    .cloned()
-                    .unwrap_or_default();
+            let mut tokens_map = yaml_map
+                .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
+                .and_then(|v| v.as_mapping())
+                .cloned()
+                .unwrap_or_default();
 
-                tokens_map.insert(
-                    serde_yaml::Value::String("access_token".to_string()),
-                    serde_yaml::Value::String(tokens.access_token),
-                );
-                tokens_map.insert(
-                    serde_yaml::Value::String("refresh_token".to_string()),
-                    serde_yaml::Value::String(tokens.refresh_token),
-                );
-                tokens_map.insert(
-                    serde_yaml::Value::String("expires_at".to_string()),
-                    serde_yaml::Value::Number(serde_yaml::Number::from(tokens.expires_at)),
-                );
-                tokens_map.insert(
-                    serde_yaml::Value::String("openai_api_key".to_string()),
-                    serde_yaml::Value::String(tokens.openai_api_key.clone()),
-                );
-                tokens_map.insert(
-                    serde_yaml::Value::String("chatgpt_account_id".to_string()),
-                    serde_yaml::Value::String(tokens.chatgpt_account_id),
-                );
-                tokens_map.insert(
-                    serde_yaml::Value::String("api_key_exchange_error".to_string()),
-                    serde_yaml::Value::String(tokens.api_key_exchange_error),
-                );
+            tokens_map.insert(
+                serde_yaml::Value::String("access_token".to_string()),
+                serde_yaml::Value::String(tokens.access_token),
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("refresh_token".to_string()),
+                serde_yaml::Value::String(tokens.refresh_token),
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("expires_at".to_string()),
+                serde_yaml::Value::Number(serde_yaml::Number::from(tokens.expires_at)),
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("openai_api_key".to_string()),
+                serde_yaml::Value::String(tokens.openai_api_key.clone()),
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("chatgpt_account_id".to_string()),
+                serde_yaml::Value::String(tokens.chatgpt_account_id),
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("api_key_exchange_error".to_string()),
+                serde_yaml::Value::String(tokens.api_key_exchange_error),
+            );
 
+            yaml_map.insert(
+                serde_yaml::Value::String("oauth_tokens".to_string()),
+                serde_yaml::Value::Mapping(tokens_map),
+            );
+            if tokens.openai_api_key.is_empty() {
+                yaml_map.remove(serde_yaml::Value::String("OPENAI_API_KEY".to_string()));
+            } else {
                 yaml_map.insert(
-                    serde_yaml::Value::String("oauth_tokens".to_string()),
-                    serde_yaml::Value::Mapping(tokens_map),
+                    serde_yaml::Value::String("OPENAI_API_KEY".to_string()),
+                    serde_yaml::Value::String(tokens.openai_api_key),
                 );
-                if tokens.openai_api_key.is_empty() {
-                    yaml_map.remove(serde_yaml::Value::String("OPENAI_API_KEY".to_string()));
-                } else {
-                    yaml_map.insert(
-                        serde_yaml::Value::String("OPENAI_API_KEY".to_string()),
-                        serde_yaml::Value::String(tokens.openai_api_key),
-                    );
-                }
-                yaml_map.insert(
-                    serde_yaml::Value::String("session_id".to_string()),
-                    serde_yaml::Value::String(session_id),
-                );
+            }
+            yaml_map.insert(
+                serde_yaml::Value::String("session_id".to_string()),
+                serde_yaml::Value::String(session_id),
+            );
 
-                Ok(serde_yaml::Value::Mapping(yaml_map))
-            },
-        )
+            Ok(serde_yaml::Value::Mapping(yaml_map))
+        })
         .await
         .map(|_| ())
     }
@@ -386,10 +382,7 @@ impl OpenAICodexProvider {
         Ok(Self::parse_usage_payload(&root))
     }
 
-    pub fn usage_request_error_to_string(
-        error: UsageRequestError,
-        source: AuthSource,
-    ) -> String {
+    pub fn usage_request_error_to_string(error: UsageRequestError, source: AuthSource) -> String {
         match error {
             UsageRequestError::Status(status, body) => {
                 let truncated: String = body.chars().take(512).collect();
@@ -1160,9 +1153,7 @@ impl OpenAICodexProvider {
         true
     }
 
-    pub fn codex_cli_unmanaged_refresh_message(
-        rejected_access_token: &str,
-    ) -> Option<String> {
+    pub fn codex_cli_unmanaged_refresh_message(rejected_access_token: &str) -> Option<String> {
         if rejected_access_token.is_empty() {
             return None;
         }

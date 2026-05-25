@@ -34,9 +34,20 @@ impl TrajectoryFileSplitter {
         let trajectory: Value = serde_json::from_str(text)
             .map_err(|e| format!("Failed to parse trajectory JSON: {}", e))?;
 
-        let trajectory_id = trajectory.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let title = trajectory.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
-        let messages = trajectory.get("messages").and_then(|v| v.as_array()).ok_or("No messages array")?;
+        let trajectory_id = trajectory
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let title = trajectory
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Untitled")
+            .to_string();
+        let messages = trajectory
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .ok_or("No messages array")?;
 
         let extracted = self.extract_messages(messages);
         if extracted.is_empty() {
@@ -45,7 +56,12 @@ impl TrajectoryFileSplitter {
 
         let mut results = Vec::new();
 
-        let metadata_text = format!("Trajectory: {}\nTitle: {}\nMessages: {}", trajectory_id, title, extracted.len());
+        let metadata_text = format!(
+            "Trajectory: {}\nTitle: {}\nMessages: {}",
+            trajectory_id,
+            title,
+            extracted.len()
+        );
         results.push(SplitResult {
             file_path: path.clone(),
             window_text: metadata_text.clone(),
@@ -62,7 +78,10 @@ impl TrajectoryFileSplitter {
                 window_text_hash: official_text_hashing_function(&chunk.text),
                 start_line: chunk.start_msg as u64,
                 end_line: chunk.end_msg as u64,
-                symbol_path: format!("traj:{}:msg:{}-{}", trajectory_id, chunk.start_msg, chunk.end_msg),
+                symbol_path: format!(
+                    "traj:{}:msg:{}-{}",
+                    trajectory_id, chunk.start_msg, chunk.end_msg
+                ),
             });
         }
 
@@ -74,7 +93,11 @@ impl TrajectoryFileSplitter {
             .iter()
             .enumerate()
             .filter_map(|(idx, msg)| {
-                let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                let role = msg
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
                 if role == "context_file" || role == "cd_instruction" || role == "system" {
                     return None;
                 }
@@ -93,7 +116,11 @@ impl TrajectoryFileSplitter {
                 } else {
                     content
                 };
-                Some(ExtractedMessage { index: idx, role, content: truncated })
+                Some(ExtractedMessage {
+                    index: idx,
+                    role,
+                    content: truncated,
+                })
             })
             .collect()
     }
@@ -106,7 +133,8 @@ impl TrajectoryFileSplitter {
             return content_arr
                 .iter()
                 .filter_map(|item| {
-                    item.get("text").and_then(|t| t.as_str())
+                    item.get("text")
+                        .and_then(|t| t.as_str())
                         .or_else(|| item.get("m_content").and_then(|t| t.as_str()))
                 })
                 .collect::<Vec<_>>()
@@ -116,7 +144,9 @@ impl TrajectoryFileSplitter {
             let names: Vec<_> = tool_calls
                 .iter()
                 .filter_map(|tc| {
-                    tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str())
+                    tc.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
                 })
                 .map(|s| format!("[tool: {}]", s))
                 .collect();

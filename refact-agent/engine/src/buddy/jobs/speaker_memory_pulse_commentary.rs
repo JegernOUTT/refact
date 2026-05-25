@@ -19,22 +19,14 @@ impl BuddyJob for SpeakerMemoryPulseCommentaryJob {
         20
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.pulse.memory.total > 0
             || ctx.pulse.memory.pending_ops > 0
             || ctx.pulse.memory.duplicate_candidates > 0
             || ctx.pulse.memory.stale_conflicts > 0
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let summary = memory_summary(&ctx);
         let voice = voice_service().await;
         let speech = voice

@@ -46,9 +46,7 @@ pub async fn handle_v1_code_completion(
     );
     code_completion_post.parameters.temperature =
         Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
-    let cache_arc = {
-        gcx.completions_cache.clone()
-    };
+    let cache_arc = { gcx.completions_cache.clone() };
     if !code_completion_post.no_cache {
         let cache_key = completion_cache::cache_key_from_post(&code_completion_post);
         let cached_maybe = completion_cache::cache_get(cache_arc.clone(), cache_key.clone());
@@ -143,9 +141,7 @@ pub async fn handle_v1_code_completion_prompt(
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
 
     // don't need cache, but go along
-    let cache_arc = {
-        gcx.completions_cache.clone()
-    };
+    let cache_arc = { gcx.completions_cache.clone() };
 
     let ast_service_opt = gcx.ast_service.lock().unwrap().clone();
     let mut scratchpad = scratchpads::create_code_completion_scratchpad(

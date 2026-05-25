@@ -214,9 +214,7 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
     let messages = session
         .messages
         .iter()
-        .filter(|message| {
-            message.role != "assistant" || has_displayable_assistant_content(message)
-        })
+        .filter(|message| message.role != "assistant" || has_displayable_assistant_content(message))
         .cloned()
         .collect();
 
@@ -287,18 +285,14 @@ pub async fn get_all_trajectories_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> 
     dirs
 }
 
-async fn get_all_trajectories_dirs_from_weak(
-    gcx_weak: &Weak<GlobalContext>,
-) -> Vec<PathBuf> {
+async fn get_all_trajectories_dirs_from_weak(gcx_weak: &Weak<GlobalContext>) -> Vec<PathBuf> {
     match gcx_weak.upgrade() {
         Some(gcx) => get_all_trajectories_dirs(gcx).await,
         None => vec![],
     }
 }
 
-pub async fn get_buddy_conversations_dir(
-    gcx: Arc<GlobalContext>,
-) -> Result<PathBuf, String> {
+pub async fn get_buddy_conversations_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
     Ok(workspace_root.join(".refact/buddy/chats/conversations"))
@@ -316,10 +310,7 @@ fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
     }
 }
 
-pub async fn find_trajectory_path(
-    gcx: Arc<GlobalContext>,
-    chat_id: &str,
-) -> Option<PathBuf> {
+pub async fn find_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Option<PathBuf> {
     if let Ok(buddy_dir) = get_buddy_conversations_dir(gcx.clone()).await {
         let buddy_path = buddy_dir.join(format!("{}.json", chat_id));
         if buddy_path.exists() {
@@ -1130,10 +1121,7 @@ pub async fn save_trajectory_snapshot(
     Ok(())
 }
 
-pub async fn maybe_save_trajectory(
-    app: AppState,
-    session_arc: Arc<AMutex<ChatSession>>,
-) {
+pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
     let snapshot = {
         let session = session_arc.lock().await;
         if !session.trajectory_dirty {
@@ -1195,11 +1183,7 @@ pub async fn check_external_reload_pending(
     }
 }
 
-async fn process_trajectory_change(
-    gcx: Arc<GlobalContext>,
-    chat_id: &str,
-    is_remove: bool,
-) {
+async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_remove: bool) {
     let app = AppState::from_gcx(gcx.clone()).await;
     let sessions = app.chat.sessions.clone();
     if is_remove {
@@ -2280,10 +2264,7 @@ fn decode_cursor(cursor: &str) -> Option<(String, String)> {
     }
 }
 
-async fn trajectory_data_to_meta_validated(
-    app: AppState,
-    data: &TrajectoryData,
-) -> TrajectoryMeta {
+async fn trajectory_data_to_meta_validated(app: AppState, data: &TrajectoryData) -> TrajectoryMeta {
     let mut meta = trajectory_data_to_meta(data);
     if let Some(worktree) = trajectory_worktree_from_extra(&data.extra) {
         meta.worktree = validate_loaded_worktree_strict(app, &data.id, worktree).await;
@@ -3605,8 +3586,11 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
         }
         let chat_id = "malformed-worktree-save";
         let payload = json!({
@@ -3707,7 +3691,11 @@ mod tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
@@ -3790,8 +3778,11 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
         }
 
         fn snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
@@ -3880,7 +3871,11 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(
-            first.file_name().and_then(|name| name.to_str()).unwrap().len(),
+            first
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap()
+                .len(),
             22
         );
         assert!(first
@@ -3933,8 +3928,11 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx.clone()).await;
         {
-            *app.workspace.documents_state.workspace_folders.lock().unwrap() =
-                vec![dir.path().to_path_buf()];
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
         }
         let traj_dir = dir.path().join(".refact").join("trajectories");
         tokio::fs::create_dir_all(&traj_dir).await.unwrap();
@@ -3956,7 +3954,11 @@ mod tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
@@ -4009,7 +4011,11 @@ mod tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }
@@ -4144,7 +4150,11 @@ mod tests {
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache.clone(), std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()))).await;
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            cache.clone(),
+            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        )
+        .await;
         {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         }

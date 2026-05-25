@@ -513,23 +513,13 @@ pub async fn handle_sidebar_subscribe(
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     let (trajectory_rx, workspace_changed_rx, task_rx, notification_rx, buddy_rx, seq_counter) = {
+        let trajectory_rx = gcx.trajectory_events_tx.as_ref().map(|tx| tx.subscribe());
 
-        let trajectory_rx = gcx
-            .trajectory_events_tx
-            .as_ref()
-            .map(|tx| tx.subscribe());
-
-        let workspace_changed_rx = gcx
-            .workspace_changed_tx
-            .as_ref()
-            .map(|tx| tx.subscribe());
+        let workspace_changed_rx = gcx.workspace_changed_tx.as_ref().map(|tx| tx.subscribe());
 
         let task_rx = gcx.task_events_tx.as_ref().map(|tx| tx.subscribe());
 
-        let notification_rx = gcx
-            .notification_events_tx
-            .as_ref()
-            .map(|tx| tx.subscribe());
+        let notification_rx = gcx.notification_events_tx.as_ref().map(|tx| tx.subscribe());
 
         let buddy_rx = gcx.buddy_events_tx.as_ref().map(|tx| tx.subscribe());
 

@@ -71,9 +71,7 @@ pub async fn index_mcp_resources(
         None => return,
     };
 
-    let (cache_dir, vec_db) = {
-        (gcx.cache_dir.clone(), gcx.vec_db.clone())
-    };
+    let (cache_dir, vec_db) = { (gcx.cache_dir.clone(), gcx.vec_db.clone()) };
 
     if vec_db.lock().await.is_none() {
         return;
@@ -194,9 +192,7 @@ pub async fn remove_indexed_resources(gcx_weak: Weak<GlobalContext>, config_path
         None => return,
     };
 
-    let (cache_dir, vec_db) = {
-        (gcx.cache_dir.clone(), gcx.vec_db.clone())
-    };
+    let (cache_dir, vec_db) = { (gcx.cache_dir.clone(), gcx.vec_db.clone()) };
 
     let server_name = server_name_for_path(&config_path);
     let resources_dir = cache_dir.join("mcp_resources").join(&server_name);

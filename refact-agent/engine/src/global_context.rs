@@ -233,7 +233,8 @@ pub struct GlobalContext {
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
     pub privacy_settings: Arc<StdRwLock<Arc<PrivacySettings>>>,
     pub indexing_everywhere: Arc<crate::files_blocklist::IndexingEverywhere>,
-    pub integration_sessions: Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
+    pub integration_sessions:
+        Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
     pub browser_runtimes: Arc<AMutex<HashMap<String, Arc<AMutex<BrowserRuntime>>>>>,
     pub codelens_cache: Arc<AMutex<crate::http::routers::v1::code_lens::CodeLensCache>>,
     pub init_shadow_repos_background_task_holder: BackgroundTasksHolder,
@@ -253,7 +254,8 @@ pub struct GlobalContext {
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
     pub providers: Arc<ARwLock<ProviderRegistry>>,
     pub knowledge_index: Arc<AMutex<KnowledgeIndex>>,
-    pub llm_stats_sender: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<crate::stats::event::LlmCallEvent>>>>,
+    pub llm_stats_sender:
+        Arc<StdMutex<Option<tokio::sync::mpsc::Sender<crate::stats::event::LlmCallEvent>>>>,
     pub ext_cache_generation: Arc<std::sync::atomic::AtomicU64>,
     pub buddy: Arc<AMutex<Option<crate::buddy::actor::BuddyService>>>,
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
@@ -455,9 +457,7 @@ pub async fn try_load_caps_quickly_if_not_present(
     max_age_seconds: u64,
 ) -> Result<Arc<CodeAssistantCaps>, ScratchError> {
     let cmdline = CommandLine::from_args(); // XXX make it Arc and don't reload all the time
-    let (caps_state, config_dir) = {
-        (gcx.caps_state.clone(), gcx.config_dir.clone())
-    };
+    let (caps_state, config_dir) = { (gcx.caps_state.clone(), gcx.config_dir.clone()) };
     let caps_reading_lock = caps_state.read().await.reading_lock.clone();
 
     let now = std::time::SystemTime::now()
@@ -725,7 +725,10 @@ pub mod tests {
         make_test_gcx_with_dirs(cache_dir, config_dir).await
     }
 
-    pub async fn make_test_gcx_with_dirs(cache_dir: PathBuf, config_dir: PathBuf) -> Arc<GlobalContext> {
+    pub async fn make_test_gcx_with_dirs(
+        cache_dir: PathBuf,
+        config_dir: PathBuf,
+    ) -> Arc<GlobalContext> {
         let (ask_shutdown_sender, _) = std::sync::mpsc::channel::<String>();
 
         let _ = std::fs::create_dir_all(&cache_dir);

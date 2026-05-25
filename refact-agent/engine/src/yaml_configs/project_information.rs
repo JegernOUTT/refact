@@ -15,9 +15,7 @@ async fn get_config_path(gcx: Arc<GlobalContext>) -> Option<PathBuf> {
         .map(|d| d.join(".refact").join("project_information.yaml"))
 }
 
-pub async fn load_project_information_config(
-    gcx: Arc<GlobalContext>,
-) -> ProjectInformationConfig {
+pub async fn load_project_information_config(gcx: Arc<GlobalContext>) -> ProjectInformationConfig {
     let Some(path) = get_config_path(gcx.clone()).await else {
         return ProjectInformationConfig::default();
     };
@@ -56,9 +54,7 @@ pub async fn save_project_information_config(
     Ok(())
 }
 
-pub async fn ensure_default_config_exists(
-    gcx: Arc<GlobalContext>,
-) -> std::io::Result<bool> {
+pub async fn ensure_default_config_exists(gcx: Arc<GlobalContext>) -> std::io::Result<bool> {
     let Some(path) = get_config_path(gcx.clone()).await else {
         return Ok(false);
     };

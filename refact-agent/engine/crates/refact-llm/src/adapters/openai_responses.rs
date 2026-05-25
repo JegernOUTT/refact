@@ -60,11 +60,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         );
 
         insert_extra_headers(&mut headers, &settings.extra_headers);
-        crate::provider_quirks::apply_github_copilot_request_headers(
-            &mut headers,
-            req,
-            settings,
-        );
+        crate::provider_quirks::apply_github_copilot_request_headers(&mut headers, req, settings);
 
         let (input, instructions) = convert_to_responses_format(&req.messages);
         let mut body = json!({

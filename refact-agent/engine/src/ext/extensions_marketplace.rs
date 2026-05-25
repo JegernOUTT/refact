@@ -1417,7 +1417,8 @@ pub async fn installed_scopes_by_kind(
             let config_dir = app.paths.config_dir.clone();
             let locals = get_project_dirs(app.gcx.clone()).await;
             if let Some(registry) =
-                crate::yaml_configs::customization_registry::get_project_registry(app.gcx.clone()).await
+                crate::yaml_configs::customization_registry::get_project_registry(app.gcx.clone())
+                    .await
             {
                 for (id, _cfg) in registry.subagents {
                     let global_path = config_dir.join("subagents").join(format!("{}.yaml", id));
@@ -1472,10 +1473,7 @@ pub async fn resolve_marketplace_item(
     Ok(ResolvedMarketplaceItem { item, abs_path })
 }
 
-async fn resolve_scope_dir(
-    app: AppState,
-    scope: &str,
-) -> Result<(PathBuf, String), String> {
+async fn resolve_scope_dir(app: AppState, scope: &str) -> Result<(PathBuf, String), String> {
     let config_dir = app.paths.config_dir.clone();
     let project_root = get_project_dirs(app.gcx.clone()).await.into_iter().next();
     match scope {

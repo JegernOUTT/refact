@@ -23,13 +23,15 @@ pub async fn create_code_completion_scratchpad(
     cache_arc: Arc<StdRwLock<completion_cache::CompletionCache>>,
     ast_module: Option<Arc<AMutex<AstIndexService>>>,
 ) -> Result<Box<dyn ScratchpadAbstract>, String> {
-    let tokenizer = crate::tokens::cached_tokenizer(global_context.clone(), &model_rec.base).await?;
+    let tokenizer =
+        crate::tokens::cached_tokenizer(global_context.clone(), &model_rec.base).await?;
     let ast_index = match ast_module {
         Some(ast) => Some(ast.lock().await.ast_index.clone()),
         None => None,
     };
-    let pp_context = Arc::new(crate::postprocessing::gcx_pp_context::GcxPPContext(global_context.clone()))
-        as Arc<dyn refact_postprocessing::pp_context_provider::PPContextTrait>;
+    let pp_context = Arc::new(crate::postprocessing::gcx_pp_context::GcxPPContext(
+        global_context.clone(),
+    )) as Arc<dyn refact_postprocessing::pp_context_provider::PPContextTrait>;
     let project_dirs = crate::files_correction::get_project_dirs(global_context.clone()).await;
     refact_scratchpads::create_code_completion_scratchpad(
         tokenizer,

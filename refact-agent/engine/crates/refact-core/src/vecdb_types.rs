@@ -7,7 +7,11 @@ use async_trait::async_trait;
 
 use crate::llm_types::EmbeddingModelRecord;
 
-pub type FileReader = Arc<dyn Fn(PathBuf) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync>;
+pub type FileReader = Arc<
+    dyn Fn(PathBuf) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[async_trait]
 pub trait VecdbSearch: Send + Sync {

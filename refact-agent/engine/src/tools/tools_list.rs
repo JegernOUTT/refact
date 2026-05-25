@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::integrations::running_integrations::load_integrations;
 use crate::yaml_configs::customization_registry::get_project_registry;
@@ -115,11 +114,7 @@ async fn tool_available_from_gcx(
     let (ast_on, vecdb_on, allow_experimental) = {
         let vecdb_on = gcx.vec_db.lock().await.is_some();
         let ast_on = gcx.ast_service.lock().unwrap().is_some();
-        (
-            ast_on,
-            vecdb_on,
-            gcx.cmdline.experimental,
-        )
+        (ast_on, vecdb_on, gcx.cmdline.experimental)
     };
 
     let is_there_a_thinking_model = match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await

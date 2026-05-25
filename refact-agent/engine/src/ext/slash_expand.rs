@@ -204,7 +204,10 @@ pub async fn expand_slash_command(
         return Ok(None);
     }
     let ext_dirs = get_ext_dirs(app.clone()).await;
-    let generation = app.integrations.ext_cache_generation.load(Ordering::Relaxed);
+    let generation = app
+        .integrations
+        .ext_cache_generation
+        .load(Ordering::Relaxed);
     let lock = SLASH_CACHE.get_or_init(|| tokio::sync::RwLock::new(None));
     let (commands, skill_indices) = {
         let read = lock.read().await;

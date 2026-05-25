@@ -17,8 +17,10 @@ pub trait HttpClientAccess: Send + Sync {
     fn http_client(&self) -> reqwest::Client;
 }
 
-pub const PRIVACY_ACCESS_FOLLOW_UP: &str = "PrivacyAccess is left for follow-up because PrivacySettings still lives in the engine crate.";
-pub const CAPS_ACCESS_FOLLOW_UP: &str = "CapsAccess is left for follow-up because CodeAssistantCaps still lives in the engine crate.";
+pub const PRIVACY_ACCESS_FOLLOW_UP: &str =
+    "PrivacyAccess is left for follow-up because PrivacySettings still lives in the engine crate.";
+pub const CAPS_ACCESS_FOLLOW_UP: &str =
+    "CapsAccess is left for follow-up because CodeAssistantCaps still lives in the engine crate.";
 
 pub fn omitted_traits_follow_up_notes() -> [&'static str; 2] {
     [PRIVACY_ACCESS_FOLLOW_UP, CAPS_ACCESS_FOLLOW_UP]

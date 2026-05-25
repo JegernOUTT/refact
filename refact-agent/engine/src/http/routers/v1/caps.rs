@@ -8,9 +8,7 @@ use crate::caps::model_caps;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 
-pub async fn handle_v1_ping(
-    State(app): State<AppState>,
-) -> Response<Body> {
+pub async fn handle_v1_ping(State(app): State<AppState>) -> Response<Body> {
     let gcx = app.gcx.clone();
     let ping_message: String = gcx.cmdline.ping_message.clone();
     Response::builder()
@@ -19,9 +17,7 @@ pub async fn handle_v1_ping(
         .unwrap()
 }
 
-pub async fn handle_v1_caps(
-    State(app): State<AppState>,
-) -> Result<Response<Body>, ScratchError> {
+pub async fn handle_v1_caps(State(app): State<AppState>) -> Result<Response<Body>, ScratchError> {
     let global_context = app.gcx.clone();
     let caps_result =
         crate::global_context::try_load_caps_quickly_if_not_present(global_context.clone(), 0)

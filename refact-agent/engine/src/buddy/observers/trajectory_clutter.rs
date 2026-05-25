@@ -119,11 +119,7 @@ impl BuddyObserver for TrajectoryClutterObserver {
         settings.observers.trajectory_clutter
     }
 
-    async fn observe(
-        &self,
-        gcx: AppState,
-        ctx: &ObserverContext,
-    ) -> Vec<BuddyFact> {
+    async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
         let traj_dir = ctx.project_root.join(".refact").join("trajectories");
         if !traj_dir.exists() {
             return vec![];

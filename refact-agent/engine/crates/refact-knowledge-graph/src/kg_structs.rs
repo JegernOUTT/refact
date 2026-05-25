@@ -5,8 +5,6 @@ use petgraph::graph::{DiGraph, NodeIndex};
 
 pub use refact_core::knowledge_frontmatter::KnowledgeFrontmatter;
 
-
-
 #[derive(Debug, Clone)]
 pub struct KnowledgeDoc {
     pub path: PathBuf,

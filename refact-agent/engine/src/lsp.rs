@@ -179,9 +179,7 @@ impl LspBackend {
             &params.text_document_position.text_document.uri,
             "text_document.uri",
         )?;
-        let memory_document_map = {
-            self.gcx.documents_state.memory_document_map.clone()
-        };
+        let memory_document_map = { self.gcx.documents_state.memory_document_map.clone() };
         let doc = memory_document_map
             .lock()
             .await
@@ -189,9 +187,12 @@ impl LspBackend {
             .cloned()
             .ok_or_else(|| internal_error("document not found"))?;
         let mut doc_snapshot = doc.write().await;
-        let txt = crate::files_in_workspace::get_document_text_or_read_from_disk(&mut doc_snapshot, self.gcx.clone())
-            .await
-            .map_err(internal_error)?;
+        let txt = crate::files_in_workspace::get_document_text_or_read_from_disk(
+            &mut doc_snapshot,
+            self.gcx.clone(),
+        )
+        .await
+        .map_err(internal_error)?;
         let path_string = path.to_string_lossy().to_string();
         Ok(CodeCompletionPost {
             inputs: CodeCompletionInputs {
@@ -247,9 +248,7 @@ impl LspBackend {
     }
 
     async fn ping_http_server(&self) -> Result<()> {
-        let (port, http_client) = {
-            (self.gcx.cmdline.http_port, self.gcx.http_client.clone())
-        };
+        let (port, http_client) = { (self.gcx.cmdline.http_port, self.gcx.http_client.clone()) };
 
         let url = "http://127.0.0.1:".to_string() + &port.to_string() + &"/v1/ping".to_string();
         let mut attempts = 0;
@@ -297,8 +296,7 @@ impl LanguageServer for LspBackend {
         }
         let folders = canonical_workspace_roots(&folders);
         let changed = {
-            let mut workspace_folders =
-                self.gcx.documents_state.workspace_folders.lock().unwrap();
+            let mut workspace_folders = self.gcx.documents_state.workspace_folders.lock().unwrap();
             if workspace_roots_changed(&workspace_folders, &folders) {
                 *workspace_folders = folders.clone();
                 info!("LSP workspace_folders {:?}", folders);
@@ -434,7 +432,8 @@ impl LanguageServer for LspBackend {
 
     async fn shutdown(&self) -> Result<()> {
         info!("shutdown");
-        self.gcx.ask_shutdown_sender
+        self.gcx
+            .ask_shutdown_sender
             .lock()
             .unwrap()
             .send("LSP SHUTDOWN".to_string())
@@ -473,8 +472,7 @@ impl LanguageServer for LspBackend {
             removed.push(path);
         }
         let changed = {
-            let mut workspace_folders =
-                self.gcx.documents_state.workspace_folders.lock().unwrap();
+            let mut workspace_folders = self.gcx.documents_state.workspace_folders.lock().unwrap();
             apply_workspace_root_changes(&mut workspace_folders, &added, &removed)
         };
         if changed {
@@ -669,9 +667,7 @@ mod tests {
     }
 }
 
-async fn build_lsp_service(
-    gcx: Arc<GlobalContext>,
-) -> (LspService<LspBackend>, ClientSocket) {
+async fn build_lsp_service(gcx: Arc<GlobalContext>) -> (LspService<LspBackend>, ClientSocket) {
     let (lsp_service, socket) = LspService::build(|client| LspBackend { gcx, client })
         .custom_method("refact/getCompletions", LspBackend::get_completions)
         .custom_method("refact/setActiveDocument", LspBackend::set_active_document)
@@ -695,7 +691,8 @@ pub async fn spawn_lsp_task(
                     addr,
                     listener_maybe.unwrap_err()
                 );
-                gcx_t.ask_shutdown_sender
+                gcx_t
+                    .ask_shutdown_sender
                     .lock()
                     .unwrap()
                     .send("LSP PORT_BUSY".to_string())

@@ -324,15 +324,29 @@ impl<'de> Deserialize<'de> for ChatMessage {
             Some(content_value) => {
                 let content_raw = chat_content_raw_from_value(content_value.clone())
                     .map_err(serde::de::Error::custom)?;
-                content_raw.to_internal_format().map_err(serde::de::Error::custom)?
+                content_raw
+                    .to_internal_format()
+                    .map_err(serde::de::Error::custom)?
             }
             None => ChatContent::SimpleText(String::new()),
         };
 
-        let message_id = obj.get("message_id").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        let finish_reason = obj.get("finish_reason").and_then(|x| x.as_str().map(|x| x.to_string()));
-        let reasoning_content = obj.get("reasoning_content").and_then(|x| x.as_str().map(|x| x.to_string()));
-        let tool_call_id = obj.get("tool_call_id").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+        let message_id = obj
+            .get("message_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let finish_reason = obj
+            .get("finish_reason")
+            .and_then(|x| x.as_str().map(|x| x.to_string()));
+        let reasoning_content = obj
+            .get("reasoning_content")
+            .and_then(|x| x.as_str().map(|x| x.to_string()));
+        let tool_call_id = obj
+            .get("tool_call_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
         let tool_failed = obj.get("tool_failed").and_then(|x| x.as_bool());
         let preserve = obj.get("preserve").and_then(|x| x.as_bool());
 
@@ -383,10 +397,23 @@ impl<'de> Deserialize<'de> for ChatMessage {
             .unwrap_or_default();
 
         const KNOWN_FIELDS: &[&str] = &[
-            "role", "content", "message_id", "finish_reason", "reasoning_content",
-            "tool_calls", "tool_call_id", "tool_failed", "preserve", "usage", "checkpoints",
-            "thinking_blocks", "citations", "server_content_blocks",
-            "summarized_range", "summarization_tier", "summarized_token_estimate",
+            "role",
+            "content",
+            "message_id",
+            "finish_reason",
+            "reasoning_content",
+            "tool_calls",
+            "tool_call_id",
+            "tool_failed",
+            "preserve",
+            "usage",
+            "checkpoints",
+            "thinking_blocks",
+            "citations",
+            "server_content_blocks",
+            "summarized_range",
+            "summarization_tier",
+            "summarized_token_estimate",
         ];
         let extra: serde_json::Map<String, Value> = obj
             .iter()
@@ -428,7 +455,6 @@ impl ChatMessage {
     }
 }
 
-
 fn default_gradient_type_value() -> i32 {
     -1
 }
@@ -460,7 +486,8 @@ pub fn normalize_file_name(name: String) -> String {
 
 impl<'de> Deserialize<'de> for ContextFile {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
         struct Raw {
@@ -536,7 +563,11 @@ impl ChatToolFunction {
         &self,
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, serde_json::Error> {
         let trimmed = self.arguments.trim();
-        let args_str = if trimmed.starts_with('{') { trimmed } else { "{}" };
+        let args_str = if trimmed.starts_with('{') {
+            trimmed
+        } else {
+            "{}"
+        };
         serde_json::from_str(args_str)
     }
 }

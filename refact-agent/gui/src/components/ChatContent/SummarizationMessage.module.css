@@ -1,0 +1,136 @@
+.card {
+  margin: var(--space-1) 0;
+  border-radius: var(--radius-2);
+  overflow: hidden;
+  border: 1px solid var(--gray-a5);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--gray-a3);
+  cursor: pointer;
+  user-select: none;
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tierBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-1);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  background: var(--accent-3);
+  color: var(--accent-11);
+}
+
+.tierBadgeTier0 {
+  background: var(--blue-3);
+  color: var(--blue-11);
+}
+
+.tierBadgeTier1 {
+  background: var(--violet-3);
+  color: var(--violet-11);
+}
+
+.tierBadgeTier1Merged {
+  background: var(--indigo-3);
+  color: var(--indigo-11);
+}
+
+.tierBadgeTier2 {
+  background: var(--amber-3);
+  color: var(--amber-11);
+}
+
+.rangeLabel {
+  color: var(--gray-11);
+  font-size: 12px;
+}
+
+.tokenLabel {
+  color: var(--gray-10);
+  font-size: 12px;
+}
+
+.toggle {
+  margin-left: auto;
+  color: var(--gray-10);
+  font-size: 11px;
+}
+
+.body {
+  padding: var(--space-2) var(--space-3);
+  background: var(--gray-a2);
+  font-size: 12px;
+  color: var(--gray-12);
+}
+
+.body p {
+  margin: var(--space-1) 0;
+}
+
+.body h1,
+.body h2,
+.body h3,
+.body h4 {
+  margin: var(--space-2) 0 var(--space-1) 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gray-12);
+}
+
+.body ul {
+  margin: var(--space-1) 0;
+  padding-left: var(--space-4);
+}
+
+.body code {
+  font-size: 11px;
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--gray-a4);
+}
+
+.statCell {
+  display: flex;
+  flex-direction: column;
+}
+
+.statLabel {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--gray-10);
+}
+
+.statValue {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gray-12);
+  font-variant-numeric: tabular-nums;
+}

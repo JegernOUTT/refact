@@ -60,7 +60,10 @@ pub fn format_tier0_compaction_report(report: &Tier0CompactReport, attempt: usiz
             "- Context file entries deduplicated: {}",
             report.context_files_deduped,
         ),
-        format!("- Tool outputs truncated: {}", report.tool_outputs_truncated),
+        format!(
+            "- Tool outputs truncated: {}",
+            report.tool_outputs_truncated
+        ),
         format!("- Estimated tokens saved: {}", report.tokens_saved_estimate),
     )
 }
@@ -68,6 +71,7 @@ pub fn format_tier0_compaction_report(report: &Tier0CompactReport, attempt: usiz
 pub fn make_ui_only_compaction_report_message(
     report: &Tier0CompactReport,
     attempt: usize,
+    affected_range: Option<(usize, usize)>,
 ) -> ChatMessage {
     let mut extra = serde_json::Map::new();
     mark_ui_only(&mut extra);
@@ -78,6 +82,7 @@ pub fn make_ui_only_compaction_report_message(
         role: "summarization".to_string(),
         content: ChatContent::SimpleText(format_tier0_compaction_report(report, attempt)),
         summarization_tier: Some("tier2_reactive".to_string()),
+        summarized_range: affected_range,
         summarized_token_estimate: Some(report.tokens_saved_estimate),
         extra,
         ..Default::default()
@@ -90,8 +95,15 @@ pub fn append_ui_only_reactive_compaction_diagnostics(
     report: &Tier0CompactReport,
     attempt: usize,
 ) {
+    let range = if messages.is_empty() {
+        None
+    } else {
+        Some((0usize, messages.len().saturating_sub(1)))
+    };
     messages.push(make_ui_only_error_message(error));
-    messages.push(make_ui_only_compaction_report_message(report, attempt));
+    messages.push(make_ui_only_compaction_report_message(
+        report, attempt, range,
+    ));
 }
 
 #[cfg(test)]
@@ -117,13 +129,19 @@ mod tests {
             tool_outputs_truncated: 3,
             tokens_saved_estimate: 456,
         };
-        let message = make_ui_only_compaction_report_message(&report, 2);
+        let message = make_ui_only_compaction_report_message(&report, 2, Some((0, 9)));
 
         assert!(is_ui_only_message(&message));
         assert_eq!(message.role, "summarization");
-        assert_eq!(message.summarization_tier.as_deref(), Some("tier2_reactive"));
+        assert_eq!(
+            message.summarization_tier.as_deref(),
+            Some("tier2_reactive")
+        );
         assert_eq!(message.summarized_token_estimate, Some(456));
-        assert_eq!(message.extra.get("compaction_report"), Some(&Value::Bool(true)));
+        assert_eq!(
+            message.extra.get("compaction_report"),
+            Some(&Value::Bool(true))
+        );
         let content = message.content.content_text_only();
         assert!(content.contains("Attempt: 2"));
         assert!(content.contains("Context file entries deduplicated: 2"));

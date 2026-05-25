@@ -126,7 +126,6 @@ impl UserActivityRing {
         self.persisted_len.store(self.buf.len(), Ordering::SeqCst);
         Ok(())
     }
-
 }
 
 pub fn time_of_day_pattern(actions: &[UserAction]) -> String {

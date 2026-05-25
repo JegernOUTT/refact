@@ -20,19 +20,11 @@ impl BuddyJob for ErrorTriageJob {
         true
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.recent_diagnostics.len() >= 3
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for d in &ctx.recent_diagnostics {
             *counts.entry(d.error_type.clone()).or_default() += 1;

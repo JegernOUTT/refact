@@ -1085,7 +1085,8 @@ mod tests {
 
     #[test]
     fn test_parse_py_jump_to_conclusions() {
-        let code = include_str!("../../../../tests/emergency_frog_situation/jump_to_conclusions.py");
+        let code =
+            include_str!("../../../../tests/emergency_frog_situation/jump_to_conclusions.py");
         let annotated = py_parse4test(code);
         std::fs::write(
             "src/ast/alt_testsuite/jump_to_conclusions_annotated.py",

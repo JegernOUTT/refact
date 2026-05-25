@@ -700,12 +700,8 @@ impl Tool for ToolTaskAgentFinish {
         }
 
         if success {
-            schedule_card_verifier_after_finish(
-                gcx.clone(),
-                task_id.clone(),
-                card_id.clone(),
-            )
-            .await;
+            schedule_card_verifier_after_finish(gcx.clone(), task_id.clone(), card_id.clone())
+                .await;
         }
 
         if !success {

@@ -1,4 +1,3 @@
-
 use chrono::{Datelike, Timelike, Utc, Weekday};
 
 use crate::buddy::autonomous_workflows::{autonomous_workflow_meta, BUDDY_FRIDAY_RETRO_WORKFLOW_ID};
@@ -58,11 +57,7 @@ impl BuddyJob for BuddyFridayRetroJob {
         should_run_now(ctx)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         execute_autonomous_spec(gcx, &ctx, build_friday_retro_spec(&ctx)).await
     }
 }

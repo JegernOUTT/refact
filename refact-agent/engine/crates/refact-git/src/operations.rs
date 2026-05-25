@@ -109,8 +109,7 @@ pub struct GitHistoryReport {
 }
 
 fn canonical_path(path: PathBuf) -> PathBuf {
-    dunce::simplified(&path.canonicalize().unwrap_or_else(|_| path.clone()))
-        .to_path_buf()
+    dunce::simplified(&path.canonicalize().unwrap_or_else(|_| path.clone())).to_path_buf()
 }
 
 fn status_options(include_unmodified: bool, show: git2::StatusShow) -> git2::StatusOptions {

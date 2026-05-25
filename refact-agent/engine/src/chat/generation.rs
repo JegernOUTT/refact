@@ -36,10 +36,8 @@ use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
-use crate::chat::diagnostics::{
-    make_ui_only_compaction_report_message, make_ui_only_error_message,
-};
-use crate::chat::history_limit::tier0_deterministic_compact;
+use crate::chat::diagnostics::{make_ui_only_compaction_report_message, make_ui_only_error_message};
+use crate::chat::history_limit::{tier0_deterministic_compact_with, CompactAggression};
 use crate::chat::trajectory_ops::approx_token_count;
 
 const TOKEN_BUDGET_CADENCE: usize = 6;
@@ -540,6 +538,7 @@ pub fn start_generation(
         let mut network_retry_attempt = 0usize;
         let mut context_limit_compact_count = 0usize;
         let mut tier1_compact_count = 0usize;
+        let mut tier1_disabled_for_session = false;
         loop {
             let (mut thread, chat_id) = {
                 let session = session_arc.lock().await;
@@ -625,6 +624,7 @@ pub fn start_generation(
                 &session_arc,
                 &thread,
                 &mut tier1_compact_count,
+                &mut tier1_disabled_for_session,
             )
             .await;
 
@@ -703,11 +703,26 @@ pub fn start_generation(
                     continue;
                 }
                 if retry_decision.is_context_limit() && !abort_flag.load(Ordering::SeqCst) {
-                    if context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
+                    let auto_compact_enabled = {
+                        let session = session_arc.lock().await;
+                        session.thread.auto_compact_enabled.unwrap_or(true)
+                    };
+                    if !auto_compact_enabled {
+                        warn!(
+                            "Context limit error and auto_compact_enabled=false; surfacing error: {}",
+                            error.message
+                        );
+                    } else if context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
                         let original_error = error.message.clone();
                         context_limit_compact_count += 1;
+                        let aggression = if context_limit_compact_count >= 2 {
+                            CompactAggression::Aggressive
+                        } else {
+                            CompactAggression::Standard
+                        };
                         warn!(
-                            "Context limit error, applying Tier 0 compact attempt {}/{}: {}",
+                            "Context limit error, applying Tier 0 ({:?}) compact attempt {}/{}: {}",
+                            aggression,
                             context_limit_compact_count,
                             MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
                             original_error,
@@ -715,20 +730,31 @@ pub fn start_generation(
                         {
                             let mut session = session_arc.lock().await;
                             session.clear_stream_for_retry();
+                            let affected_range = if session.messages.is_empty() {
+                                None
+                            } else {
+                                Some((0usize, session.messages.len().saturating_sub(1)))
+                            };
                             session.add_message(make_ui_only_error_message(&original_error));
-                            let report = tier0_deterministic_compact(&mut session.messages, 0);
+                            let report = tier0_deterministic_compact_with(
+                                &mut session.messages,
+                                2,
+                                aggression,
+                            );
                             session.add_message(make_ui_only_compaction_report_message(
                                 &report,
                                 context_limit_compact_count,
+                                affected_range,
                             ));
                             session.cache_guard_force_next = true;
                         }
                         continue;
+                    } else {
+                        error.message = format!(
+                            "Context too large after {} compaction attempts. Original error: {}",
+                            context_limit_compact_count, error.message
+                        );
                     }
-                    error.message = format!(
-                        "Context too large after {} compaction attempts. Original error: {}",
-                        context_limit_compact_count, error.message
-                    );
                 }
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
@@ -2144,13 +2170,23 @@ mod tests {
         messages.push(make_ui_only_error_message(
             "context_length_exceeded: too many tokens",
         ));
-        let report = tier0_deterministic_compact(&mut messages, 0);
-        messages.push(make_ui_only_compaction_report_message(&report, 1));
+        let affected = if messages.is_empty() {
+            None
+        } else {
+            Some((0usize, messages.len().saturating_sub(1)))
+        };
+        let report =
+            tier0_deterministic_compact_with(&mut messages, 0, CompactAggression::Standard);
+        messages.push(make_ui_only_compaction_report_message(&report, 1, affected));
 
         assert_eq!(messages[messages.len() - 2].role, "error");
         assert_eq!(messages[messages.len() - 1].role, "summarization");
-        assert!(crate::chat::diagnostics::is_ui_only_message(&messages[messages.len() - 2]));
-        assert!(crate::chat::diagnostics::is_ui_only_message(&messages[messages.len() - 1]));
+        assert!(crate::chat::diagnostics::is_ui_only_message(
+            &messages[messages.len() - 2]
+        ));
+        assert!(crate::chat::diagnostics::is_ui_only_message(
+            &messages[messages.len() - 1]
+        ));
         assert_eq!(
             messages[messages.len() - 1].summarization_tier.as_deref(),
             Some("tier2_reactive")
@@ -2174,7 +2210,10 @@ mod tests {
 
         assert!(partial_context_error.retry_decision().is_context_limit());
         assert!(!partial_context_error.should_retry(0, &abort));
-        assert!(partial_context_error.retry_decision().is_context_limit() && !abort.load(Ordering::SeqCst));
+        assert!(
+            partial_context_error.retry_decision().is_context_limit()
+                && !abort.load(Ordering::SeqCst)
+        );
     }
 
     #[test]

@@ -46,19 +46,11 @@ impl BuddyJob for TourJob {
         1
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.onboarding.greeted && !ctx.onboarding.tour_completed && ctx.job_state.last_run.is_none()
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        _ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
         let fallback_text = "This is me on your dashboard — I track everything happening in your project. Ask me about setup, skills, or MCP anytime!".to_string();
         let mut speech = tour_fallback_speech(fallback_text.clone());
         if let Some(snapshot) = crate::buddy::actor::buddy_snapshot(gcx.clone()).await {

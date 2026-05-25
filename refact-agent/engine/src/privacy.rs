@@ -67,15 +67,13 @@ pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySetti
         .unwrap()
         .as_secs();
     let (config_dir, privacy_yaml) = {
-        let should_reload =
-            gcx.privacy_settings.read().unwrap().loaded_ts + PRIVACY_TOO_OLD.as_secs() <= current_time;
+        let should_reload = gcx.privacy_settings.read().unwrap().loaded_ts
+            + PRIVACY_TOO_OLD.as_secs()
+            <= current_time;
         if !should_reload {
             return gcx.privacy_settings.read().unwrap().clone();
         }
-        (
-            gcx.config_dir.clone(),
-            gcx.cmdline.privacy_yaml.clone(),
-        )
+        (gcx.config_dir.clone(), gcx.cmdline.privacy_yaml.clone())
     };
 
     let path = if privacy_yaml.is_empty() {

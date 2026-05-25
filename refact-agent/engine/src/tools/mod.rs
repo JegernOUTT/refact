@@ -3,11 +3,11 @@ pub mod tools_description;
 pub mod tools_list;
 
 pub mod subagent_phases;
+pub(crate) mod task_tool_helpers;
 #[cfg(test)]
 mod tests_schema;
 pub mod tool_helpers;
 pub mod tool_name_alias;
-pub(crate) mod task_tool_helpers;
 
 mod tool_activate_skill;
 mod tool_add_workspace_folder;
@@ -18,9 +18,9 @@ mod tool_agent_planner_qna;
 mod tool_agent_pulse;
 mod tool_agent_steer;
 mod tool_ast_definition;
+mod tool_card_comment;
 mod tool_cat;
 mod tool_chrome;
-mod tool_card_comment;
 #[cfg(test)]
 pub mod tool_cmdline;
 mod tool_code_review;
@@ -67,13 +67,13 @@ mod tool_task_broadcast;
 pub(crate) mod tool_task_check_agents;
 pub(crate) mod tool_task_documents;
 mod tool_task_done;
-mod tool_task_overview;
 mod tool_task_init;
 mod tool_task_mark_card;
 pub mod tool_task_memory;
 mod tool_task_merge_agent;
-mod tool_task_spawn_agent;
+mod tool_task_overview;
 mod tool_task_restart_agent;
+mod tool_task_spawn_agent;
 mod tool_task_verify_card;
 mod tool_task_wait_for_agents;
 mod tool_tasks;

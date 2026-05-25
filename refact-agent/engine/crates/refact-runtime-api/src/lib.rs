@@ -25,7 +25,13 @@ pub trait BuddyEventSink: Send + Sync {
     async fn complete_event(&self, dedupe_key: &str, status: &str);
     async fn snapshot(&self) -> Option<BuddySnapshot>;
     async fn apply_chat_completion(&self, event: BuddyRuntimeEvent, xp: u64, mood: String);
-    async fn report_error(&self, error_type: &str, error_msg: &str, source: Option<&str>, chat_id: Option<&str>);
+    async fn report_error(
+        &self,
+        error_type: &str,
+        error_msg: &str,
+        source: Option<&str>,
+        chat_id: Option<&str>,
+    );
     async fn mark_chat_error(&self, event: BuddyRuntimeEvent);
     async fn maybe_add_suggestion(&self, suggestion: BuddySuggestion);
     async fn build_pulse_message(&self) -> Option<ChatMessage>;
@@ -68,7 +74,11 @@ pub struct ToolExecutionResult {
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
     async fn get_tools_for_mode(&self, mode: &str, model_id: Option<&str>) -> Vec<ToolDesc>;
-    async fn get_tools_index_for_mode(&self, mode: &str, model_id: Option<&str>) -> ToolRegistryIndex;
+    async fn get_tools_index_for_mode(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> ToolRegistryIndex;
     async fn check_tool_confirmation(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),
@@ -77,7 +87,8 @@ pub trait ToolRegistry: Send + Sync {
         tool_name: &str,
         args: serde_json::Map<String, serde_json::Value>,
     ) -> Option<Result<ToolConfirmationCheck, String>>;
-    async fn get_tool_policy_info(&self, mode: &str, model_id: Option<&str>) -> Vec<ToolPolicyInfo>;
+    async fn get_tool_policy_info(&self, mode: &str, model_id: Option<&str>)
+        -> Vec<ToolPolicyInfo>;
     async fn execute_tool(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),

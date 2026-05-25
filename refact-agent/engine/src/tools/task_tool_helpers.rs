@@ -166,8 +166,14 @@ mod tests {
         assert_eq!(optional_string(&args, "name"), Some("card-1".to_string()));
         assert_eq!(optional_string(&args, "empty"), None);
         assert_eq!(optional_string(&args, "missing"), None);
-        assert_eq!(required_string(&args, "empty").unwrap_err(), "Missing 'empty'");
-        assert_eq!(required_string(&args, "null").unwrap_err(), "Missing 'null'");
+        assert_eq!(
+            required_string(&args, "empty").unwrap_err(),
+            "Missing 'empty'"
+        );
+        assert_eq!(
+            required_string(&args, "null").unwrap_err(),
+            "Missing 'null'"
+        );
     }
 
     #[test]
@@ -201,7 +207,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err, "task_id override is not allowed from this planner chat");
+        assert_eq!(
+            err,
+            "task_id override is not allowed from this planner chat"
+        );
     }
 
     #[tokio::test]

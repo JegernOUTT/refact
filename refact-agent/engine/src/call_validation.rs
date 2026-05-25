@@ -7,11 +7,11 @@ use crate::custom_error::ScratchError;
 use crate::worktrees::types::WorktreeMeta;
 
 pub use refact_core::chat_types::{
-    Checkpoint, CodeCompletionInputs, CodeCompletionPost, ContextEnum, ContextFile,
-    ChatContent, ChatMessage, ChatToolCall, ChatToolFunction, ChatUsage, CursorPosition,
-    MeteringUsd, MultimodalElement, OutputFilter, PostprocessSettings, ReasoningEffort,
-    SamplingParameters, SearchResult, deserialize_path, format_search_results, serialize_path,
-    normalize_mode_id, canonical_mode_id,
+    Checkpoint, CodeCompletionInputs, CodeCompletionPost, ContextEnum, ContextFile, ChatContent,
+    ChatMessage, ChatToolCall, ChatToolFunction, ChatUsage, CursorPosition, MeteringUsd,
+    MultimodalElement, OutputFilter, PostprocessSettings, ReasoningEffort, SamplingParameters,
+    SearchResult, deserialize_path, format_search_results, serialize_path, normalize_mode_id,
+    canonical_mode_id,
 };
 
 pub fn code_completion_post_validate(
@@ -46,8 +46,6 @@ pub fn code_completion_post_validate(
     }
     Ok(())
 }
-
-
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -116,8 +114,6 @@ impl Default for ChatMeta {
     }
 }
 
-
-
 /// Check if a mode ID is agentic (supports tool execution and knowledge enrichment).
 pub fn is_agentic_mode_id(mode_id: &str) -> bool {
     matches!(mode_id, "agent" | "task_planner" | "task_agent")
@@ -141,8 +137,6 @@ pub async fn validate_mode_for_request(
     Ok(canonical)
 }
 
-
-
 fn default_true() -> bool {
     true
 }
@@ -161,7 +155,6 @@ pub struct DiffChunk {
     pub is_file: bool,
     pub application_details: String,
 }
-
 
 #[cfg(test)]
 mod tests {

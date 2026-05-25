@@ -19,19 +19,11 @@ impl BuddyJob for ConfigWatcherJob {
         true
     }
 
-    async fn should_run(
-        &self,
-        _gcx: AppState,
-        _ctx: &BuddyJobContext,
-    ) -> bool {
+    async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
         true
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         if ctx.project_root.join("AGENTS.md").exists() {
             return BuddyJobResult::default();
         }

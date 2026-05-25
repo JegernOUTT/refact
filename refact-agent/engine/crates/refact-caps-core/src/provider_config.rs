@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use refact_core::llm_types::{EmbeddingModelRecord, HasBaseModelRecord, WireFormat, default_true};
 use refact_core::provider_types::{extra_headers_mapping_to_hash_map, parse_extra_headers_value};
 
-use super::model_records::{
-    ChatModelRecord, CompletionModelRecord, DefaultModels, normalize_string,
-};
+use super::model_records::{ChatModelRecord, CompletionModelRecord, DefaultModels, normalize_string};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CapsProvider {
@@ -90,11 +88,7 @@ impl CapsProvider {
     pub fn apply_override(&mut self, value: serde_yaml::Value) -> Result<(), String> {
         set_field_if_exists::<String>(&mut self.base_provider, "base_provider", &value)?;
         set_field_if_exists::<bool>(&mut self.enabled, "enabled", &value)?;
-        set_field_if_exists::<bool>(
-            &mut self.supports_completion,
-            "supports_completion",
-            &value,
-        )?;
+        set_field_if_exists::<bool>(&mut self.supports_completion, "supports_completion", &value)?;
         set_field_if_exists::<WireFormat>(&mut self.wire_format, "wire_format", &value)?;
         set_field_if_exists::<String>(&mut self.endpoint_style, "endpoint_style", &value)?;
         set_field_if_exists::<String>(
@@ -216,7 +210,10 @@ impl fmt::Debug for CapsProvider {
             .field("chat_endpoint", &self.chat_endpoint)
             .field("embedding_endpoint", &self.embedding_endpoint)
             .field("api_key", &redacted_secret(&self.api_key))
-            .field("tokenizer_api_key", &redacted_secret(&self.tokenizer_api_key))
+            .field(
+                "tokenizer_api_key",
+                &redacted_secret(&self.tokenizer_api_key),
+            )
             .field("extra_headers", &self.extra_headers)
             .field("code_completion_n_ctx", &self.code_completion_n_ctx)
             .field("completion_models", &self.completion_models)
@@ -406,7 +403,10 @@ chat_buddy_model: buddy-default
         assert_eq!(provider.api_key, "new-key");
         assert_eq!(provider.tokenizer_api_key, "new-tokenizer");
         assert_eq!(provider.code_completion_n_ctx, 2048);
-        assert_eq!(provider.extra_headers.get("X-Test").map(String::as_str), Some("value"));
+        assert_eq!(
+            provider.extra_headers.get("X-Test").map(String::as_str),
+            Some("value")
+        );
         assert_eq!(provider.embedding_model.base.name, "embed");
         assert!(provider.embedding_model.base.removable);
         assert!(provider.embedding_model.base.user_configured);

@@ -16,7 +16,9 @@ use refact_postprocessing::pp_context_provider::PPContextTrait;
 
 use crate::completion_cache;
 use crate::completon_rag::retrieve_ast_based_extra_context;
-use crate::scratchpad_abstract::{FinishReason, HasTokenizerAndEot, ScratchpadAbstract, ScratchpadPromptInput};
+use crate::scratchpad_abstract::{
+    FinishReason, HasTokenizerAndEot, ScratchpadAbstract, ScratchpadPromptInput,
+};
 
 const DEBUG: bool = false;
 
@@ -169,7 +171,9 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
             return Err(msg);
         }
 
-        let cpath = self.pp_context.canonical_path(&self.post.inputs.cursor.file);
+        let cpath = self
+            .pp_context
+            .canonical_path(&self.post.inputs.cursor.file);
 
         let supports_stop = true;
         if supports_stop {

@@ -1871,12 +1871,10 @@ async fn run_task_briefing_subchat(
                 .build()
                 .map_err(|e| format!("failed to start task briefing runtime: {}", e))?;
             runtime.block_on(async move {
-                let caps = crate::global_context::try_load_caps_quickly_if_not_present(
-                    app.gcx.clone(),
-                    0,
-                )
-                .await
-                .map_err(|e| e.message.clone())?;
+                let caps =
+                    crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
+                        .await
+                        .map_err(|e| e.message.clone())?;
                 let model = if !caps.defaults.chat_light_model.is_empty() {
                     caps.defaults.chat_light_model.clone()
                 } else if !caps.defaults.chat_default_model.is_empty() {

@@ -112,7 +112,8 @@ pub async fn generate_commit_message_by_diff(
 pub async fn _generate_commit_message_for_projects(
     gcx: Arc<GlobalContext>,
 ) -> Result<HashMap<PathBuf, String>, String> {
-    let project_folders = gcx.documents_state
+    let project_folders = gcx
+        .documents_state
         .workspace_folders
         .lock()
         .unwrap()

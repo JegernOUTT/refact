@@ -18,9 +18,7 @@ pub async fn load_models_dev_catalog(
     gcx: Arc<GlobalContext>,
     force_refresh: bool,
 ) -> Result<ModelsDevCatalog, String> {
-    let (cache_dir, http_client) = {
-        (gcx.cache_dir.clone(), gcx.http_client.clone())
-    };
+    let (cache_dir, http_client) = { (gcx.cache_dir.clone(), gcx.http_client.clone()) };
 
     if force_refresh {
         match fetch_models_dev_catalog(&http_client).await {
@@ -57,9 +55,8 @@ async fn fetch_models_dev_catalog(
             return Err(format!("models.dev catalog returned HTTP {status}"));
         }
         let body = read_models_dev_response_body(response).await?;
-        let catalog = parse_catalog_json(&body).map_err(|e| {
-            format!("models.dev live catalog is invalid: {e}")
-        })?;
+        let catalog = parse_catalog_json(&body)
+            .map_err(|e| format!("models.dev live catalog is invalid: {e}"))?;
         validate_required_project_providers(&catalog)
             .map_err(|e| format!("models.dev live catalog is incomplete: {e}"))?;
         Ok((catalog, body))

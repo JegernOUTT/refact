@@ -1,4 +1,3 @@
-
 use axum::extract::Query;
 use axum::response::Json;
 use axum::extract::State;
@@ -97,9 +96,11 @@ mod tests {
         }))
         .unwrap();
 
-        let result =
-            handle_v1_commands_marketplace_install(axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await), hyper::body::Bytes::from(body))
-                .await;
+        let result = handle_v1_commands_marketplace_install(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            hyper::body::Bytes::from(body),
+        )
+        .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.status_code, StatusCode::CONFLICT);

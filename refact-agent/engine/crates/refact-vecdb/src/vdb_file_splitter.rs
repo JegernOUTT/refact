@@ -14,7 +14,9 @@ pub struct FileSplitter {
 
 impl FileSplitter {
     pub fn new(window_size: usize) -> Self {
-        Self { soft_window: window_size }
+        Self {
+            soft_window: window_size,
+        }
     }
 
     pub async fn vectorization_split(

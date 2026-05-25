@@ -741,9 +741,7 @@ async fn planner_agent_refs(
     let board = storage::load_board(gcx.clone(), task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let sessions = {
-        gcx.chat_sessions.clone()
-    };
+    let sessions = { gcx.chat_sessions.clone() };
     let mut refs = Vec::new();
     for agent_chat_id in board
         .cards
@@ -993,7 +991,9 @@ mod tests {
             last_agents_summary_at: None,
             planner_session_state: None,
         };
-        storage::save_task_meta(gcx.clone(), task_id, &meta).await.unwrap();
+        storage::save_task_meta(gcx.clone(), task_id, &meta)
+            .await
+            .unwrap();
         storage::save_board(gcx.clone(), task_id, &TaskBoard::default())
             .await
             .unwrap();
@@ -1112,7 +1112,9 @@ mod tests {
     async fn handle_patch_board_concurrent_patches_one_succeeds_one_409() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-concurrent").await;
-        let mut board = storage::load_board(gcx.clone(), "task-concurrent").await.unwrap();
+        let mut board = storage::load_board(gcx.clone(), "task-concurrent")
+            .await
+            .unwrap();
         board.rev = 5;
         storage::save_board(gcx.clone(), "task-concurrent", &board)
             .await
@@ -1211,7 +1213,9 @@ mod tests {
     async fn delete_planner_chat_rejects_other_task() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-1").await;
-        storage::create_task(gcx.clone(), "other task").await.unwrap();
+        storage::create_task(gcx.clone(), "other task")
+            .await
+            .unwrap();
         let task_2_path = temp.path().join(".refact/tasks/task-2");
         let created_task_path = std::fs::read_dir(temp.path().join(".refact/tasks"))
             .unwrap()
@@ -1228,7 +1232,11 @@ mod tests {
             serde_yaml::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
         meta.id = "task-2".to_string();
         std::fs::write(&meta_path, serde_yaml::to_string(&meta).unwrap()).unwrap();
-        save_snapshot(gcx.clone(), snapshot("shared-chat", "task-2", "planner", None)).await;
+        save_snapshot(
+            gcx.clone(),
+            snapshot("shared-chat", "task-2", "planner", None),
+        )
+        .await;
 
         let result = handle_delete_planner_chat(
             State(app(gcx)),
@@ -1275,7 +1283,11 @@ mod tests {
     async fn delete_planner_chat_happy_path() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = setup_task(temp.path(), "task-1").await;
-        save_snapshot(gcx.clone(), snapshot("planner-chat", "task-1", "planner", None)).await;
+        save_snapshot(
+            gcx.clone(),
+            snapshot("planner-chat", "task-1", "planner", None),
+        )
+        .await;
         let planner_path = temp
             .path()
             .join(".refact/tasks/task-1/trajectories/planner/planner-chat.json");

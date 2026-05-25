@@ -175,11 +175,7 @@ impl BuddyJob for BuddyPrIssueMatchmakerJob {
         cache.changed_lines >= MIN_CHANGED_LINES || !had_fresh_cache
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let cache = diff_cache_for_execute(&ctx).await;
         if cache.changed_lines < MIN_CHANGED_LINES {
             return cache_result(&cache);
@@ -292,9 +288,10 @@ mod tests {
             checked_at: Utc::now(),
             changed_lines: 0,
         });
-        assert!(!job
-            .should_run(gcx.clone(), &test_context(root, Some(small_cache)))
-            .await);
+        assert!(
+            !job.should_run(gcx.clone(), &test_context(root, Some(small_cache)))
+                .await
+        );
         assert!(job.should_run(gcx, &test_context(root, None)).await);
         let pending_cache = checked_diff_cache(root.to_path_buf()).await;
         store_pending_diff_cache(root, pending_cache.clone());

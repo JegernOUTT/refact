@@ -170,11 +170,7 @@ impl BuddyJob for BuddyOnboardingJob {
         cached_hash == spec.signal_hash && !same_signal(ctx, &spec.signal_hash)
     }
 
-    async fn execute(
-        &self,
-        gcx: AppState,
-        ctx: BuddyJobContext,
-    ) -> BuddyJobResult {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let scan = current_scan(&ctx).await;
         if scan.candidates.is_empty() {
             return BuddyJobResult {

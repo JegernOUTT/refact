@@ -44,9 +44,7 @@ pub fn lowlevel_file_markup(
                 let pp = recursive_path_of_guid(&guid_to_symbol, &x.borrow().parent_guid);
                 format!("{}::{}", pp, pname)
             }
-            None => {
-                "UNK".to_string()
-            }
+            None => "UNK".to_string(),
         };
     }
     for s in symbols4export.iter_mut() {
@@ -64,8 +62,19 @@ pub fn lowlevel_file_markup(
     };
     let path_str = doc.doc_path.to_string_lossy().to_string();
     let n = 30usize;
-    let short_path: String = path_str.chars().rev().take(n).collect::<String>().chars().rev().collect();
-    let short_path = if short_path.len() == n { format!("...{}", short_path) } else { short_path };
+    let short_path: String = path_str
+        .chars()
+        .rev()
+        .take(n)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let short_path = if short_path.len() == n {
+        format!("...{}", short_path)
+    } else {
+        short_path
+    };
     tracing::info!(
         "file_markup {:>4} symbols in {:.3}ms for {}",
         x.symbols_sorted_by_path_len.len(),

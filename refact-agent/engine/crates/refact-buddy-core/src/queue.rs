@@ -370,9 +370,6 @@ mod tests {
         let mut q = OpportunityQueue::new();
         push_opportunity(&mut q, make_opportunity("opp-accepted", "ck-accepted"));
         assert!(q.mark_status("opp-accepted", OpportunityStatus::Accepted));
-        assert!(q
-            .get("opp-accepted")
-            .and_then(|o| o.resolved_at)
-            .is_some());
+        assert!(q.get("opp-accepted").and_then(|o| o.resolved_at).is_some());
     }
 }

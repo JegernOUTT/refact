@@ -7,9 +7,7 @@ use crate::http::routers::v1::status::get_rag_status;
 
 /// Waits for both AST and VecDB indexing to complete based on --wait-ast and --wait-vecdb.
 pub async fn wait_for_indexing_if_needed(gcx: Arc<GlobalContext>) {
-    let cmdline = {
-        gcx.cmdline.clone()
-    };
+    let cmdline = { gcx.cmdline.clone() };
 
     let ast_done = async || {
         get_rag_status(gcx.clone())

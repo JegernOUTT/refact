@@ -251,13 +251,11 @@ pub(crate) async fn detect_repo_from_git(project_root: &Path) -> Option<RepoInfo
     parse_remote_url(&url)
 }
 
-async fn detect_provider(
-    gcx: AppState,
-    repo: &RepoInfo,
-) -> Result<Option<IssueProvider>, String> {
+async fn detect_provider(gcx: AppState, repo: &RepoInfo) -> Result<Option<IssueProvider>, String> {
     let active = crate::files_correction::get_active_project_path(gcx.gcx.clone()).await;
     let (config_dirs, global_config_dir) =
-        crate::integrations::setting_up_integrations::get_config_dirs(gcx.gcx.clone(), &active).await;
+        crate::integrations::setting_up_integrations::get_config_dirs(gcx.gcx.clone(), &active)
+            .await;
     let mut search_dirs: Vec<PathBuf> = config_dirs;
     search_dirs.push(global_config_dir);
 
@@ -352,9 +350,7 @@ pub async fn investigation_logs(
     Ok(kept.join("\n"))
 }
 
-pub async fn investigation_internal_context(
-    gcx: AppState,
-) -> Result<String, String> {
+pub async fn investigation_internal_context(gcx: AppState) -> Result<String, String> {
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_from_app(
             gcx.clone(),

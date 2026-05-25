@@ -289,11 +289,17 @@ export interface CDInstructionMessage extends BaseMessage {
   content: string;
 }
 
+export type SummarizationTier =
+  | "tier0_deterministic"
+  | "tier1_llm"
+  | "tier1_merged"
+  | "tier2_reactive";
+
 export interface SummarizationMessage extends BaseMessage {
   role: "summarization";
   content: string;
   summarized_range?: [number, number];
-  summarization_tier?: string;
+  summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;
 }
 

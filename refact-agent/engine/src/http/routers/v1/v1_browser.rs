@@ -1858,11 +1858,7 @@ fn recorder_events_to_timeline(
     entries
 }
 
-async fn browser_frame_emission_task(
-    gcx: Arc<GlobalContext>,
-    chat_id: String,
-    runtime_id: String,
-) {
+async fn browser_frame_emission_task(gcx: Arc<GlobalContext>, chat_id: String, runtime_id: String) {
     let sessions = gcx.chat_sessions.clone();
     let mut last_status_json: Option<String> = None;
 
@@ -2092,7 +2088,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-        use hyper::body::to_bytes;
+    use hyper::body::to_bytes;
     use tower::ServiceExt;
 
     #[test]

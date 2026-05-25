@@ -98,12 +98,8 @@ pub async fn load_indexing_yaml(
 }
 
 pub async fn reload_global_indexing_only(gcx: Arc<GlobalContext>) -> IndexingEverywhere {
-    let (config_dir, indexing_yaml) = {
-        (
-            gcx.config_dir.clone(),
-            gcx.cmdline.indexing_yaml.clone(),
-        )
-    };
+    let (config_dir, indexing_yaml) =
+        { (gcx.config_dir.clone(), gcx.cmdline.indexing_yaml.clone()) };
     let global_indexing_path = if indexing_yaml.is_empty() {
         config_dir.join("indexing.yaml")
     } else {

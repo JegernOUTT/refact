@@ -297,8 +297,9 @@ mod tests {
                 worktree.display()
             )]
         );
-        assert!(scoped_path_warnings(&scoped_path(worktree, false, None, false), &f.scope)
-            .is_empty());
+        assert!(
+            scoped_path_warnings(&scoped_path(worktree, false, None, false), &f.scope).is_empty()
+        );
     }
 
     #[test]
@@ -309,15 +310,13 @@ mod tests {
             append_scope_warnings("summary".to_string(), &warnings),
             "warning one\nwarning two\nsummary"
         );
-        assert_eq!(
-            append_scope_warnings("summary".to_string(), &[]),
-            "summary"
-        );
+        assert_eq!(append_scope_warnings("summary".to_string(), &[]), "summary");
     }
 
     #[test]
     fn scope_warnings_to_tool_message_extracts_only_worktree_scope_lines() {
-        let summary = "⚠️ Worktree scope: first\nnot a warning\n⚠️ Worktree scope: second\n✅ Updated file";
+        let summary =
+            "⚠️ Worktree scope: first\nnot a warning\n⚠️ Worktree scope: second\n✅ Updated file";
         let message = scope_warnings_to_tool_message(summary, "tool-call").unwrap();
 
         match message {

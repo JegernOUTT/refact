@@ -147,7 +147,10 @@ impl<'de> Deserialize<'de> for EmbeddingModelRecord {
 
         match Input::deserialize(deserializer)? {
             Input::String(name) => Ok(EmbeddingModelRecord {
-                base: BaseModelRecord { name, ..Default::default() },
+                base: BaseModelRecord {
+                    name,
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             Input::Full(mut helper) => {
@@ -165,4 +168,3 @@ impl<'de> Deserialize<'de> for EmbeddingModelRecord {
         }
     }
 }
-
