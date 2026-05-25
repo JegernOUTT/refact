@@ -76,6 +76,7 @@ impl ChatSession {
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
             recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
+            abort_notify: Arc::new(Notify::new()),
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -127,6 +128,7 @@ impl ChatSession {
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
             recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
+            abort_notify: Arc::new(Notify::new()),
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -690,6 +692,7 @@ impl ChatSession {
     pub fn abort_stream(&mut self) {
         self.abort_flag.store(true, Ordering::SeqCst);
         self.user_interrupt_flag.store(true, Ordering::SeqCst);
+        self.abort_notify.notify_waiters();
         if let Some(draft) = self.draft_message.take() {
             self.emit(ChatEvent::StreamFinished {
                 message_id: draft.message_id.clone(),

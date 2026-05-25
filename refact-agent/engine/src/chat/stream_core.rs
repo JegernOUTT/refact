@@ -78,6 +78,7 @@ pub struct StreamRunParams {
     pub model_rec: BaseModelRecord,
     pub chat_id: Option<String>,
     pub abort_flag: Option<Arc<AtomicBool>>,
+    pub abort_notify: Option<Arc<tokio::sync::Notify>>,
     pub supports_tools: bool,
     pub supports_reasoning: bool,
     pub reasoning_type: Option<String>,
@@ -103,7 +104,7 @@ impl LlmStreamError {
     }
 
     pub fn should_retry(&self, attempt: usize, abort: &AtomicBool) -> bool {
-        if self.partial_output_emitted || self.retry_decision().is_user_cancelled() {
+        if self.retry_decision().is_user_cancelled() {
             return false;
         }
         should_retry_llm_error(&self.message, attempt, abort)
@@ -138,18 +139,42 @@ impl From<String> for LlmStreamError {
     }
 }
 
-async fn wait_for_abort_signal(abort_flag: Option<Arc<AtomicBool>>) {
+async fn wait_for_abort_signal(
+    abort_flag: Option<Arc<AtomicBool>>,
+    abort_notify: Option<Arc<tokio::sync::Notify>>,
+) {
     let Some(abort_flag) = abort_flag else {
         std::future::pending::<()>().await;
         return;
     };
 
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(200));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        heartbeat.tick().await;
-        if abort_flag.load(Ordering::SeqCst) {
-            return;
+    if abort_flag.load(Ordering::SeqCst) {
+        return;
+    }
+
+    if let Some(notify) = abort_notify {
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(50));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = &mut notified => return,
+                _ = heartbeat.tick() => {
+                    if abort_flag.load(Ordering::SeqCst) {
+                        return;
+                    }
+                }
+            }
+        }
+    } else {
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(50));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            heartbeat.tick().await;
+            if abort_flag.load(Ordering::SeqCst) {
+                return;
+            }
         }
     }
 }
@@ -169,6 +194,7 @@ async fn send_llm_http_request(
     http_parts: &HttpParts,
     wire_format: WireFormat,
     abort_flag: Option<Arc<AtomicBool>>,
+    abort_notify: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<reqwest::Response, String> {
     let accept = match wire_format {
         WireFormat::OllamaNative => "application/x-ndjson",
@@ -184,7 +210,7 @@ async fn send_llm_http_request(
 
     tokio::select! {
         result = request => result.map_err(|e| format!("LLM request failed: {}", e)),
-        _ = wait_for_abort_signal(abort_flag) => Err(ABORT_ERROR_MESSAGE.to_string()),
+        _ = wait_for_abort_signal(abort_flag, abort_notify) => Err(ABORT_ERROR_MESSAGE.to_string()),
     }
 }
 
@@ -1035,6 +1061,7 @@ async fn run_llm_websocket_request<C: StreamCollector>(
     adapter: &dyn crate::llm::adapter::LlmWireAdapter,
     auth_token: &str,
     abort_flag: Option<Arc<AtomicBool>>,
+    abort_notify: Option<Arc<tokio::sync::Notify>>,
     collector: &mut C,
 ) -> Result<Vec<ChoiceFinal>, String> {
     let mut request = websocket_endpoint
@@ -1066,14 +1093,14 @@ async fn run_llm_websocket_request<C: StreamCollector>(
         result = connect => result
             .map_err(|_| "OpenAI Codex WebSocket connect timed out".to_string())?
             .map_err(|e| format!("OpenAI Codex WebSocket connect failed: {}", e))?,
-        _ = wait_for_abort_signal(abort_flag.clone()) => return Err(ABORT_ERROR_MESSAGE.to_string()),
+        _ = wait_for_abort_signal(abort_flag.clone(), abort_notify.clone()) => return Err(ABORT_ERROR_MESSAGE.to_string()),
     };
     let send = websocket.send(tokio_tungstenite::tungstenite::Message::Text(
         build_openai_codex_websocket_message(&http_parts.body).to_string(),
     ));
     tokio::select! {
         result = send => result.map_err(|e| format!("OpenAI Codex WebSocket send failed: {}", e))?,
-        _ = wait_for_abort_signal(abort_flag.clone()) => return Err(ABORT_ERROR_MESSAGE.to_string()),
+        _ = wait_for_abort_signal(abort_flag.clone(), abort_notify.clone()) => return Err(ABORT_ERROR_MESSAGE.to_string()),
     };
 
     let mut accumulators: Vec<ChoiceAccumulator> = vec![ChoiceAccumulator::default()];
@@ -1102,7 +1129,7 @@ async fn run_llm_websocket_request<C: StreamCollector>(
                 }
                 continue;
             }
-            _ = wait_for_abort_signal(abort_flag.clone()) => {
+            _ = wait_for_abort_signal(abort_flag.clone(), abort_notify.clone()) => {
                 return Err(ABORT_ERROR_MESSAGE.to_string());
             }
             maybe_message = websocket.next() => {
@@ -1157,6 +1184,7 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
     adapter: &dyn crate::llm::adapter::LlmWireAdapter,
     auth_token: &str,
     abort_flag: Option<Arc<AtomicBool>>,
+    abort_notify: Option<Arc<tokio::sync::Notify>>,
     collector: &mut C,
 ) -> Result<Vec<ChoiceFinal>, String> {
     let mut stream = response.bytes_stream();
@@ -1187,7 +1215,7 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
                 }
                 continue;
             }
-            _ = wait_for_abort_signal(abort_flag.clone()) => {
+            _ = wait_for_abort_signal(abort_flag.clone(), abort_notify.clone()) => {
                 return Err(ABORT_ERROR_MESSAGE.to_string());
             }
             maybe_bytes = stream.next() => {
@@ -1283,7 +1311,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                     &params.llm_request.model_id,
                     &http_parts.body,
                 ) => res.map_err(|e| LlmStreamError::new(e, partial_output_emitted))?,
-                _ = wait_for_abort_signal(params.abort_flag.clone()) => {
+                _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
                     return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
                 }
             };
@@ -1312,6 +1340,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
             adapter,
             &params.model_rec.auth_token,
             params.abort_flag.clone(),
+            params.abort_notify.clone(),
             &mut replay_collector,
         )
         .await
@@ -1338,10 +1367,15 @@ pub async fn run_llm_stream<C: StreamCollector>(
         }
     }
 
-    let mut response =
-        send_llm_http_request(&client, &http_parts, wire_format, params.abort_flag.clone())
-            .await
-            .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
+    let mut response = send_llm_http_request(
+        &client,
+        &http_parts,
+        wire_format,
+        params.abort_flag.clone(),
+        params.abort_notify.clone(),
+    )
+    .await
+    .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
     let mut status = response.status();
     if !status.is_success()
         && is_openai_codex_chatgpt_backend(&params.model_rec)
@@ -1360,7 +1394,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 status,
                 &params.model_rec.api_key,
             ) => res,
-            _ = wait_for_abort_signal(params.abort_flag.clone()) => {
+            _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
                 return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
             }
         };
@@ -1387,6 +1421,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                     &retry_parts,
                     wire_format,
                     params.abort_flag.clone(),
+                    params.abort_notify.clone(),
                 )
                 .await
                 .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
@@ -1399,7 +1434,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
     if !status.is_success() {
         let text = tokio::select! {
             body = read_error_body_bounded(response) => body,
-            _ = wait_for_abort_signal(params.abort_flag.clone()) => {
+            _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
                 return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
             }
         };
@@ -1437,6 +1472,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
             adapter,
             &params.model_rec.auth_token,
             params.abort_flag.clone(),
+            params.abort_notify.clone(),
             &mut tracking_collector,
         )
         .await
@@ -1487,7 +1523,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 }
                 continue;
             }
-            _ = wait_for_abort_signal(params.abort_flag.clone()) => {
+            _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
                 return Err(LlmStreamError::new(
                     ABORT_ERROR_MESSAGE,
                     *tracking_collector.partial_output_emitted,
@@ -1814,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_error_with_partial_output_does_not_retry_transient_error() {
+    fn stream_error_with_partial_output_retries_transient_error() {
         let abort = AtomicBool::new(false);
         let error = LlmStreamError {
             message: "LLM error (503 Service Unavailable): overloaded".to_string(),
@@ -1825,7 +1861,7 @@ mod tests {
             error.retry_decision(),
             RetryDecision::Retry { .. }
         ));
-        assert!(!error.should_retry(0, &abort));
+        assert!(error.should_retry(0, &abort));
     }
 
     #[test]
@@ -1841,6 +1877,86 @@ mod tests {
             RetryDecision::Retry { .. }
         ));
         assert!(error.should_retry(0, &abort));
+    }
+
+    #[test]
+    fn user_cancelled_with_partial_output_does_not_retry() {
+        let abort = AtomicBool::new(false);
+        let error = LlmStreamError {
+            message: ABORT_ERROR_MESSAGE.to_string(),
+            partial_output_emitted: true,
+        };
+
+        assert!(error.retry_decision().is_user_cancelled());
+        assert!(!error.should_retry(0, &abort));
+    }
+
+    #[test]
+    fn mid_stream_disconnect_with_partial_output_retries() {
+        let abort = AtomicBool::new(false);
+        let error = LlmStreamError {
+            message: "LLM stream ended unexpectedly without completion signal".to_string(),
+            partial_output_emitted: true,
+        };
+
+        assert!(matches!(
+            error.retry_decision(),
+            RetryDecision::Retry { .. }
+        ));
+        assert!(error.should_retry(0, &abort));
+    }
+
+    #[tokio::test]
+    async fn wait_for_abort_signal_returns_instantly_on_notify() {
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let abort_notify = Arc::new(tokio::sync::Notify::new());
+        let start = std::time::Instant::now();
+        let flag_for_setter = abort_flag.clone();
+        let notify_for_setter = abort_notify.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            flag_for_setter.store(true, Ordering::SeqCst);
+            notify_for_setter.notify_waiters();
+        });
+        wait_for_abort_signal(Some(abort_flag), Some(abort_notify)).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "abort_notify should propagate within 50ms, took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_abort_signal_falls_back_to_polling_without_notify() {
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let flag_for_setter = abort_flag.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            flag_for_setter.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        wait_for_abort_signal(Some(abort_flag), None).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(150),
+            "polling fallback should detect abort within ~50ms tick, took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_abort_signal_returns_immediately_if_already_set() {
+        let abort_flag = Arc::new(AtomicBool::new(true));
+        let abort_notify = Arc::new(tokio::sync::Notify::new());
+        let start = std::time::Instant::now();
+        wait_for_abort_signal(Some(abort_flag), Some(abort_notify)).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(5),
+            "already-set flag should return immediately, took {:?}",
+            elapsed
+        );
     }
 
     #[test]

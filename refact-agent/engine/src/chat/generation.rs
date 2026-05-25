@@ -45,7 +45,7 @@ const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 3;
 const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
-    "Stream interrupted after partial output. Not retrying to avoid corruption.";
+    "Stream interrupted after partial output and all retry attempts failed.";
 
 async fn user_stop_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
     let session = session_arc.lock().await;
@@ -645,10 +645,13 @@ pub fn start_generation(
                 break;
             }
 
-            let abort_flag = {
+            let (abort_flag, abort_notify) = {
                 let mut session = session_arc.lock().await;
                 match session.start_stream() {
-                    Some((_message_id, abort_flag)) => abort_flag,
+                    Some((_message_id, abort_flag)) => {
+                        let notify = session.abort_notify.clone();
+                        (abort_flag, notify)
+                    }
                     None => {
                         warn!(
                             "Cannot start generation for {}: already generating",
@@ -691,6 +694,7 @@ pub fn start_generation(
                 thread,
                 chat_id.clone(),
                 abort_flag.clone(),
+                abort_notify.clone(),
             )
             .await;
 
@@ -1000,6 +1004,7 @@ pub async fn run_llm_generation(
     thread: ThreadParams,
     chat_id: String,
     abort_flag: Arc<AtomicBool>,
+    abort_notify: Arc<tokio::sync::Notify>,
 ) -> Result<(), LlmStreamError> {
     let gcx = app.gcx.clone();
     check_aborted_before_stream(&abort_flag)?;
@@ -1152,6 +1157,7 @@ pub async fn run_llm_generation(
         prepared.llm_request,
         &model_rec,
         abort_flag,
+        abort_notify,
     )
     .await
 }
@@ -1171,6 +1177,7 @@ async fn run_streaming_generation(
     mut llm_request: LlmRequest,
     model_rec: &crate::caps::ChatModelRecord,
     abort_flag: Arc<AtomicBool>,
+    abort_notify: Arc<tokio::sync::Notify>,
 ) -> Result<(), LlmStreamError> {
     info!(
         "session generation: model={}, messages={}",
@@ -1216,6 +1223,7 @@ async fn run_streaming_generation(
             model_rec: model_rec.base.clone(),
             chat_id: Some(chat_id.clone()),
             abort_flag: Some(abort_flag.clone()),
+            abort_notify: Some(abort_notify.clone()),
             supports_tools: model_rec.supports_tools,
             supports_reasoning: model_rec.has_reasoning_support(),
             reasoning_type: model_rec.reasoning_type_string(),

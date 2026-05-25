@@ -1643,6 +1643,7 @@ async fn subchat_stream(
             model_rec: model_rec.base.clone(),
             chat_id: None,
             abort_flag: Some(abort_flag.clone()),
+            abort_notify: None,
             supports_tools: model_rec.supports_tools,
             supports_reasoning: model_rec.has_reasoning_support(),
             reasoning_type: model_rec.reasoning_type_string(),

@@ -189,6 +189,7 @@ pub async fn check_or_pause_cache_guard(
         session
             .abort_flag
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        session.abort_notify.notify_waiters();
 
         let mut summary = format!(
             "Prompt cache append-only prefix check failed for model `{}`.\n\n",

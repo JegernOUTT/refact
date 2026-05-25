@@ -252,7 +252,7 @@ const STREAM_CORRUPTED_PATTERNS: &[&str] = &[
     "can't stream from",
     "cannot stream from",
     "stream interrupted after partial output",
-    "not retrying to avoid corruption",
+    "all retry attempts failed",
 ];
 
 const TOOL_SCHEMA_INVALID_PATTERNS: &[&str] = &[
@@ -1173,7 +1173,7 @@ mod tests {
     #[test]
     fn test_partial_output_with_context_limit_classifies_correctly() {
         assert_eq!(
-            classify_user_error("Stream interrupted after partial output. Not retrying to avoid corruption. Original error: LLM error: invalid_request_error: context_length_exceeded: Your input exceeds the context window"),
+            classify_user_error("Stream interrupted after partial output and all retry attempts failed. Original error: LLM error: invalid_request_error: context_length_exceeded: Your input exceeds the context window"),
             UserErrorCategory::ContextTooLarge
         );
     }
@@ -1182,7 +1182,7 @@ mod tests {
     fn test_partial_output_alone_classifies_as_stream_corrupted() {
         assert_eq!(
             classify_user_error(
-                "Stream interrupted after partial output. Not retrying to avoid corruption."
+                "Stream interrupted after partial output and all retry attempts failed."
             ),
             UserErrorCategory::StreamCorrupted
         );
