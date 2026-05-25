@@ -14,6 +14,7 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
+use crate::tools::task_tool_helpers::require_bound_planner_task;
 use crate::worktrees::service::{worktree_merge_lock, WorktreeService};
 use crate::worktrees::types::{MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy};
 
@@ -426,13 +427,10 @@ impl Tool for ToolTaskMergeAgent {
                 .to_string());
         }
 
-        let task_id = if let Some(id) = args.get("task_id").and_then(|v| v.as_str()) {
-            id.to_string()
-        } else if let Some(ref meta) = ccx_lock.task_meta {
-            meta.task_id.clone()
-        } else {
-            return Err("Missing 'task_id' (and chat is not bound to a task)".to_string());
-        };
+        let gcx = ccx_lock.app.gcx.clone();
+        drop(ccx_lock);
+
+        let task_id = require_bound_planner_task(&ccx, args).await?;
 
         let card_id = args
             .get("card_id")
@@ -453,9 +451,6 @@ impl Tool for ToolTaskMergeAgent {
                 strategy
             ));
         }
-
-        let gcx = ccx_lock.app.gcx.clone();
-        drop(ccx_lock);
 
         let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
         let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
@@ -923,8 +918,11 @@ The agent's work has been successfully merged back to the main branch."#,
 #[cfg(test)]
 mod worktree_merge_tool_tests {
     use super::*;
+    use crate::app_state::AppState;
+    use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus, VerifierReport};
     use crate::worktrees::types::CreateWorktreeRequest;
+    use serde_json::json;
     use std::path::Path;
 
     fn run_git(cwd: &Path, args: &[&str]) -> String {
@@ -964,6 +962,30 @@ mod worktree_merge_tool_tests {
     async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
         let root = root.canonicalize().unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
+    }
+
+    async fn planner_ccx(gcx: Arc<GlobalContext>) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "planner-chat".to_string(),
+                None,
+                "model".to_string(),
+                Some(ThreadTaskMeta {
+                    task_id: "task-1".to_string(),
+                    role: "planner".to_string(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: None,
+                }),
+                None,
+            )
+            .await,
+        ))
     }
 
     fn test_card(worktree_id: &str, branch: &str, root: &Path) -> BoardCard {
@@ -1083,6 +1105,42 @@ mod worktree_merge_tool_tests {
             parse_auto_revert_timeout(&args).unwrap(),
             Duration::from_secs(120)
         );
+    }
+
+    #[tokio::test]
+    async fn task_merge_agent_rejects_mismatched_task_id() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ccx = planner_ccx(gcx).await;
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("task_id".to_string(), json!("task-2")),
+        ]);
+
+        let err = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "task_id override is not allowed from this planner chat");
+    }
+
+    #[tokio::test]
+    async fn task_merge_agent_uses_bound_task_when_no_args() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(gcx.clone(), &source, test_card("wt", "agent", &source)).await;
+        let ccx = planner_ccx(gcx).await;
+        let args = HashMap::from([("card_id".to_string(), json!("missing-card"))]);
+
+        let err = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "Card missing-card not found");
     }
 
     #[tokio::test]
