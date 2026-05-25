@@ -1590,26 +1590,12 @@ async fn handle_tool_decisions(
         let mut session = session_arc.lock().await;
         let auto_approved = session.runtime.auto_approved_tool_ids.clone();
         let paused_msg_idx = session.runtime.paused_message_index;
-        let accepted = session.process_tool_decisions(decisions);
-        let any_rejected = decisions.iter().any(|d| !d.accepted);
+        let outcome = session.process_tool_decisions(decisions);
+        let any_rejected = !outcome.denied_ids.is_empty();
 
-        for id in &accepted {
+        for id in &outcome.accepted_ids {
             if !session.runtime.accepted_tool_ids.contains(id) {
                 session.runtime.accepted_tool_ids.push(id.clone());
-            }
-        }
-
-        for decision in decisions {
-            if !decision.accepted {
-                let tool_message = ChatMessage {
-                    message_id: Uuid::new_v4().to_string(),
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText("Tool execution denied by user".to_string()),
-                    tool_call_id: decision.tool_call_id.clone(),
-                    tool_failed: Some(true),
-                    ..Default::default()
-                };
-                session.add_message(tool_message);
             }
         }
 

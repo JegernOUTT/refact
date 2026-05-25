@@ -56,6 +56,11 @@ pub fn create_sessions_map() -> SessionsMap {
     Arc::new(ARwLock::new(HashMap::new()))
 }
 
+pub struct ToolDecisionOutcome {
+    pub accepted_ids: Vec<String>,
+    pub denied_ids: Vec<String>,
+}
+
 impl ChatSession {
     pub fn new(chat_id: String) -> Self {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
@@ -876,7 +881,7 @@ impl ChatSession {
             .any(|r| r.tool_call_id == tool_call_id)
     }
 
-    pub fn process_tool_decisions(&mut self, decisions: &[ToolDecisionItem]) -> Vec<String> {
+    pub fn process_tool_decisions(&mut self, decisions: &[ToolDecisionItem]) -> ToolDecisionOutcome {
         let mut accepted_ids = Vec::new();
         let mut denied_ids = Vec::new();
 
@@ -901,6 +906,29 @@ impl ChatSession {
         });
         let after_len = self.runtime.pause_reasons.len();
 
+        for denied_id in &denied_ids {
+            let has_matching_tool_call = self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+                .and_then(|m| m.tool_calls.as_ref())
+                .map_or(false, |tcs| tcs.iter().any(|tc| &tc.id == denied_id));
+            if !has_matching_tool_call {
+                warn!(
+                    "Denied tool_call_id {} not found in last assistant message, skipping synthesis",
+                    denied_id
+                );
+                continue;
+            }
+            self.add_message(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("Tool call denied by user.".to_string()),
+                tool_call_id: denied_id.clone(),
+                ..Default::default()
+            });
+        }
+
         if before_len != after_len {
             self.touch();
             if self.runtime.pause_reasons.is_empty() {
@@ -916,7 +944,7 @@ impl ChatSession {
             }
         }
 
-        accepted_ids
+        ToolDecisionOutcome { accepted_ids, denied_ids }
     }
 }
 
@@ -1854,11 +1882,11 @@ mod tests {
             integr_config_path: None,
         });
         session.set_runtime_state(SessionState::Paused, None);
-        let accepted = session.process_tool_decisions(&[ToolDecisionItem {
+        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
             tool_call_id: "tc1".into(),
             accepted: true,
         }]);
-        assert_eq!(accepted, vec!["tc1"]);
+        assert_eq!(outcome.accepted_ids, vec!["tc1"]);
         assert_eq!(session.runtime.pause_reasons.len(), 1);
         assert_eq!(session.runtime.state, SessionState::Paused);
     }
@@ -1932,12 +1960,12 @@ mod tests {
         let before = session.last_activity;
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        let accepted = session.process_tool_decisions(&[ToolDecisionItem {
+        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
             tool_call_id: "unknown".into(),
             accepted: true,
         }]);
 
-        assert!(accepted.is_empty());
+        assert!(outcome.accepted_ids.is_empty());
         assert_eq!(session.runtime.pause_reasons.len(), 1);
         assert_eq!(session.last_activity, before);
         assert!(rx.try_recv().is_err());
@@ -1955,11 +1983,12 @@ mod tests {
             integr_config_path: None,
         });
         session.set_runtime_state(SessionState::Paused, None);
-        let accepted = session.process_tool_decisions(&[ToolDecisionItem {
+        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
             tool_call_id: "tc1".into(),
             accepted: false,
         }]);
-        assert!(accepted.is_empty());
+        assert!(outcome.accepted_ids.is_empty());
+        assert_eq!(outcome.denied_ids, vec!["tc1"]);
         assert!(session.runtime.pause_reasons.is_empty());
         assert_eq!(session.runtime.state, SessionState::Idle);
     }
@@ -1976,11 +2005,11 @@ mod tests {
             integr_config_path: None,
         });
         session.set_runtime_state(SessionState::Paused, None);
-        let accepted = session.process_tool_decisions(&[ToolDecisionItem {
+        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
             tool_call_id: "unknown".into(),
             accepted: true,
         }]);
-        assert!(accepted.is_empty());
+        assert!(outcome.accepted_ids.is_empty());
         assert_eq!(session.runtime.pause_reasons.len(), 1);
     }
 
@@ -2795,5 +2824,136 @@ mod tests {
             session.recent_request_ids.len(),
             session.recent_request_ids_set.len()
         );
+    }
+
+    fn make_assistant_with_tool_calls(ids: &[&str]) -> ChatMessage {
+        use crate::call_validation::{ChatToolCall, ChatToolFunction};
+        ChatMessage {
+            role: "assistant".to_string(),
+            tool_calls: Some(
+                ids.iter()
+                    .map(|id| ChatToolCall {
+                        id: id.to_string(),
+                        index: None,
+                        function: ChatToolFunction {
+                            name: "shell".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                        extra_content: None,
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn make_pause_reason(tool_call_id: &str) -> PauseReason {
+        PauseReason {
+            reason_type: "confirmation".into(),
+            tool_name: "shell".into(),
+            command: "shell".into(),
+            rule: "ask".into(),
+            tool_call_id: tool_call_id.into(),
+            integr_config_path: None,
+        }
+    }
+
+    #[test]
+    fn denied_tool_call_produces_synthetic_tool_result_message() {
+        let mut session = make_session();
+        session.add_message(make_assistant_with_tool_calls(&["tc1"]));
+        session.runtime.pause_reasons.push(make_pause_reason("tc1"));
+        session.set_runtime_state(SessionState::Paused, None);
+
+        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "tc1".into(),
+            accepted: false,
+        }]);
+
+        assert_eq!(outcome.denied_ids, vec!["tc1"]);
+        assert!(outcome.accepted_ids.is_empty());
+        let tool_msgs: Vec<_> = session.messages.iter().filter(|m| m.role == "tool").collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert_eq!(tool_msgs[0].tool_call_id, "tc1");
+        assert_eq!(
+            tool_msgs[0].content,
+            ChatContent::SimpleText("Tool call denied by user.".to_string())
+        );
+    }
+
+    #[test]
+    fn denied_then_accepted_in_same_decision_batch_keeps_accepted_running() {
+        let mut session = make_session();
+        session.add_message(make_assistant_with_tool_calls(&["tc1", "tc2"]));
+        session.runtime.pause_reasons.push(make_pause_reason("tc1"));
+        session.runtime.pause_reasons.push(make_pause_reason("tc2"));
+        session.set_runtime_state(SessionState::Paused, None);
+
+        let outcome = session.process_tool_decisions(&[
+            ToolDecisionItem { tool_call_id: "tc1".into(), accepted: false },
+            ToolDecisionItem { tool_call_id: "tc2".into(), accepted: true },
+        ]);
+
+        assert_eq!(outcome.accepted_ids, vec!["tc2"]);
+        assert_eq!(outcome.denied_ids, vec!["tc1"]);
+        let tool_msgs: Vec<_> = session.messages.iter().filter(|m| m.role == "tool").collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert_eq!(tool_msgs[0].tool_call_id, "tc1");
+    }
+
+    #[test]
+    fn all_denied_transitions_to_idle_after_synthesis() {
+        let mut session = make_session();
+        session.add_message(make_assistant_with_tool_calls(&["tc1"]));
+        session.runtime.pause_reasons.push(make_pause_reason("tc1"));
+        session.set_runtime_state(SessionState::Paused, None);
+
+        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "tc1".into(),
+            accepted: false,
+        }]);
+
+        assert_eq!(outcome.denied_ids, vec!["tc1"]);
+        assert!(session.runtime.pause_reasons.is_empty());
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.messages.iter().filter(|m| m.role == "tool").count(), 1);
+    }
+
+    #[test]
+    fn denied_tool_call_unmatched_id_logs_warning_but_does_not_panic() {
+        let mut session = make_session();
+        session.runtime.pause_reasons.push(make_pause_reason("tc1"));
+        session.set_runtime_state(SessionState::Paused, None);
+
+        let outcome = session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "tc1".into(),
+            accepted: false,
+        }]);
+
+        assert_eq!(outcome.denied_ids, vec!["tc1"]);
+        assert!(session.messages.iter().all(|m| m.role != "tool"));
+        assert!(session.runtime.pause_reasons.is_empty());
+        assert_eq!(session.runtime.state, SessionState::Idle);
+    }
+
+    #[test]
+    fn synthesized_tool_result_message_has_correct_tool_call_id() {
+        let mut session = make_session();
+        session.add_message(make_assistant_with_tool_calls(&["unique-call-abc"]));
+        session.runtime.pause_reasons.push(make_pause_reason("unique-call-abc"));
+        session.set_runtime_state(SessionState::Paused, None);
+
+        session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "unique-call-abc".into(),
+            accepted: false,
+        }]);
+
+        let tool_msg = session
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("no tool message synthesized");
+        assert_eq!(tool_msg.tool_call_id, "unique-call-abc");
     }
 }
