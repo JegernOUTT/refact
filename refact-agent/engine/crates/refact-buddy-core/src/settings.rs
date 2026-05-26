@@ -36,7 +36,7 @@ pub struct ObserverToggles {
     pub task_health: bool,
     #[serde(default = "default_true")]
     pub trajectory_clutter: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub chat_pattern: bool,
     #[serde(default = "default_true")]
     pub customization_drift: bool,
@@ -57,7 +57,7 @@ impl Default for ObserverToggles {
         Self {
             task_health: true,
             trajectory_clutter: true,
-            chat_pattern: false,
+            chat_pattern: true,
             customization_drift: true,
             memory_garden: true,
             mcp_auth: true,
@@ -78,8 +78,10 @@ pub struct BuddySettings {
     pub autonomous_chats_enabled: bool,
     #[serde(default = "default_true")]
     pub proactive_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub message_observation_enabled: bool,
+    #[serde(default = "default_true")]
+    pub chat_reactions_enabled: bool,
     #[serde(default = "default_true")]
     pub housekeeping_enabled: bool,
     #[serde(default = "default_true")]
@@ -113,7 +115,8 @@ impl Default for BuddySettings {
             personality_prompt: None,
             autonomous_chats_enabled: true,
             proactive_enabled: true,
-            message_observation_enabled: false,
+            message_observation_enabled: true,
+            chat_reactions_enabled: true,
             housekeeping_enabled: true,
             humor_enabled: true,
             humor_level: HumorLevel::default(),
@@ -135,13 +138,16 @@ mod tests {
         let settings: BuddySettings = serde_json::from_str(json).unwrap();
 
         assert!(settings.proactive_enabled);
+        assert!(settings.message_observation_enabled);
+        assert!(settings.chat_reactions_enabled);
+        assert!(settings.observers.chat_pattern);
     }
 
     #[test]
     fn settings_default_observer_toggles() {
         let settings = BuddySettings::default();
 
-        assert!(!settings.observers.chat_pattern);
+        assert!(settings.observers.chat_pattern);
         assert!(settings.observers.task_health);
         assert!(settings.observers.trajectory_clutter);
         assert!(settings.observers.customization_drift);
