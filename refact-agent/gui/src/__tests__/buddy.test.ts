@@ -36,6 +36,9 @@ import {
   removeDraft,
   selectUnreadOpportunities,
   selectSeenNotificationIds,
+  snoozeChatBubbles,
+  clearExpiredChatBubbleSnooze,
+  recordChatBubbleImpression,
   defaultBuddyPulse,
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
@@ -426,6 +429,10 @@ async function expectNoCompanionNotification(
   await waitFor(() => expect(notificationElement(container, id)).toBeNull());
 }
 
+function expectNoCompanionNotificationNow(container: HTMLElement, id: string) {
+  expect(notificationElement(container, id)).toBeNull();
+}
+
 describe("Buddy chat notification freshness", () => {
   beforeEach(() => {
     setupBuddyCompanionHandlers();
@@ -512,7 +519,9 @@ describe("Buddy chat notification freshness", () => {
 
     expect(source).toContain("isBuddyRuntimeEventVisible(event)");
     expect(source).toContain(".sort(compareBuddyRuntimeEvents)");
-    expect(source).toContain("runtimes.find((event) => {");
+    expect(source).toContain(
+      "for (const [index, event] of runtimes.entries())",
+    );
     expect(source).toContain('event.priority === "critical"');
   });
 
@@ -920,6 +929,251 @@ describe("Buddy chat notification freshness", () => {
     expect(source).toContain(
       "await dismissMutation(notification.sourceId).unwrap()",
     );
+  });
+
+  test("dismissing a bubble starts cooldown and blocks another candidate before five minutes", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const store = setUpStore();
+      const firstRuntime = makeChatRuntimeEvent({
+        id: "runtime-cooldown-first",
+        title: "First runtime notice",
+        created_at: new Date(0).toISOString(),
+        controls: [
+          {
+            id: "dismiss-first-runtime",
+            label: "Dismiss",
+            action: "dismiss_runtime_event",
+            action_param: "runtime-cooldown-first",
+            style: "ghost",
+          },
+        ],
+      });
+      const secondRuntime = makeChatRuntimeEvent({
+        id: "runtime-cooldown-second",
+        title: "Second runtime notice",
+        created_at: new Date(0).toISOString(),
+        controls: [
+          {
+            id: "dismiss-second-runtime",
+            label: "Dismiss",
+            action: "dismiss_runtime_event",
+            action_param: "runtime-cooldown-second",
+            style: "ghost",
+          },
+        ],
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [firstRuntime] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await expectCompanionNotification(
+        container,
+        "runtime:runtime-cooldown-first",
+      );
+      const dismissButton = await screen.findByRole("button", {
+        name: "Dismiss",
+        hidden: true,
+      });
+      fireEvent.click(dismissButton);
+
+      await expectNoCompanionNotification(
+        container,
+        "runtime:runtime-cooldown-first",
+      );
+      store.dispatch(enqueueRuntimeEvent(secondRuntime));
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:runtime-cooldown-second",
+      );
+
+      nowSpy.mockReturnValue(5 * 60 * 1000 - 1);
+      store.dispatch(enqueueRuntimeEvent({ ...secondRuntime }));
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:runtime-cooldown-second",
+      );
+    } finally {
+      randomSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("after cooldown a durable opportunity can appear", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const store = setUpStore();
+      const opportunity = makeOpportunity({
+        id: "opp-after-cooldown",
+        summary: "Check durable opportunity",
+        proposed_actions: [{ kind: "dismiss" }],
+        created_at: new Date(0).toISOString(),
+      });
+      server.use(
+        http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [opportunity] }),
+        ),
+      );
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ opportunities: [opportunity] })),
+      );
+      store.dispatch(snoozeChatBubbles(5 * 60 * 1000));
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      expectNoCompanionNotificationNow(
+        container,
+        "opportunity:opp-after-cooldown",
+      );
+
+      nowSpy.mockReturnValue(5 * 60 * 1000 + 2);
+      store.dispatch(clearExpiredChatBubbleSnooze());
+      await expectCompanionNotification(
+        container,
+        "opportunity:opp-after-cooldown",
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("event-once runtime event from an old snapshot never appears", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+    try {
+      const store = setUpStore();
+      const staleRuntime = makeChatRuntimeEvent({
+        id: "runtime-stale-snapshot",
+        title: "Stale snapshot event",
+        status: "completed",
+        priority: "normal",
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [staleRuntime] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectNoCompanionNotification(
+        container,
+        "runtime:runtime-stale-snapshot",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("event-once runtime event during cooldown expires instead of appearing later", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch(snoozeChatBubbles(5 * 60 * 1000));
+      const eventOnceRuntime = makeChatRuntimeEvent({
+        id: "runtime-expire-during-cooldown",
+        title: "Short lived status",
+        status: "completed",
+        priority: "normal",
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      store.dispatch(enqueueRuntimeEvent(eventOnceRuntime));
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:runtime-expire-during-cooldown",
+      );
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 2);
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:runtime-expire-during-cooldown",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("ambient candidate is preferred when recent ambient ratio is below fifty percent", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const actionableRuntime = makeChatRuntimeEvent({
+        id: "runtime-actionable-ratio",
+        title: "Actionable runtime",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const ambientSpeech = makeChatSpeech({
+        id: "ambient-ratio-speech",
+        text: "Ambient gremlin whisper",
+        speech_intent: "humor",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot({
+            active_speech: ambientSpeech,
+            runtime_queue: [actionableRuntime],
+          }),
+        ),
+      );
+      store.dispatch(
+        recordChatBubbleImpression({
+          id: "prior-actionable",
+          kind: "actionable",
+        }),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(
+        container,
+        "speech:ambient-ratio-speech",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:runtime-actionable-ratio",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("if no ambient candidate exists an actionable candidate can show", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const actionableRuntime = makeChatRuntimeEvent({
+        id: "runtime-actionable-no-ambient",
+        title: "Actionable runtime",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [actionableRuntime] })),
+      );
+      store.dispatch(
+        recordChatBubbleImpression({
+          id: "prior-actionable",
+          kind: "actionable",
+        }),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(
+        container,
+        "runtime:runtime-actionable-no-ambient",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

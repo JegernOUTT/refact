@@ -255,6 +255,7 @@ function lastPage(store: AppStore) {
 
 describe("buddy action execution contract", () => {
   beforeEach(() => {
+    localStorage.clear();
     vi.restoreAllMocks();
   });
 

@@ -17,6 +17,23 @@ import type {
 
 const HOME_NOTIFICATION_SNOOZE_MS = 10 * 60 * 1000;
 const BUDDY_SEEN_STORAGE_KEY = "refact.buddy.seenNotifications.v1";
+const BUDDY_CHAT_BUBBLE_POLICY_STORAGE_KEY = "refact.buddy.chatBubblePolicy.v1";
+const CHAT_BUBBLE_COOLDOWN_MIN_MS = 5 * 60 * 1000;
+const CHAT_BUBBLE_COOLDOWN_MAX_MS = 10 * 60 * 1000;
+const CHAT_BUBBLE_IMPRESSION_LIMIT = 20;
+
+export type BuddyChatBubbleClass = "ambient" | "actionable" | "event_once";
+
+export interface BuddyChatBubbleImpression {
+  id: string;
+  kind: BuddyChatBubbleClass;
+  shown_at: number;
+}
+
+interface BuddyChatBubblePolicyStorage {
+  snoozedUntil: number | null;
+  impressions: BuddyChatBubbleImpression[];
+}
 
 function nowMs(): number {
   return Date.now();
@@ -66,6 +83,109 @@ function pruneSeenNotificationIds(
       .sort((left, right) => right[1] - left[1])
       .slice(0, 200),
   );
+}
+
+function isBuddyChatBubbleClass(value: unknown): value is BuddyChatBubbleClass {
+  return (
+    value === "ambient" || value === "actionable" || value === "event_once"
+  );
+}
+
+function loadChatBubblePolicy(): BuddyChatBubblePolicyStorage {
+  if (typeof localStorage === "undefined") {
+    return { snoozedUntil: null, impressions: [] };
+  }
+  try {
+    const raw = localStorage.getItem(BUDDY_CHAT_BUBBLE_POLICY_STORAGE_KEY);
+    if (!raw) return { snoozedUntil: null, impressions: [] };
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return { snoozedUntil: null, impressions: [] };
+    }
+    const candidate = parsed as {
+      snoozedUntil?: unknown;
+      impressions?: unknown;
+    };
+    const snoozedUntil =
+      typeof candidate.snoozedUntil === "number" &&
+      Number.isFinite(candidate.snoozedUntil) &&
+      candidate.snoozedUntil > nowMs()
+        ? candidate.snoozedUntil
+        : null;
+    const impressions = Array.isArray(candidate.impressions)
+      ? candidate.impressions.flatMap((entry): BuddyChatBubbleImpression[] => {
+          if (typeof entry !== "object" || entry === null) return [];
+          const impression = entry as {
+            id?: unknown;
+            kind?: unknown;
+            shown_at?: unknown;
+          };
+          if (
+            typeof impression.id !== "string" ||
+            !isBuddyChatBubbleClass(impression.kind) ||
+            typeof impression.shown_at !== "number" ||
+            !Number.isFinite(impression.shown_at)
+          ) {
+            return [];
+          }
+          return [
+            {
+              id: impression.id,
+              kind: impression.kind,
+              shown_at: impression.shown_at,
+            },
+          ];
+        })
+      : [];
+    return {
+      snoozedUntil,
+      impressions: pruneChatBubbleImpressions(impressions),
+    };
+  } catch {
+    return { snoozedUntil: null, impressions: [] };
+  }
+}
+
+function persistChatBubblePolicy(
+  snoozedUntil: number | null,
+  impressions: BuddyChatBubbleImpression[],
+): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(
+      BUDDY_CHAT_BUBBLE_POLICY_STORAGE_KEY,
+      JSON.stringify({
+        snoozedUntil,
+        impressions: pruneChatBubbleImpressions(impressions),
+      }),
+    );
+  } catch {
+    return;
+  }
+}
+
+function pruneChatBubbleImpressions(
+  impressions: BuddyChatBubbleImpression[],
+): BuddyChatBubbleImpression[] {
+  return [...impressions]
+    .sort((left, right) => right.shown_at - left.shown_at)
+    .slice(0, CHAT_BUBBLE_IMPRESSION_LIMIT);
+}
+
+function chatBubbleCooldownDurationMs(overrideMs: number | undefined): number {
+  if (
+    overrideMs !== undefined &&
+    Number.isFinite(overrideMs) &&
+    overrideMs > 0
+  ) {
+    return overrideMs;
+  }
+  const spanMs = CHAT_BUBBLE_COOLDOWN_MAX_MS - CHAT_BUBBLE_COOLDOWN_MIN_MS;
+  return CHAT_BUBBLE_COOLDOWN_MIN_MS + Math.floor(Math.random() * spanMs);
 }
 
 function defaultBuddyState(): BuddyState {
@@ -285,25 +405,32 @@ export interface BuddySliceState {
   activeDrafts: BuddyDraft[];
   homeSnoozedUntil: number | null;
   seenNotificationIds: Record<string, number>;
+  chatBubbleSnoozedUntil: number | null;
+  chatBubbleImpressions: BuddyChatBubbleImpression[];
 }
 
 const EMPTY_BUDDY_ACTIVITIES: BuddyActivityEntry[] = [];
 const EMPTY_BUDDY_SUGGESTIONS: BuddySuggestion[] = [];
 
-const initialState: BuddySliceState = {
-  snapshot: null,
-  loaded: false,
-  conversations: [],
-  recentDiagnostics: [],
-  runtimeQueue: [],
-  nowPlaying: null,
-  activeSpeech: null,
-  opportunities: [],
-  pulse: null,
-  activeDrafts: [],
-  homeSnoozedUntil: null,
-  seenNotificationIds: pruneSeenNotificationIds(loadSeenNotificationIds()),
-};
+function initialState(): BuddySliceState {
+  const initialChatBubblePolicy = loadChatBubblePolicy();
+  return {
+    snapshot: null,
+    loaded: false,
+    conversations: [],
+    recentDiagnostics: [],
+    runtimeQueue: [],
+    nowPlaying: null,
+    activeSpeech: null,
+    opportunities: [],
+    pulse: null,
+    activeDrafts: [],
+    homeSnoozedUntil: null,
+    seenNotificationIds: pruneSeenNotificationIds(loadSeenNotificationIds()),
+    chatBubbleSnoozedUntil: initialChatBubblePolicy.snoozedUntil,
+    chatBubbleImpressions: initialChatBubblePolicy.impressions,
+  };
+}
 function syncSnapshotRuntime(state: BuddySliceState) {
   if (state.snapshot) {
     state.snapshot.runtime_queue = state.runtimeQueue;
@@ -595,6 +722,42 @@ export const buddySlice = createSlice({
       });
       persistSeenNotificationIds(state.seenNotificationIds);
     },
+    recordChatBubbleImpression: (
+      state,
+      action: PayloadAction<{ id: string; kind: BuddyChatBubbleClass }>,
+    ) => {
+      state.chatBubbleImpressions = pruneChatBubbleImpressions([
+        {
+          id: action.payload.id,
+          kind: action.payload.kind,
+          shown_at: nowMs(),
+        },
+        ...state.chatBubbleImpressions.filter(
+          (impression) => impression.id !== action.payload.id,
+        ),
+      ]);
+      persistChatBubblePolicy(
+        state.chatBubbleSnoozedUntil,
+        state.chatBubbleImpressions,
+      );
+    },
+    snoozeChatBubbles: (state, action: PayloadAction<number | undefined>) => {
+      state.chatBubbleSnoozedUntil =
+        nowMs() + chatBubbleCooldownDurationMs(action.payload);
+      persistChatBubblePolicy(
+        state.chatBubbleSnoozedUntil,
+        state.chatBubbleImpressions,
+      );
+    },
+    clearExpiredChatBubbleSnooze: (state) => {
+      if (
+        state.chatBubbleSnoozedUntil != null &&
+        state.chatBubbleSnoozedUntil <= nowMs()
+      ) {
+        state.chatBubbleSnoozedUntil = null;
+        persistChatBubblePolicy(null, state.chatBubbleImpressions);
+      }
+    },
     clearExpiredBuddyNotificationSnooze: (state) => {
       if (state.homeSnoozedUntil != null && state.homeSnoozedUntil <= nowMs()) {
         state.homeSnoozedUntil = null;
@@ -630,6 +793,8 @@ export const buddySlice = createSlice({
     selectActiveDrafts: (state) => state.activeDrafts,
     selectHomeSnoozedUntil: (state) => state.homeSnoozedUntil,
     selectSeenNotificationIds: (state) => state.seenNotificationIds,
+    selectChatBubbleSnoozedUntil: (state) => state.chatBubbleSnoozedUntil,
+    selectChatBubbleImpressions: (state) => state.chatBubbleImpressions,
   },
 });
 
@@ -659,6 +824,9 @@ export const {
   removeDraft,
   snoozeHomeNotifications,
   markBuddyNotificationSeen,
+  recordChatBubbleImpression,
+  snoozeChatBubbles,
+  clearExpiredChatBubbleSnooze,
   clearExpiredBuddyNotificationSnooze,
   replaceOpportunities,
 } = buddySlice.actions;
@@ -682,6 +850,8 @@ export const {
   selectActiveDrafts,
   selectHomeSnoozedUntil,
   selectSeenNotificationIds,
+  selectChatBubbleSnoozedUntil,
+  selectChatBubbleImpressions,
 } = buddySlice.selectors;
 
 export const selectOpportunityById = (

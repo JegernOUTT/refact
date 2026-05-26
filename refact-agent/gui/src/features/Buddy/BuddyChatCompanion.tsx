@@ -14,10 +14,16 @@ import {
   selectBuddySuggestions,
   selectActiveSpeech,
   selectSeenNotificationIds,
+  selectChatBubbleSnoozedUntil,
+  selectChatBubbleImpressions,
   dismissBuddySuggestion,
   dismissRuntimeEvent,
   clearActiveSpeech,
   markBuddyNotificationSeen,
+  recordChatBubbleImpression,
+  snoozeChatBubbles,
+  clearExpiredChatBubbleSnooze,
+  type BuddyChatBubbleClass,
 } from "./buddySlice";
 import { selectChatErrorById } from "../Chat/Thread";
 import { startBuddyInvestigation } from "../Chat/Thread";
@@ -66,6 +72,7 @@ interface NotificationItem {
   id: string;
   sourceId: string;
   text: string;
+  createdAt: string;
   source:
     | "speech"
     | "thread"
@@ -77,6 +84,45 @@ interface NotificationItem {
   diagnostic?: DiagnosticContext | null;
   opportunity?: BuddyOpportunity;
   speechIntent?: string;
+  ttlMs?: number | null;
+  ttlSeconds?: number;
+}
+
+interface NotificationCandidate {
+  notification: NotificationItem;
+  kind: BuddyChatBubbleClass;
+  rank: number;
+}
+
+const EVENT_ONCE_FRESHNESS_MS = 75_000;
+const AMBIENT_RATIO_TARGET = 0.5;
+const AMBIENT_SIGNALS = new Set<string>([
+  "speech_humor",
+  "speech_insight",
+  "speech_memory_pulse_commentary",
+  "speaker_insight",
+  "speaker_memory_pulse_commentary",
+]);
+const AMBIENT_INTENTS = new Set<string>([
+  "humor",
+  "insight",
+  "memory_pulse_commentary",
+]);
+const DURABLE_SPEECH_INTENTS = new Set<string>([
+  "tour",
+  "quest_accept",
+  "quest_complete",
+  "milestone",
+]);
+
+function normalizedPolicyToken(value: string | null | undefined): string {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function isAmbientToken(value: string | null | undefined): boolean {
+  const token = normalizedPolicyToken(value);
+  if (!token) return false;
+  return AMBIENT_INTENTS.has(token) || AMBIENT_SIGNALS.has(token);
 }
 
 function notificationTriggerSource(
@@ -97,6 +143,101 @@ function notificationIdentity(
 function createdAtMs(value: string): number {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function eventFreshnessMs(ttlMs: number | null | undefined): number {
+  if (ttlMs != null && Number.isFinite(ttlMs) && ttlMs > 0) {
+    return Math.min(EVENT_ONCE_FRESHNESS_MS, ttlMs);
+  }
+  return EVENT_ONCE_FRESHNESS_MS;
+}
+
+function isFreshEventOnce(createdAt: string, ttlMs?: number | null): boolean {
+  const createdAtTime = createdAtMs(createdAt);
+  if (createdAtTime <= 0) return false;
+  return Date.now() - createdAtTime <= eventFreshnessMs(ttlMs);
+}
+
+function isDurableSpeech(activeSpeech: {
+  persistent: boolean;
+  ttl_seconds: number;
+  speech_intent?: string;
+}): boolean {
+  if (activeSpeech.persistent) return true;
+  const intent = normalizedPolicyToken(activeSpeech.speech_intent);
+  return intent ? DURABLE_SPEECH_INTENTS.has(intent) : false;
+}
+
+function classifySpeech(activeSpeech: {
+  persistent: boolean;
+  ttl_seconds: number;
+  speech_intent?: string;
+  dedupe_key?: string;
+}): BuddyChatBubbleClass {
+  if (
+    isAmbientToken(activeSpeech.speech_intent) ||
+    isAmbientToken(activeSpeech.dedupe_key)
+  ) {
+    return "ambient";
+  }
+  return isDurableSpeech(activeSpeech) ? "actionable" : "event_once";
+}
+
+function classifyRuntimeEvent(event: BuddyRuntimeEvent): BuddyChatBubbleClass {
+  if (
+    isAmbientToken(event.signal_type) ||
+    isAmbientToken(event.source) ||
+    isAmbientToken(event.dedupe_key ?? undefined)
+  ) {
+    return "ambient";
+  }
+  if (
+    event.status === "failed" ||
+    event.priority === "critical" ||
+    event.priority === "high" ||
+    (event.controls?.length ?? 0) > 0 ||
+    event.persistent === true
+  ) {
+    return "actionable";
+  }
+  return "event_once";
+}
+
+function isCandidateFresh(candidate: NotificationCandidate): boolean {
+  if (candidate.kind !== "event_once") return true;
+  if (candidate.notification.source === "runtime") {
+    return isFreshEventOnce(
+      candidate.notification.createdAt,
+      candidate.notification.ttlMs,
+    );
+  }
+  if (candidate.notification.source === "speech") {
+    const ttlMs = (candidate.notification.ttlSeconds ?? 0) * 1000;
+    return isFreshEventOnce(candidate.notification.createdAt, ttlMs);
+  }
+  return true;
+}
+
+function ambientRatio(impressions: { kind: BuddyChatBubbleClass }[]): number {
+  if (impressions.length === 0) return 0;
+  const ambientCount = impressions.filter(
+    (impression) => impression.kind === "ambient",
+  ).length;
+  return ambientCount / impressions.length;
+}
+
+function pickNotificationCandidate(
+  candidates: NotificationCandidate[],
+  impressions: { kind: BuddyChatBubbleClass }[],
+): NotificationCandidate | null {
+  const eligible = candidates.filter(isCandidateFresh);
+  if (eligible.length === 0) return null;
+  const sorted = [...eligible].sort((left, right) => left.rank - right.rank);
+  const ambient = sorted.find((candidate) => candidate.kind === "ambient");
+  if (ambient && ambientRatio(impressions) < AMBIENT_RATIO_TARGET) {
+    return ambient;
+  }
+  return sorted[0] ?? null;
 }
 
 function speechMatchesChat(
@@ -156,6 +297,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const suggestions = useAppSelector(selectBuddySuggestions);
   const activeSpeech = useAppSelector(selectActiveSpeech);
   const seenNotificationIds = useAppSelector(selectSeenNotificationIds);
+  const chatBubbleSnoozedUntil = useAppSelector(selectChatBubbleSnoozedUntil);
+  const chatBubbleImpressions = useAppSelector(selectChatBubbleImpressions);
   const threadError = useAppSelector((state) =>
     selectChatErrorById(state, chatId),
   );
@@ -251,13 +394,14 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     setActiveNotificationId(id);
   }, []);
 
-  const notification = useMemo<NotificationItem | null>(() => {
+  const notificationCandidates = useMemo<NotificationCandidate[]>(() => {
     const isEligible = (id: string) =>
       !dismissedNotificationIds.has(id) &&
       (!(id in seenNotificationIds) || activeNotificationId === id);
 
     const chatDiagnostic =
       diagnostics.find((d) => d.chat_id === chatId) ?? null;
+    const candidates: NotificationCandidate[] = [];
 
     if (
       activeSpeech &&
@@ -266,18 +410,24 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     ) {
       const id = notificationIdentity("speech", activeSpeech.id);
       if (isEligible(id)) {
-        return {
-          id,
-          sourceId: activeSpeech.id,
-          text: activeSpeech.text,
-          source: "speech",
-          controls: activeSpeech.controls,
-          diagnostic: activeSpeech.chat_id
-            ? diagnostics.find((d) => d.chat_id === activeSpeech.chat_id) ??
-              null
-            : null,
-          speechIntent: activeSpeech.speech_intent,
-        };
+        candidates.push({
+          kind: classifySpeech(activeSpeech),
+          rank: 10,
+          notification: {
+            id,
+            sourceId: activeSpeech.id,
+            text: activeSpeech.text,
+            createdAt: activeSpeech.created_at,
+            source: "speech",
+            controls: activeSpeech.controls,
+            diagnostic: activeSpeech.chat_id
+              ? diagnostics.find((d) => d.chat_id === activeSpeech.chat_id) ??
+                null
+              : null,
+            speechIntent: activeSpeech.speech_intent,
+            ttlSeconds: activeSpeech.ttl_seconds,
+          },
+        });
       }
     }
 
@@ -287,55 +437,45 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       runtimeQueue,
       chatDiagnostic,
     );
-    const criticalRuntime = runtimes.find((event) => {
+    for (const [index, event] of runtimes.entries()) {
       const id = notificationIdentity("runtime", event.id);
-      return event.priority === "critical" && isEligible(id);
-    });
-    if (criticalRuntime) {
-      return {
-        id: notificationIdentity("runtime", criticalRuntime.id),
-        sourceId: criticalRuntime.id,
-        text: formatBuddyRuntimeEventText(criticalRuntime),
-        source: "runtime",
-        controls: criticalRuntime.controls?.length
-          ? criticalRuntime.controls
-          : errorControls,
-        diagnostic: chatDiagnostic,
-      };
+      if (!isEligible(id)) continue;
+      candidates.push({
+        kind: classifyRuntimeEvent(event),
+        rank: event.priority === "critical" ? 20 + index : 40 + index,
+        notification: {
+          id,
+          sourceId: event.id,
+          text: formatBuddyRuntimeEventText(event),
+          createdAt: event.created_at,
+          source: "runtime",
+          controls: event.controls?.length ? event.controls : errorControls,
+          diagnostic: chatDiagnostic,
+          ttlMs: event.ttl_ms,
+        },
+      });
     }
 
     const normalizedThreadError = threadError?.trim() ?? null;
     const threadId = notificationIdentity("thread-error", chatId);
-    if (normalizedThreadError && isEligible(threadId)) {
-      if (
-        isBuddyOverlaySuppressedIssue(normalizedThreadError, chatDiagnostic)
-      ) {
-        return null;
-      }
-      return {
-        id: threadId,
-        sourceId: chatId,
-        text: normalizedThreadError.slice(0, 160),
-        source: "thread",
-        controls: errorControls,
-        diagnostic: chatDiagnostic,
-      };
-    }
-
-    const runtimeError = runtimes.find((event) =>
-      isEligible(notificationIdentity("runtime", event.id)),
-    );
-    if (runtimeError) {
-      return {
-        id: notificationIdentity("runtime", runtimeError.id),
-        sourceId: runtimeError.id,
-        text: formatBuddyRuntimeEventText(runtimeError),
-        source: "runtime",
-        controls: runtimeError.controls?.length
-          ? runtimeError.controls
-          : errorControls,
-        diagnostic: chatDiagnostic,
-      };
+    if (
+      normalizedThreadError &&
+      isEligible(threadId) &&
+      !isBuddyOverlaySuppressedIssue(normalizedThreadError, chatDiagnostic)
+    ) {
+      candidates.push({
+        kind: "actionable",
+        rank: 30,
+        notification: {
+          id: threadId,
+          sourceId: chatId,
+          text: normalizedThreadError.slice(0, 160),
+          createdAt: new Date().toISOString(),
+          source: "thread",
+          controls: errorControls,
+          diagnostic: chatDiagnostic,
+        },
+      });
     }
 
     if (chatDiagnostic?.error_message.trim()) {
@@ -343,44 +483,51 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         "diagnostic",
         `${chatId}:${chatDiagnostic.collected_at}`,
       );
-      if (isEligible(id)) {
-        if (
-          isBuddyOverlaySuppressedIssue(
-            chatDiagnostic.error_message,
-            chatDiagnostic,
-          )
-        ) {
-          return null;
-        }
-        return {
-          id,
-          sourceId: chatDiagnostic.diagnostic_id ?? chatDiagnostic.collected_at,
-          text: chatDiagnostic.error_message.slice(0, 120),
-          source: "diagnostic",
-          controls: errorControls,
-          diagnostic: chatDiagnostic,
-        };
+      if (
+        isEligible(id) &&
+        !isBuddyOverlaySuppressedIssue(
+          chatDiagnostic.error_message,
+          chatDiagnostic,
+        )
+      ) {
+        candidates.push({
+          kind: "actionable",
+          rank: 50,
+          notification: {
+            id,
+            sourceId:
+              chatDiagnostic.diagnostic_id ?? chatDiagnostic.collected_at,
+            text: chatDiagnostic.error_message.slice(0, 120),
+            createdAt: chatDiagnostic.collected_at,
+            source: "diagnostic",
+            controls: errorControls,
+            diagnostic: chatDiagnostic,
+          },
+        });
       }
     }
 
-    const activeSuggestion = suggestions.find((suggestion: BuddySuggestion) => {
+    suggestions.forEach((suggestion: BuddySuggestion, index) => {
       const id = notificationIdentity("suggestion", suggestion.id);
-      return !suggestion.dismissed && isEligible(id);
+      if (suggestion.dismissed || !isEligible(id)) return;
+      candidates.push({
+        kind: "actionable",
+        rank: 60 + index,
+        notification: {
+          id,
+          sourceId: suggestion.id,
+          text: `${suggestion.title}: ${suggestion.description}`,
+          createdAt: suggestion.created_at,
+          source: "suggestion",
+          controls: suggestion.controls.length
+            ? suggestion.controls
+            : suggestionControls,
+          diagnostic: null,
+        },
+      });
     });
-    if (activeSuggestion) {
-      return {
-        id: notificationIdentity("suggestion", activeSuggestion.id),
-        sourceId: activeSuggestion.id,
-        text: `${activeSuggestion.title}: ${activeSuggestion.description}`,
-        source: "suggestion",
-        controls: activeSuggestion.controls.length
-          ? activeSuggestion.controls
-          : suggestionControls,
-        diagnostic: null,
-      };
-    }
 
-    const activeOpportunity = unread
+    [...unread]
       .filter((opportunity) =>
         isEligible(notificationIdentity("opportunity", opportunity.id)),
       )
@@ -388,18 +535,24 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         (left, right) =>
           createdAtMs(right.created_at) - createdAtMs(left.created_at),
       )
-      .at(0);
-    return activeOpportunity === undefined
-      ? null
-      : {
-          id: notificationIdentity("opportunity", activeOpportunity.id),
-          sourceId: activeOpportunity.id,
-          text: opportunitySpeechText(activeOpportunity),
-          source: "opportunity",
-          controls: opportunityActionControls(activeOpportunity),
-          diagnostic: null,
-          opportunity: activeOpportunity,
-        };
+      .forEach((opportunity, index) => {
+        candidates.push({
+          kind: "actionable",
+          rank: 70 + index,
+          notification: {
+            id: notificationIdentity("opportunity", opportunity.id),
+            sourceId: opportunity.id,
+            text: opportunitySpeechText(opportunity),
+            createdAt: opportunity.created_at,
+            source: "opportunity",
+            controls: opportunityActionControls(opportunity),
+            diagnostic: null,
+            opportunity,
+          },
+        });
+      });
+
+    return candidates;
   }, [
     activeNotificationId,
     activeSpeech,
@@ -416,6 +569,64 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     unread,
   ]);
 
+  useEffect(() => {
+    dispatch(clearExpiredChatBubbleSnooze());
+    if (chatBubbleSnoozedUntil == null) return;
+    const delayMs = Math.max(0, chatBubbleSnoozedUntil - Date.now() + 1);
+    const timer = window.setTimeout(() => {
+      dispatch(clearExpiredChatBubbleSnooze());
+    }, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [chatBubbleSnoozedUntil, dispatch]);
+
+  useEffect(() => {
+    const delays = notificationCandidates
+      .filter((candidate) => candidate.kind === "event_once")
+      .map((candidate) => {
+        const ttlMs =
+          candidate.notification.source === "speech"
+            ? (candidate.notification.ttlSeconds ?? 0) * 1000
+            : candidate.notification.ttlMs;
+        return (
+          createdAtMs(candidate.notification.createdAt) +
+          eventFreshnessMs(ttlMs) -
+          Date.now() +
+          1
+        );
+      })
+      .filter((delayMs) => delayMs > 0);
+    if (delays.length === 0) return;
+    const timer = window.setTimeout(
+      () => {
+        refreshSpeechExpiry((tick) => tick + 1);
+      },
+      Math.min(...delays),
+    );
+    return () => window.clearTimeout(timer);
+  }, [notificationCandidates]);
+
+  const selectedCandidate = useMemo<NotificationCandidate | null>(() => {
+    if (chatBubbleSnoozedUntil != null && chatBubbleSnoozedUntil > Date.now()) {
+      return null;
+    }
+    const activeCandidate = notificationCandidates.find(
+      (candidate) =>
+        candidate.notification.id === activeNotificationId &&
+        isCandidateFresh(candidate),
+    );
+    if (activeCandidate) return activeCandidate;
+    return pickNotificationCandidate(
+      notificationCandidates,
+      chatBubbleImpressions,
+    );
+  }, [
+    activeNotificationId,
+    chatBubbleImpressions,
+    chatBubbleSnoozedUntil,
+    notificationCandidates,
+  ]);
+
+  const notification = selectedCandidate?.notification ?? null;
   useEffect(() => {
     setActionError(null);
   }, [notification?.id]);
@@ -434,6 +645,20 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     if (activeNotificationId in seenNotificationIds) return;
     dispatch(markBuddyNotificationSeen(activeNotificationId));
   }, [activeNotificationId, dispatch, seenNotificationIds]);
+
+  useEffect(() => {
+    if (!selectedCandidate) return;
+    dispatch(
+      recordChatBubbleImpression({
+        id: selectedCandidate.notification.id,
+        kind: selectedCandidate.kind,
+      }),
+    );
+  }, [dispatch, selectedCandidate]);
+
+  const completeBubbleInteraction = useCallback(() => {
+    dispatch(snoozeChatBubbles(undefined));
+  }, [dispatch]);
 
   const handleControl = useCallback(
     async (ctrl: BuddyControl) => {
@@ -472,6 +697,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
               for (const oppId of dismissedOpportunityIds) {
                 dismissNotification(notificationIdentity("opportunity", oppId));
               }
+              completeBubbleInteraction();
             }
             const failed = results.find(
               (result) => result.status === "rejected",
@@ -489,6 +715,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             actionIndex,
           );
           dismissNotification(notification.id);
+          completeBubbleInteraction();
         } catch (error) {
           restoreNotification(notification.id);
           setActionError(formatOpportunityActionError(error));
@@ -500,6 +727,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       }
 
       if (ctrl.action === "dismiss" || ctrl.action === "dismiss_speech") {
+        completeBubbleInteraction();
         dismissNotification(notification.id);
         setActionError(null);
         if (notification.source === "speech") {
@@ -522,6 +750,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       }
 
       if (ctrl.action === "dismiss_runtime_event") {
+        completeBubbleInteraction();
         const runtimeEventId = ctrl.action_param?.trim()
           ? ctrl.action_param.trim()
           : notification.sourceId;
@@ -542,18 +771,21 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       }
 
       if (ctrl.action === "open_buddy") {
+        completeBubbleInteraction();
         dismissNotification(notification.id);
         dispatch(push({ name: "buddy" }));
         return;
       }
 
       if (ctrl.action.startsWith("care_")) {
+        completeBubbleInteraction();
         await executeBuddyAction(ctrl, dispatch);
         dismissNotification(notification.id);
         return;
       }
 
       if (ctrl.action === "accept_quest") {
+        completeBubbleInteraction();
         await executeBuddyAction(ctrl, dispatch, {
           triggerText: notification.text,
           triggerSource: notificationTriggerSource(notification.source),
@@ -594,6 +826,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           if (notification.source !== "suggestion") {
             dismissNotification(notification.id);
           }
+          completeBubbleInteraction();
         } catch (error) {
           if (notification.source === "suggestion") {
             restoreNotification(notification.id);
@@ -615,6 +848,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       restoreNotification,
       dispatch,
       chatId,
+      completeBubbleInteraction,
     ],
   );
 
