@@ -319,7 +319,7 @@ describe("VirtualizedChatList", () => {
     expect(secondCall?.followOutput?.(false)).toBe(false);
   });
 
-  test("wheel inside nested content does not disable outer auto-follow", () => {
+  test("wheel scroll-up disables follow before Virtuoso emits scroll", () => {
     render(
       <div style={{ height: 400 }}>
         <VirtualizedChatList
@@ -331,13 +331,52 @@ describe("VirtualizedChatList", () => {
     );
 
     const scroller = screen.getByTestId("chat-virtuoso-scroller");
-    const nested = screen.getByText("item-1");
     const call = getVirtuosoCalls().at(-1);
 
     Object.defineProperty(scroller, "scrollTop", {
       configurable: true,
       value: 100,
       writable: true,
+    });
+    fireEvent.scroll(scroller);
+
+    fireEvent.wheel(scroller, { deltaY: -30 });
+
+    expect(screen.getByTitle("Follow stream")).toBeInTheDocument();
+    expect(call?.followOutput?.(false)).toBe(false);
+  });
+
+  test("wheel inside nested scrollable content does not disable outer auto-follow", () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming
+          renderItem={(item) => (
+            <div
+              data-testid={`nested-${item.key}`}
+              style={{ overflowY: "auto", maxHeight: 20 }}
+            >
+              <div style={{ height: 80 }}>{item.text}</div>
+            </div>
+          )}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    const nested = screen.getByTestId("nested-k-1");
+    const call = getVirtuosoCalls().at(-1);
+
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 100,
+      writable: true,
+    });
+    Object.defineProperties(nested, {
+      scrollTop: { configurable: true, value: 10, writable: true },
+      scrollHeight: { configurable: true, value: 80 },
+      clientHeight: { configurable: true, value: 20 },
     });
     fireEvent.scroll(scroller);
 

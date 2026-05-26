@@ -16,6 +16,37 @@ const SCROLL_INTENT_MS = 500;
 const PASSIVE_SCROLL_GRACE_MS = 250;
 const MIN_MEASURED_LIST_HEIGHT = 1;
 
+function canScrollInWheelDirection(element: HTMLElement, deltaY: number): boolean {
+  if (deltaY < 0) return element.scrollTop > 0;
+  if (deltaY > 0) {
+    return element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+  }
+  return false;
+}
+
+function isWheelHandledByNestedScroller(
+  scroller: HTMLElement,
+  target: EventTarget | null,
+  deltaY: number,
+): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+
+  let current: HTMLElement | null = target;
+  while (current && current !== scroller) {
+    const style = window.getComputedStyle(current);
+    const canScrollY =
+      style.overflowY === "auto" ||
+      style.overflowY === "scroll" ||
+      style.overflowY === "overlay";
+    if (canScrollY && canScrollInWheelDirection(current, deltaY)) {
+      return true;
+    }
+    current = current.parentElement;
+  }
+
+  return false;
+}
+
 export type VirtualizedChatListProps<T extends { key: string }> = {
   items: T[];
   renderItem: (item: T) => React.ReactNode;
@@ -154,10 +185,23 @@ export function VirtualizedChatList<T extends { key: string }>({
         ...restProps
       } = props;
       const handleWheel: React.WheelEventHandler<HTMLDivElement> = (event) => {
-        markUserInput();
-        if (event.deltaY > 0) {
-          lastActiveScrollDownTsRef.current = performance.now();
+        const wheelHandledByNestedScroller = isWheelHandledByNestedScroller(
+          event.currentTarget,
+          event.target,
+          event.deltaY,
+        );
+
+        if (!wheelHandledByNestedScroller) {
+          markUserInput();
+          if (event.deltaY < 0) {
+            autoFollowRef.current = false;
+            userScrolledUpRef.current = true;
+            setShowFollowButton(true);
+          } else if (event.deltaY > 0) {
+            lastActiveScrollDownTsRef.current = performance.now();
+          }
         }
+
         onWheel?.(event);
       };
 
@@ -192,6 +236,7 @@ export function VirtualizedChatList<T extends { key: string }>({
       const handleTouchStart: React.TouchEventHandler<HTMLDivElement> = (
         event,
       ) => {
+        pointerDownRef.current = true;
         markUserInput();
         restProps.onTouchStart?.(event);
       };
@@ -201,6 +246,20 @@ export function VirtualizedChatList<T extends { key: string }>({
       ) => {
         markUserInput();
         restProps.onTouchMove?.(event);
+      };
+
+      const handleTouchEnd: React.TouchEventHandler<HTMLDivElement> = (
+        event,
+      ) => {
+        pointerDownRef.current = false;
+        restProps.onTouchEnd?.(event);
+      };
+
+      const handleTouchCancel: React.TouchEventHandler<HTMLDivElement> = (
+        event,
+      ) => {
+        pointerDownRef.current = false;
+        restProps.onTouchCancel?.(event);
       };
 
       const handlePointerDown: React.PointerEventHandler<HTMLDivElement> = (
@@ -282,6 +341,8 @@ export function VirtualizedChatList<T extends { key: string }>({
           onKeyDown={handleKeyDown}
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onTouchCancel={handleTouchCancel}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerCancel}
