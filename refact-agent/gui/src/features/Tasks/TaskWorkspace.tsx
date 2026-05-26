@@ -578,189 +578,189 @@ const CardDetail: React.FC<CardDetailProps> = ({
           </Badge>
         </Flex>
 
-          {card.depends_on.length > 0 && (
-            <Box>
-              <Text size="2" weight="medium" color="gray">
-                Dependencies
-              </Text>
-              <Flex gap="1" mt="1">
-                {card.depends_on.map((dep) => (
-                  <Badge key={dep} size="1" variant="soft">
-                    {dep}
-                  </Badge>
-                ))}
-              </Flex>
-            </Box>
-          )}
+        {card.depends_on.length > 0 && (
+          <Box>
+            <Text size="2" weight="medium" color="gray">
+              Dependencies
+            </Text>
+            <Flex gap="1" mt="1">
+              {card.depends_on.map((dep) => (
+                <Badge key={dep} size="1" variant="soft">
+                  {dep}
+                </Badge>
+              ))}
+            </Flex>
+          </Box>
+        )}
 
-          {worktreeLabel && (
-            <Box>
-              <Text size="2" weight="medium" color="gray">
-                Worktree
-              </Text>
-              <Flex direction="column" gap="2" mt="1">
-                <Flex gap="2" align="center" wrap="wrap">
-                  <Badge size="1" color="green" variant="soft">
-                    <BranchIcon /> {worktreeLabel}
+        {worktreeLabel && (
+          <Box>
+            <Text size="2" weight="medium" color="gray">
+              Worktree
+            </Text>
+            <Flex direction="column" gap="2" mt="1">
+              <Flex gap="2" align="center" wrap="wrap">
+                <Badge size="1" color="green" variant="soft">
+                  <BranchIcon /> {worktreeLabel}
+                </Badge>
+                {worktree?.record ?? worktree?.meta ? (
+                  <WorktreeStatusBadge
+                    worktree={worktree.meta ?? worktree.record?.meta}
+                    record={worktree.record}
+                  />
+                ) : null}
+                {worktree?.referenceCount && worktree.referenceCount > 1 ? (
+                  <Badge size="1" color="amber" variant="soft">
+                    shared by {worktree.referenceCount}
                   </Badge>
-                  {worktree?.record ?? worktree?.meta ? (
-                    <WorktreeStatusBadge
-                      worktree={worktree.meta ?? worktree.record?.meta}
-                      record={worktree.record}
-                    />
-                  ) : null}
-                  {worktree?.referenceCount && worktree.referenceCount > 1 ? (
-                    <Badge size="1" color="amber" variant="soft">
-                      shared by {worktree.referenceCount}
-                    </Badge>
-                  ) : null}
-                </Flex>
-                {isWorktreeLoading && (
-                  <Text size="1" color="gray">
-                    Loading worktree metadata...
-                  </Text>
-                )}
-                {!isWorktreeLoading && !worktree && (
-                  <Text size="1" color="gray">
-                    Worktree metadata is unavailable or stale.
-                  </Text>
-                )}
-                {worktree?.stale && (
-                  <Text size="1" color="amber">
-                    This worktree appears stale, missing, or deleted.
-                  </Text>
-                )}
-                {worktree?.legacy && (
-                  <Text size="1" color="amber">
-                    Legacy / unregistered worktree
-                  </Text>
-                )}
-                <Flex gap="2" wrap="wrap">
-                  {wrapWorktreeAction(
-                    <Button
-                      type="button"
-                      size="1"
-                      variant="soft"
-                      disabled={worktreeActionsDisabled}
-                      title={worktreeActionsTooltip}
-                      onClick={() => invokeWorktreeAction(onViewDiff)}
-                    >
-                      View Diff
-                    </Button>,
-                  )}
-                  {wrapWorktreeAction(
-                    <Button
-                      type="button"
-                      size="1"
-                      variant="soft"
-                      disabled={worktreeActionsDisabled}
-                      title={worktreeActionsTooltip}
-                      onClick={() => invokeWorktreeAction(onMerge)}
-                    >
-                      Merge
-                    </Button>,
-                  )}
-                  {wrapWorktreeAction(
-                    <Button
-                      type="button"
-                      size="1"
-                      variant="soft"
-                      color="gray"
-                      disabled={worktreeActionsDisabled}
-                      title={worktreeActionsTooltip}
-                      onClick={() => invokeWorktreeAction(onOpenWorktree)}
-                    >
-                      Open
-                    </Button>,
-                  )}
-                  {wrapWorktreeAction(
-                    <Button
-                      type="button"
-                      size="1"
-                      variant="soft"
-                      color="red"
-                      disabled={worktreeActionsDisabled}
-                      title={worktreeActionsTooltip}
-                      onClick={() => invokeWorktreeAction(onDeleteWorktree)}
-                    >
-                      Discard/Delete
-                    </Button>,
-                  )}
-                </Flex>
+                ) : null}
               </Flex>
-            </Box>
-          )}
-
-          {card.instructions && (
-            <Box>
-              <Text size="2" weight="medium" color="gray">
-                Instructions
-              </Text>
-              <Box className={styles.cardDetailSection}>
-                {onInternalLink ? (
-                  <InternalLinkProvider
-                    onInternalLink={(url) => {
-                      onClose();
-                      return onInternalLink(url);
-                    }}
+              {isWorktreeLoading && (
+                <Text size="1" color="gray">
+                  Loading worktree metadata...
+                </Text>
+              )}
+              {!isWorktreeLoading && !worktree && (
+                <Text size="1" color="gray">
+                  Worktree metadata is unavailable or stale.
+                </Text>
+              )}
+              {worktree?.stale && (
+                <Text size="1" color="amber">
+                  This worktree appears stale, missing, or deleted.
+                </Text>
+              )}
+              {worktree?.legacy && (
+                <Text size="1" color="amber">
+                  Legacy / unregistered worktree
+                </Text>
+              )}
+              <Flex gap="2" wrap="wrap">
+                {wrapWorktreeAction(
+                  <Button
+                    type="button"
+                    size="1"
+                    variant="soft"
+                    disabled={worktreeActionsDisabled}
+                    title={worktreeActionsTooltip}
+                    onClick={() => invokeWorktreeAction(onViewDiff)}
                   >
-                    <Markdown canHaveInteractiveElements={false}>
-                      {card.instructions}
-                    </Markdown>
-                  </InternalLinkProvider>
-                ) : (
+                    View Diff
+                  </Button>,
+                )}
+                {wrapWorktreeAction(
+                  <Button
+                    type="button"
+                    size="1"
+                    variant="soft"
+                    disabled={worktreeActionsDisabled}
+                    title={worktreeActionsTooltip}
+                    onClick={() => invokeWorktreeAction(onMerge)}
+                  >
+                    Merge
+                  </Button>,
+                )}
+                {wrapWorktreeAction(
+                  <Button
+                    type="button"
+                    size="1"
+                    variant="soft"
+                    color="gray"
+                    disabled={worktreeActionsDisabled}
+                    title={worktreeActionsTooltip}
+                    onClick={() => invokeWorktreeAction(onOpenWorktree)}
+                  >
+                    Open
+                  </Button>,
+                )}
+                {wrapWorktreeAction(
+                  <Button
+                    type="button"
+                    size="1"
+                    variant="soft"
+                    color="red"
+                    disabled={worktreeActionsDisabled}
+                    title={worktreeActionsTooltip}
+                    onClick={() => invokeWorktreeAction(onDeleteWorktree)}
+                  >
+                    Discard/Delete
+                  </Button>,
+                )}
+              </Flex>
+            </Flex>
+          </Box>
+        )}
+
+        {card.instructions && (
+          <Box>
+            <Text size="2" weight="medium" color="gray">
+              Instructions
+            </Text>
+            <Box className={styles.cardDetailSection}>
+              {onInternalLink ? (
+                <InternalLinkProvider
+                  onInternalLink={(url) => {
+                    onClose();
+                    return onInternalLink(url);
+                  }}
+                >
                   <Markdown canHaveInteractiveElements={false}>
                     {card.instructions}
                   </Markdown>
-                )}
-              </Box>
-            </Box>
-          )}
-
-          {card.final_report && (
-            <Box>
-              <Text size="2" weight="medium" color="gray">
-                Final Report
-              </Text>
-              <Box
-                className={styles.cardDetailSection}
-                style={{ background: "var(--green-2)" }}
-              >
+                </InternalLinkProvider>
+              ) : (
                 <Markdown canHaveInteractiveElements={false}>
-                  {card.final_report}
+                  {card.instructions}
                 </Markdown>
-              </Box>
+              )}
             </Box>
-          )}
+          </Box>
+        )}
 
-          {card.status_updates.length > 0 && (
-            <Box>
-              <Text size="2" weight="medium" color="gray">
-                Updates
-              </Text>
-              <Flex direction="column" gap="1" mt="1">
-                {card.status_updates.map((update, i) => (
-                  <Text key={i} size="1" color="gray">
-                    {new Date(update.timestamp).toLocaleString()}:{" "}
-                    {update.message}
-                  </Text>
-                ))}
-              </Flex>
+        {card.final_report && (
+          <Box>
+            <Text size="2" weight="medium" color="gray">
+              Final Report
+            </Text>
+            <Box
+              className={styles.cardDetailSection}
+              style={{ background: "var(--green-2)" }}
+            >
+              <Markdown canHaveInteractiveElements={false}>
+                {card.final_report}
+              </Markdown>
             </Box>
-          )}
+          </Box>
+        )}
 
-          <CardCommentsSection
-            taskId={taskId}
-            cardId={card.id}
-            comments={card.comments ?? []}
-          />
+        {card.status_updates.length > 0 && (
+          <Box>
+            <Text size="2" weight="medium" color="gray">
+              Updates
+            </Text>
+            <Flex direction="column" gap="1" mt="1">
+              {card.status_updates.map((update, i) => (
+                <Text key={i} size="1" color="gray">
+                  {new Date(update.timestamp).toLocaleString()}:{" "}
+                  {update.message}
+                </Text>
+              ))}
+            </Flex>
+          </Box>
+        )}
 
-          <Flex justify="end">
-            <Dialog.Close>
-              <Button variant="soft">Close</Button>
-            </Dialog.Close>
-          </Flex>
+        <CardCommentsSection
+          taskId={taskId}
+          cardId={card.id}
+          comments={card.comments ?? []}
+        />
+
+        <Flex justify="end">
+          <Dialog.Close>
+            <Button variant="soft">Close</Button>
+          </Dialog.Close>
         </Flex>
+      </Flex>
     </Dialog.Content>
   );
 };
@@ -834,10 +834,13 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   }, [board, deleteTargetId, deleteTargetWorktree]);
   const [deleteBranch, setDeleteBranch] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
-  const notificationTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const notificationTimerRef = React.useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
   useEffect(() => {
     return () => {
-      if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
+      if (notificationTimerRef.current)
+        clearTimeout(notificationTimerRef.current);
     };
   }, []);
   const [layout, setLayout] = useState(() =>
@@ -990,8 +993,12 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
     if (prevStatus === "planning" && currentStatus === "active") {
       setNotification("Planning complete! You can now spawn agents.");
-      if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
-      notificationTimerRef.current = setTimeout(() => setNotification(null), 3000);
+      if (notificationTimerRef.current)
+        clearTimeout(notificationTimerRef.current);
+      notificationTimerRef.current = setTimeout(
+        () => setNotification(null),
+        3000,
+      );
     }
   }, [task]);
 
@@ -1012,8 +1019,12 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
   const showNotification = useCallback((message: string) => {
     setNotification(message);
-    if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
-    notificationTimerRef.current = setTimeout(() => setNotification(null), 3000);
+    if (notificationTimerRef.current)
+      clearTimeout(notificationTimerRef.current);
+    notificationTimerRef.current = setTimeout(
+      () => setNotification(null),
+      3000,
+    );
   }, []);
 
   const handleNewPlanner = useCallback(() => {
@@ -1181,7 +1192,14 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
       return false;
     },
-    [board, taskId, dispatch, plannerChats, handleSelectAgent, showNotification],
+    [
+      board,
+      taskId,
+      dispatch,
+      plannerChats,
+      handleSelectAgent,
+      showNotification,
+    ],
   );
 
   const handleToggleChatExpanded = useCallback(() => {

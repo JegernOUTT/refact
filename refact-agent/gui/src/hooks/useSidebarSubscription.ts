@@ -589,7 +589,7 @@ export function useSidebarSubscription() {
       ) {
         processTrajectoriesSnapshot(
           snapshot.trajectories,
-          status === "error" ? (error ?? "Failed to load chats") : undefined,
+          status === "error" ? error ?? "Failed to load chats" : undefined,
           snapshot.pagination,
         );
       } else if (

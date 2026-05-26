@@ -217,7 +217,10 @@ export const tasksApi = createApi({
           return {
             error: {
               status: "CUSTOM_ERROR" as const,
-              error: `Invalid TaskBoard shape: ${JSON.stringify(raw).slice(0, 200)}`,
+              error: `Invalid TaskBoard shape: ${JSON.stringify(raw).slice(
+                0,
+                200,
+              )}`,
             },
           };
         }

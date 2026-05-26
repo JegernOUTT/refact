@@ -63,9 +63,7 @@ function mockMemories(response: TaskMemoriesResponse = memoriesResponse) {
   const namespaces = [
     ...new Set(response.memories.map((m) => m.namespace)),
   ].sort();
-  const tags = [
-    ...new Set(response.memories.flatMap((m) => m.tags)),
-  ].sort();
+  const tags = [...new Set(response.memories.flatMap((m) => m.tags))].sort();
   const kinds = [...new Set(response.memories.map((m) => m.kind))].sort();
   const pinned_count = response.memories.filter((m) => m.pinned).length;
   server.use(
@@ -558,13 +556,11 @@ describe("MemoryInboxPanel", () => {
 
   it("pin_success_does_not_leave_stale_optimistic_override", async () => {
     server.use(
-      http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories",
-        () =>
-          HttpResponse.json({
-            ...memoriesResponse,
-            memories: [{ ...memoriesResponse.memories[0], pinned: false }],
-          }),
+      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+        HttpResponse.json({
+          ...memoriesResponse,
+          memories: [{ ...memoriesResponse.memories[0], pinned: false }],
+        }),
       ),
       http.get(
         "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
@@ -604,13 +600,11 @@ describe("MemoryInboxPanel", () => {
 
   it("pin_failure_rolls_back_to_previous_value", async () => {
     server.use(
-      http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories",
-        () =>
-          HttpResponse.json({
-            ...memoriesResponse,
-            memories: [{ ...memoriesResponse.memories[1] }],
-          }),
+      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+        HttpResponse.json({
+          ...memoriesResponse,
+          memories: [{ ...memoriesResponse.memories[1] }],
+        }),
       ),
       http.get(
         "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
@@ -640,21 +634,17 @@ describe("MemoryInboxPanel", () => {
     await user.click(screen.getByRole("button", { name: "Unpin" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Unpin" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Unpin" })).toBeInTheDocument();
     });
   });
 
   it("archive_success_removes_entry_until_server_resurrects", async () => {
     server.use(
-      http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories",
-        () =>
-          HttpResponse.json({
-            ...memoriesResponse,
-            memories: [{ ...memoriesResponse.memories[0], pinned: false }],
-          }),
+      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+        HttpResponse.json({
+          ...memoriesResponse,
+          memories: [{ ...memoriesResponse.memories[0], pinned: false }],
+        }),
       ),
       http.get(
         "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
@@ -691,21 +681,17 @@ describe("MemoryInboxPanel", () => {
     );
 
     await waitFor(() => {
-      expect(
-        screen.getByText("Use scoped memory index"),
-      ).toBeInTheDocument();
+      expect(screen.getByText("Use scoped memory index")).toBeInTheDocument();
     });
   });
 
   it("archive_failure_rolls_back", async () => {
     server.use(
-      http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories",
-        () =>
-          HttpResponse.json({
-            ...memoriesResponse,
-            memories: [{ ...memoriesResponse.memories[0], pinned: false }],
-          }),
+      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+        HttpResponse.json({
+          ...memoriesResponse,
+          memories: [{ ...memoriesResponse.memories[0], pinned: false }],
+        }),
       ),
       http.get(
         "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
@@ -737,9 +723,7 @@ describe("MemoryInboxPanel", () => {
     );
 
     await waitFor(() => {
-      expect(
-        screen.getByText("Use scoped memory index"),
-      ).toBeInTheDocument();
+      expect(screen.getByText("Use scoped memory index")).toBeInTheDocument();
     });
   });
 

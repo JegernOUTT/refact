@@ -11,7 +11,6 @@ import { taskSseEventReceived } from "./tasksSlice";
 import type { ChatThreadRuntime } from "../Chat/Thread/types";
 import type {
   BoardCard,
-
   TaskBoard,
   TaskMeta,
   TrajectoryInfo,
@@ -1112,4 +1111,3 @@ describe("TaskWorkspace CardDetail dialog", () => {
     expect(dialog.contains(document.activeElement)).toBe(true);
   });
 });
-

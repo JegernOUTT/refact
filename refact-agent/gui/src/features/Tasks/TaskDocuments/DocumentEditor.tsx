@@ -150,7 +150,11 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
           await pinDocument({ taskId, slug, pinned }).unwrap();
         }
       } else {
-        if (!formSlug || !SLUG_PATTERN.test(formSlug) || formSlug.length < SLUG_MIN_LENGTH) {
+        if (
+          !formSlug ||
+          !SLUG_PATTERN.test(formSlug) ||
+          formSlug.length < SLUG_MIN_LENGTH
+        ) {
           setSlugError("Slug is required and must be valid.");
           return;
         }

@@ -180,7 +180,9 @@ export const taskMemoriesApi = createApi({
           return {
             error: {
               status: "CUSTOM_ERROR" as const,
-              error: `Invalid TaskMemoriesResponse shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+              error: `Invalid TaskMemoriesResponse shape: ${JSON.stringify(
+                result.data,
+              ).slice(0, 200)}`,
             },
           };
         }
@@ -207,7 +209,9 @@ export const taskMemoriesApi = createApi({
           return {
             error: {
               status: "CUSTOM_ERROR" as const,
-              error: `Invalid TaskMemoryFacetsResponse shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+              error: `Invalid TaskMemoryFacetsResponse shape: ${JSON.stringify(
+                result.data,
+              ).slice(0, 200)}`,
             },
           };
         }

@@ -88,7 +88,9 @@ export interface AppendTaskDocumentRequest {
   section: string;
 }
 
-export function isTaskDocumentDetail(value: unknown): value is TaskDocumentDetail {
+export function isTaskDocumentDetail(
+  value: unknown,
+): value is TaskDocumentDetail {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -213,7 +215,9 @@ export const taskDocumentsApi = createApi({
           return {
             error: {
               status: "CUSTOM_ERROR" as const,
-              error: `Invalid TaskDocumentListResponse shape: ${JSON.stringify(raw).slice(0, 200)}`,
+              error: `Invalid TaskDocumentListResponse shape: ${JSON.stringify(
+                raw,
+              ).slice(0, 200)}`,
             },
           };
         }
@@ -244,7 +248,9 @@ export const taskDocumentsApi = createApi({
           return {
             error: {
               status: "CUSTOM_ERROR" as const,
-              error: `Invalid TaskDocumentDetail shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+              error: `Invalid TaskDocumentDetail shape: ${JSON.stringify(
+                result.data,
+              ).slice(0, 200)}`,
             },
           };
         }
@@ -417,7 +423,9 @@ export const taskDocumentsApi = createApi({
           return {
             error: {
               status: "CUSTOM_ERROR" as const,
-              error: `Invalid TaskDocumentHistoryResponse shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+              error: `Invalid TaskDocumentHistoryResponse shape: ${JSON.stringify(
+                result.data,
+              ).slice(0, 200)}`,
             },
           };
         }

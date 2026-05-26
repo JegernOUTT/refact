@@ -18,7 +18,6 @@ import type { TaskMemoryEntry } from "../../../services/refact/taskMemoriesApi";
 import { memoryKindColor } from "../../../services/refact/taskKinds";
 import styles from "./MemoryInboxPanel.module.css";
 
-
 const TITLE_FALLBACK_LENGTH = 80;
 const PREVIEW_LENGTH = 180;
 
