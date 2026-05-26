@@ -1065,6 +1065,54 @@ describe("TaskWorkspace planner CRUD", () => {
   });
 });
 
+describe("TaskWorkspace CardDetail dialog", () => {
+  it("escape_closes_card_detail_dialog", async () => {
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+
+    expect(
+      await screen.findByRole("dialog", { name: /Implement worktree/ }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: /Implement worktree/ }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("tab_cycles_focus_within_card_detail_dialog", async () => {
+    const record = makeRecord();
+    const card = makeCard({ agent_worktree_name: record.meta.id });
+    server.use(...taskWorkspaceHandlers(card, [record]));
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: /Implement worktree/,
+    });
+    expect(dialog).toBeInTheDocument();
+
+    await user.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await user.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+});
+
 describe("TaskWorkspace CardCommentsSection", () => {
   it("card_detail_renders_card_comments_section", async () => {
     const comment: CardComment = {

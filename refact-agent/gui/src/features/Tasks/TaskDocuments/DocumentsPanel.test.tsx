@@ -394,6 +394,39 @@ describe("DocumentsPanel", () => {
     });
   });
 
+  it("tab_cycles_focus_within_history_dialog", async () => {
+    mockDocuments();
+    server.use(
+      http.get(
+        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/history",
+        () =>
+          HttpResponse.json({
+            task_id: "task-1",
+            slug: "initial-plan",
+            history: [],
+          }),
+      ),
+    );
+
+    const { user } = render(<DocumentsPanel taskId="task-1" />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const row = await screen.findByTestId("document-row-initial-plan");
+    await user.click(within(row).getByRole("button", { name: "History" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "History: initial-plan",
+    });
+    expect(dialog).toBeInTheDocument();
+
+    await user.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await user.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
   it("pinned documents render before unpinned in the list", async () => {
     mockDocuments({
       task_id: "task-1",

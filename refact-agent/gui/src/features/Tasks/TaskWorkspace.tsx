@@ -4,9 +4,7 @@ import {
   Box,
   Text,
   Button,
-  Heading,
   Badge,
-  Card,
   Dialog,
   Checkbox,
   Tooltip,
@@ -557,28 +555,27 @@ const CardDetail: React.FC<CardDetailProps> = ({
     );
 
   return (
-    <Box className={styles.cardDetailOverlay} onClick={onClose}>
-      <Card className={styles.cardDetail} onClick={(e) => e.stopPropagation()}>
-        <Flex direction="column" gap="3">
-          <Flex justify="between" align="center">
-            <Heading size="3" className={styles.cardDetailTitle}>
-              <Badge size="1" color="gray" variant="soft" mr="2">
-                {card.id}
-              </Badge>
-              {card.title}
-            </Heading>
-            <Badge
-              color={
-                card.column === "done"
-                  ? "green"
-                  : card.column === "failed"
-                    ? "red"
-                    : "blue"
-              }
-            >
-              {card.column}
+    <Dialog.Content maxWidth="600px">
+      <Flex direction="column" gap="3">
+        <Flex justify="between" align="center">
+          <Dialog.Title size="3" className={styles.cardDetailTitle}>
+            <Badge size="1" color="gray" variant="soft" mr="2">
+              {card.id}
             </Badge>
-          </Flex>
+            {card.title}
+          </Dialog.Title>
+          <Badge
+            color={
+              card.column === "done"
+                ? "green"
+                : card.column === "failed"
+                  ? "red"
+                  : "blue"
+            }
+          >
+            {card.column}
+          </Badge>
+        </Flex>
 
           {card.depends_on.length > 0 && (
             <Box>
@@ -758,13 +755,12 @@ const CardDetail: React.FC<CardDetailProps> = ({
           />
 
           <Flex justify="end">
-            <Button variant="soft" onClick={onClose}>
-              Close
-            </Button>
+            <Dialog.Close>
+              <Button variant="soft">Close</Button>
+            </Dialog.Close>
           </Flex>
         </Flex>
-      </Card>
-    </Box>
+    </Dialog.Content>
   );
 };
 
@@ -1665,21 +1661,28 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         </Tabs.Root>
       </Box>
 
-      {selectedCard && (
-        <CardDetail
-          taskId={taskId}
-          card={selectedCard}
-          worktree={selectedCardWorktree}
-          worktreeLabel={selectedCardWorktreeLabel}
-          isWorktreeLoading={worktreesLoading}
-          onClose={() => setSelectedCardId(null)}
-          onInternalLink={handleInternalLink}
-          onViewDiff={handleViewCardDiff}
-          onMerge={handleMergeCardWorktree}
-          onOpenWorktree={(worktree) => void handleOpenCardWorktree(worktree)}
-          onDeleteWorktree={handleDeleteCardWorktree}
-        />
-      )}
+      <Dialog.Root
+        open={Boolean(selectedCard)}
+        onOpenChange={(open) => {
+          if (!open) setSelectedCardId(null);
+        }}
+      >
+        {selectedCard && (
+          <CardDetail
+            taskId={taskId}
+            card={selectedCard}
+            worktree={selectedCardWorktree}
+            worktreeLabel={selectedCardWorktreeLabel}
+            isWorktreeLoading={worktreesLoading}
+            onClose={() => setSelectedCardId(null)}
+            onInternalLink={handleInternalLink}
+            onViewDiff={handleViewCardDiff}
+            onMerge={handleMergeCardWorktree}
+            onOpenWorktree={(worktree) => void handleOpenCardWorktree(worktree)}
+            onDeleteWorktree={handleDeleteCardWorktree}
+          />
+        )}
+      </Dialog.Root>
 
       <WorktreeDiffPanel
         open={Boolean(diffTarget)}
