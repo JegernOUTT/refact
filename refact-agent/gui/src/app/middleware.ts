@@ -68,6 +68,7 @@ import {
   setIsAuthError,
 } from "../features/Errors/errorsSlice";
 import { reportBuddyFrontendError } from "../features/Buddy/reportBuddyFrontendError";
+import { setBackendStatus } from "../features/Connection";
 import { setThemeMode, updateConfig } from "../features/Config/configSlice";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
 import { resetSidebarState } from "../features/Sidebar/sidebarSlice";
@@ -436,6 +437,21 @@ startListening({
     listenerApi.dispatch(clearError());
     listenerApi.dispatch(capsApi.util.resetApiState());
     listenerApi.dispatch(modelsApi.util.resetApiState());
+  },
+});
+
+startListening({
+  actionCreator: setBackendStatus,
+  effect: (action, listenerApi) => {
+    const previousStatus =
+      listenerApi.getOriginalState().connection.backendStatus;
+    if (action.payload.status !== "online" || previousStatus === "online") {
+      return;
+    }
+    listenerApi.dispatch(clearError());
+    listenerApi.dispatch(capsApi.util.resetApiState());
+    listenerApi.dispatch(modelsApi.util.resetApiState());
+    listenerApi.dispatch(providersApi.util.resetApiState());
   },
 });
 

@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo } from "react";
 import { Select, Text, Flex } from "@radix-ui/themes";
-import { useGetCapsQuery } from "../../services/refact/caps";
+import { useGetCapsQuery } from "../../hooks";
 import { RichModelSelectItem } from "../Select/RichModelSelectItem";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { isLegacyRefactModel } from "../../utils/modelProviders";

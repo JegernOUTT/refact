@@ -17,8 +17,13 @@ import {
   Callout,
 } from "@radix-ui/themes";
 import { ChevronDownIcon, Cross1Icon } from "@radix-ui/react-icons";
-import { useAppSelector, useAppDispatch, useCapsForToolUse } from "../../hooks";
-import { useGetCapsQuery, CapCost } from "../../services/refact/caps";
+import {
+  useAppSelector,
+  useAppDispatch,
+  useCapsForToolUse,
+  useGetCapsQuery,
+} from "../../hooks";
+import { CapCost } from "../../services/refact/caps";
 import {
   selectChatId,
   selectModel,
