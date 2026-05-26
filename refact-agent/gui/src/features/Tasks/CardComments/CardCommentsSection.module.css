@@ -1,0 +1,15 @@
+.commentItem {
+  background: var(--gray-2);
+  border-radius: var(--radius-2);
+  padding: var(--space-2);
+}
+
+.commentBody {
+  font-size: var(--font-size-1);
+  margin-bottom: var(--space-1);
+}
+
+.composer {
+  border-top: 1px solid var(--gray-a4);
+  padding-top: var(--space-2);
+}

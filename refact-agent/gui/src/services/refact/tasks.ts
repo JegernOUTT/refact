@@ -35,6 +35,15 @@ export interface StatusUpdate {
   message: string;
 }
 
+export interface CardComment {
+  id: string;
+  author_role: "planner" | "agents" | "user" | "system" | "http";
+  author_id: string | null;
+  timestamp: string;
+  body: string;
+  reply_to: string | null;
+}
+
 export interface BoardCard {
   id: string;
   title: string;
@@ -54,6 +63,7 @@ export interface BoardCard {
   agent_worktree?: string;
   agent_worktree_name?: string;
   target_files: string[];
+  comments?: CardComment[];
 }
 
 export interface CreateTaskRequest {
@@ -345,6 +355,49 @@ export const tasksApi = createApi({
       ],
     }),
 
+    addCardComment: builder.mutation<
+      TaskBoard,
+      {
+        taskId: string;
+        cardId: string;
+        body: string;
+        authorRole: "user";
+        replyTo?: string;
+      }
+    >({
+      queryFn: async (
+        { taskId, cardId, body, authorRole, replyTo },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
+        const state = api.getState() as RootState;
+        const port = state.config.lspPort;
+        const result = await baseQuery({
+          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/board`,
+          method: "POST",
+          body: {
+            rev: 0,
+            patches: [
+              {
+                type: "AddComment",
+                card_id: cardId,
+                body,
+                author_role: authorRole,
+                author_id: null,
+                reply_to: replyTo ?? null,
+              },
+            ],
+          },
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as TaskBoard };
+      },
+      invalidatesTags: (_result, _error, { taskId }) => [
+        { type: "Board", id: taskId },
+      ],
+    }),
+
     updateTaskMeta: builder.mutation<
       TaskMeta,
       {
@@ -400,4 +453,5 @@ export const {
   useCreatePlannerChatMutation,
   useDeletePlannerChatMutation,
   useCreatePlannerChatFromTransitionMutation,
+  useAddCardCommentMutation,
 } = tasksApi;

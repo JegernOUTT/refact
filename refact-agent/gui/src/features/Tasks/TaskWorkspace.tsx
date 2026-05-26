@@ -87,6 +87,7 @@ import {
 } from "../../utils/chatUiPersistence";
 import { MemoryInboxPanel } from "./TaskMemories/MemoryInboxPanel";
 import { DocumentsPanel } from "./TaskDocuments/DocumentsPanel";
+import { CardCommentsSection } from "./CardComments";
 
 type ActiveChat =
   | { type: "planner"; chatId: string }
@@ -498,6 +499,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
 };
 
 interface CardDetailProps {
+  taskId: string;
   card: BoardCard;
   worktree: CardWorktreeTarget | null;
   worktreeLabel: string | null;
@@ -511,6 +513,7 @@ interface CardDetailProps {
 }
 
 const CardDetail: React.FC<CardDetailProps> = ({
+  taskId,
   card,
   worktree,
   worktreeLabel,
@@ -737,6 +740,12 @@ const CardDetail: React.FC<CardDetailProps> = ({
               </Flex>
             </Box>
           )}
+
+          <CardCommentsSection
+            taskId={taskId}
+            cardId={card.id}
+            comments={card.comments ?? []}
+          />
 
           <Flex justify="end">
             <Button variant="soft" onClick={onClose}>
@@ -1640,6 +1649,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
 
       {selectedCard && (
         <CardDetail
+          taskId={taskId}
           card={selectedCard}
           worktree={selectedCardWorktree}
           worktreeLabel={selectedCardWorktreeLabel}

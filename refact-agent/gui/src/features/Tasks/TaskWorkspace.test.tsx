@@ -11,6 +11,7 @@ import { taskSseEventReceived } from "./tasksSlice";
 import type { ChatThreadRuntime } from "../Chat/Thread/types";
 import type {
   BoardCard,
+  CardComment,
   TaskBoard,
   TaskMeta,
   TrajectoryInfo,
@@ -1038,5 +1039,36 @@ describe("TaskWorkspace planner CRUD", () => {
     await user.click(screen.getByRole("button", { name: "New planner" }));
 
     await screen.findByText(/Create failed/);
+  });
+});
+
+describe("TaskWorkspace CardCommentsSection", () => {
+  it("card_detail_renders_card_comments_section", async () => {
+    const comment: CardComment = {
+      id: "comment-uuid-1",
+      author_role: "user",
+      author_id: null,
+      timestamp: new Date().toISOString(),
+      body: "A test board comment",
+      reply_to: null,
+    };
+    const card = makeCard({ comments: [comment] });
+    server.use(
+      ...taskWorkspaceHandlers(card, []),
+      http.post("http://127.0.0.1:8001/v1/tasks/task-1/board", () =>
+        HttpResponse.json(makeBoard(card)),
+      ),
+    );
+
+    const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState(),
+    });
+
+    await user.click(await openCardDetail(card));
+
+    await waitFor(() => {
+      expect(screen.getByText("A test board comment")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Comments \(/)).toBeInTheDocument();
   });
 });
