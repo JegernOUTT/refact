@@ -219,6 +219,7 @@ export function useSidebarSubscription() {
   historyRef.current = historyChats;
   const serverWorkspaceRootsRef = useRef<string[] | undefined>(undefined);
   const disconnectRef = useRef<(() => void) | null>(null);
+  const activePortRef = useRef<number | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -802,15 +803,21 @@ export function useSidebarSubscription() {
     const apiKey = config.apiKey ?? null;
 
     if (port <= 0 || port > 65535) {
+      activePortRef.current = null;
       scheduleReconnect();
       return;
     }
 
     const generation = ++generationRef.current;
-    dispatch(resetSidebarState({ lspPort: port }));
-    serverWorkspaceRootsRef.current = undefined;
-    tasksSnapshotRef.current = null;
-    void prepareInitialHistory(generation);
+    const reconnectingSameEndpoint = activePortRef.current === port;
+    activePortRef.current = port;
+
+    if (!reconnectingSameEndpoint) {
+      dispatch(resetSidebarState({ lspPort: port }));
+      serverWorkspaceRootsRef.current = undefined;
+      tasksSnapshotRef.current = null;
+      void prepareInitialHistory(generation);
+    }
 
     const onEvent = (envelope: SidebarDispatchedEventEnvelope) => {
       if (generation !== generationRef.current) return;
@@ -877,6 +884,7 @@ export function useSidebarSubscription() {
       if (disconnectRef.current) {
         disconnectRef.current();
       }
+      activePortRef.current = null;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }

@@ -53,12 +53,21 @@ export const sidebarWorkspaceChanged = createAction<{
 export const sidebarReducer = createReducer(initialState, (builder) => {
   builder
     .addCase(sidebarSubscriptionStarted, (state, action) => {
+      const reconnectingSameEndpoint =
+        state.subscriptionId !== null &&
+        state.lspPort === action.payload.lspPort;
+
       state.subscriptionId = action.payload.subscriptionId;
       state.lspPort = action.payload.lspPort;
-      state.sections.workspace = loadingSection();
-      state.sections.chats = loadingSection();
-      state.sections.tasks = loadingSection();
-      state.sections.buddy = loadingSection();
+
+      for (const section of ["workspace", "chats", "tasks", "buddy"] as const) {
+        if (
+          !reconnectingSameEndpoint ||
+          state.sections[section].status === "error"
+        ) {
+          state.sections[section] = loadingSection();
+        }
+      }
     })
     .addCase(sidebarSectionSnapshotReceived, (state, action) => {
       state.sections[action.payload.section] = {

@@ -52,6 +52,53 @@ describe("sidebarReducer", () => {
     expect(state.sections.tasks.status).toBe("loading");
   });
 
+  it("keeps section readiness when reconnecting to the same endpoint", () => {
+    let state = sidebarReducer(
+      undefined,
+      sidebarSubscriptionStarted({ subscriptionId: "sub", lspPort: 8001 }),
+    );
+    state = sidebarReducer(
+      state,
+      sidebarSectionSnapshotReceived({ section: "tasks", status: "ready" }),
+    );
+
+    state = sidebarReducer(
+      state,
+      sidebarSubscriptionStarted({ subscriptionId: "sub-2", lspPort: 8001 }),
+    );
+
+    expect(state.subscriptionId).toBe("sub-2");
+    expect(state.lspPort).toBe(8001);
+    expect(state.sections.tasks.status).toBe("ready");
+  });
+
+  it("clears section errors when reconnecting to the same endpoint", () => {
+    let state = sidebarReducer(
+      undefined,
+      sidebarSubscriptionStarted({ subscriptionId: "sub", lspPort: 8001 }),
+    );
+    state = sidebarReducer(
+      state,
+      sidebarSectionSnapshotReceived({ section: "tasks", status: "ready" }),
+    );
+    state = sidebarReducer(
+      state,
+      sidebarSectionSnapshotReceived({
+        section: "chats",
+        status: "error",
+        error: "transport error",
+      }),
+    );
+
+    state = sidebarReducer(
+      state,
+      sidebarSubscriptionStarted({ subscriptionId: "sub-2", lspPort: 8001 }),
+    );
+
+    expect(state.sections.tasks.status).toBe("ready");
+    expect(state.sections.chats).toEqual({ status: "loading", error: null });
+  });
+
   it("resets all sections only when explicitly reset", () => {
     let state = sidebarReducer(
       undefined,

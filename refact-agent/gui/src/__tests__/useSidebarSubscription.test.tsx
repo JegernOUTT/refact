@@ -249,6 +249,66 @@ describe("useSidebarSubscription", () => {
     });
   });
 
+  it("keeps loaded sections while reconnecting after a closed stream", async () => {
+    let requestCount = 0;
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/sidebar/subscribe", () => {
+        requestCount += 1;
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            if (requestCount === 1) {
+              for (const event of [
+                sectionSnapshot(0, "workspace", {
+                  workspace_roots: ["/workspace/refact"],
+                }),
+                sectionSnapshot(1, "chats", { trajectories: [] }),
+                sectionSnapshot(2, "tasks", { tasks: [] }),
+                sectionSnapshot(3, "buddy", { buddy: null }),
+              ]) {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+                );
+              }
+              controller.close();
+            }
+          },
+        });
+
+        return new HttpResponse(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          },
+        });
+      }),
+    );
+
+    const store = renderSidebarSubscription();
+
+    await waitFor(() => {
+      expect(store.getState().sidebar.sections.chats.status).toBe("ready");
+      expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
+      expect(store.getState().history.isLoading).toBe(false);
+    });
+
+    await waitFor(
+      () => {
+        expect(requestCount).toBeGreaterThan(1);
+      },
+      { timeout: 2_000 },
+    );
+
+    expect(store.getState().sidebar.sections).toMatchObject({
+      workspace: { status: "ready" },
+      chats: { status: "ready" },
+      tasks: { status: "ready" },
+      buddy: { status: "ready" },
+    });
+    expect(store.getState().history.isLoading).toBe(false);
+  });
+
   it("resets section readiness and cached tasks when the same subscription switches workspace", async () => {
     server.use(
       sidebarSnapshotHandler(
