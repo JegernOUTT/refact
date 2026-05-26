@@ -21,6 +21,12 @@ const CHATGPT_CODEX_MODELS_URL: &str =
 const CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
 pub const CODEX_WEBSOCKET_ENDPOINT_HEADER: &str =
     "x-refact-internal-openai-codex-websocket-endpoint";
+pub const CODEX_HTTP_HEADER_RETRY_ENABLED_HEADER: &str =
+    "x-refact-internal-openai-codex-http-header-retry-enabled";
+pub const CODEX_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_HEADER: &str =
+    "x-refact-internal-openai-codex-http-header-retry-timeout-seconds";
+pub const CODEX_HTTP_HEADER_RETRY_MAX_ATTEMPTS_HEADER: &str =
+    "x-refact-internal-openai-codex-http-header-retry-max-attempts";
 #[allow(dead_code)]
 const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const CODEX_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -36,6 +42,18 @@ fn new_codex_session_id() -> String {
 
 fn default_use_websocket() -> bool {
     true
+}
+
+fn default_http_response_header_retry_enabled() -> bool {
+    true
+}
+
+fn default_http_response_header_retry_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_http_response_header_retry_max_attempts() -> usize {
+    10
 }
 
 fn normalized_model_id(id: &str) -> String {
@@ -138,6 +156,12 @@ pub struct OpenAICodexProvider {
     pub session_id: String,
     #[serde(default = "default_use_websocket")]
     pub use_websocket: bool,
+    #[serde(default = "default_http_response_header_retry_enabled")]
+    pub http_response_header_retry_enabled: bool,
+    #[serde(default = "default_http_response_header_retry_timeout_seconds")]
+    pub http_response_header_retry_timeout_seconds: u64,
+    #[serde(default = "default_http_response_header_retry_max_attempts")]
+    pub http_response_header_retry_max_attempts: usize,
 }
 
 impl Default for OpenAICodexProvider {
@@ -148,6 +172,11 @@ impl Default for OpenAICodexProvider {
             oauth_tokens: OAuthTokens::default(),
             session_id: new_codex_session_id(),
             use_websocket: default_use_websocket(),
+            http_response_header_retry_enabled: default_http_response_header_retry_enabled(),
+            http_response_header_retry_timeout_seconds:
+                default_http_response_header_retry_timeout_seconds(),
+            http_response_header_retry_max_attempts:
+                default_http_response_header_retry_max_attempts(),
         }
     }
 }
@@ -200,6 +229,33 @@ impl OpenAICodexProvider {
         tokio::time::timeout(Duration::from_secs(30), OPENAI_CODEX_REFRESH_GUARD.lock())
             .await
             .map_err(|_| "OpenAI Codex OAuth refresh guard timed out".to_string())
+    }
+
+    fn yaml_usize_field(yaml: &serde_yaml::Value, key: &str) -> Result<Option<usize>, String> {
+        let Some(value) = yaml.get(key) else {
+            return Ok(None);
+        };
+        if let Some(value) = value.as_u64() {
+            return usize::try_from(value)
+                .map(Some)
+                .map_err(|_| format!("{key} is too large"));
+        }
+        if let Some(value) = value.as_i64() {
+            return usize::try_from(value)
+                .map(Some)
+                .map_err(|_| format!("{key} must be a positive integer"));
+        }
+        if let Some(value) = value.as_str() {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok(None);
+            }
+            return value
+                .parse::<usize>()
+                .map(Some)
+                .map_err(|_| format!("{key} must be a positive integer"));
+        }
+        Err(format!("{key} must be a positive integer"))
     }
 
     fn needs_refresh_on_start(expires_at: i64) -> bool {
@@ -1149,6 +1205,21 @@ fields:
     f_desc: "Use WebSocket streaming for ChatGPT backend OAuth requests. HTTP SSE remains the fallback."
     f_label: "Use WebSocket streaming"
     f_default: true
+  http_response_header_retry_enabled:
+    f_type: boolean
+    f_desc: "Retry ChatGPT backend HTTP requests when no response headers arrive before the timeout."
+    f_label: "Retry stalled HTTP requests"
+    f_default: true
+  http_response_header_retry_timeout_seconds:
+    f_type: integer
+    f_desc: "Seconds to wait for HTTP response headers before retrying."
+    f_label: "Header timeout, seconds"
+    f_default: 10
+  http_response_header_retry_max_attempts:
+    f_type: integer
+    f_desc: "Maximum HTTP attempts before surfacing the timeout error."
+    f_label: "Max retry attempts"
+    f_default: 10
 oauth:
   supported: true
   methods:
@@ -1179,6 +1250,22 @@ available:
         if let Some(use_websocket) = yaml.get("use_websocket").and_then(|v| v.as_bool()) {
             self.use_websocket = use_websocket;
         }
+        if let Some(enabled) = yaml
+            .get("http_response_header_retry_enabled")
+            .and_then(|v| v.as_bool())
+        {
+            self.http_response_header_retry_enabled = enabled;
+        }
+        if let Some(timeout_seconds) =
+            Self::yaml_usize_field(&yaml, "http_response_header_retry_timeout_seconds")?
+        {
+            self.http_response_header_retry_timeout_seconds = timeout_seconds.max(1) as u64;
+        }
+        if let Some(max_attempts) =
+            Self::yaml_usize_field(&yaml, "http_response_header_retry_max_attempts")?
+        {
+            self.http_response_header_retry_max_attempts = max_attempts.max(1);
+        }
         parse_enabled_models(&yaml, &mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
         Ok(())
@@ -1201,6 +1288,9 @@ available:
             "auth_source": auth_source,
             "oauth_connected": oauth_connected,
             "use_websocket": self.use_websocket,
+            "http_response_header_retry_enabled": self.http_response_header_retry_enabled,
+            "http_response_header_retry_timeout_seconds": self.http_response_header_retry_timeout_seconds,
+            "http_response_header_retry_max_attempts": self.http_response_header_retry_max_attempts,
             "enabled_models": self.enabled_models,
             "custom_models": self.custom_models
         })
@@ -1223,6 +1313,18 @@ available:
                         CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL.to_string(),
                     );
                 }
+                extra_headers.insert(
+                    CODEX_HTTP_HEADER_RETRY_ENABLED_HEADER.to_string(),
+                    self.http_response_header_retry_enabled.to_string(),
+                );
+                extra_headers.insert(
+                    CODEX_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_HEADER.to_string(),
+                    self.http_response_header_retry_timeout_seconds.to_string(),
+                );
+                extra_headers.insert(
+                    CODEX_HTTP_HEADER_RETRY_MAX_ATTEMPTS_HEADER.to_string(),
+                    self.http_response_header_retry_max_attempts.to_string(),
+                );
                 (
                     "https://chatgpt.com/backend-api/codex/responses".to_string(),
                     access_token,
@@ -1536,12 +1638,64 @@ mod tests {
                 .map(String::as_str),
             Some(super::CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL)
         );
+        assert_eq!(
+            runtime
+                .extra_headers
+                .get(super::CODEX_HTTP_HEADER_RETRY_ENABLED_HEADER)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            runtime
+                .extra_headers
+                .get(super::CODEX_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_HEADER)
+                .map(String::as_str),
+            Some("10")
+        );
+        assert_eq!(
+            runtime
+                .extra_headers
+                .get(super::CODEX_HTTP_HEADER_RETRY_MAX_ATTEMPTS_HEADER)
+                .map(String::as_str),
+            Some("10")
+        );
 
         p.use_websocket = false;
         let runtime = p.build_runtime().unwrap();
         assert!(!runtime
             .extra_headers
             .contains_key(super::CODEX_WEBSOCKET_ENDPOINT_HEADER));
+    }
+
+    #[test]
+    fn http_header_retry_settings_apply_and_roundtrip() {
+        let mut p = OpenAICodexProvider::default();
+        p.provider_settings_apply(
+            serde_yaml::from_str(
+                r#"
+http_response_header_retry_enabled: false
+http_response_header_retry_timeout_seconds: "7"
+http_response_header_retry_max_attempts: 12
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!p.http_response_header_retry_enabled);
+        assert_eq!(p.http_response_header_retry_timeout_seconds, 7);
+        assert_eq!(p.http_response_header_retry_max_attempts, 12);
+
+        let settings = p.provider_settings_as_json();
+        assert_eq!(settings["http_response_header_retry_enabled"], json!(false));
+        assert_eq!(
+            settings["http_response_header_retry_timeout_seconds"],
+            json!(7)
+        );
+        assert_eq!(
+            settings["http_response_header_retry_max_attempts"],
+            json!(12)
+        );
     }
 
     #[test]

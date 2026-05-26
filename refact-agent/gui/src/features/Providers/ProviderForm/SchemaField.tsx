@@ -71,6 +71,17 @@ export const SchemaField: React.FC<SchemaFieldProps> = ({
     );
   }
 
+  if (field.f_type === "integer" || field.f_type === "number") {
+    return (
+      <NumberField
+        field={field}
+        value={value}
+        disabled={disabled}
+        onSave={onSave}
+      />
+    );
+  }
+
   return (
     <StringField
       field={field}
@@ -78,6 +89,79 @@ export const SchemaField: React.FC<SchemaFieldProps> = ({
       disabled={disabled}
       onSave={onSave}
     />
+  );
+};
+
+const NumberField: React.FC<SchemaFieldProps> = ({
+  field,
+  value,
+  disabled,
+  onSave,
+}) => {
+  const valueToString = useCallback(
+    (candidate: unknown) => String(candidate ?? field.f_default ?? ""),
+    [field.f_default],
+  );
+  const [localValue, setLocalValue] = useState(valueToString(value));
+  const [saveState, setSaveState] = useState<FieldSaveState>("idle");
+  const originalValueRef = useRef(value);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(timerRef.current), []);
+
+  useEffect(() => {
+    originalValueRef.current = value;
+    setLocalValue(valueToString(value));
+  }, [value, valueToString]);
+
+  const handleBlur = useCallback(async () => {
+    if (localValue === valueToString(originalValueRef.current)) return;
+    const parsed = Number(localValue);
+    if (!Number.isFinite(parsed)) {
+      setSaveState("error");
+      timerRef.current = setTimeout(() => setSaveState("idle"), 2000);
+      return;
+    }
+    const nextValue = field.f_type === "integer" ? Math.trunc(parsed) : parsed;
+    setSaveState("saving");
+    try {
+      await onSave(field.key, nextValue);
+      setSaveState("saved");
+      timerRef.current = setTimeout(() => setSaveState("idle"), 1500);
+    } catch {
+      setSaveState("error");
+      timerRef.current = setTimeout(() => setSaveState("idle"), 2000);
+    }
+  }, [field.f_type, field.key, localValue, onSave, valueToString]);
+
+  return (
+    <Flex direction="column" gap="1">
+      <Flex align="center" justify="between">
+        <Flex direction="column" gap="0">
+          <Text size="2" weight="medium">
+            {field.f_label ?? field.key}
+          </Text>
+          {field.f_desc && (
+            <Text size="1" color="gray">
+              {field.f_desc}
+            </Text>
+          )}
+        </Flex>
+        <SaveIndicator state={saveState} />
+      </Flex>
+      <TextField.Root
+        id={field.key}
+        type="number"
+        value={localValue}
+        placeholder={field.f_placeholder ?? ""}
+        disabled={disabled}
+        onChange={(e) => setLocalValue(e.target.value)}
+        onBlur={() => void handleBlur()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+        className={disabled ? styles.disabledField : undefined}
+      />
+    </Flex>
   );
 };
 

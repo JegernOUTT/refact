@@ -52,7 +52,10 @@ async function parseSchema(yamlStr: string): Promise<ParsedSchema> {
         f_placeholder: def.f_placeholder
           ? String(def.f_placeholder)
           : undefined,
-        f_default: def.f_default ? String(def.f_default) : undefined,
+        f_default:
+          def.f_default !== undefined && def.f_default !== null
+            ? String(def.f_default)
+            : undefined,
         f_extra: Boolean(def.f_extra),
         f_secret: Boolean(def.f_secret),
         smartlinks: Array.isArray(def.smartlinks)

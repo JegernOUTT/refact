@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use eventsource_stream::Eventsource;
 use serde_json::{json, Value};
@@ -26,6 +26,8 @@ lazy_static::lazy_static! {
 }
 
 const OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
+const OPENAI_CODEX_HTTP_RESPONSE_HEADER_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10);
+const OPENAI_CODEX_HTTP_RESPONSE_HEADER_ATTEMPTS_DEFAULT: usize = 10;
 
 fn merge_usage(existing: Option<ChatUsage>, incoming: ChatUsage) -> ChatUsage {
     match existing {
@@ -225,6 +227,88 @@ async fn send_llm_http_request(
     }
 }
 
+fn openai_codex_http_response_header_timeout_message(timeout: Duration) -> String {
+    format!(
+        "OpenAI Codex HTTP SSE response header timeout after {}s",
+        timeout.as_secs()
+    )
+}
+
+async fn wait_before_openai_codex_http_retry(
+    attempt: usize,
+    abort_flag: Option<Arc<AtomicBool>>,
+    abort_notify: Option<Arc<tokio::sync::Notify>>,
+) -> Result<(), String> {
+    let shift = std::cmp::min(attempt, 3) as u32;
+    let delay = Duration::from_millis(200 * 2u64.pow(shift));
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => Ok(()),
+        _ = wait_for_abort_signal(abort_flag, abort_notify) => Err(ABORT_ERROR_MESSAGE.to_string()),
+    }
+}
+
+async fn send_openai_codex_http_request_with_header_timeout(
+    client: &reqwest::Client,
+    http_parts: &HttpParts,
+    wire_format: WireFormat,
+    abort_flag: Option<Arc<AtomicBool>>,
+    abort_notify: Option<Arc<tokio::sync::Notify>>,
+    response_header_timeout: Duration,
+    max_attempts: usize,
+) -> Result<reqwest::Response, String> {
+    let max_attempts = std::cmp::max(1, max_attempts);
+    let mut last_error = String::new();
+
+    for attempt in 0..max_attempts {
+        let request = send_llm_http_request(
+            client,
+            http_parts,
+            wire_format,
+            abort_flag.clone(),
+            abort_notify.clone(),
+        );
+        let result = tokio::time::timeout(response_header_timeout, request).await;
+        match result {
+            Ok(Ok(response)) => {
+                if attempt > 0 {
+                    tracing::info!(
+                        attempt = attempt + 1,
+                        max_attempts,
+                        "OpenAI Codex HTTP SSE request recovered after retry"
+                    );
+                }
+                return Ok(response);
+            }
+            Ok(Err(error)) if is_abort_error(&error) => return Err(error),
+            Ok(Err(error)) => {
+                last_error = error;
+                if !classify_llm_error_for_retry(&last_error).is_retryable_transient() {
+                    return Err(last_error);
+                }
+            }
+            Err(_) => {
+                last_error =
+                    openai_codex_http_response_header_timeout_message(response_header_timeout);
+            }
+        }
+
+        if attempt + 1 == max_attempts {
+            break;
+        }
+
+        tracing::warn!(
+            attempt = attempt + 1,
+            max_attempts,
+            error = %last_error,
+            "OpenAI Codex HTTP SSE request did not receive response headers; retrying"
+        );
+        wait_before_openai_codex_http_retry(attempt, abort_flag.clone(), abort_notify.clone())
+            .await?;
+    }
+
+    Err(last_error)
+}
+
 fn should_commit_cache_guard_after_http_success(status: reqwest::StatusCode, text: &str) -> bool {
     if status.is_success() {
         return true;
@@ -244,6 +328,32 @@ fn openai_codex_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
 
 fn is_openai_codex_chatgpt_backend(model_rec: &BaseModelRecord) -> bool {
     openai_codex_instance_id(model_rec).is_some()
+}
+
+fn openai_codex_http_header_retry_config(model_rec: &BaseModelRecord) -> Option<(Duration, usize)> {
+    if !is_openai_codex_chatgpt_backend(model_rec) {
+        return None;
+    }
+    let headers = &model_rec.extra_headers;
+    let retry_enabled = headers
+        .get(crate::providers::openai_codex::CODEX_HTTP_HEADER_RETRY_ENABLED_HEADER)
+        .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        .unwrap_or(true);
+    if !retry_enabled {
+        return None;
+    }
+    let timeout = headers
+        .get(crate::providers::openai_codex::CODEX_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_HEADER)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(OPENAI_CODEX_HTTP_RESPONSE_HEADER_TIMEOUT_DEFAULT);
+    let max_attempts = headers
+        .get(crate::providers::openai_codex::CODEX_HTTP_HEADER_RETRY_MAX_ATTEMPTS_HEADER)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(OPENAI_CODEX_HTTP_RESPONSE_HEADER_ATTEMPTS_DEFAULT);
+    Some((timeout, max_attempts))
 }
 
 async fn force_refresh_openai_codex_for_retry(
@@ -1898,15 +2008,30 @@ pub async fn run_llm_stream<C: StreamCollector>(
         );
     }
 
-    let mut response = send_llm_http_request(
-        &client,
-        &http_parts,
-        wire_format,
-        params.abort_flag.clone(),
-        params.abort_notify.clone(),
-    )
-    .await
-    .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
+    let codex_http_header_retry_config = openai_codex_http_header_retry_config(&params.model_rec);
+    let mut response =
+        if let Some((response_header_timeout, max_attempts)) = codex_http_header_retry_config {
+            send_openai_codex_http_request_with_header_timeout(
+                &client,
+                &http_parts,
+                wire_format,
+                params.abort_flag.clone(),
+                params.abort_notify.clone(),
+                response_header_timeout,
+                max_attempts,
+            )
+            .await
+        } else {
+            send_llm_http_request(
+                &client,
+                &http_parts,
+                wire_format,
+                params.abort_flag.clone(),
+                params.abort_notify.clone(),
+            )
+            .await
+        }
+        .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
     let mut status = response.status();
     if !status.is_success()
         && is_openai_codex_chatgpt_backend(&params.model_rec)
@@ -1947,14 +2072,29 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 retry_parts
                     .headers
                     .insert(reqwest::header::AUTHORIZATION, auth_value);
-                response = send_llm_http_request(
-                    &client,
-                    &retry_parts,
-                    wire_format,
-                    params.abort_flag.clone(),
-                    params.abort_notify.clone(),
-                )
-                .await
+                response = if let Some((response_header_timeout, max_attempts)) =
+                    codex_http_header_retry_config
+                {
+                    send_openai_codex_http_request_with_header_timeout(
+                        &client,
+                        &retry_parts,
+                        wire_format,
+                        params.abort_flag.clone(),
+                        params.abort_notify.clone(),
+                        response_header_timeout,
+                        max_attempts,
+                    )
+                    .await
+                } else {
+                    send_llm_http_request(
+                        &client,
+                        &retry_parts,
+                        wire_format,
+                        params.abort_flag.clone(),
+                        params.abort_notify.clone(),
+                    )
+                    .await
+                }
                 .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
                 status = response.status();
             }
@@ -2335,6 +2475,43 @@ mod tests {
     }
 
     #[test]
+    fn codex_http_header_retry_config_defaults_and_overrides() {
+        let mut model = BaseModelRecord {
+            id: "openai_codex/gpt-5.6-codex".to_string(),
+            endpoint: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            openai_codex_http_header_retry_config(&model),
+            Some((
+                OPENAI_CODEX_HTTP_RESPONSE_HEADER_TIMEOUT_DEFAULT,
+                OPENAI_CODEX_HTTP_RESPONSE_HEADER_ATTEMPTS_DEFAULT,
+            ))
+        );
+
+        model.extra_headers.insert(
+            crate::providers::openai_codex::CODEX_HTTP_HEADER_RETRY_TIMEOUT_SECONDS_HEADER
+                .to_string(),
+            "3".to_string(),
+        );
+        model.extra_headers.insert(
+            crate::providers::openai_codex::CODEX_HTTP_HEADER_RETRY_MAX_ATTEMPTS_HEADER.to_string(),
+            "4".to_string(),
+        );
+        assert_eq!(
+            openai_codex_http_header_retry_config(&model),
+            Some((Duration::from_secs(3), 4))
+        );
+
+        model.extra_headers.insert(
+            crate::providers::openai_codex::CODEX_HTTP_HEADER_RETRY_ENABLED_HEADER.to_string(),
+            "false".to_string(),
+        );
+        assert_eq!(openai_codex_http_header_retry_config(&model), None);
+    }
+
+    #[test]
     fn websocket_create_message_wraps_responses_body() {
         let body = json!({
             "model": "gpt-5.6-codex",
@@ -2400,6 +2577,16 @@ mod tests {
         ));
         assert!(!is_openai_codex_previous_response_missing_error(
             "OpenAI Codex WebSocket stream stalled"
+        ));
+    }
+
+    #[test]
+    fn openai_codex_http_header_timeout_is_retryable() {
+        let error = openai_codex_http_response_header_timeout_message(Duration::from_secs(10));
+
+        assert!(matches!(
+            classify_llm_error_for_retry(&error),
+            RetryDecision::Retry { .. }
         ));
     }
 
