@@ -48,37 +48,66 @@ fn valid_provider(provider: &Value) -> bool {
 }
 
 fn prepare_forwarded_args(args: &HashMap<String, Value>) -> Result<HashMap<String, Value>, String> {
+    let known = ["title", "body", "labels", "provider", "confidence"];
+    let mut unknown: Vec<_> = args.keys().filter(|k| !known.contains(&k.as_str())).collect();
+    if !unknown.is_empty() {
+        unknown.sort();
+        return Err(format!("Unknown arguments for buddy_open_issue: {:?}", unknown));
+    }
+
     if let Some(provider) = args.get("provider") {
         if !valid_provider(provider) {
             return Err("buddy_open_issue: provider must be 'github' or 'gitlab'".to_string());
         }
     }
 
-    let mut forwarded = args.clone();
-    if let Some(title) = args.get("title").and_then(Value::as_str) {
-        forwarded.insert(
-            "title".to_string(),
-            json!(capped_redacted(title, TITLE_MAX_CHARS)),
-        );
-    }
-    if let Some(body) = args.get("body").and_then(Value::as_str) {
-        forwarded.insert(
-            "body".to_string(),
-            json!(capped_redacted(body, BODY_MAX_CHARS)),
-        );
-    }
-    if let Some(labels) = args.get("labels").and_then(Value::as_array) {
-        let labels = labels
+    let sanitized_title = args
+        .get("title")
+        .and_then(Value::as_str)
+        .map(|t| capped_redacted(t, TITLE_MAX_CHARS));
+
+    let sanitized_body = args
+        .get("body")
+        .and_then(Value::as_str)
+        .map(|b| capped_redacted(b, BODY_MAX_CHARS));
+
+    let validated_labels = if let Some(labels_value) = args.get("labels") {
+        let raw: Vec<Value> = labels_value
+            .as_array()
+            .ok_or("labels must be an array of strings")?
             .iter()
-            .filter_map(Value::as_str)
-            .map(redact_sensitive)
-            .filter(|label| label.chars().count() <= LABEL_MAX_CHARS)
+            .enumerate()
+            .map(|(i, v)| {
+                v.as_str()
+                    .ok_or_else(|| format!("labels[{}] must be a string", i))
+                    .map(|s| Value::String(redact_sensitive(s)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let processed: Vec<Value> = raw
+            .into_iter()
+            .filter(|v| v.as_str().map_or(false, |s| s.chars().count() <= LABEL_MAX_CHARS))
             .take(MAX_LABELS)
-            .collect::<Vec<_>>();
-        forwarded.insert("labels".to_string(), json!(labels));
+            .collect();
+        Some(Value::Array(processed))
+    } else {
+        None
+    };
+
+    let mut forwarded = HashMap::new();
+    if let Some(title) = sanitized_title {
+        forwarded.insert("title".to_string(), Value::String(title));
+    }
+    if let Some(body) = sanitized_body {
+        forwarded.insert("body".to_string(), Value::String(body));
+    }
+    if let Some(labels) = validated_labels {
+        forwarded.insert("labels".to_string(), labels);
+    }
+    if let Some(provider) = args.get("provider").and_then(Value::as_str) {
+        forwarded.insert("provider".to_string(), Value::String(provider.to_string()));
     }
     // The autonomous subchat owns the issue-filing decision; reaching this wrapper means confirmed.
-    forwarded.insert("confidence".to_string(), json!("confirmed"));
+    forwarded.insert("confidence".to_string(), Value::String("confirmed".to_string()));
     Ok(forwarded)
 }
 
@@ -216,6 +245,75 @@ mod tests {
         assert_eq!(out["title"], json!("Bug"));
         assert_eq!(out["body"], json!("Details"));
         assert_eq!(out["provider"], json!("github"));
+        assert_eq!(out["confidence"], json!("confirmed"));
+    }
+
+    #[test]
+    fn buddy_open_issue_rejects_unknown_arguments() {
+        let err = prepare_forwarded_args(&args(vec![
+            ("title", json!("Bug")),
+            ("body", json!("Details")),
+            ("labels", json!(["fix"])),
+            ("provider", json!("github")),
+            ("extra", json!("evil")),
+        ]))
+        .expect_err("unknown arg should fail");
+
+        assert!(err.contains("Unknown arguments for buddy_open_issue"));
+        assert!(err.contains("extra"));
+    }
+
+    #[test]
+    fn buddy_open_issue_rejects_non_string_label() {
+        let err = prepare_forwarded_args(&args(vec![
+            ("title", json!("Bug")),
+            ("body", json!("Details")),
+            ("labels", json!(["ok", 42])),
+        ]))
+        .expect_err("non-string label should fail");
+
+        assert!(err.contains("labels[1]"));
+        assert!(err.contains("must be a string"));
+    }
+
+    #[test]
+    fn buddy_open_issue_rejects_non_array_labels() {
+        let err = prepare_forwarded_args(&args(vec![
+            ("title", json!("Bug")),
+            ("body", json!("Details")),
+            ("labels", json!("not-an-array")),
+        ]))
+        .expect_err("non-array labels should fail");
+
+        assert_eq!(err, "labels must be an array of strings");
+    }
+
+    #[test]
+    fn buddy_open_issue_forwards_only_allowlisted_keys() {
+        let out = forwarded(vec![
+            ("title", json!("Bug")),
+            ("body", json!("Details")),
+            ("labels", json!(["fix"])),
+            ("provider", json!("github")),
+        ]);
+
+        assert_eq!(out.len(), 5);
+        assert!(out.contains_key("title"));
+        assert!(out.contains_key("body"));
+        assert!(out.contains_key("labels"));
+        assert!(out.contains_key("provider"));
+        assert!(out.contains_key("confidence"));
+    }
+
+    #[test]
+    fn buddy_open_issue_accepts_valid_input() {
+        let out = forwarded(vec![
+            ("title", json!("Simple bug")),
+            ("body", json!("Repro steps")),
+        ]);
+
+        assert_eq!(out["title"], json!("Simple bug"));
+        assert_eq!(out["body"], json!("Repro steps"));
         assert_eq!(out["confidence"], json!("confirmed"));
     }
 }
