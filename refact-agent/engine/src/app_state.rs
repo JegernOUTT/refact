@@ -25,6 +25,7 @@ use crate::caps::CodeAssistantCaps;
 use crate::chat::trajectories::{self, TrajectoryEvent};
 use crate::chat::{self, process_command_queue, SessionsMap};
 use crate::completion_cache::CompletionCache;
+use crate::exec::ExecRegistry;
 use crate::files_blocklist::IndexingEverywhere;
 use crate::files_in_workspace::DocumentsState;
 use crate::global_context::{AtCommandsPreviewCache, CommandLine, SharedGlobalContext};
@@ -50,6 +51,7 @@ pub struct RuntimeServices {
     pub cmdline: Arc<CommandLine>,
     pub http_client: reqwest::Client,
     pub ask_shutdown_sender: Arc<StdMutex<std::sync::mpsc::Sender<String>>>,
+    pub exec_registry: Arc<ExecRegistry>,
 }
 
 #[derive(Clone)]

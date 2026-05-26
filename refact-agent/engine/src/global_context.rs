@@ -24,6 +24,7 @@ use crate::caps::providers::get_latest_provider_mtime;
 use crate::providers::{ProviderRegistry, load_providers_from_config};
 use crate::completion_cache::CompletionCache;
 use crate::custom_error::ScratchError;
+use crate::exec::ExecRegistry;
 use crate::files_in_workspace::DocumentsState;
 use crate::integrations::browser_runtime::BrowserRuntime;
 use crate::integrations::sessions::IntegrationSession;
@@ -219,6 +220,7 @@ impl AtCommandsPreviewCache {
 
 pub struct GlobalContext {
     pub shutdown_flag: Arc<AtomicBool>,
+    pub exec_registry: Arc<ExecRegistry>,
     pub cmdline: CommandLine,
     pub http_client: reqwest::Client,
     pub cache_dir: PathBuf,
@@ -278,6 +280,7 @@ impl GlobalContext {
                 cmdline: Arc::new(self.cmdline.clone()),
                 http_client: self.http_client.clone(),
                 ask_shutdown_sender: self.ask_shutdown_sender.clone(),
+                exec_registry: self.exec_registry.clone(),
             },
             paths: PathServices {
                 cache_dir: self.cache_dir.clone(),
@@ -649,6 +652,7 @@ pub async fn create_global_context(
         .unwrap_or_else(|error| panic!("failed to initialize background agent registry: {error}"));
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
+        exec_registry: Arc::new(ExecRegistry::new()),
         cmdline: cmdline.clone(),
         http_client: http_client.clone(),
         cache_dir,
@@ -728,6 +732,14 @@ pub mod tests {
             &cloned.runtime.shutdown_flag
         ));
         assert!(Arc::ptr_eq(
+            &gcx.exec_registry,
+            &app_state.runtime.exec_registry
+        ));
+        assert!(Arc::ptr_eq(
+            &app_state.runtime.exec_registry,
+            &second_app_state.runtime.exec_registry
+        ));
+        assert!(Arc::ptr_eq(
             &app_state.model.caps,
             &second_app_state.model.caps
         ));
@@ -736,6 +748,27 @@ pub mod tests {
             &second_app_state.model.tokenizers
         ));
         assert!(Arc::ptr_eq(&app_state.agents, &second_app_state.agents));
+    }
+
+    #[tokio::test]
+    async fn make_test_gcx_initializes_exec_registry() {
+        let gcx = make_test_gcx().await;
+        let snapshot = gcx
+            .exec_registry
+            .register(
+                crate::exec::ExecProcessMeta::new(
+                    crate::exec::ExecMode::Foreground,
+                    "true".to_string(),
+                ),
+                1024,
+            )
+            .await;
+
+        assert_eq!(gcx.exec_registry.list(Default::default()).await.len(), 1);
+        assert_eq!(
+            gcx.exec_registry.get(&snapshot.meta.process_id).await,
+            Some(snapshot)
+        );
     }
 
     pub async fn make_test_gcx() -> Arc<GlobalContext> {
@@ -797,6 +830,7 @@ pub mod tests {
 
         let cx = GlobalContext {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            exec_registry: Arc::new(ExecRegistry::new()),
             cmdline,
             http_client,
             cache_dir,

@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::env;
 use std::panic;
+use std::time::Duration;
 
 use files_correction::canonical_path;
 use integrations::running_integrations;
@@ -102,6 +103,8 @@ pub mod stats;
 pub mod tasks;
 pub mod trajectory_memos;
 pub mod voice;
+
+const EXEC_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run() {
     unsafe {
@@ -270,6 +273,19 @@ pub async fn run() {
     chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
     background_tasks.abort().await;
     git::checkpoints::abort_init_shadow_repos(gcx.clone()).await;
+    let exec_cleanup = gcx
+        .exec_registry
+        .cleanup_shutdown(EXEC_SHUTDOWN_CLEANUP_TIMEOUT)
+        .await;
+    if exec_cleanup.removed_count > 0 {
+        info!(
+            "exec shutdown cleanup removed {} records, stopped {} children, failed {}, timed out {}",
+            exec_cleanup.removed_count,
+            exec_cleanup.child_stopped_count,
+            exec_cleanup.child_failed_count,
+            exec_cleanup.child_timed_out_count
+        );
+    }
     integrations::sessions::stop_sessions(gcx.clone()).await;
     info!("bb\n");
 }
