@@ -1501,6 +1501,11 @@ mod tests {
         );
     }
 
+    // FLAKY: tokio::time::timeout always polls the inner future first before
+    // checking the timer. On fast machines, `git log --all` on a 1-commit repo
+    // completes its read loop before the timer can fire — even with
+    // Duration::ZERO — making this test pass non-deterministically. Tracked T-183.
+    #[ignore = "tokio::time::timeout polls inner future first; race with fast git; T-183"]
     #[tokio::test]
     async fn run_git_respects_timeout() {
         let temp = tempfile::tempdir().unwrap();
