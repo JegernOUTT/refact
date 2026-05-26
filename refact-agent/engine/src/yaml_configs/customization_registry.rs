@@ -623,6 +623,8 @@ pub fn map_legacy_mode_to_id(mode_str: &str) -> &str {
         "CONFIGURE" => "configurator",
         "TASK_PLANNER" => "task_planner",
         "TASK_AGENT" => "task_agent",
+        "BRAINSTORM" => "brainstorming",
+        "BRAINSTORMING" => "brainstorming",
         _ => {
             if mode_str
                 .chars()
@@ -921,8 +923,8 @@ mod tests {
             "create_knowledge(content)",
             "## Workflow",
             "Understand the Task",
-            "Implement without Delegation",
-            "Validate via Delegation",
+            "Execute with Plan Discipline",
+            "Validate and Review",
             "tasks_set",
             "task_done()",
             "ask_questions()",
@@ -1789,6 +1791,8 @@ mod tests {
         assert_eq!(map_legacy_mode_to_id("CONFIGURE"), "configurator");
         assert_eq!(map_legacy_mode_to_id("TASK_PLANNER"), "task_planner");
         assert_eq!(map_legacy_mode_to_id("TASK_AGENT"), "task_agent");
+        assert_eq!(map_legacy_mode_to_id("BRAINSTORM"), "brainstorming");
+        assert_eq!(map_legacy_mode_to_id("BRAINSTORMING"), "brainstorming");
     }
 
     #[test]

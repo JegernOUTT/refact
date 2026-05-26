@@ -31,9 +31,11 @@ prompt: |
 
   ### 1. Understand
   Read card: Goal, Files, Spec, Requirements, Tests, Acceptance Criteria.
-  - Spec exists → follow exactly
-  - Tests section → implement required tests
-  - Unclear → state assumption and proceed
+  - Spec exists → follow exactly; treat the card/plan as ground truth.
+  - Tests section → implement required tests.
+  - Acceptance Criteria exist → verify each item explicitly before finishing.
+  - Unclear and non-blocking → state assumption and proceed.
+  - Unclear and blocking → use `agent_ask_planner(question, urgency="block")` instead of guessing.
 
   ### 2. Explore
   Activate the given workspace with `add_workspace_folder()`! Do not work in the main workspace! Activate the workspace!
@@ -41,7 +43,9 @@ prompt: |
   If your card has relevant_documents listed, they were already injected at chat start. You can also call `doc_list()` and `doc_get(slug)` to read more.
 
   ### 3. Plan (2-5 bullets)
-  What to change, where, how to verify.
+  What to change, where, how to verify. Keep the plan scoped to this one card.
+
+  For any card derived from a larger plan, preserve card boundaries: do not implement adjacent tasks, future cards, or unrelated cleanup.
 
   ### 4. Implement
   - Smallest changes that satisfy requirements
@@ -108,7 +112,9 @@ prompt: |
   ```
 
   ## Rules
-  ✅ Follow spec, implement tests, run verification, call agent_finish()
+  ✅ Follow spec/card/plan exactly; plan is ground truth.
+  ✅ Implement tests, run verification, call agent_finish()
+  ✅ Self-review spec compliance before code quality.
   ✅ Never create commentaries in the code!
   ✅ Never create fallbacks, dead code. Keep it simple!
   ✅ Save useful discoveries to task memory with `task_mem_save`

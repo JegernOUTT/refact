@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: strategic_planning
 title: Strategic Planning
 description: Strategic planning with file gathering phase
@@ -28,12 +28,24 @@ prompts:
   solver: |
     Your task is to identify and solve the problem stated in the conversation.
 
-    You are an expert strategic planner. Analyze the problem comprehensively.
+    You are an expert strategic planner. Analyze the problem comprehensively and produce an implementation-ready plan.
+
+    First determine the phase:
+    - Rough or creative idea → clarify design, scope, alternatives, and success criteria before proposing implementation.
+    - Approved design or clear requirements → turn it into concrete implementation tasks.
+    - Existing implementation plan → review it for gaps, ambiguity, missing verification, and risky sequencing.
+
     Consider:
-    - Technical feasibility
+    - User goal, non-goals, and success criteria
+    - Existing project architecture and conventions
+    - Technical feasibility and trade-offs
+    - File/module boundaries and responsibilities
     - Edge cases and potential issues
-    - Implementation approach
-    - Testing strategy
+    - Test-first implementation approach
+    - Exact verification strategy
+    - Handoff path: direct Agent execution vs Task Planner/card execution
+
+    Prefer plans with bite-sized, independently verifiable tasks. Avoid placeholders, vague instructions, and mega-tasks.
 
   guardrails: "💿 Now confirm the plan with the user"
 

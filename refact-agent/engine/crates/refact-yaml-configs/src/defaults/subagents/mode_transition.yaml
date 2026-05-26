@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: mode_transition
 title: Mode Transition Context Extraction
 description: Analyze conversation to extract context for transitioning to a new chat mode
@@ -91,11 +91,17 @@ messages:
     A brief message to start the new chat, telling the assistant what to continue working on.
     </handoff_message>
 
+    If TARGET MODE is plan and the conversation contains an approved design/spec, include that design in <handoff_message> so Plan mode can turn it into implementation tasks.
+
+    If TARGET MODE is agent and the conversation contains a complete implementation plan, put a compact execution instruction in <handoff_message> and preserve the full plan either by selecting the exact MSG_ID/tool output that contains it or by including it in <summary> when it fits the budget. The Agent should receive the plan as ground truth.
+
     If TARGET MODE is task_planner and the conversation contains a complete implementation plan, also include it verbatim:
 
     <plan>
-    Full plan text, including waves, cards, dependencies, files, tests, and acceptance criteria.
+    Full plan text, including waves/cards or tasks, dependencies, exact files, tests, verification commands, acceptance criteria, risks, and non-goals.
     </plan>
+
+    For plan handoffs, prefer a clean phase boundary: preserve finalized design/plan artifacts and high-signal decisions, not brainstorming noise or stale alternatives.
 
     Be thorough but selective. The goal is to preserve everything important while keeping the new chat focused. Do not select more than one image-bearing message unless it is absolutely necessary; only one image can be carried over.
 

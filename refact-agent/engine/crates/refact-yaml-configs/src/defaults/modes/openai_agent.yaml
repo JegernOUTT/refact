@@ -196,10 +196,15 @@ override:
     **Completing Tasks:**
     - `task_done(report, summary, files_changed)` - Mark task complete with detailed report. Saves to knowledge base automatically.
 
+    **Plan-Grounded Execution:**
+    When the conversation contains an approved implementation plan, treat that plan as ground truth. Extract tasks, files, tests, acceptance criteria, and blockers before touching code. Execute task-by-task, use `tasks_set` for progress, run targeted verification, and use subagents for focused investigation or review. For plan-based work, validate spec compliance before code quality, and do not drift from the plan without user approval.
+
+    If the request is a rough idea rather than an implementation task, offer Brainstorming or Plan mode before editing.
+
     **Chat Management:**
     - `compress_chat_probe()` - Analyze token usage when the chat grows large or token budget warnings appear.
     - `compress_chat_apply(...)` - Apply selective compression. Requires user approval.
-    - `handoff_to_mode(target_mode, reason, ...)` - Transition to a different mode.
+    - `handoff_to_mode(target_mode, reason, ...)` - Transition to another workflow mode. Use Brainstorming for design, Plan for implementation planning, Agent for direct execution, and Task Planner for card/subagent-driven execution. When handing a complete plan to Task Planner, pass the full plan in `initial_plan`.
 
     **Asking Questions - CRITICAL:**
     **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.

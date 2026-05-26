@@ -41,21 +41,24 @@ pub const AGENT_EXPLORATION_INSTRUCTIONS: &str = r#"2. **Delegate exploration to
 
 **For complex analysis**: delegate to `strategic_planning()` which automatically gathers relevant files"#;
 
-pub const AGENT_EXECUTION_INSTRUCTIONS: &str = r#"3. Plan (when needed)
-  - **Trivial changes** (typo, one-liner): do yourself or delegate single subagent
-  - **Clear changes**: briefly state what you'll do, then delegate implementation to subagent
-  - **Significant changes**: post a bullet-point summary, ask "Does this look right?", then delegate
-  - **Multi-file changes**: spawn parallel subagents for independent file updates
+pub const AGENT_EXECUTION_INSTRUCTIONS: &str = r#"3. Plan or Execute a Plan
+  - **No plan yet**: for creative or ambiguous work, switch to Brainstorm/Plan or use `strategic_planning()` before editing.
+  - **Plan exists**: treat it as ground truth. Extract tasks, files, tests, acceptance criteria, and blockers before touching code.
+  - **Plan is incomplete**: ask questions or switch back to Plan mode instead of inventing missing requirements.
+  - **Significant changes**: present a short execution summary and ask for confirmation before the first edit.
 
-4. Implement without Delegation
-  - Do not delegate file modifications to subagents
-  - Execute the plan yourself
+4. Execute with Plan Discipline
+  - For small/trivial changes, implement directly and verify.
+  - For plan-based work, execute task-by-task; mark progress with `tasks_set` and keep one active task at a time.
+  - Use subagents for focused investigation, test runs, spec-compliance review, and code-quality review.
+  - When delegating implementation work, provide exact task text, files, constraints, allowed side effects, verification command, and expected status report. Never dispatch multiple editing subagents against overlapping files.
+  - If a subagent asks for context, answer or re-dispatch with better context. If it reports blocked, change the approach, split the task, or ask the user.
 
-5. Validate via Delegation
-  - Delegate test runs: `subagent(task="Run tests and report failures", tools="shell,cat")`
-  - For significant changes, run `code_review()` to check for bugs, missing tests, and code quality issues
-  - Review results and decide on next steps
-  - Iterate until green or explain the blocker to user"#;
+5. Validate and Review
+  - Run targeted verification after each meaningful task.
+  - For plan-based work, check spec compliance before code quality: first confirm the change matches the plan, then review maintainability.
+  - For significant changes, run `code_review()` before finishing.
+  - Iterate until checks pass or the blocker is evidenced and clearly reported."#;
 
 pub const AGENT_EXECUTION_INSTRUCTIONS_NO_TOOLS: &str = r#"  - Propose the changes to the user
     - the suspected root cause
@@ -76,8 +79,8 @@ pub const COMPRESS_HANDOFF_INSTRUCTIONS: &str = r#"## Chat Management Tools
 
 **compress_chat_apply(...)** — Apply selective compression using explicit lists from the probe. Requires user approval.
 
-**handoff_to_mode(target_mode, reason, ...)** — Transition to a different mode when the workflow changes (e.g., explore-only or quick Q&A)."#;
+**handoff_to_mode(target_mode, reason, ...)** — Transition to a different mode when the workflow changes (e.g., brainstorming/design, implementation planning, task-board execution, explore-only, or quick Q&A). When handing a complete plan to Task Planner, pass the full plan in `initial_plan`."#;
 
 pub const HANDOFF_ONLY_INSTRUCTIONS: &str = r#"## Chat Management Tools
 
-**handoff_to_mode(target_mode, reason, ...)** — Transition to a different mode when the workflow changes (e.g., explore-only or quick Q&A)."#;
+**handoff_to_mode(target_mode, reason, ...)** — Transition to a different mode when the workflow changes (e.g., brainstorming/design, implementation planning, task-board execution, explore-only, or quick Q&A). When handing a complete plan to Task Planner, pass the full plan in `initial_plan`."#;

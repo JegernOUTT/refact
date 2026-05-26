@@ -10,6 +10,7 @@ const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MODE_TRANSITION_CONTEXT_BUDGET_PERCENT: usize = 30;
 const MODE_TRANSITION_FILES_BUDGET_PERCENT: usize = 70;
 const MODE_TRANSITION_MAX_IMAGES: usize = 1;
+const MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP: usize = 120_000;
 
 lazy_static! {
     static ref MEMORY_PATH_REGEX: Regex = Regex::new(
@@ -347,7 +348,17 @@ fn parse_list_tag(content: &str, tag: &str) -> Vec<String> {
 fn has_substantive_plan_markers(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let mut markers = 0;
-    for marker in ["wave", "card", "acceptance criteria"] {
+    for marker in [
+        "implementation plan",
+        "## tasks",
+        "### task",
+        "acceptance criteria",
+        "verification",
+        "final verification",
+        "file map",
+        "wave",
+        "card",
+    ] {
         if lower.contains(marker) {
             markers += 1;
         }
@@ -854,6 +865,33 @@ pub async fn assemble_new_chat(
         }
     }
 
+    if let Some(initial_plan) = decisions
+        .initial_plan
+        .as_deref()
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+    {
+        let prefix = "## Initial Plan\n\n";
+        let prefix_symbols = text_symbols(prefix);
+        let plan_budget = remaining_messages_symbols.max(
+            MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP
+                .min(text_symbols(initial_plan) + prefix_symbols),
+        );
+        let mut text = prefix.to_string();
+        let mut remaining_plan_symbols = plan_budget.saturating_sub(prefix_symbols);
+        if let Some(plan) = take_from_symbol_budget(initial_plan, &mut remaining_plan_symbols) {
+            text.push_str(&plan);
+            new_messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText(text),
+                preserve: Some(true),
+                ..Default::default()
+            });
+            let used = prefix_symbols + text_symbols(&plan);
+            remaining_messages_symbols = remaining_messages_symbols.saturating_sub(used);
+        }
+    }
+
     let finish_report = find_finish_report(original_messages);
     if let Some(report) = &finish_report {
         let prefix = "## Task Completion Report\n\n";
@@ -1098,6 +1136,19 @@ Wave 0
         );
 
         assert!(extract_initial_plan_text("", &handoff).is_none());
+    }
+
+    #[test]
+    fn test_heuristic_initial_plan_accepts_task_plan_format() {
+        let handoff = format!(
+            "# Feature Implementation Plan\n\n## File Map\n- Modify: `src/lib.rs`\n\n## Tasks\n\n### Task 1: Update behavior\n- [ ] Step 1: Write test\n\n## Final Verification\n- `cargo test`\n\n{}",
+            "Preserve exact files, verification, and acceptance criteria. ".repeat(20)
+        );
+
+        let plan = extract_initial_plan_text("", &handoff).unwrap();
+
+        assert!(plan.contains("Feature Implementation Plan"));
+        assert!(plan.contains("Final Verification"));
     }
 
     #[test]
@@ -1450,6 +1501,31 @@ MSG_ID:2
             decisions.messages_to_preserve,
             vec!["MSG_ID:10", "MSG_ID:2", "MSG_ID:5", "MSG_ID:2"]
         );
+    }
+
+    #[tokio::test]
+    async fn test_assemble_new_chat_includes_initial_plan_as_preserved_context() {
+        let plan = "# Feature Implementation Plan\n\n## Tasks\n\n### Task 1: Build\n- [ ] Verify: `cargo test`";
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("prepare handoff".to_string()),
+            ..Default::default()
+        }];
+        let decisions = ParsedDecisions {
+            initial_plan: Some(plan.to_string()),
+            ..Default::default()
+        };
+
+        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let text = new_messages
+            .iter()
+            .map(|msg| msg.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("## Initial Plan"));
+        assert!(text.contains("Feature Implementation Plan"));
+        assert!(new_messages.iter().any(|msg| msg.preserve == Some(true)));
     }
 
     #[tokio::test]
