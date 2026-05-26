@@ -720,10 +720,21 @@ startListening({
   },
 });
 
-// Track processed handoff tool_call_ids to avoid re-triggering on SSE reconnects.
-// Bounded to prevent unbounded growth in long sessions.
-const MAX_PROCESSED_HANDOFFS = 1000;
+const MAX_PROCESSED_HANDOFFS = 1024;
 const processedHandoffIds = new Set<string>();
+const inFlightHandoffs = new Set<string>();
+
+export function resetHandoffSets(): void {
+  processedHandoffIds.clear();
+  inFlightHandoffs.clear();
+}
+
+export function handoffSetsSize(): { processed: number; inFlight: number } {
+  return {
+    processed: processedHandoffIds.size,
+    inFlight: inFlightHandoffs.size,
+  };
+}
 
 startListening({
   actionCreator: applyChatEvent,
@@ -736,7 +747,8 @@ startListening({
     if (typeof msg.content !== "string") return;
 
     const toolCallId = msg.tool_call_id;
-    if (processedHandoffIds.has(toolCallId)) return;
+    const key = `${event.chat_id}:${toolCallId}`;
+    if (processedHandoffIds.has(key) || inFlightHandoffs.has(key)) return;
 
     const parsed = safeParseJson(msg.content);
     if (!parsed || typeof parsed !== "object") return;
@@ -820,30 +832,31 @@ startListening({
 
     if (port) {
       const { regenerate } = await import("../services/refact/chatCommands");
+      inFlightHandoffs.add(key);
       try {
         await regenerate(new_chat_id, port, apiKey ?? undefined);
-        // Mark as processed only after successful start so SSE reconnects
-        // can retry if regenerate failed on the first attempt
         if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
-          const firstKey = processedHandoffIds.values().next().value;
-          if (firstKey !== undefined) processedHandoffIds.delete(firstKey);
+          const arr = Array.from(processedHandoffIds);
+          arr
+            .slice(0, MAX_PROCESSED_HANDOFFS / 2)
+            .forEach((k) => processedHandoffIds.delete(k));
         }
-        processedHandoffIds.add(toolCallId);
+        processedHandoffIds.add(key);
       } catch {
-        // Regenerate failed — revert the waiting state and leave the id
-        // unprocessed so a reconnect can retry
         listenerApi.dispatch(
           setIsWaitingForResponse({ id: new_chat_id, value: false }),
         );
+      } finally {
+        inFlightHandoffs.delete(key);
       }
     } else {
-      // No port means we can't regenerate, but still mark processed to
-      // avoid a tight retry loop
       if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
-        const firstKey = processedHandoffIds.values().next().value;
-        if (firstKey !== undefined) processedHandoffIds.delete(firstKey);
+        const arr = Array.from(processedHandoffIds);
+        arr
+          .slice(0, MAX_PROCESSED_HANDOFFS / 2)
+          .forEach((k) => processedHandoffIds.delete(k));
       }
-      processedHandoffIds.add(toolCallId);
+      processedHandoffIds.add(key);
     }
   },
 });
@@ -1283,8 +1296,6 @@ startListening({
       | {
           thread: {
             task_meta?: { task_id: string };
-            is_task_chat?: boolean;
-            id: string;
           };
         }
       | undefined
@@ -1293,10 +1304,7 @@ startListening({
     for (const [threadId, runtime] of Object.entries(threads)) {
       if (!runtime) continue;
       const thread = runtime.thread;
-      if (
-        thread.task_meta?.task_id === taskId ||
-        (thread.is_task_chat && thread.id.includes(taskId))
-      ) {
+      if (thread.task_meta?.task_id === taskId) {
         listenerApi.dispatch(closeThread({ id: threadId, force: true }));
       }
     }
