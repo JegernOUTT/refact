@@ -504,6 +504,42 @@ fn mark_section_settled(
     }
 }
 
+fn section_settled(
+    section: SidebarSection,
+    workspace_settled: bool,
+    chats_settled: bool,
+    tasks_settled: bool,
+    buddy_settled: bool,
+) -> bool {
+    match section {
+        SidebarSection::Workspace => workspace_settled,
+        SidebarSection::Chats => chats_settled,
+        SidebarSection::Tasks => tasks_settled,
+        SidebarSection::Buddy => buddy_settled,
+    }
+}
+
+fn buffered_event_ready(
+    event: &SidebarEvent,
+    workspace_settled: bool,
+    chats_settled: bool,
+    tasks_settled: bool,
+    buddy_settled: bool,
+    bootstrap_complete: bool,
+) -> bool {
+    match event {
+        SidebarEvent::SectionSnapshot { section, .. }
+        | SidebarEvent::SectionUpdate { section, .. } => section_settled(
+            *section,
+            workspace_settled,
+            chats_settled,
+            tasks_settled,
+            buddy_settled,
+        ),
+        SidebarEvent::Notification { .. } => bootstrap_complete,
+    }
+}
+
 fn try_finish_bootstrap(
     workspace_settled: bool,
     chats_settled: bool,
@@ -519,26 +555,50 @@ fn try_finish_bootstrap(
     {
         *bootstrap_complete = true;
         *initial_rx = None;
-        let mut events = Vec::new();
-        while let Some(event) = buffered_live_events.pop_front() {
-            if let Some(event) = make_event(seq_counter, subscription_id, event) {
-                events.push(event);
-            }
-        }
-        return events;
     }
 
-    Vec::new()
+    let mut emitted = Vec::new();
+    let mut pending = VecDeque::new();
+    while let Some(event) = buffered_live_events.pop_front() {
+        if buffered_event_ready(
+            &event,
+            workspace_settled,
+            chats_settled,
+            tasks_settled,
+            buddy_settled,
+            *bootstrap_complete,
+        ) {
+            if let Some(event) = make_event(seq_counter, subscription_id, event) {
+                emitted.push(event);
+            }
+        } else {
+            pending.push_back(event);
+        }
+    }
+    *buffered_live_events = pending;
+
+    emitted
 }
 
 fn push_or_emit_live_event(
     event: SidebarEvent,
+    workspace_settled: bool,
+    chats_settled: bool,
+    tasks_settled: bool,
+    buddy_settled: bool,
     bootstrap_complete: bool,
     buffered_live_events: &mut VecDeque<SidebarEvent>,
     seq_counter: &AtomicU64,
     subscription_id: &str,
 ) -> Option<String> {
-    if bootstrap_complete {
+    if buffered_event_ready(
+        &event,
+        workspace_settled,
+        chats_settled,
+        tasks_settled,
+        buddy_settled,
+        bootstrap_complete,
+    ) {
         make_event(seq_counter, subscription_id, event)
     } else {
         buffered_live_events.push_back(event);
@@ -724,6 +784,10 @@ pub async fn handle_sidebar_subscribe(
                             };
                             if let Some(event) = push_or_emit_live_event(
                                 event,
+                                workspace_settled,
+                                chats_settled,
+                                tasks_settled,
+                                buddy_settled,
                                 bootstrap_complete,
                                 &mut buffered_live_events,
                                 &seq_counter,
@@ -736,6 +800,10 @@ pub async fn handle_sidebar_subscribe(
                             let event = chats_snapshot_event(gcx_for_stream.clone()).await;
                             if let Some(event) = push_or_emit_live_event(
                                 event,
+                                workspace_settled,
+                                chats_settled,
+                                tasks_settled,
+                                buddy_settled,
                                 bootstrap_complete,
                                 &mut buffered_live_events,
                                 &seq_counter,
@@ -798,6 +866,10 @@ pub async fn handle_sidebar_subscribe(
                             };
                             if let Some(event) = push_or_emit_live_event(
                                 event,
+                                workspace_settled,
+                                chats_settled,
+                                tasks_settled,
+                                buddy_settled,
                                 bootstrap_complete,
                                 &mut buffered_live_events,
                                 &seq_counter,
@@ -810,6 +882,10 @@ pub async fn handle_sidebar_subscribe(
                             let event = tasks_snapshot_event(gcx_for_stream.clone()).await;
                             if let Some(event) = push_or_emit_live_event(
                                 event,
+                                workspace_settled,
+                                chats_settled,
+                                tasks_settled,
+                                buddy_settled,
                                 bootstrap_complete,
                                 &mut buffered_live_events,
                                 &seq_counter,
@@ -838,6 +914,10 @@ pub async fn handle_sidebar_subscribe(
                             let event = SidebarEvent::Notification { notification };
                             if let Some(event) = push_or_emit_live_event(
                                 event,
+                                workspace_settled,
+                                chats_settled,
+                                tasks_settled,
+                                buddy_settled,
                                 bootstrap_complete,
                                 &mut buffered_live_events,
                                 &seq_counter,
@@ -872,6 +952,10 @@ pub async fn handle_sidebar_subscribe(
                             };
                             if let Some(event) = push_or_emit_live_event(
                                 event,
+                                workspace_settled,
+                                chats_settled,
+                                tasks_settled,
+                                buddy_settled,
                                 bootstrap_complete,
                                 &mut buffered_live_events,
                                 &seq_counter,
@@ -884,6 +968,10 @@ pub async fn handle_sidebar_subscribe(
                             let event = buddy_snapshot_event(gcx_for_stream.clone()).await;
                             if let Some(event) = push_or_emit_live_event(
                                 event,
+                                workspace_settled,
+                                chats_settled,
+                                tasks_settled,
+                                buddy_settled,
                                 bootstrap_complete,
                                 &mut buffered_live_events,
                                 &seq_counter,
@@ -1083,6 +1171,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn settled_section_live_updates_flush_before_full_bootstrap() {
+        let mut initial_rx = Some(mpsc::unbounded_channel().1);
+        let mut bootstrap_complete = false;
+        let mut buffered_live_events = VecDeque::from([
+            SidebarEvent::SectionUpdate {
+                section: SidebarSection::Tasks,
+                update: SidebarSectionUpdate::Task(TaskEvent::BoardChanged {
+                    task_id: "task-1".to_string(),
+                    rev: 2,
+                    board: Default::default(),
+                }),
+            },
+            buffered_notification(),
+        ]);
+        let seq = AtomicU64::new(0);
+
+        let emitted = try_finish_bootstrap(
+            false,
+            false,
+            true,
+            false,
+            &mut bootstrap_complete,
+            &mut initial_rx,
+            &mut buffered_live_events,
+            &seq,
+            "sub-1",
+        );
+
+        assert!(!bootstrap_complete);
+        assert!(initial_rx.is_some());
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(seq.load(Ordering::SeqCst), 1);
+        assert_eq!(buffered_live_events.len(), 1);
+        assert!(matches!(
+            buffered_live_events.front(),
+            Some(SidebarEvent::Notification { .. })
+        ));
     }
 
     #[test]

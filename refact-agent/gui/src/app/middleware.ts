@@ -1325,17 +1325,31 @@ startListening({
         break;
       case "task_updated":
         listenerApi.dispatch(
-          tasksApi.util.invalidateTags([{ type: "Tasks", id: event.task_id }]),
+          tasksApi.util.invalidateTags([
+            { type: "Tasks", id: event.task_id },
+            "Tasks",
+          ]),
         );
         break;
       case "task_deleted":
         listenerApi.dispatch(
-          tasksApi.util.invalidateTags([{ type: "Tasks", id: "LIST" }]),
+          tasksApi.util.invalidateTags([
+            { type: "Tasks", id: event.task_id },
+            { type: "Tasks", id: "LIST" },
+            { type: "Board", id: event.task_id },
+            { type: "TaskTrajectories", id: `${event.task_id}/planner` },
+            "Tasks",
+          ]),
         );
         break;
       case "board_changed":
         listenerApi.dispatch(
-          tasksApi.util.invalidateTags([{ type: "Board", id: event.task_id }]),
+          tasksApi.util.invalidateTags([
+            { type: "Board", id: event.task_id },
+            { type: "Tasks", id: event.task_id },
+            { type: "TaskTrajectories", id: `${event.task_id}/planner` },
+            "Tasks",
+          ]),
         );
         break;
     }
