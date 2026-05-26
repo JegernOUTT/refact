@@ -1,6 +1,6 @@
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::diagnostics::is_ui_only_message;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 fn is_authoritative_summary(msg: &ChatMessage) -> bool {
     if msg.role != "summarization" || is_ui_only_message(msg) {
@@ -33,22 +33,31 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
         }
     }
 
+    let mut summary_by_start: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+    for (start, end, content) in summaries {
+        summary_by_start
+            .entry(start)
+            .or_default()
+            .push((end, content));
+    }
+    for entries in summary_by_start.values_mut() {
+        entries.sort_by_key(|(end, _)| *end);
+    }
+
     let mut result = Vec::with_capacity(messages.len());
-    let mut emitted_summaries: HashSet<usize> = HashSet::new();
 
     for (i, msg) in messages.iter().enumerate() {
         if msg.role == "summarization" {
             continue;
         }
         if suppressed.contains(&i) {
-            for (start, _, content) in &summaries {
-                if i == *start && !emitted_summaries.contains(start) {
+            if let Some(entries) = summary_by_start.remove(&i) {
+                for (_, content) in entries {
                     result.push(ChatMessage {
-                        role: "cd_instruction".to_string(),
-                        content: ChatContent::SimpleText(content.clone()),
+                        role: "user".to_string(),
+                        content: ChatContent::SimpleText(content),
                         ..Default::default()
                     });
-                    emitted_summaries.insert(*start);
                 }
             }
             continue;
@@ -112,7 +121,7 @@ mod tests {
         ];
         let result = apply_summarization_linearize(messages);
         let roles: Vec<&str> = result.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", "cd_instruction", "user", "assistant"]);
+        assert_eq!(roles, vec!["user", "user", "user", "assistant"]);
         assert_eq!(result[0].content.content_text_only(), "hello");
         assert_eq!(
             result[1].content.content_text_only(),
@@ -166,6 +175,20 @@ mod tests {
         assert_eq!(result[1].content.content_text_only(), "hi");
         assert_eq!(result[2].content.content_text_only(), "real follow-up");
         assert_eq!(result[3].content.content_text_only(), "final");
+    }
+
+    #[test]
+    fn test_linearize_drops_tail_summary_without_matching_range() {
+        let messages = vec![
+            user("old user"),
+            assistant("old assistant"),
+            user("current question"),
+            summarization("stale summary", (10, 11)),
+        ];
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert_eq!(result[2].content.content_text_only(), "current question");
     }
 
     #[test]
