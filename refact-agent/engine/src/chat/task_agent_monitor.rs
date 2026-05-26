@@ -5,12 +5,13 @@
 // - Agent becomes stuck (no activity beyond threshold)
 // - Session ends in Error state without calling agent_finish
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use std::process::Command;
-use std::path::Path;
-use tokio::time::sleep;
+
 use chrono::Utc;
+use tokio::time::sleep;
 
 use crate::app_state::AppState;
 use crate::tasks::storage;
@@ -23,6 +24,7 @@ use crate::chat::types::{ChatSession, SessionState, TaskMeta};
 use crate::chat::{get_or_create_session_with_trajectory, process_command_queue};
 use crate::chat::types::{CommandRequest, ChatCommand};
 use crate::worktrees::service::WorktreeService;
+use crate::worktrees::git;
 use refact_buddy_core::types::BuddyRuntimeEvent;
 use uuid::Uuid;
 
@@ -289,8 +291,7 @@ impl AgentFailureKind {
     }
 
     fn should_cleanup_worktree(self) -> bool {
-        let _ = self;
-        false
+        matches!(self, AgentFailureKind::Cancelled)
     }
 
     fn final_report_reason(self, error_message: &str) -> String {
@@ -385,7 +386,7 @@ async fn mark_agent_as_failed(
     expected_agent_id: Option<&str>,
     planner_chat_id: Option<&str>,
     reason: &str,
-    _failure_kind: AgentFailureKind,
+    failure_kind: AgentFailureKind,
 ) -> Result<(), String> {
     let _ = update_card_heartbeat(app.clone(), task_id, card_id).await;
 
@@ -483,26 +484,113 @@ async fn mark_agent_as_failed(
         } else {
             String::new()
         };
-        let card_id_for_retain = card_id.to_string();
-        let _ = storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
-            if let Some(c) = board.get_card_mut(&card_id_for_retain) {
+        let cleanup_result = if failure_kind.should_cleanup_worktree() {
+            if let (Some(ref wt), Some(ref br)) = (&worktree, &branch) {
+                let result = remove_agent_worktree_and_branch(
+                    app.clone(),
+                    task_id,
+                    card_id,
+                    wt,
+                    br,
+                    worktree_name.as_deref(),
+                )
+                .await;
+                tracing::info!(
+                    "Automatic cleanup for failed agent card {}: worktree_removed={}, branch_deleted={}",
+                    card_id,
+                    result.0,
+                    result.1
+                );
+                Some(result)
+            } else {
+                Some((false, false))
+            }
+        } else {
+            None
+        };
+        let retention_or_cleanup_note = match cleanup_result {
+            Some((worktree_removed, branch_deleted)) => {
+                let worktree_note = if worktree_removed {
+                    "worktree removed"
+                } else if worktree.is_some() {
+                    "worktree removal not confirmed"
+                } else {
+                    "no worktree recorded"
+                };
+                let branch_note = if branch_deleted {
+                    "branch deleted"
+                } else if branch.is_some() {
+                    "branch deletion not confirmed"
+                } else {
+                    "no branch recorded"
+                };
+                format!(
+                    "\n\nAutomatic cleanup attempted: {}; {}.",
+                    worktree_note, branch_note
+                )
+            }
+            None => "\n\nWorktree and branch retained for inspection or retry via `restart_agent`."
+                .to_string(),
+        };
+        let card_id_for_report = card_id.to_string();
+        let clear_worktree_fields = cleanup_result
+            .map(|(worktree_removed, _)| worktree_removed)
+            .unwrap_or(false);
+        let clear_branch_field = cleanup_result
+            .map(|(_, branch_deleted)| branch_deleted)
+            .unwrap_or(false);
+        if let Err(e) = storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
+            if let Some(c) = board.get_card_mut(&card_id_for_report) {
                 if let Some(ref mut report) = c.final_report {
                     if !diff_report.is_empty() {
                         report.push_str(&diff_report);
                     }
-                    report.push_str(
-                        "\n\nWorktree and branch retained for inspection or retry via `restart_agent`.",
-                    );
+                    report.push_str(&retention_or_cleanup_note);
                 }
+                if clear_worktree_fields {
+                    c.agent_worktree = None;
+                    c.agent_worktree_name = None;
+                }
+                if clear_branch_field {
+                    c.agent_branch = None;
+                }
+            } else {
+                tracing::warn!(
+                    "Cannot update final report for failed agent card {}: card disappeared",
+                    card_id_for_report
+                );
             }
             Ok(())
         })
-        .await;
+        .await
+        {
+            tracing::warn!(
+                "Failed to update final report for failed agent card {}: {}",
+                card_id,
+                e
+            );
+        }
     }
 
-    if let Err(e) =
-        notify_planner_agents_finished(app.clone(), task_id, &board, all_finished, planner_chat_id)
-            .await
+    let notification_board = storage::load_board(app.gcx.clone(), task_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to reload task board {} before planner notification: {}",
+                task_id,
+                e
+            );
+            board.clone()
+        });
+
+    if let Err(e) = notify_planner_agents_finished(
+        app.clone(),
+        task_id,
+        &notification_board,
+        all_finished,
+        planner_chat_id,
+    )
+    .await
     {
         tracing::warn!(
             "Marked agent for card {} as failed, but planner notification failed: {}",
@@ -677,56 +765,210 @@ pub(crate) async fn notify_planner_agents_finished(
     Ok(())
 }
 
+fn expected_agent_branch_prefix(task_id: &str, card_id: &str) -> String {
+    format!("refact/task/{}/card/{}/", task_id, card_id)
+}
+
+fn validate_agent_branch_for_cleanup(
+    task_id: &str,
+    card_id: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let expected_prefix = expected_agent_branch_prefix(task_id, card_id);
+    if branch.starts_with(&expected_prefix) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Refusing to delete unsafe branch '{}'; expected prefix '{}'.",
+            branch, expected_prefix
+        ))
+    }
+}
+
+fn canonical_existing_path(path: &Path) -> Result<PathBuf, String> {
+    dunce::canonicalize(path)
+        .map_err(|e| format!("Failed to canonicalize '{}': {}", path.display(), e))
+}
+
+fn validate_agent_worktree_path_for_cleanup(
+    cache_dir: &Path,
+    workspace_roots: &[PathBuf],
+    worktree: &Path,
+) -> Result<PathBuf, String> {
+    let worktree = canonical_existing_path(worktree)?;
+    let cache_dir = canonical_existing_path(cache_dir)?;
+    let cache_root = cache_dir.join("worktrees");
+    let cache_root = if cache_root.exists() {
+        canonical_existing_path(&cache_root)?
+    } else {
+        return Err(format!(
+            "Refusing to delete worktree path '{}': worktree cache '{}' does not exist.",
+            worktree.display(),
+            cache_root.display()
+        ));
+    };
+
+    if worktree == Path::new("/") || worktree == cache_dir || worktree == cache_root {
+        return Err(format!(
+            "Refusing to delete unsafe worktree path '{}'.",
+            worktree.display()
+        ));
+    }
+
+    for workspace_root in workspace_roots {
+        if let Ok(workspace_root) = canonical_existing_path(workspace_root) {
+            if worktree == workspace_root {
+                return Err(format!(
+                    "Refusing to delete workspace root '{}'.",
+                    worktree.display()
+                ));
+            }
+        }
+    }
+
+    if !worktree.starts_with(&cache_root) {
+        return Err(format!(
+            "Refusing to delete worktree path '{}' outside Refact worktree cache '{}'.",
+            worktree.display(),
+            cache_root.display()
+        ));
+    }
+
+    Ok(worktree)
+}
+
+fn fallback_remove_worktree_and_branch(
+    cache_dir: PathBuf,
+    workspace_root: PathBuf,
+    workspace_roots: Vec<PathBuf>,
+    task_id: String,
+    card_id: String,
+    agent_worktree: String,
+    agent_branch: String,
+    remove_worktree: bool,
+    remove_branch: bool,
+) -> (bool, bool) {
+    let branch_is_safe = match validate_agent_branch_for_cleanup(&task_id, &card_id, &agent_branch)
+    {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Skipping fallback agent branch cleanup: {}", e);
+            false
+        }
+    };
+
+    let mut worktree_removed = false;
+    if remove_worktree {
+        match validate_agent_worktree_path_for_cleanup(
+            &cache_dir,
+            &workspace_roots,
+            Path::new(&agent_worktree),
+        ) {
+            Ok(worktree) => {
+                worktree_removed = !worktree.exists();
+                if !worktree_removed {
+                    let warnings = git::remove_worktree_path(&workspace_root, &worktree);
+                    for warning in warnings {
+                        tracing::warn!("Fallback agent worktree cleanup warning: {}", warning);
+                    }
+                    worktree_removed = !worktree.exists();
+                }
+            }
+            Err(e) => tracing::warn!("Skipping fallback agent worktree cleanup: {}", e),
+        }
+    }
+
+    let mut branch_deleted = false;
+    if remove_branch && branch_is_safe {
+        match git::delete_branch(&workspace_root, &agent_branch) {
+            Ok(deleted) => branch_deleted = deleted,
+            Err(e) => tracing::warn!("Fallback agent branch cleanup failed: {}", e),
+        }
+    }
+
+    (worktree_removed, branch_deleted)
+}
+
 pub(crate) async fn remove_agent_worktree_and_branch(
     app: AppState,
+    task_id: &str,
+    card_id: &str,
     agent_worktree: &str,
     agent_branch: &str,
     agent_worktree_name: Option<&str>,
 ) -> (bool, bool) {
+    let cache_dir = app.paths.cache_dir.clone();
+    let project_dirs = crate::files_correction::get_project_dirs(app.gcx.clone()).await;
+    let Some(workspace_root) = project_dirs.first().cloned() else {
+        tracing::warn!(
+            "Cannot cleanup failed agent worktree for card {}: no workspace folder found",
+            card_id
+        );
+        return (false, false);
+    };
+
+    let mut worktree_removed = !Path::new(agent_worktree).exists();
+    let mut branch_deleted = false;
+
     if let Some(worktree_id) = agent_worktree_name {
-        let cache_dir = app.paths.cache_dir.clone();
-        let project_dirs = crate::files_correction::get_project_dirs(app.gcx.clone()).await;
-        if let Some(source_root) = project_dirs.first() {
-            if let Ok(service) = WorktreeService::new(cache_dir, source_root.clone()) {
-                match service.delete_worktree(worktree_id, true).await {
-                    Ok(deleted) => {
-                        return (
-                            deleted.deleted && !Path::new(agent_worktree).exists(),
-                            deleted.branch_deleted,
-                        );
-                    }
-                    Err(e) => {
+        if let Ok(service) = WorktreeService::new(cache_dir.clone(), workspace_root.clone()) {
+            match service.delete_worktree(worktree_id, true).await {
+                Ok(deleted) => {
+                    worktree_removed = deleted.deleted && !Path::new(agent_worktree).exists();
+                    branch_deleted = deleted.branch_deleted;
+                    for warning in deleted.warnings {
                         tracing::warn!(
-                            "Failed to delete registered worktree '{}': {}",
+                            "Registered agent worktree cleanup warning for '{}': {}",
                             worktree_id,
-                            e
+                            warning
                         );
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to delete registered worktree '{}': {}",
+                        worktree_id,
+                        e
+                    );
                 }
             }
         }
     }
 
-    let project_dirs = crate::files_correction::get_project_dirs(app.gcx.clone()).await;
-    if let Some(workspace_root) = project_dirs.first() {
-        let worktree_removed = Command::new("git")
-            .args(["worktree", "remove", agent_worktree, "--force"])
-            .current_dir(workspace_root)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        let branch_deleted = Command::new("git")
-            .args(["branch", "-D", agent_branch])
-            .current_dir(workspace_root)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        (worktree_removed, branch_deleted)
-    } else {
-        (false, false)
+    if worktree_removed && branch_deleted {
+        return (true, true);
     }
+
+    let remove_worktree = !worktree_removed;
+    let remove_branch = !branch_deleted;
+    let task_id = task_id.to_string();
+    let card_id = card_id.to_string();
+    let agent_worktree = agent_worktree.to_string();
+    let agent_branch = agent_branch.to_string();
+    tokio::task::spawn_blocking(move || {
+        fallback_remove_worktree_and_branch(
+            cache_dir,
+            workspace_root,
+            project_dirs,
+            task_id,
+            card_id,
+            agent_worktree,
+            agent_branch,
+            remove_worktree,
+            remove_branch,
+        )
+    })
+    .await
+    .map(|(fallback_worktree_removed, fallback_branch_deleted)| {
+        (
+            worktree_removed || fallback_worktree_removed,
+            branch_deleted || fallback_branch_deleted,
+        )
+    })
+    .unwrap_or_else(|e| {
+        tracing::warn!("Fallback agent cleanup task failed: {}", e);
+        (worktree_removed, branch_deleted)
+    })
 }
 
 pub(crate) async fn capture_failed_agent_diff(
@@ -1728,19 +1970,19 @@ mod tests {
     }
 
     #[test]
-    fn task_agent_monitor_all_failure_kinds_retain_worktree() {
+    fn task_agent_monitor_only_cancelled_failure_cleans_up_worktree() {
         for kind in [
             AgentFailureKind::TransientExhausted,
             AgentFailureKind::ContextLimit,
             AgentFailureKind::Permanent,
-            AgentFailureKind::Cancelled,
         ] {
             assert!(
                 !kind.should_cleanup_worktree(),
-                "{:?} should not cleanup worktree",
+                "{:?} should retain worktree",
                 kind
             );
         }
+        assert!(AgentFailureKind::Cancelled.should_cleanup_worktree());
     }
 
     #[test]
@@ -1756,6 +1998,35 @@ mod tests {
         assert!(report.contains("context limit"));
         assert!(report.contains("Context too large"));
         assert!(report.contains("Suggested action: Compact the chat"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_agent_failure_attempts_cleanup() {
+        let (_temp, app, task_id, _agent_chat_id, _session_arc) =
+            setup_monitor_case("doing", SessionState::Idle, Duration::from_secs(90), vec![]).await;
+
+        mark_agent_as_failed(
+            app.clone(),
+            &task_id,
+            "T-1",
+            Some("agent-1"),
+            None,
+            "cancelled by user",
+            AgentFailureKind::Cancelled,
+        )
+        .await
+        .unwrap();
+
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "failed");
+        let report = card.final_report.as_deref().unwrap_or("");
+        assert!(report.contains("Automatic cleanup attempted"));
+        assert!(report.contains("no worktree recorded"));
+        assert!(report.contains("no branch recorded"));
+        assert!(!report.contains("retained for inspection or retry"));
     }
 
     #[tokio::test]
