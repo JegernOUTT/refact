@@ -346,7 +346,13 @@ impl Tool for ToolHandoffToMode {
         };
 
         apply_overrides(&mut decisions, args);
-        let initial_plan = decisions.initial_plan.clone();
+        let plan_body = parse_optional_string(args, "initial_plan")
+            .or_else(|| parse_optional_string(args, "summary"))
+            .or_else(|| parse_optional_string(args, "context_summary"))
+            .or_else(|| parse_optional_string(args, "handoff_message"))
+            .unwrap_or_else(|| {
+                "# Initial Plan\n\nNo plan content provided at handoff. Edit this document or use doc_create.".to_string()
+            });
 
         let path_context = { AgenticPathContext::from_context(&*gcx) };
         let new_messages = assemble_new_chat(&path_context, &messages, &decisions)
@@ -409,32 +415,25 @@ impl Tool for ToolHandoffToMode {
             .await
             .map_err(|e| format!("Failed to save handoff trajectory: {}", e))?;
 
-        let initial_plan_doc = if canonical_mode == "task_planner" {
-            match (
-                task_meta.as_ref().map(|meta| meta.task_id.as_str()),
-                initial_plan
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty()),
-            ) {
-                (Some(task_id), Some(plan_text)) => {
-                    let result =
-                        create_initial_plan_document(gcx.clone(), task_id, plan_text).await;
-                    if let Err(error) = &result {
+        let (initial_plan_doc_slug, initial_plan_doc_error) = if canonical_mode == "task_planner" {
+            if let Some(task_id_str) = task_meta.as_ref().map(|meta| meta.task_id.as_str()) {
+                match create_initial_plan_document(gcx.clone(), task_id_str, &plan_body).await {
+                    Ok(slug) => (Some(slug), None::<String>),
+                    Err(err) => {
                         tracing::warn!(
                             "failed to create initial-plan document for task {}: {}",
-                            task_id,
-                            error
+                            task_id_str,
+                            err
                         );
+                        (None, Some(err))
                     }
-                    result.map(Some)
                 }
-                _ => Ok(None),
+            } else {
+                (None, None)
             }
         } else {
-            Ok(None)
+            (None, None)
         };
-        let initial_plan_doc_slug = initial_plan_doc.clone().ok().flatten();
 
         let result = json!({
             "type": "handoff_to_mode",
@@ -444,7 +443,9 @@ impl Tool for ToolHandoffToMode {
             "messages_count": new_messages.len(),
             "task_meta": task_meta,
             "initial_plan_document": initial_plan_doc_slug,
+            "initial_plan_error": initial_plan_doc_error,
         });
+
 
         Ok((
             false,
@@ -797,5 +798,151 @@ mod tests {
         assert_eq!(facade.saved.lock().unwrap().len(), 1);
         let result = tool_result_json(&messages);
         assert!(result["initial_plan_document"].is_null());
+        assert_eq!(facade.saved.lock().unwrap().len(), 1);
+        let result = tool_result_json(&messages);
+        assert!(result["initial_plan_document"].is_null());
+        assert!(result["initial_plan_error"].is_string(), "error should surface in output");
+    }
+
+    #[tokio::test]
+    async fn handoff_with_initial_plan_creates_pinned_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatFacade::default());
+        facade.snapshot.lock().unwrap().replace(source_snapshot());
+        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
+        let ccx = handoff_ccx(app).await;
+        let mut tool = ToolHandoffToMode { config_path: String::new() };
+
+        let (_, messages) = tool
+            .tool_execute(ccx, &"call-id".to_string(), &handoff_args("# Wave 0\n- Card T-1"))
+            .await
+            .unwrap();
+
+        let saved = facade.saved.lock().unwrap().clone();
+        let task_meta = saved[0].task_meta.as_ref().unwrap();
+        let document = temp
+            .path()
+            .join(".refact/tasks")
+            .join(&task_meta.task_id)
+            .join("documents/initial-plan.md");
+        let result = tool_result_json(&messages);
+        assert_eq!(result["initial_plan_document"], "initial-plan");
+        assert!(result["initial_plan_error"].is_null());
+        let raw = tokio::fs::read_to_string(document).await.unwrap();
+        assert!(raw.contains("pinned: true"), "{raw}");
+        assert!(raw.contains("Card T-1"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn handoff_with_only_summary_uses_summary_as_plan_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatFacade::default());
+        facade.snapshot.lock().unwrap().replace(source_snapshot());
+        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
+        let ccx = handoff_ccx(app).await;
+        let mut tool = ToolHandoffToMode { config_path: String::new() };
+        let args = HashMap::from([
+            ("target_mode".to_string(), json!("task_planner")),
+            ("summary".to_string(), json!("Summary plan content here")),
+        ]);
+
+        let (_, messages) = tool.tool_execute(ccx, &"call-id".to_string(), &args).await.unwrap();
+
+        let saved = facade.saved.lock().unwrap().clone();
+        let task_meta = saved[0].task_meta.as_ref().unwrap();
+        let document = temp
+            .path()
+            .join(".refact/tasks")
+            .join(&task_meta.task_id)
+            .join("documents/initial-plan.md");
+        let result = tool_result_json(&messages);
+        assert_eq!(result["initial_plan_document"], "initial-plan");
+        let raw = tokio::fs::read_to_string(document).await.unwrap();
+        assert!(raw.contains("Summary plan content here"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn handoff_with_only_handoff_message_uses_it_as_plan_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatFacade::default());
+        facade.snapshot.lock().unwrap().replace(source_snapshot());
+        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
+        let ccx = handoff_ccx(app).await;
+        let mut tool = ToolHandoffToMode { config_path: String::new() };
+        let args = HashMap::from([
+            ("target_mode".to_string(), json!("task_planner")),
+            ("handoff_message".to_string(), json!("Handoff message body")),
+        ]);
+
+        let (_, messages) = tool.tool_execute(ccx, &"call-id".to_string(), &args).await.unwrap();
+
+        let saved = facade.saved.lock().unwrap().clone();
+        let task_meta = saved[0].task_meta.as_ref().unwrap();
+        let document = temp
+            .path()
+            .join(".refact/tasks")
+            .join(&task_meta.task_id)
+            .join("documents/initial-plan.md");
+        let result = tool_result_json(&messages);
+        assert_eq!(result["initial_plan_document"], "initial-plan");
+        let raw = tokio::fs::read_to_string(document).await.unwrap();
+        assert!(raw.contains("Handoff message body"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn handoff_with_no_plan_content_creates_stub_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatFacade::default());
+        facade.snapshot.lock().unwrap().replace(source_snapshot());
+        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
+        let ccx = handoff_ccx(app).await;
+        let mut tool = ToolHandoffToMode { config_path: String::new() };
+        let args = HashMap::from([("target_mode".to_string(), json!("task_planner"))]);
+
+        let (_, messages) = tool.tool_execute(ccx, &"call-id".to_string(), &args).await.unwrap();
+
+        let saved = facade.saved.lock().unwrap().clone();
+        let task_meta = saved[0].task_meta.as_ref().unwrap();
+        let document = temp
+            .path()
+            .join(".refact/tasks")
+            .join(&task_meta.task_id)
+            .join("documents/initial-plan.md");
+        let result = tool_result_json(&messages);
+        assert_eq!(result["initial_plan_document"], "initial-plan");
+        let raw = tokio::fs::read_to_string(document).await.unwrap();
+        assert!(raw.contains("No plan content provided at handoff"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn handoff_surfaces_document_creation_error_prominently() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade = Arc::new(MockChatFacade::default());
+        let mut snapshot = source_snapshot();
+        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
+            task_id: "missing-task".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("planner-missing-task-1".to_string()),
+        });
+        facade.snapshot.lock().unwrap().replace(snapshot);
+        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
+        let ccx = handoff_ccx(app).await;
+        let mut tool = ToolHandoffToMode { config_path: String::new() };
+        let args = HashMap::from([
+            ("target_mode".to_string(), json!("task_planner")),
+            ("initial_plan".to_string(), json!("Some plan content")),
+        ]);
+
+        let (_, messages) = tool.tool_execute(ccx, &"call-id".to_string(), &args).await.unwrap();
+
+        let result = tool_result_json(&messages);
+        assert!(result["initial_plan_document"].is_null());
+        assert!(
+            result["initial_plan_error"].is_string(),
+            "error should be surfaced in tool output, got: {:?}",
+            result["initial_plan_error"]
+        );
     }
 }

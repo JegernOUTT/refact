@@ -285,6 +285,48 @@ fn parse_rfc3339_to_utc(ts: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+fn validate_files_to_open(args: &HashMap<String, Value>) -> Result<Vec<String>, String> {
+    let raw = args
+        .get("files_to_open")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    let mut paths = Vec::with_capacity(raw.len());
+    for (idx, v) in raw.iter().enumerate() {
+        match v.as_str() {
+            None => {
+                let type_name = match v {
+                    Value::Null => "null",
+                    Value::Bool(_) => "bool",
+                    Value::Number(_) => "number",
+                    Value::Array(_) => "array",
+                    Value::Object(_) => "object",
+                    Value::String(_) => unreachable!(),
+                };
+                return Err(format!("files_to_open[{idx}] must be a string, got {type_name}"));
+            }
+            Some(s) if s.is_empty() => {
+                return Err(format!("files_to_open[{idx}] is empty"));
+            }
+            Some(s) => paths.push(s.to_string()),
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut has_duplicates = false;
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        } else {
+            has_duplicates = true;
+        }
+    }
+    if has_duplicates {
+        tracing::warn!("files_to_open contains duplicate paths; deduplicating");
+    }
+    Ok(deduped)
+}
+
 pub struct ToolTaskSpawnAgent;
 
 impl ToolTaskSpawnAgent {
@@ -604,15 +646,7 @@ impl Tool for ToolTaskSpawnAgent {
             .get("card_id")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'card_id'")?;
-        let files_to_open: Vec<String> = args
-            .get("files_to_open")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let files_to_open = validate_files_to_open(args)?;
         let suggested_steps: usize = match args
             .get("suggested_steps")
             .or_else(|| args.get("max_steps"))
@@ -1767,5 +1801,45 @@ mod tests {
             msg.contains("Worktree retained for inspection"),
             "message should contain retention notice"
         );
+        assert!(
+            msg.contains("Worktree retained for inspection"),
+            "message should contain retention notice"
+        );
+    }
+
+    #[test]
+    fn files_to_open_rejects_non_string_entry() {
+        use serde_json::json;
+        let args = HashMap::from([(
+            "files_to_open".to_string(),
+            json!([{"path": "/foo"}, "/bar"]),
+        )]);
+        let err = validate_files_to_open(&args).unwrap_err();
+        assert!(err.contains("files_to_open[0]"), "{err}");
+        assert!(err.contains("must be a string"), "{err}");
+        assert!(err.contains("object"), "{err}");
+    }
+
+    #[test]
+    fn files_to_open_rejects_empty_string() {
+        use serde_json::json;
+        let args = HashMap::from([(
+            "files_to_open".to_string(),
+            json!(["valid.txt", "", "other.txt"]),
+        )]);
+        let err = validate_files_to_open(&args).unwrap_err();
+        assert!(err.contains("files_to_open[1]"), "{err}");
+        assert!(err.contains("is empty"), "{err}");
+    }
+
+    #[test]
+    fn files_to_open_dedupes_with_warning() {
+        use serde_json::json;
+        let args = HashMap::from([(
+            "files_to_open".to_string(),
+            json!(["/foo/bar.txt", "/baz.txt", "/foo/bar.txt"]),
+        )]);
+        let paths = validate_files_to_open(&args).unwrap();
+        assert_eq!(paths, vec!["/foo/bar.txt", "/baz.txt"]);
     }
 }
