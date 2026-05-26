@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -25,24 +26,10 @@ impl ExecProcessId {
         Self(format!("exec_{}", Uuid::new_v4()))
     }
 
-    pub fn for_service(service_name: &str) -> Self {
-        let mut slug = String::new();
-        let mut previous_separator = false;
-        for c in service_name.chars() {
-            if c.is_ascii_alphanumeric() {
-                slug.push(c.to_ascii_lowercase());
-                previous_separator = false;
-            } else if !previous_separator {
-                slug.push('_');
-                previous_separator = true;
-            }
-        }
-        let slug = slug.trim_matches('_');
-        if slug.is_empty() {
-            Self("exec_service_service".to_string())
-        } else {
-            Self(format!("exec_service_{slug}"))
-        }
+    pub fn for_service(service_name: &str, owner: &ExecOwnerMeta) -> Self {
+        let slug = service_slug(service_name);
+        let scope_hash = service_scope_hash(owner);
+        Self(format!("exec_service_{slug}_{scope_hash:016x}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -54,6 +41,33 @@ impl std::fmt::Display for ExecProcessId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+fn service_slug(service_name: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_separator = false;
+    for c in service_name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator {
+            slug.push('_');
+            previous_separator = true;
+        }
+    }
+    let slug = slug.trim_matches('_');
+    if slug.is_empty() {
+        "service".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+fn service_scope_hash(owner: &ExecOwnerMeta) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    owner.chat_id.hash(&mut hasher);
+    owner.workspace.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,15 +546,26 @@ mod tests {
     }
 
     #[test]
-    fn test_service_process_id_is_predictable() {
-        assert_eq!(
-            ExecProcessId::for_service("API server!").as_str(),
-            "exec_service_api_server"
-        );
-        assert_eq!(
-            ExecProcessId::for_service("  ").as_str(),
-            "exec_service_service"
-        );
+    fn test_service_process_id_is_scope_aware() {
+        let workspace_a = ExecOwnerMeta {
+            chat_id: Some("chat-a".to_string()),
+            workspace: Some(PathBuf::from("/workspace-a")),
+            ..ExecOwnerMeta::default()
+        };
+        let workspace_b = ExecOwnerMeta {
+            chat_id: Some("chat-a".to_string()),
+            workspace: Some(PathBuf::from("/workspace-b")),
+            ..ExecOwnerMeta::default()
+        };
+        let id_a = ExecProcessId::for_service("API server!", &workspace_a);
+        let id_b = ExecProcessId::for_service("API server!", &workspace_b);
+
+        assert!(id_a.as_str().starts_with("exec_service_api_server_"));
+        assert_ne!(id_a, id_b);
+        assert_eq!(id_a, ExecProcessId::for_service("API server!", &workspace_a));
+        assert!(ExecProcessId::for_service("  ", &workspace_a)
+            .as_str()
+            .starts_with("exec_service_service_"));
     }
 
     #[test]

@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
+use crate::exec::ExecRegistry;
+
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::exec::{
@@ -187,7 +189,12 @@ impl Tool for ToolProcessStart {
                 &mut error_log,
             )
             .await;
-        let workspace = process_workspace(gcx.clone(), execution_scope.as_ref()).await;
+        // Prefer an explicit workdir as the workspace scope so two callers in the
+        // same chat/gcx but different workdirs do not collide on service IDs.
+        let workspace = match parsed.workdir.clone() {
+            Some(workdir) => Some(workdir),
+            None => process_workspace(gcx.clone(), execution_scope.as_ref()).await,
+        };
         if parsed.mode == ExecMode::Service && parsed.service_name.is_none() {
             return Err("service mode requires service_name".to_string());
         }
@@ -607,6 +614,15 @@ impl Tool for ToolShellServiceAlias {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let parsed = parse_shell_service_alias_args(args)?;
+        let (gcx, execution_scope, chat_id) = {
+            let ccx_lock = ccx.lock().await;
+            (
+                ccx_lock.app.gcx.clone(),
+                ccx_lock.execution_scope.clone(),
+                ccx_lock.chat_id.clone(),
+            )
+        };
+        let workspace = process_workspace(gcx, execution_scope.as_ref()).await;
         match parsed.action.as_str() {
             "start" => {
                 let mut start = ToolProcessStart {
@@ -621,7 +637,10 @@ impl Tool for ToolShellServiceAlias {
                     .await
             }
             "stop" => {
-                let process_id = ExecProcessId::for_service(&parsed.service_name);
+                let exec_registry = exec_registry_from_ccx(ccx.clone()).await;
+                let process_id =
+                    service_process_id(&exec_registry, &parsed.service_name, &chat_id, workspace.as_ref())
+                        .await?;
                 let mut kill = ToolProcessKill {
                     config_path: self.config_path.clone(),
                 };
@@ -633,7 +652,10 @@ impl Tool for ToolShellServiceAlias {
                 .await
             }
             "status" | "logs" => {
-                let process_id = ExecProcessId::for_service(&parsed.service_name);
+                let exec_registry = exec_registry_from_ccx(ccx.clone()).await;
+                let process_id =
+                    service_process_id(&exec_registry, &parsed.service_name, &chat_id, workspace.as_ref())
+                        .await?;
                 let mut read = ToolProcessRead {
                     config_path: self.config_path.clone(),
                 };
@@ -650,17 +672,22 @@ impl Tool for ToolShellServiceAlias {
                 read.tool_execute(ccx, tool_call_id, &read_args).await
             }
             "restart" => {
-                let process_id = ExecProcessId::for_service(&parsed.service_name);
-                let mut kill = ToolProcessKill {
-                    config_path: self.config_path.clone(),
-                };
-                let _ = kill
-                    .tool_execute(
-                        ccx.clone(),
-                        tool_call_id,
-                        &make_args_map(vec![("process_id", json!(process_id.as_str()))]),
-                    )
-                    .await;
+                let exec_registry = exec_registry_from_ccx(ccx.clone()).await;
+                if let Ok(process_id) =
+                    service_process_id(&exec_registry, &parsed.service_name, &chat_id, workspace.as_ref())
+                        .await
+                {
+                    let mut kill = ToolProcessKill {
+                        config_path: self.config_path.clone(),
+                    };
+                    let _ = kill
+                        .tool_execute(
+                            ccx.clone(),
+                            tool_call_id,
+                            &make_args_map(vec![("process_id", json!(process_id.as_str()))]),
+                        )
+                        .await;
+                }
                 let mut start = ToolProcessStart {
                     config_path: self.config_path.clone(),
                 };
@@ -734,6 +761,32 @@ impl Tool for ToolShellServiceAlias {
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())
     }
+}
+
+async fn exec_registry_from_ccx(ccx: Arc<AMutex<AtCommandsContext>>) -> Arc<ExecRegistry> {
+    let ccx_lock = ccx.lock().await;
+    ccx_lock.app.runtime.exec_registry.clone()
+}
+
+async fn service_process_id(
+    exec_registry: &ExecRegistry,
+    service_name: &str,
+    chat_id: &str,
+    workspace: Option<&PathBuf>,
+) -> Result<ExecProcessId, String> {
+    let mut lookup = ExecServiceLookup::new(service_name.to_string());
+    if !chat_id.is_empty() {
+        lookup = lookup.with_chat_id(chat_id.to_string());
+    }
+    if let Some(workspace) = workspace.cloned() {
+        lookup = lookup.with_workspace(workspace);
+    }
+    exec_registry
+        .find_service(lookup)
+        .await
+        .filter(|snapshot| !snapshot.status.is_terminal())
+        .map(|snapshot| snapshot.meta.process_id)
+        .ok_or_else(|| format!("Service '{service_name}' is not running"))
 }
 
 fn source(config_path: &str) -> ToolSource {
@@ -1550,7 +1603,13 @@ mod tests {
         .await
         .unwrap();
         let process_id = process_id(&message);
-        assert_eq!(process_id, ExecProcessId::for_service("api"));
+        let expected_owner = ExecOwnerMeta {
+            chat_id: Some("chat".to_string()),
+            service_name: Some("api".to_string()),
+            workspace: None,
+            tool_call_id: Some("tool_call".to_string()),
+        };
+        assert_eq!(process_id, ExecProcessId::for_service("api", &expected_owner));
         assert_eq!(exec(&message)["mode"], "service");
         assert_eq!(exec(&message)["service_name"], "api");
 
@@ -1642,6 +1701,166 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tool_process_start_same_service_name_in_distinct_chats_does_not_collide() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let first_ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_with_abort(
+                app.clone(),
+                4096,
+                20,
+                false,
+                Vec::new(),
+                "chat-a".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+                None,
+            )
+            .await,
+        ));
+        let second_ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_with_abort(
+                app,
+                4096,
+                20,
+                false,
+                Vec::new(),
+                "chat-b".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+                None,
+            )
+            .await,
+        ));
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        let first = run_tool(
+            &mut start,
+            first_ccx,
+            make_args_map(vec![
+                ("command", json!(long_running_command("svc-a"))),
+                ("mode", json!("service")),
+                ("service_name", json!("api")),
+                ("startup_wait_ms", json!(100)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let second = run_tool(
+            &mut start,
+            second_ccx,
+            make_args_map(vec![
+                ("command", json!(long_running_command("svc-b"))),
+                ("mode", json!("service")),
+                ("service_name", json!("api")),
+                ("startup_wait_ms", json!(100)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let first_process_id = process_id(&first);
+        let second_process_id = process_id(&second);
+
+        assert_ne!(first_process_id, second_process_id);
+        assert_eq!(exec(&first)["status"], "running");
+        assert_eq!(exec(&second)["status"], "running");
+
+        gcx.exec_registry.kill(&first_process_id).await.unwrap();
+        gcx.exec_registry.kill(&second_process_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tool_process_start_same_service_name_in_distinct_workspaces_does_not_collide() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
+                vec![workspace_a.clone(), workspace_b.clone()];
+        }
+        let first_app = AppState::from_gcx(gcx.clone()).await;
+        let second_app = AppState::from_gcx(gcx.clone()).await;
+        let first_ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_with_abort(
+                first_app,
+                4096,
+                20,
+                false,
+                Vec::new(),
+                "chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+                None,
+            )
+            .await,
+        ));
+        let second_ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_with_abort(
+                second_app,
+                4096,
+                20,
+                false,
+                Vec::new(),
+                "chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+                None,
+            )
+            .await,
+        ));
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        let first = run_tool(
+            &mut start,
+            first_ccx,
+            make_args_map(vec![
+                ("command", json!(long_running_command("svc-a"))),
+                ("workdir", json!(workspace_a.to_string_lossy().to_string())),
+                ("mode", json!("service")),
+                ("service_name", json!("api")),
+                ("startup_wait_ms", json!(100)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let second = run_tool(
+            &mut start,
+            second_ccx,
+            make_args_map(vec![
+                ("command", json!(long_running_command("svc-b"))),
+                ("workdir", json!(workspace_b.to_string_lossy().to_string())),
+                ("mode", json!("service")),
+                ("service_name", json!("api")),
+                ("startup_wait_ms", json!(100)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let first_process_id = process_id(&first);
+        let second_process_id = process_id(&second);
+
+        assert_ne!(first_process_id, second_process_id);
+        assert_eq!(exec(&first)["status"], "running");
+        assert_eq!(exec(&second)["status"], "running");
+
+        gcx.exec_registry.kill(&first_process_id).await.unwrap();
+        gcx.exec_registry.kill(&second_process_id).await.unwrap();
     }
 
     #[tokio::test]
@@ -1905,7 +2124,13 @@ mod tests {
         .await
         .unwrap();
         let process_id = process_id(&message);
-        assert_eq!(process_id, ExecProcessId::for_service("alias"));
+        let expected_owner = ExecOwnerMeta {
+            chat_id: Some("chat".to_string()),
+            service_name: Some("alias".to_string()),
+            workspace: None,
+            tool_call_id: Some("tool_call".to_string()),
+        };
+        assert_eq!(process_id, ExecProcessId::for_service("alias", &expected_owner));
         assert!(gcx.integration_sessions.lock().await.is_empty());
 
         let logs = run_tool(

@@ -31,6 +31,10 @@ pub struct ExecTranscript {
 }
 
 impl ExecTranscript {
+    fn normalize_max_bytes(max_bytes: usize) -> usize {
+        max_bytes.max(1)
+    }
+
     pub fn new(process_id: ExecProcessId, max_bytes: usize) -> Self {
         Self {
             process_id,
@@ -42,7 +46,7 @@ impl ExecTranscript {
             dropped_bytes: 0,
             truncated_chunks: 0,
             current_bytes: 0,
-            max_bytes,
+            max_bytes: Self::normalize_max_bytes(max_bytes),
         }
     }
 
@@ -415,6 +419,19 @@ mod tests {
         let chunks = t.read_since(0);
         assert_eq!(chunks[0].process_id, pid);
         assert_eq!(t.process_id(), &pid);
+    }
+
+    #[test]
+    fn test_zero_byte_limit_is_clamped() {
+        let mut t = make_transcript(0);
+        t.append(ExecOutputStream::Stdout, "abcdef".to_string());
+
+        assert_eq!(t.max_bytes(), 1);
+        assert!(t.current_bytes() <= 1);
+        assert!(t.is_truncated());
+        let read = t.read(0, None);
+        assert_eq!(read.max_bytes, 1);
+        assert!(read.current_bytes <= 1);
     }
 
     #[test]

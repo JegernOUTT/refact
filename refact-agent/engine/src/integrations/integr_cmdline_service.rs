@@ -14,8 +14,6 @@ use crate::exec::{
     ExecOutputStream, ExecOwnerMeta, ExecReadResult, ExecReadinessProbe, ExecServiceLookup,
     ExecSpawnRequest, ExecStatus,
 };
-#[cfg(test)]
-use crate::exec::ExecProcessId;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::{
     IntegrationCommon, IntegrationConfirmation, IntegrationTrait,
@@ -584,7 +582,12 @@ mod tests {
         assert!(gcx.integration_sessions.lock().await.is_empty());
         let snapshot = gcx
             .exec_registry
-            .kill(&ExecProcessId::for_service("service_api"))
+            .find_service(ExecServiceLookup::new("service_api").with_chat_id("chat"))
+            .await
+            .unwrap();
+        let snapshot = gcx
+            .exec_registry
+            .kill(&snapshot.meta.process_id)
             .await
             .unwrap();
         assert_eq!(snapshot.status, ExecStatus::Killed);

@@ -337,7 +337,7 @@ impl ExecRegistry {
                 .service_name
                 .as_deref()
                 .ok_or_else(|| "service mode requires service_name".to_string())?;
-            meta = meta.with_process_id(ExecProcessId::for_service(service_name));
+            meta = meta.with_process_id(ExecProcessId::for_service(service_name, &request.owner));
         }
         if let Some(cwd) = request.cwd.clone() {
             meta = meta.with_cwd(cwd);
@@ -631,5 +631,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(waited.status, ExecStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn service_ids_include_workspace_scope() {
+        let registry = ExecRegistry::new();
+        let first_workspace = tempfile::tempdir().unwrap();
+        let second_workspace = tempfile::tempdir().unwrap();
+        let command = if cfg!(windows) {
+            "[Console]::Out.Write('svc'); Start-Sleep -Seconds 5"
+        } else {
+            "printf svc; sleep 5"
+        };
+        let owner_a = crate::exec::types::ExecOwnerMeta {
+            chat_id: Some("chat".to_string()),
+            tool_call_id: Some("tool-a".to_string()),
+            service_name: Some("api".to_string()),
+            workspace: Some(first_workspace.path().to_path_buf()),
+        };
+        let owner_b = crate::exec::types::ExecOwnerMeta {
+            chat_id: Some("chat".to_string()),
+            tool_call_id: Some("tool-b".to_string()),
+            service_name: Some("api".to_string()),
+            workspace: Some(second_workspace.path().to_path_buf()),
+        };
+
+        let first = registry
+            .spawn(
+                ExecSpawnRequest::service(shell_script(command))
+                    .with_owner(owner_a.clone())
+                    .with_startup_wait(Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+        let second = registry
+            .spawn(
+                ExecSpawnRequest::service(shell_script(command))
+                    .with_owner(owner_b.clone())
+                    .with_startup_wait(Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(first.snapshot.meta.process_id, second.snapshot.meta.process_id);
+        assert_eq!(first.snapshot.status, ExecStatus::Running);
+        assert_eq!(second.snapshot.status, ExecStatus::Running);
+        assert_eq!(
+            registry
+                .find_service(
+                    crate::exec::types::ExecServiceLookup::new("api")
+                        .with_chat_id("chat")
+                        .with_workspace(first_workspace.path().to_path_buf()),
+                )
+                .await
+                .unwrap()
+                .meta
+                .process_id,
+            first.snapshot.meta.process_id
+        );
+        assert_eq!(
+            registry
+                .find_service(
+                    crate::exec::types::ExecServiceLookup::new("api")
+                        .with_chat_id("chat")
+                        .with_workspace(second_workspace.path().to_path_buf()),
+                )
+                .await
+                .unwrap()
+                .meta
+                .process_id,
+            second.snapshot.meta.process_id
+        );
+
+        registry.kill(&first.snapshot.meta.process_id).await.unwrap();
+        registry.kill(&second.snapshot.meta.process_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_ids_include_chat_scope() {
+        let registry = ExecRegistry::new();
+        let workspace = tempfile::tempdir().unwrap();
+        let command = if cfg!(windows) {
+            "[Console]::Out.Write('svc'); Start-Sleep -Seconds 5"
+        } else {
+            "printf svc; sleep 5"
+        };
+        let owner_a = crate::exec::types::ExecOwnerMeta {
+            chat_id: Some("chat-a".to_string()),
+            tool_call_id: Some("tool-a".to_string()),
+            service_name: Some("api".to_string()),
+            workspace: Some(workspace.path().to_path_buf()),
+        };
+        let owner_b = crate::exec::types::ExecOwnerMeta {
+            chat_id: Some("chat-b".to_string()),
+            tool_call_id: Some("tool-b".to_string()),
+            service_name: Some("api".to_string()),
+            workspace: Some(workspace.path().to_path_buf()),
+        };
+
+        let first = registry
+            .spawn(
+                ExecSpawnRequest::service(shell_script(command))
+                    .with_owner(owner_a)
+                    .with_startup_wait(Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+        let second = registry
+            .spawn(
+                ExecSpawnRequest::service(shell_script(command))
+                    .with_owner(owner_b)
+                    .with_startup_wait(Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(first.snapshot.meta.process_id, second.snapshot.meta.process_id);
+        assert_eq!(first.snapshot.status, ExecStatus::Running);
+        assert_eq!(second.snapshot.status, ExecStatus::Running);
+
+        registry.kill(&first.snapshot.meta.process_id).await.unwrap();
+        registry.kill(&second.snapshot.meta.process_id).await.unwrap();
     }
 }

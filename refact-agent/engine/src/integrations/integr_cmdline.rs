@@ -786,6 +786,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_cmdline_abort_returns_partial_output_and_metadata() {
+        let (gcx, ccx) = test_ccx().await;
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut ccx_lock = ccx.lock().await;
+            ccx_lock.abort_flag = abort_flag.clone();
+        }
+        let mut tool = ToolCmdline {
+            name: "cmdline_abort".to_string(),
+            cfg: CmdlineToolConfig {
+                command: slow_command(),
+                description: "Abort command".to_string(),
+                parameters: Vec::new(),
+                timeout: "10".to_string(),
+                ..CmdlineToolConfig::default()
+            },
+            ..ToolCmdline::default()
+        };
+        let run = tokio::spawn({
+            let ccx = ccx.clone();
+            async move {
+                tool.tool_execute(ccx, &"tool_call".to_string(), &args(vec![]))
+                    .await
+                    .unwrap()
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        abort_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (_, messages) = run.await.unwrap();
+        let message = only_message(messages);
+        let body = text(&message);
+        let exec = exec(&message);
+
+        assert!(body.contains("start"));
+        assert!(body.contains("interrupted by user"));
+        assert_eq!(exec["status"], "killed");
+        assert_eq!(message.tool_failed, Some(true));
+        let process_id = exec["process_id"].as_str().unwrap();
+        let snapshot = gcx
+            .exec_registry
+            .get(&crate::exec::ExecProcessId(process_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status, ExecStatus::Killed);
+    }
+
+    #[tokio::test]
     async fn configured_cmdline_confirmation_matches_configured_command_text() {
         let (_, ccx) = test_ccx().await;
         let tool = ToolCmdline {

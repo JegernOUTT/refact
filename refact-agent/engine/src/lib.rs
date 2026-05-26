@@ -279,10 +279,13 @@ pub async fn run() {
         .await;
     if exec_cleanup.removed_count > 0 {
         info!(
-            "exec shutdown cleanup removed {} records, stopped {} children, failed {}, timed out {}",
+            "exec shutdown cleanup removed {} records, stopped {} runtime processes and {} children, failed runtime/child {}/{}, timed out runtime/child {}/{}",
             exec_cleanup.removed_count,
+            exec_cleanup.runtime_stopped_count,
             exec_cleanup.child_stopped_count,
+            exec_cleanup.runtime_failed_count,
             exec_cleanup.child_failed_count,
+            exec_cleanup.runtime_timed_out_count,
             exec_cleanup.child_timed_out_count
         );
     }
