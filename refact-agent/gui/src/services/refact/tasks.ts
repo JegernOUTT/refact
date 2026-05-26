@@ -66,6 +66,19 @@ export interface BoardCard {
   comments?: CardComment[];
 }
 
+export function isBoardCard(value: unknown): value is BoardCard {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.id === "string" &&
+    typeof v.title === "string" &&
+    typeof v.column === "string" &&
+    typeof v.priority === "string" &&
+    Array.isArray(v.depends_on) &&
+    typeof v.instructions === "string"
+  );
+}
+
 export interface CreateTaskRequest {
   name: string;
   target_files?: string[];
@@ -195,7 +208,20 @@ export const tasksApi = createApi({
           url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/board`,
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as TaskBoard };
+        const raw = result.data;
+        if (
+          typeof raw !== "object" ||
+          raw === null ||
+          !Array.isArray((raw as Record<string, unknown>).cards)
+        ) {
+          return {
+            error: {
+              status: "CUSTOM_ERROR" as const,
+              error: `Invalid TaskBoard shape: ${JSON.stringify(raw).slice(0, 200)}`,
+            },
+          };
+        }
+        return { data: raw as unknown as TaskBoard };
       },
       providesTags: (_result, _error, taskId) => [
         { type: "Board", id: taskId },

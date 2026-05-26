@@ -32,9 +32,10 @@ use crate::tools::tool_task_documents::{
 };
 use crate::tools::tool_task_memory::{
     MemoryKind, MemoryNamespace, TaskMemoriesApiResponse, TaskMemoryArchiveApiResponse,
-    TaskMemoryListFilters, TaskMemoryPinApiResponse, TaskMemoryTriageApiResponse,
-    archive_task_memory_for_api, list_task_memories_for_api, mark_task_memories_triaged_for_api,
-    set_task_memory_pinned_for_api,
+    TaskMemoryFacetsResponse, TaskMemoryListFilters, TaskMemoryPinApiResponse,
+    TaskMemoryTriageApiResponse, archive_task_memory_for_api, list_task_memories_for_api,
+    mark_task_memories_triaged_for_api, set_task_memory_pinned_for_api,
+    task_memory_facets_for_api,
 };
 
 #[derive(Deserialize)]
@@ -392,6 +393,16 @@ pub async fn handle_task_memories_triage_done(
         .transpose()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let result = mark_task_memories_triaged_for_api(app.gcx.clone(), &task_id, cursor)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
+pub async fn handle_task_memory_facets(
+    State(app): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<TaskMemoryFacetsResponse>, (StatusCode, String)> {
+    let result = task_memory_facets_for_api(app.gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(result))

@@ -834,6 +834,16 @@ pub struct TaskMemoriesApiResponse {
     pub warnings: Vec<TaskMemoryApiWarning>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskMemoryFacetsResponse {
+    pub task_id: String,
+    pub namespaces: Vec<String>,
+    pub tags: Vec<String>,
+    pub kinds: Vec<String>,
+    pub total_count: usize,
+    pub pinned_count: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskMemoryListFilters {
     pub since: Option<DateTime<Utc>>,
@@ -1255,6 +1265,43 @@ pub async fn list_task_memories_for_api(
                 error: warning.error,
             })
             .collect(),
+    })
+}
+
+pub async fn task_memory_facets_for_api(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+) -> Result<TaskMemoryFacetsResponse, String> {
+    let task_dir = find_task_dir(gcx, task_id).await?;
+    let (memories, _warnings) =
+        load_task_memory_inbox_entries(&task_dir.join(MEMORIES_DIR)).await?;
+    let total_count = memories.len();
+    let pinned_count = memories.iter().filter(|m| m.frontmatter.pinned).count();
+    let mut namespaces: Vec<String> = memories
+        .iter()
+        .map(|m| m.frontmatter.namespace.to_string())
+        .collect();
+    namespaces.sort();
+    namespaces.dedup();
+    let mut tags: Vec<String> = memories
+        .iter()
+        .flat_map(|m| m.frontmatter.tags.iter().cloned())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    let mut kinds: Vec<String> = memories
+        .iter()
+        .map(|m| m.frontmatter.kind.to_string())
+        .collect();
+    kinds.sort();
+    kinds.dedup();
+    Ok(TaskMemoryFacetsResponse {
+        task_id: task_id.to_string(),
+        namespaces,
+        tags,
+        kinds,
+        total_count,
+        pinned_count,
     })
 }
 
@@ -3308,5 +3355,125 @@ mod tests {
             assert_eq!(hits.len(), 1, "query {query}");
             assert_eq!(hits[0].card.title, "Filename");
         }
+    }
+
+    #[tokio::test]
+    async fn handle_task_memory_facets_returns_sorted_deduplicated_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![temp.path().to_path_buf()];
+        let task_dir = temp.path().join(".refact/tasks/task-1");
+        let memories_dir = task_dir.join(MEMORIES_DIR);
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+
+        for (file, namespace, kind, tags) in &[
+            (
+                "mem-a.md",
+                MemoryNamespace::Task,
+                MemoryKind::Decision,
+                vec!["planner".to_string(), "search".to_string()],
+            ),
+            (
+                "mem-b.md",
+                MemoryNamespace::Global,
+                MemoryKind::Spec,
+                vec!["search".to_string()],
+            ),
+            (
+                "mem-c.md",
+                MemoryNamespace::Task,
+                MemoryKind::Decision,
+                vec!["planner".to_string()],
+            ),
+        ] {
+            tokio::fs::write(
+                memories_dir.join(file),
+                render_memory_file(
+                    &TaskMemoryFrontmatter {
+                        namespace: namespace.clone(),
+                        kind: *kind,
+                        tags: tags.clone(),
+                        ..Default::default()
+                    },
+                    "body",
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = task_memory_facets_for_api(gcx, "task-1").await.unwrap();
+        assert_eq!(result.task_id, "task-1");
+        assert_eq!(result.namespaces, vec!["global", "task"]);
+        assert_eq!(result.kinds, vec!["decision", "spec"]);
+        assert_eq!(result.tags, vec!["planner", "search"]);
+        assert_eq!(result.total_count, 3);
+    }
+
+    #[tokio::test]
+    async fn handle_task_memory_facets_counts_pinned_correctly() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![temp.path().to_path_buf()];
+        let task_dir = temp.path().join(".refact/tasks/task-1");
+        let memories_dir = task_dir.join(MEMORIES_DIR);
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+
+        for (file, pinned) in &[("pinned.md", true), ("active.md", false), ("also-pinned.md", true)] {
+            tokio::fs::write(
+                memories_dir.join(file),
+                render_memory_file(
+                    &TaskMemoryFrontmatter {
+                        pinned: *pinned,
+                        ..Default::default()
+                    },
+                    "body",
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = task_memory_facets_for_api(gcx, "task-1").await.unwrap();
+        assert_eq!(result.total_count, 3);
+        assert_eq!(result.pinned_count, 2);
+    }
+
+    #[tokio::test]
+    async fn handle_task_memory_facets_does_not_load_memory_bodies() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![temp.path().to_path_buf()];
+        let task_dir = temp.path().join(".refact/tasks/task-1");
+        let memories_dir = task_dir.join(MEMORIES_DIR);
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+
+        tokio::fs::write(
+            memories_dir.join("mem.md"),
+            render_memory_file(
+                &TaskMemoryFrontmatter {
+                    kind: MemoryKind::Risk,
+                    namespace: MemoryNamespace::Task,
+                    tags: vec!["critical".to_string()],
+                    ..Default::default()
+                },
+                "very large body content that should not appear in facets response",
+            ),
+        )
+        .await
+        .unwrap();
+
+        let result = task_memory_facets_for_api(gcx, "task-1").await.unwrap();
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(
+            !serialized.contains("very large body content"),
+            "facets response must not include memory body content"
+        );
+        assert_eq!(result.kinds, vec!["risk"]);
+        assert_eq!(result.namespaces, vec!["task"]);
+        assert_eq!(result.tags, vec!["critical"]);
     }
 }

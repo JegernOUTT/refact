@@ -27,7 +27,6 @@ import classNames from "classnames";
 import { Markdown } from "../../../components/Markdown";
 import { DocumentEditor } from "./DocumentEditor";
 import {
-  type TaskDocumentKind,
   type TaskDocumentSummary,
   useDeleteTaskDocumentMutation,
   useGetTaskDocumentHistoryQuery,
@@ -35,30 +34,13 @@ import {
   useListTaskDocumentsQuery,
   usePinTaskDocumentMutation,
 } from "../../../services/refact/taskDocumentsApi";
+import {
+  DOCUMENT_KINDS,
+  documentKindColor,
+} from "../../../services/refact/taskKinds";
 import styles from "./TaskDocuments.module.css";
 
 const ALL_VALUE = "all";
-
-const DOCUMENT_KINDS: TaskDocumentKind[] = [
-  "plan",
-  "design",
-  "runbook",
-  "brief",
-  "postmortem",
-  "spec",
-];
-
-const KIND_COLORS: Record<
-  TaskDocumentKind,
-  "blue" | "purple" | "green" | "teal" | "red" | "gray"
-> = {
-  plan: "blue",
-  design: "purple",
-  runbook: "green",
-  brief: "teal",
-  postmortem: "red",
-  spec: "gray",
-};
 
 function formatUpdatedAt(value: string): string {
   const date = new Date(value);
@@ -120,7 +102,7 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
             </IconButton>
           </Tooltip>
           <Badge
-            color={KIND_COLORS[document.kind]}
+            color={documentKindColor(document.kind)}
             variant="soft"
             size="1"
             data-testid={`kind-badge-${document.slug}`}

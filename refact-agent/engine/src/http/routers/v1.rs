@@ -83,7 +83,8 @@ use crate::http::routers::v1::tasks::{
     handle_get_ready_cards, handle_update_task_status, handle_update_task_meta,
     handle_list_task_trajectories, handle_create_planner_chat, handle_delete_planner_chat,
     handle_tasks_subscribe, handle_list_task_memories, handle_pin_task_memory,
-    handle_archive_task_memory, handle_task_memories_triage_done, handle_list_task_documents,
+    handle_archive_task_memory, handle_task_memories_triage_done, handle_task_memory_facets,
+    handle_list_task_documents,
     handle_get_task_document, handle_create_task_document, handle_update_task_document,
     handle_append_task_document, handle_delete_task_document, handle_pin_task_document,
     handle_history_task_document,
@@ -465,6 +466,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/tasks/:task_id/status", post(handle_update_task_status))
         .route("/tasks/:task_id/meta", patch(handle_update_task_meta))
         .route("/task/:task_id/memories", get(handle_list_task_memories))
+        .route(
+            "/task/:task_id/memories/facets",
+            get(handle_task_memory_facets),
+        )
         .route(
             "/task/:task_id/memories/triage-done",
             post(handle_task_memories_triage_done),

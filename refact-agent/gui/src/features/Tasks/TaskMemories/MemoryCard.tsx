@@ -15,23 +15,9 @@ import { DrawingPinIcon, TrashIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
 import { Markdown } from "../../../components/Markdown";
 import type { TaskMemoryEntry } from "../../../services/refact/taskMemoriesApi";
+import { memoryKindColor } from "../../../services/refact/taskKinds";
 import styles from "./MemoryInboxPanel.module.css";
 
-const KIND_COLORS: Record<
-  TaskMemoryEntry["kind"],
-  "blue" | "green" | "amber" | "red" | "purple" | "gray"
-> = {
-  decision: "purple",
-  spec: "blue",
-  finding: "green",
-  gotcha: "amber",
-  risk: "red",
-  handoff: "purple",
-  progress: "blue",
-  postmortem: "amber",
-  brief: "green",
-  freeform: "gray",
-};
 
 const TITLE_FALLBACK_LENGTH = 80;
 const PREVIEW_LENGTH = 180;
@@ -153,7 +139,7 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
             <Flex direction="column" gap="1" className={styles.cardBodyColumn}>
               <Flex align="center" gap="2" className={styles.cardTitleRow}>
                 <Flex gap="1" align="center" className={styles.cardBadges}>
-                  <Badge color={KIND_COLORS[memory.kind]} variant="soft">
+                  <Badge color={memoryKindColor(memory.kind)} variant="soft">
                     {memory.kind}
                   </Badge>
                   <Badge color="gray" variant="outline">

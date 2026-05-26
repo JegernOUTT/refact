@@ -57,6 +57,54 @@ export interface TaskMemoryFacetsResponse {
   task_id: string;
   namespaces: string[];
   tags: string[];
+  kinds: string[];
+  total_count: number;
+  pinned_count: number;
+}
+
+export function isTaskMemoryEntry(value: unknown): value is TaskMemoryEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.filename === "string" &&
+    typeof v.created_at === "string" &&
+    typeof v.title === "string" &&
+    typeof v.content === "string" &&
+    Array.isArray(v.tags) &&
+    v.tags.every((t) => typeof t === "string") &&
+    typeof v.kind === "string" &&
+    typeof v.namespace === "string" &&
+    typeof v.pinned === "boolean"
+  );
+}
+
+export function isTaskMemoriesResponse(
+  value: unknown,
+): value is TaskMemoriesResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.task_id === "string" &&
+    typeof v.since === "string" &&
+    typeof v.new_count === "number" &&
+    Array.isArray(v.memories) &&
+    Array.isArray(v.warnings)
+  );
+}
+
+export function isTaskMemoryFacetsResponse(
+  value: unknown,
+): value is TaskMemoryFacetsResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.task_id === "string" &&
+    Array.isArray(v.namespaces) &&
+    Array.isArray(v.tags) &&
+    Array.isArray(v.kinds) &&
+    typeof v.total_count === "number" &&
+    typeof v.pinned_count === "number"
+  );
 }
 
 export interface PinTaskMemoryRequest {
@@ -128,7 +176,15 @@ export const taskMemoriesApi = createApi({
           url: buildTaskMemoriesUrl(state.config.lspPort, args),
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as TaskMemoriesResponse };
+        if (!isTaskMemoriesResponse(result.data)) {
+          return {
+            error: {
+              status: "CUSTOM_ERROR" as const,
+              error: `Invalid TaskMemoriesResponse shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+            },
+          };
+        }
+        return { data: result.data };
       },
       providesTags: (_result, _error, { taskId }) => [
         { type: "TaskMemories", id: taskId },
@@ -142,28 +198,23 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildTaskMemoriesUrl(state.config.lspPort, { taskId }),
+          url: `http://127.0.0.1:${
+            state.config.lspPort
+          }/v1/task/${encodeURIComponent(taskId)}/memories/facets`,
         });
         if (result.error) return { error: result.error };
-
-        const namespaces = new Set<string>();
-        const tags = new Set<string>();
-        const response = result.data as TaskMemoriesResponse;
-        for (const memory of response.memories) {
-          namespaces.add(memory.namespace);
-          for (const tag of memory.tags) tags.add(tag);
+        if (!isTaskMemoryFacetsResponse(result.data)) {
+          return {
+            error: {
+              status: "CUSTOM_ERROR" as const,
+              error: `Invalid TaskMemoryFacetsResponse shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+            },
+          };
         }
-
-        return {
-          data: {
-            task_id: response.task_id,
-            namespaces: [...namespaces].sort((a, b) => a.localeCompare(b)),
-            tags: [...tags].sort((a, b) => a.localeCompare(b)),
-          },
-        };
+        return { data: result.data };
       },
       providesTags: (_result, _error, { taskId }) => [
-        { type: "TaskMemories", id: taskId },
+        { type: "TaskMemories", id: `${taskId}:facets` },
       ],
     }),
 
@@ -187,6 +238,7 @@ export const taskMemoriesApi = createApi({
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskMemories", id: taskId },
+        { type: "TaskMemories", id: `${taskId}:facets` },
       ],
     }),
 
@@ -209,6 +261,7 @@ export const taskMemoriesApi = createApi({
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskMemories", id: taskId },
+        { type: "TaskMemories", id: `${taskId}:facets` },
       ],
     }),
 
@@ -230,6 +283,7 @@ export const taskMemoriesApi = createApi({
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskMemories", id: taskId },
+        { type: "TaskMemories", id: `${taskId}:facets` },
       ],
     }),
   }),

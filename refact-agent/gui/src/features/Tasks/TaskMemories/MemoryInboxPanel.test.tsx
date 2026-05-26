@@ -60,9 +60,29 @@ const memoriesResponse: TaskMemoriesResponse = {
 };
 
 function mockMemories(response: TaskMemoriesResponse = memoriesResponse) {
+  const namespaces = [
+    ...new Set(response.memories.map((m) => m.namespace)),
+  ].sort();
+  const tags = [
+    ...new Set(response.memories.flatMap((m) => m.tags)),
+  ].sort();
+  const kinds = [...new Set(response.memories.map((m) => m.kind))].sort();
+  const pinned_count = response.memories.filter((m) => m.pinned).length;
   server.use(
     http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
       HttpResponse.json(response),
+    ),
+    http.get(
+      "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+      ({ params }) =>
+        HttpResponse.json({
+          task_id: String(params.taskId),
+          namespaces,
+          tags,
+          kinds,
+          total_count: response.memories.length,
+          pinned_count,
+        }),
     ),
   );
 }
@@ -251,6 +271,18 @@ describe("MemoryInboxPanel", () => {
               : memoriesResponse;
           return HttpResponse.json(response);
         },
+      ),
+      http.get(
+        "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+        ({ params }) =>
+          HttpResponse.json({
+            task_id: String(params.taskId),
+            namespaces: ["card:T-2", "task"],
+            tags: ["agent", "cleanup", "handoff", "index", "planner", "search"],
+            kinds: ["decision", "risk"],
+            total_count: 2,
+            pinned_count: 1,
+          }),
       ),
     );
 

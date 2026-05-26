@@ -88,6 +88,49 @@ export interface AppendTaskDocumentRequest {
   section: string;
 }
 
+export function isTaskDocumentDetail(value: unknown): value is TaskDocumentDetail {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.slug === "string" &&
+    typeof v.name === "string" &&
+    typeof v.kind === "string" &&
+    typeof v.content === "string" &&
+    typeof v.version === "number" &&
+    typeof v.pinned === "boolean" &&
+    typeof v.created_at === "string" &&
+    typeof v.updated_at === "string"
+  );
+}
+
+export function isTaskDocumentSummary(
+  value: unknown,
+): value is TaskDocumentSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.slug === "string" &&
+    typeof v.name === "string" &&
+    typeof v.kind === "string" &&
+    typeof v.pinned === "boolean" &&
+    typeof v.version === "number" &&
+    typeof v.updated_at === "string" &&
+    typeof v.created_at === "string"
+  );
+}
+
+export function isTaskDocumentHistoryResponse(
+  value: unknown,
+): value is TaskDocumentHistoryResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.task_id === "string" &&
+    typeof v.slug === "string" &&
+    Array.isArray(v.history)
+  );
+}
+
 export type TaskDocumentsTag = { type: "TaskDocuments"; id: string };
 
 export const taskDocumentListTag = (taskId: string): TaskDocumentsTag => ({
@@ -161,6 +204,19 @@ export const taskDocumentsApi = createApi({
           }/v1/task/${encodeURIComponent(taskId)}/documents`,
         });
         if (result.error) return { error: result.error };
+        const raw = result.data as { task_id?: unknown; documents?: unknown[] };
+        if (
+          typeof raw !== "object" ||
+          raw === null ||
+          !Array.isArray(raw.documents)
+        ) {
+          return {
+            error: {
+              status: "CUSTOM_ERROR" as const,
+              error: `Invalid TaskDocumentListResponse shape: ${JSON.stringify(raw).slice(0, 200)}`,
+            },
+          };
+        }
         return { data: result.data as TaskDocumentListResponse };
       },
       providesTags: (_result, _error, { taskId }) => [
@@ -184,7 +240,15 @@ export const taskDocumentsApi = createApi({
           )}/documents/${encodeURIComponent(slug)}${params}`,
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as TaskDocumentDetail };
+        if (!isTaskDocumentDetail(result.data)) {
+          return {
+            error: {
+              status: "CUSTOM_ERROR" as const,
+              error: `Invalid TaskDocumentDetail shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+            },
+          };
+        }
+        return { data: result.data };
       },
       providesTags: (_result, _error, { taskId, slug }) => [
         taskDocumentDetailTag(taskId, slug),
@@ -349,7 +413,15 @@ export const taskDocumentsApi = createApi({
           )}/documents/${encodeURIComponent(slug)}/history`,
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as TaskDocumentHistoryResponse };
+        if (!isTaskDocumentHistoryResponse(result.data)) {
+          return {
+            error: {
+              status: "CUSTOM_ERROR" as const,
+              error: `Invalid TaskDocumentHistoryResponse shape: ${JSON.stringify(result.data).slice(0, 200)}`,
+            },
+          };
+        }
+        return { data: result.data };
       },
       providesTags: (_result, _error, { taskId, slug }) => [
         taskDocumentHistoryTag(taskId, slug),

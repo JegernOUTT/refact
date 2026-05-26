@@ -6,6 +6,7 @@ import type React from "react";
 import { render, screen } from "../../../utils/test-utils";
 import { MemoryCard } from "./MemoryCard";
 import type { TaskMemoryEntry } from "../../../services/refact/taskMemoriesApi";
+import { memoryKindColor } from "../../../services/refact/taskKinds";
 
 HTMLElement.prototype.hasPointerCapture = () => false;
 
@@ -123,6 +124,13 @@ describe("MemoryCard", () => {
       screen.getByTestId("memory-card-frontmatter-decision.md"),
     ).toBeInTheDocument();
     expect(screen.getByText("created_at")).toBeInTheDocument();
+  });
+
+  it("unknown_memory_kind_renders_gray_badge", () => {
+    expect(memoryKindColor("sprint")).toBe("gray");
+    expect(memoryKindColor("roadmap")).toBe("gray");
+    expect(memoryKindColor("")).toBe("gray");
+    expect(memoryKindColor("decision")).toBe("purple");
   });
 
   it("tag overflow uses shared thin scrollbar class", () => {
