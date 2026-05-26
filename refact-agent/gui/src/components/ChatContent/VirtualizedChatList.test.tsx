@@ -8,6 +8,9 @@ type VirtuosoCall = {
   atBottomStateChange?: (atBottom: boolean) => void;
   followOutput?: (isAtBottom: boolean) => false | "auto" | "smooth";
   increaseViewportBy?: { top: number; bottom: number };
+  defaultItemHeight?: number;
+  minOverscanItemCount?: { top: number; bottom: number };
+  overscan?: { main: number; reverse: number };
   skipAnimationFrameInResizeObserver?: boolean;
 };
 
@@ -80,7 +83,7 @@ describe("VirtualizedChatList", () => {
     );
 
     const secondCall = getVirtuosoCalls().at(-1);
-    expect(secondCall?.increaseViewportBy).toEqual({ top: 1600, bottom: 2200 });
+    expect(secondCall?.increaseViewportBy).toEqual({ top: 800, bottom: 1000 });
   });
 
   test("uses synchronous ResizeObserver measurements to reduce dynamic-height jitter", () => {
@@ -96,6 +99,23 @@ describe("VirtualizedChatList", () => {
 
     const call = getVirtuosoCalls().at(-1);
     expect(call?.skipAnimationFrameInResizeObserver).toBe(true);
+  });
+
+  test("provides measurement hints to reduce dynamic-height jumpiness", () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming={false}
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const call = getVirtuosoCalls().at(-1);
+    expect(call?.defaultItemHeight).toBe(240);
+    expect(call?.minOverscanItemCount).toEqual({ top: 20, bottom: 20 });
+    expect(call?.overscan).toEqual({ main: 400, reverse: 400 });
   });
 
   test("waits for a non-zero wrapper height before mounting Virtuoso", () => {

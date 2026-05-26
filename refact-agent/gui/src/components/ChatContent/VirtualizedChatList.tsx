@@ -15,8 +15,14 @@ import styles from "./ChatContent.module.css";
 const SCROLL_INTENT_MS = 500;
 const PASSIVE_SCROLL_GRACE_MS = 250;
 const MIN_MEASURED_LIST_HEIGHT = 1;
+const DEFAULT_ITEM_HEIGHT = 240;
+const VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT = { top: 20, bottom: 20 };
+const VIRTUOSO_OVERSCAN = { main: 400, reverse: 400 };
 
-function canScrollInWheelDirection(element: HTMLElement, deltaY: number): boolean {
+function canScrollInWheelDirection(
+  element: HTMLElement,
+  deltaY: number,
+): boolean {
   if (deltaY < 0) return element.scrollTop > 0;
   if (deltaY > 0) {
     return element.scrollTop + element.clientHeight < element.scrollHeight - 1;
@@ -130,6 +136,7 @@ export function VirtualizedChatList<T extends { key: string }>({
     autoFollowRef.current = true;
     userScrolledUpRef.current = false;
     setShowFollowButton(false);
+    if (items.length === 0) return;
     virtuosoRef.current?.scrollToIndex({
       index: items.length - 1,
       align: "end",
@@ -302,7 +309,7 @@ export function VirtualizedChatList<T extends { key: string }>({
         const isPassiveAdjustment =
           isSuppressedPassiveCorrection || !recentUserIntent;
         // Detect upward scroll as a safety net (keyboard, scrollbar drag,
-        // touch, etc. — onWheel already covers mouse/trackpad).  Use a +1px
+        // touch, etc. — onWheel already covers mouse/trackpad). Use a +1px
         // tolerance to ignore sub-pixel Virtuoso measurement jitter.
         if (
           !isPassiveAdjustment &&
@@ -318,7 +325,7 @@ export function VirtualizedChatList<T extends { key: string }>({
           }
         }
         // NOTE: We intentionally do NOT infer "user scrolling down" from
-        // scrollTop increases.  Virtuoso's internal offset corrections during
+        // scrollTop increases. Virtuoso's internal offset corrections during
         // item remeasurement can increase scrollTop without any user gesture,
         // and mistaking those for active scrolling would re-arm auto-follow
         // and cause visible scroll jumps while reading.
@@ -395,7 +402,7 @@ export function VirtualizedChatList<T extends { key: string }>({
 
   const viewportPadding = useMemo(
     () =>
-      isStreaming ? { top: 800, bottom: 1200 } : { top: 1600, bottom: 2200 },
+      isStreaming ? { top: 800, bottom: 1200 } : { top: 800, bottom: 1000 },
     [isStreaming],
   );
 
@@ -421,6 +428,9 @@ export function VirtualizedChatList<T extends { key: string }>({
           }
           atBottomThreshold={20}
           increaseViewportBy={viewportPadding}
+          defaultItemHeight={DEFAULT_ITEM_HEIGHT}
+          minOverscanItemCount={VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT}
+          overscan={VIRTUOSO_OVERSCAN}
           skipAnimationFrameInResizeObserver={true}
         />
       )}
