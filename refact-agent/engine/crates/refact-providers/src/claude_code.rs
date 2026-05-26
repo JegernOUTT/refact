@@ -12,29 +12,9 @@ use crate::traits::{
     merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaudeCodeAuthMethod {
-    Auto,
-    CliSession,
-    OauthToken,
-}
-
-impl Default for ClaudeCodeAuthMethod {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClaudeCodeProvider {
     pub enabled: bool,
-    #[serde(default)]
-    pub auth_method: ClaudeCodeAuthMethod,
-    #[serde(default)]
-    pub oauth_token: String,
-    #[serde(default)]
-    pub cli_path: Option<String>,
     #[serde(default)]
     pub enabled_models: Vec<String>,
     #[serde(default)]
@@ -97,150 +77,32 @@ impl ClaudeCodeProvider {
         .map(|_| ())
     }
 
-    fn detect_cli_path(&self) -> Option<String> {
-        if let Some(ref p) = self.cli_path {
-            if std::path::Path::new(p).exists() {
-                return Some(p.clone());
-            }
-        }
-
-        if let Ok(path) = which::which("claude") {
-            return Some(path.to_string_lossy().to_string());
-        }
-
-        #[cfg(unix)]
-        {
-            let candidates = ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"];
-            for c in &candidates {
-                if std::path::Path::new(c).exists() {
-                    return Some(c.to_string());
-                }
-            }
-            if let Some(home) = home::home_dir() {
-                let local = home.join(".local/bin/claude");
-                if local.exists() {
-                    return Some(local.to_string_lossy().to_string());
-                }
-            }
-        }
-
-        #[cfg(windows)]
-        if let Some(home) = home::home_dir() {
-            let candidate = home
-                .join("AppData")
-                .join("Local")
-                .join("Programs")
-                .join("claude")
-                .join("claude.exe");
-            if candidate.exists() {
-                return Some(candidate.to_string_lossy().to_string());
-            }
-        }
-
-        None
-    }
-
-    fn get_cli_oauth_token(&self) -> Result<String, String> {
-        let home = home::home_dir().ok_or("Cannot determine home directory")?;
-
-        let creds_path = home.join(".claude/.credentials.json");
-        if !creds_path.exists() {
-            return Err(format!(
-                "Claude CLI credentials not found at {}. Run 'claude auth login' first.",
-                creds_path.display()
-            ));
-        }
-
-        let content = std::fs::read_to_string(&creds_path)
-            .map_err(|e| format!("Failed to read {}: {}", creds_path.display(), e))?;
-
-        let creds: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse credentials: {}", e))?;
-
-        creds["claudeAiOauth"]["accessToken"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| "Access token not found in credentials file".to_string())
-    }
-
     fn diagnose_auth_status(&self) -> String {
-        match self.resolve_auth() {
-            Ok(auth_token) => {
-                if !auth_token.is_empty() {
-                    if !self.oauth_tokens.is_empty() {
-                        if self.oauth_tokens.is_expired() {
-                            "OK (OAuth - token needs refresh)".to_string()
-                        } else {
-                            "OK (OAuth login)".to_string()
-                        }
-                    } else {
-                        "OK (OAuth token from CLI session)".to_string()
-                    }
-                } else {
-                    "No credentials found".to_string()
-                }
-            }
-            Err(e) => {
-                let first_line = e.lines().next().unwrap_or(&e);
-                first_line.to_string()
-            }
+        if self.oauth_tokens.access_token.is_empty() {
+            return "Not configured — log in via OAuth".to_string();
         }
+        if self.oauth_tokens.is_expired() {
+            return "OAuth token expired — needs refresh".to_string();
+        }
+        "OK (OAuth login)".to_string()
     }
 
+    /// Subscription-only auth: returns the in-app OAuth access token for this
+    /// provider instance, or an actionable error if not logged in / expired.
     fn resolve_auth(&self) -> Result<String, String> {
-        match self.auth_method {
-            ClaudeCodeAuthMethod::Auto => {
-                if !self.oauth_tokens.is_empty()
-                    && !self.oauth_tokens.access_token.is_empty()
-                    && !self.oauth_tokens.is_expired()
-                {
-                    tracing::debug!("Claude Code: using in-app OAuth token");
-                    return Ok(self.oauth_tokens.access_token.clone());
-                }
-
-                if let Ok(token) = self.get_cli_oauth_token() {
-                    tracing::debug!(
-                        "Claude Code: using CLI session OAuth token from credentials file"
-                    );
-                    return Ok(token);
-                }
-
-                if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
-                    if !token.is_empty() && token != "***" {
-                        tracing::debug!("Claude Code: using CLAUDE_CODE_OAUTH_TOKEN env var");
-                        return Ok(token);
-                    }
-                }
-
-                if !self.oauth_token.is_empty() && self.oauth_token != "***" {
-                    tracing::debug!("Claude Code: using configured OAuth token");
-                    return Ok(self.oauth_token.clone());
-                }
-
-                Err(concat!(
-                    "No authentication method available. Options:\n",
-                    "  1. Click 'Login with Anthropic' in provider settings\n",
-                    "  2. Install Claude CLI and run 'claude auth login'\n",
-                    "  3. Provide oauth_token in provider config"
-                )
-                .to_string())
-            }
-            ClaudeCodeAuthMethod::CliSession => self.get_cli_oauth_token(),
-            ClaudeCodeAuthMethod::OauthToken => {
-                if !self.oauth_token.is_empty() && self.oauth_token != "***" {
-                    return Ok(self.oauth_token.clone());
-                }
-                if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
-                    if !token.is_empty() && token != "***" {
-                        return Ok(token);
-                    }
-                }
-                Err(
-                    "OAuth token not provided. Set oauth_token or CLAUDE_CODE_OAUTH_TOKEN env var."
-                        .to_string(),
-                )
-            }
+        if self.oauth_tokens.access_token.is_empty() {
+            return Err(
+                "Claude Code: not logged in for this provider instance. \
+                Click 'Login with Anthropic' in provider settings."
+                    .to_string(),
+            );
         }
+        if self.oauth_tokens.is_expired() {
+            return Err(
+                "Claude Code: OAuth token expired — refresh needed.".to_string(),
+            );
+        }
+        Ok(self.oauth_tokens.access_token.clone())
     }
 }
 
@@ -371,13 +233,7 @@ impl ProviderTrait for ClaudeCodeProvider {
 
     fn provider_schema(&self) -> &'static str {
         r#"
-fields:
-  oauth_token:
-    f_type: string_long
-    f_desc: "OAuth token (only if not using OAuth login)"
-    f_placeholder: "sk-ant-oat01-..."
-    f_label: "OAuth Token (optional)"
-    f_extra: true
+fields: {}
 oauth:
   supported: true
   methods:
@@ -387,7 +243,7 @@ oauth:
 description: |
   Use your Claude Code subscription to access Claude models.
 
-  **Setup:** Click **Login with Anthropic** below, or install Claude CLI and run `claude auth login`.
+  **Setup:** Click **Login with Anthropic** below. Each provider instance can be logged in to a separate Claude account.
 available:
   on_your_laptop_possible: true
   when_isolated_possible: true
@@ -398,20 +254,6 @@ available:
         if let Some(enabled) = yaml.get("enabled").and_then(|v| v.as_bool()) {
             self.enabled = enabled;
         }
-        if let Some(oauth_token) = yaml.get("oauth_token").and_then(|v| v.as_str()) {
-            if oauth_token != "***" {
-                self.oauth_token = oauth_token.to_string();
-            }
-        }
-        if let Some(cli_path) = yaml.get("cli_path").and_then(|v| v.as_str()) {
-            if !cli_path.is_empty() {
-                self.cli_path = Some(cli_path.to_string());
-            }
-        }
-        if let Some(auth_method) = yaml.get("auth_method") {
-            self.auth_method = serde_yaml::from_value(auth_method.clone())
-                .map_err(|e| format!("invalid auth_method: {}", e))?;
-        }
         if let Some(oauth_tokens) = yaml.get("oauth_tokens") {
             self.oauth_tokens = serde_yaml::from_value(oauth_tokens.clone()).unwrap_or_default();
         }
@@ -421,17 +263,12 @@ available:
     }
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
-        let cli_detected = self.detect_cli_path().unwrap_or_default();
         let auth_status = self.diagnose_auth_status();
-
-        let oauth_connected =
-            !self.oauth_tokens.is_empty() && !self.oauth_tokens.access_token.is_empty();
+        let oauth_connected = !self.oauth_tokens.access_token.is_empty();
 
         json!({
             "enabled": self.enabled,
             "auth_status": auth_status,
-            "claude_cli_path": if cli_detected.is_empty() { "not found".to_string() } else { cli_detected },
-            "oauth_token": if self.oauth_token.is_empty() { "" } else { "***" },
             "oauth_connected": oauth_connected,
             "enabled_models": self.enabled_models,
             "custom_models": self.custom_models
@@ -472,26 +309,8 @@ available:
     }
 
     fn has_credentials(&self) -> bool {
-        // Fast check: avoid blocking IO from resolve_auth() which reads filesystem
-        if !self.oauth_tokens.is_empty() && !self.oauth_tokens.access_token.is_empty() {
-            return true;
-        }
-        if !self.oauth_token.is_empty() && self.oauth_token != "***" {
-            return true;
-        }
-        if std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-            .map(|t| !t.is_empty())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        // Check CLI credentials file existence (metadata only, no read)
-        if let Some(home) = home::home_dir() {
-            if home.join(".claude/.credentials.json").exists() {
-                return true;
-            }
-        }
-        false
+        // Subscription-only: only the per-instance OAuth tokens count.
+        !self.oauth_tokens.access_token.is_empty()
     }
 
     fn model_source(&self) -> ModelSource {
@@ -769,5 +588,31 @@ mod tests {
                 "models.dev snapshot should resolve Claude Code API id {model_id}"
             );
         }
+    }
+
+    #[test]
+    fn claude_code_unauthenticated_provider_reports_not_configured() {
+        let provider = ClaudeCodeProvider::default();
+        assert!(!provider.has_credentials());
+        assert!(provider.resolve_auth().is_err());
+        assert_eq!(
+            provider.diagnose_auth_status(),
+            "Not configured — log in via OAuth"
+        );
+    }
+
+    #[test]
+    fn claude_code_logged_in_provider_reports_ok() {
+        let provider = ClaudeCodeProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: "valid".to_string(),
+                refresh_token: "refresh".to_string(),
+                expires_at: i64::MAX,
+            },
+            ..Default::default()
+        };
+        assert!(provider.has_credentials());
+        assert_eq!(provider.resolve_auth().unwrap(), "valid");
+        assert_eq!(provider.diagnose_auth_status(), "OK (OAuth login)");
     }
 }

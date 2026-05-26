@@ -41,8 +41,8 @@ use crate::http::routers::v1::gui_help_handlers::handle_v1_fullpath;
 use crate::http::routers::v1::sync_files::handle_v1_sync_files_extract_tar;
 use crate::http::routers::v1::system_prompt::handle_v1_prepend_system_prompt_and_maybe_more_initial_messages;
 use crate::providers::http::{
-    handle_v1_claude_code_usage, handle_v1_defaults_get, handle_v1_defaults_update,
-    handle_v1_google_gemini_health, handle_v1_models, handle_v1_openai_codex_usage,
+    handle_v1_defaults_get, handle_v1_defaults_update,
+    handle_v1_google_gemini_health, handle_v1_models,
     handle_v1_openrouter_account_info, handle_v1_openrouter_health,
     handle_v1_openrouter_model_endpoints, handle_v1_provider_account_info,
     handle_v1_provider_add_custom_model, handle_v1_provider_available_models,
@@ -395,8 +395,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/defaults", post(handle_v1_defaults_update))
         .route("/openrouter/health", get(handle_v1_openrouter_health))
         .route("/google-gemini/health", get(handle_v1_google_gemini_health))
-        .route("/claude-code/usage", get(handle_v1_claude_code_usage))
-        .route("/openai-codex/usage", get(handle_v1_openai_codex_usage))
         .route(
             "/get-app-searchable-id",
             get(handle_v1_get_app_searchable_id),

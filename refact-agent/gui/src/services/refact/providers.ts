@@ -659,18 +659,14 @@ export const providersApi = createApi({
 
     getClaudeCodeUsage: builder.query<
       ClaudeCodeUsageResponse,
-      ProviderScopedQueryArg | undefined
+      ProviderScopedQueryRequiredArg
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const path = providerScopedPath(
-          "/v1/claude-code/usage",
-          "claude_code",
-          args,
-          "/usage",
-        );
-        const url = `http://127.0.0.1:${port}${path}`;
+        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${encodeURIComponent(
+          args.providerName,
+        )}/usage`;
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
@@ -696,7 +692,7 @@ export const providersApi = createApi({
           return {
             meta: result.meta,
             error: {
-              error: "Invalid response from /v1/claude-code/usage",
+              error: `Invalid response from /v1/providers/${args.providerName}/usage`,
               data: result.data,
               status: "CUSTOM_ERROR",
             },
@@ -709,18 +705,14 @@ export const providersApi = createApi({
 
     getOpenAICodexUsage: builder.query<
       OpenAICodexUsageResponse,
-      ProviderScopedQueryArg | undefined
+      ProviderScopedQueryRequiredArg
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const port = state.config.lspPort as unknown as number;
-        const path = providerScopedPath(
-          "/v1/openai-codex/usage",
-          "openai_codex",
-          args,
-          "/usage",
-        );
-        const url = `http://127.0.0.1:${port}${path}`;
+        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${encodeURIComponent(
+          args.providerName,
+        )}/usage`;
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
@@ -746,7 +738,7 @@ export const providersApi = createApi({
           return {
             meta: result.meta,
             error: {
-              error: "Invalid response from /v1/openai-codex/usage",
+              error: `Invalid response from /v1/providers/${args.providerName}/usage`,
               data: result.data,
               status: "CUSTOM_ERROR",
             },

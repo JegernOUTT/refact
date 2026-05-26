@@ -1,18 +1,13 @@
-import React, { useEffect, useState } from "react";
+import React, { useMemo } from "react";
 import { HoverCard, Flex, Text, Badge } from "@radix-ui/themes";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
-  type ClaudeCodeUsageResponse,
   type ClaudeCodeUsageWindow,
-  type OpenAICodexUsageResponse,
   type OpenAICodexUsageWindow,
   type OpenAICodexRateLimit,
 } from "../../services/refact/providers";
-
-// Module-level cache: survives component unmounts (page navigation, chat switching)
-let lastKnownClaudeUsage: ClaudeCodeUsageResponse | undefined;
-let lastKnownCodexUsage: OpenAICodexUsageResponse | undefined;
+import { useCapsForToolUse, useGetConfiguredProvidersQuery } from "../../hooks";
 import styles from "./UsageCounter.module.css";
 
 const CircularUsage: React.FC<{
@@ -210,155 +205,165 @@ const ProviderIndicator: React.FC<{
   </HoverCard.Root>
 );
 
-export const ProviderUsageIndicator: React.FC = () => {
-  const { data: claudeUsage } = useGetClaudeCodeUsageQuery(undefined, {
-    pollingInterval: 30_000,
-  });
-
-  const { data: codexUsage } = useGetOpenAICodexUsageQuery(undefined, {
-    pollingInterval: 30_000,
-  });
-
-  // Local render-trigger: module-level cache doesn't cause re-renders on its own
-  const [, forceUpdate] = useState(0);
-
-  const hasLiveClaudeData = !!(
-    claudeUsage?.data &&
-    (claudeUsage.data.five_hour ?? claudeUsage.data.seven_day)
+const ClaudeCodeQuotaPill: React.FC<{
+  providerName: string;
+  displayName: string;
+}> = ({ providerName, displayName }) => {
+  const { data: claudeUsage } = useGetClaudeCodeUsageQuery(
+    { providerName },
+    { pollingInterval: 30_000 },
   );
-  const hasLiveCodexData = !!codexUsage?.data?.rate_limit;
 
-  useEffect(() => {
-    if (hasLiveClaudeData) {
-      lastKnownClaudeUsage = claudeUsage;
-      forceUpdate((n) => n + 1);
-    }
-  }, [hasLiveClaudeData, claudeUsage]);
+  const data = claudeUsage?.data;
+  if (!data) return null;
+  if (!data.five_hour && !data.seven_day) return null;
 
-  useEffect(() => {
-    if (hasLiveCodexData) {
-      lastKnownCodexUsage = codexUsage;
-      forceUpdate((n) => n + 1);
-    }
-  }, [hasLiveCodexData, codexUsage]);
-
-  // Prefer live data; fall back to module-level cache (survives unmount/remount)
-  const stickyClaudeUsage = hasLiveClaudeData
-    ? claudeUsage
-    : lastKnownClaudeUsage;
-  const stickyCodexUsage = hasLiveCodexData ? codexUsage : lastKnownCodexUsage;
-
-  const hasClaudeData = !!(
-    stickyClaudeUsage?.data &&
-    (stickyClaudeUsage.data.five_hour ?? stickyClaudeUsage.data.seven_day)
-  );
-  const hasCodexData = !!stickyCodexUsage?.data?.rate_limit;
-
-  if (!hasClaudeData && !hasCodexData) return null;
-
-  const claudeData = stickyClaudeUsage?.data;
-  const codexData = stickyCodexUsage?.data;
-
-  let claudePct = 0;
-  if (hasClaudeData && claudeData) {
-    const candidates = [
-      claudeData.five_hour?.percent_used,
-      claudeData.seven_day?.percent_used,
-    ].filter((v): v is number => v != null);
-    if (candidates.length > 0) claudePct = Math.max(...candidates);
-  }
-
-  let codexPct = 0;
-  if (hasCodexData && codexData?.rate_limit) {
-    const rl = codexData.rate_limit;
-    const candidates = [
-      rl.primary_window?.used_percent,
-      rl.secondary_window?.used_percent,
-    ].filter((v): v is number => v != null);
-    if (candidates.length > 0) codexPct = Math.max(...candidates);
-  }
+  const candidates = [
+    data.five_hour?.percent_used,
+    data.seven_day?.percent_used,
+  ].filter((v): v is number => v != null);
+  const pct = candidates.length > 0 ? Math.max(...candidates) : 0;
 
   return (
-    <Flex align="center" gap="2">
-      {hasClaudeData && claudeData && (
-        <ProviderIndicator label="Claude" pct={claudePct}>
-          <Flex direction="column" gap="3">
-            <Text size="2" weight="medium">
-              Claude Code quota
+    <ProviderIndicator label={displayName} pct={pct}>
+      <Flex direction="column" gap="3">
+        <Text size="2" weight="medium">
+          {displayName} quota
+        </Text>
+        {data.five_hour && (
+          <ClaudeWindowRow label="Session (5 hour)" w={data.five_hour} />
+        )}
+        {data.seven_day && (
+          <ClaudeWindowRow label="Weekly" w={data.seven_day} />
+        )}
+        {data.extra_usage && (
+          <Flex justify="between" align="center">
+            <Text size="1" color="gray">
+              Extra usage
             </Text>
-            {claudeData.five_hour && (
-              <ClaudeWindowRow
-                label="Session (5 hour)"
-                w={claudeData.five_hour}
-              />
-            )}
-            {claudeData.seven_day && (
-              <ClaudeWindowRow label="Weekly" w={claudeData.seven_day} />
-            )}
-            {claudeData.extra_usage && (
-              <Flex justify="between" align="center">
-                <Text size="1" color="gray">
-                  Extra usage
-                </Text>
-                <Text size="1" color="gray">
-                  {claudeData.extra_usage.is_enabled ? "enabled" : "disabled"}
-                  {" · "}${claudeData.extra_usage.used_credits.toFixed(2)} spent
-                  {typeof claudeData.extra_usage.monthly_limit === "number"
-                    ? ` / $${claudeData.extra_usage.monthly_limit.toFixed(
-                        0,
-                      )} limit`
-                    : " / unlimited"}
-                </Text>
-              </Flex>
-            )}
+            <Text size="1" color="gray">
+              {data.extra_usage.is_enabled ? "enabled" : "disabled"}
+              {" · "}${data.extra_usage.used_credits.toFixed(2)} spent
+              {typeof data.extra_usage.monthly_limit === "number"
+                ? ` / $${data.extra_usage.monthly_limit.toFixed(0)} limit`
+                : " / unlimited"}
+            </Text>
           </Flex>
-        </ProviderIndicator>
-      )}
-
-      {hasCodexData && codexData && (
-        <ProviderIndicator label="Codex" pct={codexPct}>
-          <Flex direction="column" gap="3">
-            <Flex align="center" gap="2">
-              <Text size="2" weight="medium">
-                OpenAI Codex quota
-              </Text>
-              {codexData.plan_type && (
-                <Badge color="blue" size="1">
-                  {codexData.plan_type}
-                </Badge>
-              )}
-            </Flex>
-            {codexData.rate_limit && (
-              <RateLimitSection
-                rl={codexData.rate_limit}
-                primaryLabel="Session (5 hour)"
-                secondaryLabel="Weekly"
-              />
-            )}
-            {codexData.code_review_rate_limit?.primary_window && (
-              <CodexWindowRow
-                label="Code review (weekly)"
-                w={codexData.code_review_rate_limit.primary_window}
-                limitReached={codexData.code_review_rate_limit.limit_reached}
-              />
-            )}
-            {codexData.credits && (
-              <Flex justify="between" align="center">
-                <Text size="1" color="gray">
-                  Credits
-                </Text>
-                <Text size="1" color="gray">
-                  {codexData.credits.unlimited
-                    ? "unlimited"
-                    : codexData.credits.has_credits
-                      ? `${codexData.credits.balance} remaining`
-                      : "none"}
-                </Text>
-              </Flex>
-            )}
-          </Flex>
-        </ProviderIndicator>
-      )}
-    </Flex>
+        )}
+        <Text size="1" color="gray">
+          Instance: {providerName}
+        </Text>
+      </Flex>
+    </ProviderIndicator>
   );
+};
+
+const OpenAICodexQuotaPill: React.FC<{
+  providerName: string;
+  displayName: string;
+}> = ({ providerName, displayName }) => {
+  const { data: codexUsage } = useGetOpenAICodexUsageQuery(
+    { providerName },
+    { pollingInterval: 30_000 },
+  );
+
+  const data = codexUsage?.data;
+  if (!data?.rate_limit) return null;
+
+  const rl = data.rate_limit;
+  const candidates = [
+    rl.primary_window?.used_percent,
+    rl.secondary_window?.used_percent,
+  ].filter((v): v is number => v != null);
+  const pct = candidates.length > 0 ? Math.max(...candidates) : 0;
+
+  return (
+    <ProviderIndicator label={displayName} pct={pct}>
+      <Flex direction="column" gap="3">
+        <Flex align="center" gap="2">
+          <Text size="2" weight="medium">
+            {displayName} quota
+          </Text>
+          {data.plan_type && (
+            <Badge color="blue" size="1">
+              {data.plan_type}
+            </Badge>
+          )}
+        </Flex>
+        <RateLimitSection
+          rl={rl}
+          primaryLabel="Session (5 hour)"
+          secondaryLabel="Weekly"
+        />
+        {data.code_review_rate_limit?.primary_window && (
+          <CodexWindowRow
+            label="Code review (weekly)"
+            w={data.code_review_rate_limit.primary_window}
+            limitReached={data.code_review_rate_limit.limit_reached}
+          />
+        )}
+        {data.credits && (
+          <Flex justify="between" align="center">
+            <Text size="1" color="gray">
+              Credits
+            </Text>
+            <Text size="1" color="gray">
+              {data.credits.unlimited
+                ? "unlimited"
+                : data.credits.has_credits
+                  ? `${data.credits.balance} remaining`
+                  : "none"}
+            </Text>
+          </Flex>
+        )}
+        <Text size="1" color="gray">
+          Instance: {providerName}
+        </Text>
+      </Flex>
+    </ProviderIndicator>
+  );
+};
+
+/**
+ * Renders a quota indicator only when the currently selected chat model belongs
+ * to a Claude Code or OpenAI Codex provider instance. The displayed quota is
+ * scoped to that exact provider instance (multi-account safe).
+ */
+export const ProviderUsageIndicator: React.FC = () => {
+  const { currentModel } = useCapsForToolUse();
+  const { data: providersData } = useGetConfiguredProvidersQuery();
+
+  const selectedProvider = useMemo(() => {
+    if (!currentModel || !providersData?.providers) return null;
+    const slashIdx = currentModel.indexOf("/");
+    if (slashIdx <= 0) return null;
+    const instanceName = currentModel.slice(0, slashIdx);
+    return providersData.providers.find((p) => p.name === instanceName) ?? null;
+  }, [currentModel, providersData]);
+
+  if (!selectedProvider) return null;
+
+  if (selectedProvider.base_provider === "claude_code") {
+    return (
+      <Flex align="center" gap="2">
+        <ClaudeCodeQuotaPill
+          providerName={selectedProvider.name}
+          displayName={selectedProvider.display_name}
+        />
+      </Flex>
+    );
+  }
+
+  if (selectedProvider.base_provider === "openai_codex") {
+    return (
+      <Flex align="center" gap="2">
+        <OpenAICodexQuotaPill
+          providerName={selectedProvider.name}
+          displayName={selectedProvider.display_name}
+        />
+      </Flex>
+    );
+  }
+
+  return null;
 };

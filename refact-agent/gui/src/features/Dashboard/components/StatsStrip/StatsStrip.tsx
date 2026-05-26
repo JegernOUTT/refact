@@ -266,112 +266,174 @@ function DefaultModelsCard() {
   );
 }
 
-function ProviderQuotaCard() {
-  const { data: claudeUsage } = useGetClaudeCodeUsageQuery(undefined, {
-    pollingInterval: 5 * 60_000,
-  });
-  const { data: codexUsage } = useGetOpenAICodexUsageQuery(undefined, {
-    pollingInterval: 5 * 60_000,
-  });
-
-  const hasClaudeData = !!(
-    claudeUsage?.data &&
-    (claudeUsage.data.five_hour ?? claudeUsage.data.seven_day)
+function ClaudeCodeInstanceRow({
+  providerName,
+  displayName,
+}: {
+  providerName: string;
+  displayName: string;
+}) {
+  const { data: claudeUsage } = useGetClaudeCodeUsageQuery(
+    { providerName },
+    { pollingInterval: 5 * 60_000 },
   );
-  const hasCodexData = !!codexUsage?.data?.rate_limit;
+  const data = claudeUsage?.data;
+  if (!data) return null;
+  if (!data.five_hour && !data.seven_day) return null;
 
-  if (!hasClaudeData && !hasCodexData) return null;
+  return (
+    <div className={styles.cardSection}>
+      <Flex align="center" gap="2" mb="1">
+        <Text size="1" weight="medium">
+          {displayName}
+        </Text>
+        <Text size="1" color="gray">
+          ({providerName})
+        </Text>
+      </Flex>
+      {data.five_hour && (
+        <WindowRow
+          label="Session (5h)"
+          pct={data.five_hour.percent_used}
+          resetAt={data.five_hour.resets_at}
+        />
+      )}
+      {data.seven_day && (
+        <WindowRow
+          label="Weekly"
+          pct={data.seven_day.percent_used}
+          resetAt={data.seven_day.resets_at}
+        />
+      )}
+      {data.extra_usage && (
+        <Text size="1" color="gray">
+          Extra: {data.extra_usage.is_enabled ? "on" : "off"} · $
+          {data.extra_usage.used_credits.toFixed(2)} spent
+          {typeof data.extra_usage.monthly_limit === "number"
+            ? ` / $${data.extra_usage.monthly_limit.toFixed(0)}`
+            : ""}
+        </Text>
+      )}
+    </div>
+  );
+}
+
+function OpenAICodexInstanceRow({
+  providerName,
+  displayName,
+}: {
+  providerName: string;
+  displayName: string;
+}) {
+  const { data: codexUsage } = useGetOpenAICodexUsageQuery(
+    { providerName },
+    { pollingInterval: 5 * 60_000 },
+  );
+  const data = codexUsage?.data;
+  if (!data?.rate_limit) return null;
+
+  return (
+    <div className={styles.cardSection}>
+      <Flex align="center" gap="2" mb="1">
+        <Text size="1" weight="medium">
+          {displayName}
+        </Text>
+        <Text size="1" color="gray">
+          ({providerName})
+        </Text>
+        {data.plan_type && (
+          <Badge color="blue" size="1">
+            {data.plan_type}
+          </Badge>
+        )}
+      </Flex>
+      {data.rate_limit.primary_window && (
+        <WindowRow
+          label="Session (5h)"
+          pct={data.rate_limit.primary_window.used_percent}
+          resetAt={data.rate_limit.primary_window.reset_at}
+          limitReached={data.rate_limit.limit_reached}
+        />
+      )}
+      {data.rate_limit.secondary_window && (
+        <WindowRow
+          label="Weekly"
+          pct={data.rate_limit.secondary_window.used_percent}
+          resetAt={data.rate_limit.secondary_window.reset_at}
+        />
+      )}
+      {data.code_review_rate_limit?.primary_window && (
+        <WindowRow
+          label="Code review"
+          pct={data.code_review_rate_limit.primary_window.used_percent}
+          limitReached={data.code_review_rate_limit.limit_reached}
+        />
+      )}
+      {data.credits && (
+        <Text size="1" color="gray">
+          Credits:{" "}
+          {data.credits.unlimited
+            ? "unlimited"
+            : data.credits.has_credits
+              ? `${data.credits.balance} remaining`
+              : "none"}
+        </Text>
+      )}
+    </div>
+  );
+}
+
+function ProviderQuotaCard() {
+  const { data: providersData } = useGetConfiguredProvidersQuery();
+  const providers = useMemo(
+    () => providersData?.providers ?? [],
+    [providersData],
+  );
+
+  const claudeInstances = useMemo(
+    () =>
+      providers.filter((p) => p.base_provider === "claude_code" && p.enabled),
+    [providers],
+  );
+  const codexInstances = useMemo(
+    () =>
+      providers.filter((p) => p.base_provider === "openai_codex" && p.enabled),
+    [providers],
+  );
+
+  if (claudeInstances.length === 0 && codexInstances.length === 0) return null;
+
+  const rows: React.ReactNode[] = [];
+  claudeInstances.forEach((p) =>
+    rows.push(
+      <ClaudeCodeInstanceRow
+        key={`claude:${p.name}`}
+        providerName={p.name}
+        displayName={p.display_name}
+      />,
+    ),
+  );
+  codexInstances.forEach((p) =>
+    rows.push(
+      <OpenAICodexInstanceRow
+        key={`codex:${p.name}`}
+        providerName={p.name}
+        displayName={p.display_name}
+      />,
+    ),
+  );
 
   return (
     <div className={styles.card}>
       <Text size="1" weight="bold" color="gray" className={styles.cardTitle}>
         PROVIDER QUOTAS
       </Text>
-
-      {hasClaudeData && claudeUsage.data && (
-        <div className={styles.cardSection}>
-          <Text size="1" weight="medium" mb="1" as="p">
-            Claude Code
-          </Text>
-          {claudeUsage.data.five_hour && (
-            <WindowRow
-              label="Session (5h)"
-              pct={claudeUsage.data.five_hour.percent_used}
-              resetAt={claudeUsage.data.five_hour.resets_at}
-            />
-          )}
-          {claudeUsage.data.seven_day && (
-            <WindowRow
-              label="Weekly"
-              pct={claudeUsage.data.seven_day.percent_used}
-              resetAt={claudeUsage.data.seven_day.resets_at}
-            />
-          )}
-          {claudeUsage.data.extra_usage && (
-            <Text size="1" color="gray">
-              Extra: {claudeUsage.data.extra_usage.is_enabled ? "on" : "off"} ·
-              ${claudeUsage.data.extra_usage.used_credits.toFixed(2)} spent
-              {typeof claudeUsage.data.extra_usage.monthly_limit === "number"
-                ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(0)}`
-                : ""}
-            </Text>
-          )}
-        </div>
-      )}
-
-      {hasClaudeData && hasCodexData && <div className={styles.cardDivider} />}
-
-      {hasCodexData && codexUsage.data && (
-        <div className={styles.cardSection}>
-          <Flex align="center" gap="2" mb="1">
-            <Text size="1" weight="medium">
-              OpenAI Codex
-            </Text>
-            {codexUsage.data.plan_type && (
-              <Badge color="blue" size="1">
-                {codexUsage.data.plan_type}
-              </Badge>
-            )}
-          </Flex>
-          {codexUsage.data.rate_limit?.primary_window && (
-            <WindowRow
-              label="Session (5h)"
-              pct={codexUsage.data.rate_limit.primary_window.used_percent}
-              resetAt={codexUsage.data.rate_limit.primary_window.reset_at}
-              limitReached={codexUsage.data.rate_limit.limit_reached}
-            />
-          )}
-          {codexUsage.data.rate_limit?.secondary_window && (
-            <WindowRow
-              label="Weekly"
-              pct={codexUsage.data.rate_limit.secondary_window.used_percent}
-              resetAt={codexUsage.data.rate_limit.secondary_window.reset_at}
-            />
-          )}
-          {codexUsage.data.code_review_rate_limit?.primary_window && (
-            <WindowRow
-              label="Code review"
-              pct={
-                codexUsage.data.code_review_rate_limit.primary_window
-                  .used_percent
-              }
-              limitReached={
-                codexUsage.data.code_review_rate_limit.limit_reached
-              }
-            />
-          )}
-          {codexUsage.data.credits && (
-            <Text size="1" color="gray">
-              Credits:{" "}
-              {codexUsage.data.credits.unlimited
-                ? "unlimited"
-                : codexUsage.data.credits.has_credits
-                  ? `${codexUsage.data.credits.balance} remaining`
-                  : "none"}
-            </Text>
-          )}
-        </div>
-      )}
+      {rows.map((row, idx) => (
+        <React.Fragment key={idx}>
+          {idx > 0 && <div className={styles.cardDivider} />}
+          {row}
+        </React.Fragment>
+      ))}
     </div>
   );
 }

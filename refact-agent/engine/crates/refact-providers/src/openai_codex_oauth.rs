@@ -14,7 +14,6 @@ const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const SCOPE: &str = "openid profile email offline_access";
 
-const CODEX_HOME_DIR: &str = ".codex";
 const CODEX_CALLBACK_PORT: u16 = 1455;
 const SESSION_TTL_SECS: i64 = 600;
 
@@ -77,23 +76,14 @@ pub struct OAuthTokens {
     pub refresh_token: String,
     #[serde(default)]
     pub expires_at: i64,
-    /// Platform API key obtained via OAuth token-exchange (requested_token=openai-api-key).
-    /// This is what should be used against https://api.openai.com endpoints.
-    #[serde(default)]
-    pub openai_api_key: String,
     /// ChatGPT workspace/account id used by ChatGPT backend endpoints.
     #[serde(default)]
     pub chatgpt_account_id: String,
-    /// If token-exchange to OPENAI_API_KEY fails, store a short diagnostic here.
-    #[serde(default)]
-    pub api_key_exchange_error: String,
 }
 
 impl OAuthTokens {
     pub fn is_empty(&self) -> bool {
-        self.access_token.is_empty()
-            && self.refresh_token.is_empty()
-            && self.openai_api_key.is_empty()
+        self.access_token.is_empty() && self.refresh_token.is_empty()
     }
 
     pub fn is_expired(&self) -> bool {
@@ -123,31 +113,6 @@ struct TokenResponse {
     id_token: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexCliCredentials {
-    #[serde(rename = "OPENAI_API_KEY")]
-    #[allow(dead_code)]
-    openai_api_key: Option<String>,
-    tokens: Option<CodexCliTokens>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexCliTokens {
-    #[serde(default)]
-    access_token: String,
-    #[serde(default)]
-    refresh_token: String,
-    #[serde(default)]
-    id_token: Option<serde_json::Value>,
-}
-
-fn json_string(value: &Option<serde_json::Value>) -> Option<&str> {
-    value
-        .as_ref()
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-}
-
 lazy_static::lazy_static! {
     static ref PENDING_SESSIONS: Arc<AMutex<HashMap<String, PkceSession>>> =
         Arc::new(AMutex::new(HashMap::new()));
@@ -164,94 +129,6 @@ fn generate_code_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash)
 }
 
-fn codex_home_dir() -> Result<std::path::PathBuf, String> {
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        if codex_home.to_string_lossy().trim().is_empty() {
-            return Err(
-                "CODEX_HOME is empty or whitespace. Unset it or set it to the Codex config directory."
-                    .to_string(),
-            );
-        }
-        return Ok(std::path::PathBuf::from(codex_home));
-    }
-    home::home_dir()
-        .map(|h| h.join(CODEX_HOME_DIR))
-        .ok_or_else(|| "Cannot determine Codex home directory".to_string())
-}
-
-pub fn read_codex_cli_credentials() -> Result<OAuthTokens, String> {
-    let codex_home = codex_home_dir()?;
-
-    let auth_path = codex_home.join("auth.json");
-    if !auth_path.exists() {
-        return Err(format!(
-            "Codex CLI credentials not found at {}. Run 'codex login' first.",
-            auth_path.display()
-        ));
-    }
-
-    let content = std::fs::read_to_string(&auth_path)
-        .map_err(|e| format!("Failed to read {}: {}", auth_path.display(), e))?;
-
-    let creds: CodexCliCredentials = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse {}: {}", auth_path.display(), e))?;
-
-    let openai_api_key = creds
-        .openai_api_key
-        .as_ref()
-        .filter(|key| !key.is_empty())
-        .cloned()
-        .unwrap_or_default();
-
-    let Some(tokens) = creds.tokens else {
-        if !openai_api_key.is_empty() {
-            return Ok(OAuthTokens {
-                access_token: String::new(),
-                refresh_token: String::new(),
-                expires_at: 0,
-                openai_api_key,
-                chatgpt_account_id: String::new(),
-                api_key_exchange_error: String::new(),
-            });
-        }
-        return Err(
-            "No Codex CLI credentials found (expected OPENAI_API_KEY or OAuth tokens). Run 'codex login' first."
-                .to_string(),
-        );
-    };
-
-    if tokens.access_token.is_empty() {
-        if !openai_api_key.is_empty() {
-            return Ok(OAuthTokens {
-                access_token: String::new(),
-                refresh_token: String::new(),
-                expires_at: 0,
-                openai_api_key,
-                chatgpt_account_id: String::new(),
-                api_key_exchange_error: String::new(),
-            });
-        }
-        return Err("Empty access token in Codex CLI credentials".to_string());
-    }
-
-    let chatgpt_account_id = json_string(&tokens.id_token)
-        .and_then(extract_chatgpt_account_id_from_jwt)
-        .or_else(|| extract_chatgpt_account_id_from_jwt(&tokens.access_token))
-        .unwrap_or_default();
-    let expires_at = extract_expiry_from_jwt(&tokens.access_token)
-        .or_else(|| json_string(&tokens.id_token).and_then(extract_expiry_from_jwt))
-        .unwrap_or(i64::MAX);
-
-    Ok(OAuthTokens {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_at,
-        openai_api_key,
-        chatgpt_account_id,
-        api_key_exchange_error: String::new(),
-    })
-}
-
 fn decode_jwt_payload(jwt: &str) -> Option<serde_json::Value> {
     let mut parts = jwt.split('.');
     let _header_b64 = parts.next()?;
@@ -264,26 +141,42 @@ fn decode_jwt_payload(jwt: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&payload_bytes).ok()
 }
 
-fn extract_chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
-    decode_jwt_payload(jwt)?
+/// Multi-path fallback mirroring Codex CLI + Roo-Code reference impl:
+/// `chatgpt_account_id` -> `https://api.openai.com/auth.chatgpt_account_id`
+/// -> `organizations[0].id`.
+pub fn extract_chatgpt_account_id_from_jwt(jwt: &str) -> Option<String> {
+    let payload = decode_jwt_payload(jwt)?;
+    if let Some(v) = payload
+        .get("chatgpt_account_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(v.to_string());
+    }
+    if let Some(v) = payload
         .get("https://api.openai.com/auth")
         .and_then(|v| v.get("chatgpt_account_id"))
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(v.to_string());
+    }
+    payload
+        .get("organizations")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
-fn extract_expiry_from_jwt(jwt: &str) -> Option<i64> {
+pub fn extract_expiry_from_jwt(jwt: &str) -> Option<i64> {
     decode_jwt_payload(jwt)?
         .get("exp")
         .and_then(|v| v.as_i64())
         .filter(|exp| *exp > 0)
         .and_then(|exp| exp.checked_mul(1000))
-}
-
-pub fn codex_cli_credentials_exist() -> bool {
-    codex_home_dir()
-        .map(|h| h.join("auth.json").exists())
-        .unwrap_or(false)
 }
 
 /// RFC 3986 percent-encoding: encodes spaces as `%20` (not `+` like form-urlencoded).
@@ -436,33 +329,14 @@ pub async fn exchange_code_for_session(
     let chatgpt_account_id = extract_chatgpt_account_id_from_jwt(&token_resp.id_token)
         .or_else(|| extract_chatgpt_account_id_from_jwt(&token_resp.access_token))
         .unwrap_or_default();
-
-    let (openai_api_key, api_key_exchange_error) = if !token_resp.id_token.is_empty() {
-        match obtain_openai_api_key(http_client, &token_resp.id_token).await {
-            Ok(k) => (k, String::new()),
-            Err(e) => {
-                tracing::warn!(
-                    "OpenAI Codex OAuth: failed to obtain OPENAI_API_KEY via token-exchange: {e}"
-                );
-                (String::new(), e)
-            }
-        }
-    } else {
-        (
-            String::new(),
-            "Token exchange response did not include id_token; cannot obtain OPENAI_API_KEY"
-                .to_string(),
-        )
-    };
+    let _ = http_client; // subscription-only flow no longer exchanges for an API key.
 
     Ok((
         OAuthTokens {
             access_token: token_resp.access_token,
             refresh_token: token_resp.refresh_token,
             expires_at,
-            openai_api_key,
             chatgpt_account_id,
-            api_key_exchange_error,
         },
         provider_instance_id,
     ))
@@ -504,6 +378,10 @@ pub async fn refresh_access_token(
         chrono::Utc::now().timestamp_millis() + 8 * 24 * 3600 * 1000
     };
 
+    let chatgpt_account_id = extract_chatgpt_account_id_from_jwt(&token_resp.id_token)
+        .or_else(|| extract_chatgpt_account_id_from_jwt(&token_resp.access_token))
+        .unwrap_or_default();
+
     Ok(OAuthTokens {
         access_token: token_resp.access_token,
         refresh_token: if token_resp.refresh_token.is_empty() {
@@ -512,63 +390,8 @@ pub async fn refresh_access_token(
             token_resp.refresh_token
         },
         expires_at,
-        openai_api_key: String::new(),
-        chatgpt_account_id: String::new(),
-        api_key_exchange_error: String::new(),
+        chatgpt_account_id,
     })
-}
-
-async fn obtain_openai_api_key(
-    http_client: &reqwest::Client,
-    id_token: &str,
-) -> Result<String, String> {
-    // Mirrors Codex CLI flow: OAuth token exchange for an OpenAI Platform API key.
-    // grant_type=urn:ietf:params:oauth:grant-type:token-exchange
-    // requested_token=openai-api-key
-    // subject_token_type=urn:ietf:params:oauth:token-type:id_token
-    #[derive(Deserialize)]
-    struct ExchangeResp {
-        access_token: String,
-    }
-
-    let params = [
-        (
-            "grant_type",
-            "urn:ietf:params:oauth:grant-type:token-exchange",
-        ),
-        ("client_id", CLIENT_ID),
-        ("requested_token", "openai-api-key"),
-        ("subject_token", id_token),
-        (
-            "subject_token_type",
-            "urn:ietf:params:oauth:token-type:id_token",
-        ),
-    ];
-
-    let response = http_client
-        .post(TOKEN_URL)
-        .form(&params)
-        .timeout(OAUTH_TOKEN_HTTP_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| format!("API key token-exchange request failed: {e}"))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = read_oauth_error_body_bounded(response).await;
-        return Err(format!("API key token-exchange failed ({status}): {text}"));
-    }
-
-    let body: ExchangeResp = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse API key token-exchange response: {e}"))?;
-
-    if body.access_token.is_empty() {
-        return Err("API key token-exchange returned empty access_token".to_string());
-    }
-
-    Ok(body.access_token)
 }
 
 pub async fn start_callback_listener(

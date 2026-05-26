@@ -2697,22 +2697,6 @@ async fn openai_codex_usage_response(
     }
 }
 
-/// GET /v1/claude-code/usage
-pub async fn handle_v1_claude_code_usage(
-    State(app): State<AppState>,
-) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    claude_code_usage_response(gcx, "claude_code").await
-}
-
-/// GET /v1/openai-codex/usage
-pub async fn handle_v1_openai_codex_usage(
-    State(app): State<AppState>,
-) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    openai_codex_usage_response(gcx, "openai_codex").await
-}
-
 pub async fn handle_v1_provider_usage(
     State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
@@ -3006,18 +2990,8 @@ async fn save_provider_oauth_tokens(
             );
 
             if base_provider == "openai_codex" {
-                if let Some(api_key) = tokens_value
-                    .get("openai_api_key")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    yaml_map.insert(
-                        serde_yaml::Value::String("OPENAI_API_KEY".to_string()),
-                        serde_yaml::Value::String(api_key.to_string()),
-                    );
-                } else {
-                    yaml_map.remove(serde_yaml::Value::String("OPENAI_API_KEY".to_string()));
-                }
+                // Subscription-only: never persist OPENAI_API_KEY at the provider level.
+                yaml_map.remove(serde_yaml::Value::String("OPENAI_API_KEY".to_string()));
                 ensure_openai_codex_session_id(&mut yaml_map);
             }
 
@@ -3666,9 +3640,10 @@ extra_headers:
         let config_dir = gcx.config_dir.clone();
         let providers_dir = config_dir.join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        // Pre-existing YAML may have stale top-level OPENAI_API_KEY from older versions.
         tokio::fs::write(
             providers_dir.join("openai_codex.yaml"),
-            "OPENAI_API_KEY: sk-stale\noauth_tokens:\n  openai_api_key: sk-stale\n  access_token: old\n",
+            "OPENAI_API_KEY: sk-stale\noauth_tokens:\n  access_token: old\n",
         )
         .await
         .unwrap();
@@ -3684,53 +3659,14 @@ extra_headers:
             .await
             .unwrap();
         let yaml: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        // Subscription-only: top-level OPENAI_API_KEY must never persist.
         assert!(yaml.get("OPENAI_API_KEY").is_none());
-        assert_eq!(
-            yaml.get("oauth_tokens")
-                .and_then(|tokens| tokens.get("openai_api_key"))
-                .and_then(|value| value.as_str()),
-            Some("")
-        );
+        // Saved oauth_tokens must not carry an openai_api_key field anymore.
+        assert!(yaml
+            .get("oauth_tokens")
+            .and_then(|tokens| tokens.get("openai_api_key"))
+            .is_none());
     }
-
-    #[tokio::test]
-    async fn openai_codex_oauth_save_syncs_top_level_api_key() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let config_dir = gcx.config_dir.clone();
-        let tokens = crate::providers::openai_codex_oauth::OAuthTokens {
-            openai_api_key: "sk-new".to_string(),
-            access_token: "access".to_string(),
-            expires_at: i64::MAX,
-            ..Default::default()
-        };
-        let tokens_value = serde_yaml::to_value(&tokens).unwrap();
-
-        save_provider_oauth_tokens(
-            &gcx,
-            &config_dir,
-            "openai_codex",
-            "openai_codex",
-            &tokens_value,
-        )
-        .await
-        .unwrap();
-
-        let content = tokio::fs::read_to_string(provider_file_path(&config_dir, "openai_codex"))
-            .await
-            .unwrap();
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
-        assert_eq!(
-            yaml.get("OPENAI_API_KEY").and_then(|value| value.as_str()),
-            Some("sk-new")
-        );
-        assert_eq!(
-            yaml.get("oauth_tokens")
-                .and_then(|tokens| tokens.get("openai_api_key"))
-                .and_then(|value| value.as_str()),
-            Some("sk-new")
-        );
-    }
-
     #[tokio::test]
     async fn github_copilot_oauth_save_writes_redactable_yaml() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -3840,7 +3776,6 @@ extra_headers:
         let tokens = crate::providers::openai_codex_oauth::OAuthTokens {
             access_token: "alias-access".to_string(),
             refresh_token: "alias-refresh".to_string(),
-            openai_api_key: "sk-alias".to_string(),
             expires_at: i64::MAX,
             ..Default::default()
         };
@@ -3860,7 +3795,8 @@ extra_headers:
         let saved = provider_config_json(&config_dir, "openai_codex_2").await;
         assert_eq!(saved["base_provider"], "openai_codex");
         assert_eq!(saved["display_name"], "Work Codex");
-        assert_eq!(saved["OPENAI_API_KEY"], "sk-alias");
+        // Subscription-only: top-level OPENAI_API_KEY must never persist.
+        assert!(saved.get("OPENAI_API_KEY").is_none());
         assert_eq!(saved["oauth_tokens"]["access_token"], "alias-access");
         let identity = {
             let registry = gcx.providers.read().await;
@@ -3899,7 +3835,6 @@ extra_headers:
         let tokens = crate::providers::openai_codex_oauth::OAuthTokens {
             access_token: "alias-access".to_string(),
             refresh_token: "alias-refresh".to_string(),
-            openai_api_key: "sk-alias".to_string(),
             expires_at: i64::MAX,
             ..Default::default()
         };
@@ -3921,7 +3856,8 @@ extra_headers:
         let saved = provider_config_json(&config_dir, "openai_codex_2").await;
         assert_eq!(saved["oauth_tokens"]["access_token"], "alias-access");
         assert_eq!(saved["oauth_tokens"]["refresh_token"], "alias-refresh");
-        assert_eq!(saved["OPENAI_API_KEY"], "sk-alias");
+        // Subscription-only: top-level OPENAI_API_KEY must never persist.
+        assert!(saved.get("OPENAI_API_KEY").is_none());
         assert!(saved["enabled_models"]
             .as_array()
             .unwrap()
@@ -4044,7 +3980,6 @@ extra_headers:
         let tokens = crate::providers::openai_codex_oauth::OAuthTokens {
             access_token: "access".to_string(),
             refresh_token: "refresh".to_string(),
-            openai_api_key: "sk-secret".to_string(),
             expires_at: i64::MAX,
             ..Default::default()
         };
