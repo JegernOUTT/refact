@@ -232,7 +232,7 @@ impl Tool for ToolSubagent {
 
         let has_editing_tools = tools.is_empty() || tools_contain_file_editing(&tools);
         let config_name = if has_editing_tools {
-            "subagent_with_editing"
+            "delegate_with_editing"
         } else {
             "subagent"
         };

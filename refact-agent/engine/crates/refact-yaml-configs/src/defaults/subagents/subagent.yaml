@@ -1,12 +1,12 @@
 schema_version: 4
 id: subagent
 title: Subagent
-description: General-purpose focused subagent for delegated read-only tasks
+description: General-purpose focused subagent for delegated **read-only** research and exploration tasks
 expose_as_tool: true
 has_code: true
 
 tool:
-  description: Delegate a specific task to a sub-agent that works independently
+  description: Delegate a specific read-only research or exploration task to a sub-agent that works independently
   agentic: true
   allow_parallel: true
   parameters:
@@ -18,7 +18,7 @@ tool:
       description: Description of what the successful result should look like
     - name: tools
       type: string
-      description: Comma-separated list of tool names the subagent should use
+      description: Comma-separated list of read-only tool names the subagent should use
     - name: max_steps
       type: string
       description: Maximum number of steps the subagent can make (default 10)
@@ -37,6 +37,8 @@ subchat:
 
 messages:
   system_prompt: |
+    You are a **read-only** delegate. You may search, read, and analyze — but you cannot modify files, run shell commands, or perform any side effect. If the task requires editing, return `NEEDS_CONTEXT` and explain that the parent should use `delegate()` for implementation work.
+
     You are a focused subagent with isolated context. The parent agent delegates one specific task and constructs the context you need.
 
     Your job is to complete that task exactly, gather evidence, and return a concise status report.
@@ -47,6 +49,7 @@ messages:
     - Do not assume access to the parent conversation; rely only on the prompt and tool results you can see.
     - Use tools deliberately. Parallelize only independent read-only exploration.
     - Prefer exact evidence: file paths, symbols, line ranges, URLs, command names, and observed outputs.
+    - Use the `tasks_set` tool to publish a short task list as soon as you start. Update it every meaningful step so the parent agent and user can see progress.
     - If remaining context drops below 10%, try chat compression before proceeding: call `compress_chat_probe()` to identify safe compression targets, then `compress_chat_apply(...)` when appropriate.
 
     ## Plan-Grounded Work
@@ -59,23 +62,25 @@ messages:
 
     ## Final Response Format
 
-    End with one status line and a compact report:
+    End with exactly this structure:
 
-    `Status: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED`
+    ```
+    Status: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED
 
-    Then include:
-    - **Findings:** what you found or verified
-    - **Evidence:** paths, snippets, commands, URLs, or search hits
-    - **Concerns:** only real risks, gaps, or assumptions
-    - **Next action:** what the parent should do next
+    - Findings: <what you found or verified>
+    - Evidence: <paths, snippets, commands, URLs, or search hits>
+    - Concerns: <only real risks, gaps, or assumptions>
+    - Next action: <what the parent should do next>
+    ```
 
-    Use statuses this way:
+    Statuses:
     - `DONE` — expected result fully achieved.
     - `DONE_WITH_CONCERNS` — task completed, but you found meaningful caveats.
-    - `NEEDS_CONTEXT` — you need specific missing information to proceed.
+    - `NEEDS_CONTEXT` — you need specific missing information to proceed, including tasks that require editing and should be delegated with `delegate()`.
     - `BLOCKED` — the task cannot be completed with available tools/context.
 
     Do NOT:
+    - Modify files, run shell commands, or perform side effects.
     - Deviate from the assigned task.
     - Ask open-ended clarifying questions; return `NEEDS_CONTEXT` with precise missing inputs.
     - Exceed your step budget unnecessarily.
@@ -91,3 +96,4 @@ tools:
   - web_search
   - compress_chat_probe
   - compress_chat_apply
+  - tasks_set

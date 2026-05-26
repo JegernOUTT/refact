@@ -646,7 +646,7 @@ mod tests {
     fn runtime_required_subagent_ids() -> Vec<&'static str> {
         vec![
             "subagent",
-            "subagent_with_editing",
+            "delegate_with_editing",
             "code_review",
             "code_review_gather_files",
             "strategic_planning",
@@ -1829,6 +1829,82 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn test_default_delegate_with_editing_loads_cleanly() {
+        let registry = load_default_registry_for_tests();
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+        let delegate = registry
+            .subagents
+            .get("delegate_with_editing")
+            .expect("delegate_with_editing subagent should load");
+        assert_eq!(delegate.id, "delegate_with_editing");
+        assert_eq!(delegate.schema_version, 3);
+        assert_eq!(delegate.title, "Delegate with Editing");
+        assert_eq!(delegate.expose_as_tool, false);
+        assert_eq!(delegate.has_code, true);
+        assert!(delegate
+            .messages
+            .system_prompt
+            .as_deref()
+            .unwrap_or_default()
+            .contains("target_files"));
+        assert_eq!(
+            delegate.tools,
+            vec![
+                "tree".to_string(),
+                "cat".to_string(),
+                "search_pattern".to_string(),
+                "search_symbol_definition".to_string(),
+                "search_semantic".to_string(),
+                "knowledge".to_string(),
+                "apply_patch".to_string(),
+                "create_textdoc".to_string(),
+                "update_textdoc".to_string(),
+                "update_textdoc_anchored".to_string(),
+                "update_textdoc_by_lines".to_string(),
+                "update_textdoc_regex".to_string(),
+                "undo_textdoc".to_string(),
+                "mv".to_string(),
+                "tasks_set".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_default_subagent_is_read_only() {
+        let registry = load_default_registry_for_tests();
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+        let subagent = registry
+            .subagents
+            .get("subagent")
+            .expect("subagent should load");
+        assert!(subagent.description.contains("read-only"));
+        assert!(subagent
+            .messages
+            .system_prompt
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cannot modify files"));
+        assert_eq!(
+            subagent.tools,
+            vec![
+                "tree".to_string(),
+                "cat".to_string(),
+                "search_pattern".to_string(),
+                "search_symbol_definition".to_string(),
+                "search_semantic".to_string(),
+                "knowledge".to_string(),
+                "web".to_string(),
+                "web_search".to_string(),
+                "compress_chat_probe".to_string(),
+                "compress_chat_apply".to_string(),
+                "tasks_set".to_string(),
+            ]
+        );
     }
 
     #[test]
