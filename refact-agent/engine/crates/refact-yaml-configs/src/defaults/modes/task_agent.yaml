@@ -143,6 +143,37 @@ prompt: |
   ## Failure
   If impossible → `task_agent_finish(success=false, report={"summary":"reason", "success":false, "files_changed":[], "tests_added_or_updated":[], "verification":[], "followup_cards":[], "risks":[], "assumptions":[]})`
 
+  ## Lessons from prior agent runs (read carefully)
+
+  ### Cargo timing expectations
+  - Cold cargo compile is **5–10 minutes**. Always set `timeout=600` (or higher for cross-cutting changes) on shell commands that invoke cargo.
+  - Run `cargo check -p refact-lsp` FIRST — it's much faster than `cargo test` and surfaces all type/borrow errors.
+  - Then `cargo test --lib --no-run -p refact-lsp` to compile tests without running them.
+  - Then run TARGETED test patterns: `cargo test --lib -p refact-lsp <module::test_name>`. Avoid bare `cargo test --lib` (3+ min cold, sometimes >5min with debug binary build).
+
+  ### GUI node_modules trap (worktree-specific)
+  Symptom: `npm run ...` fails with "Too many levels of symbolic links" or "vitest: not found".
+  Cause: `refact-agent/gui/node_modules` is sometimes a broken self-loop symlink in the worktree.
+  Cure: `cd <worktree>/refact-agent/gui && rm -rf node_modules && ln -s /home/.../refact-agent/gui/node_modules node_modules` (the absolute path to main's installed dir). Then `node_modules/.bin/vitest run <pattern>` works directly. Prefer this over `npm run test` (less shell overhead, more deterministic in non-interactive environments).
+
+  ### Don't panic if your worktree "appears missing"
+  Several past agents incorrectly reported "worktree is stale/missing" and abandoned real work. Before giving up, verify with:
+  - `shell("ls -la <worktree_path>")`
+  - `shell("cd <worktree_path> && git log --oneline -3")`
+  If both work, the worktree is fine — proceed with the task.
+
+  ### Commit WIP frequently
+  Inside your worktree, periodically `git add -A && git commit -m "WIP: <what you just did>"`. If you run out of context or crash, the planner can rescue from your branch. Uncommitted WIP that gets lost is unrecoverable.
+
+  ### Don't add tests you can't make pass
+  If a test fails 3+ times for reasons unrelated to the production code (test harness limitations, happy-dom quirks, parallel-load races), **ship the production fix without the test** and include a `followup_cards` entry stating "tests needed for X — investigation required". Don't block a working production fix on test infrastructure debt.
+
+  ### Cherry-pick partial fixes if needed
+  When you've finished MOST of a card but one sub-task is intractable: include only the working files in your commits, and use `followup_cards` to flag the remaining sub-task. Better to ship 2/3 fixes cleanly than to block on the 3rd.
+
+  ### Refactor for testability when stuck
+  If you can't test a function because it has many side effects (dispatch, callbacks, IO), extract the pure decision logic into a separate function and test that. The wrapper that performs side effects becomes a thin switch. This pattern unblocked a previously-failed card after two previous agents failed clicking through React-rendered Markdown.
+
   %AGENT_WORKTREE%
 
   %RICH_CONTENT_INSTRUCTIONS%
