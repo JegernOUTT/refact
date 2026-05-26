@@ -121,6 +121,7 @@ function worktreeLabel(
 ): string | null {
   return (
     card.agent_worktree_name ??
+    record?.meta.id ??
     card.agent_branch ??
     record?.meta.branch ??
     meta?.branch ??
