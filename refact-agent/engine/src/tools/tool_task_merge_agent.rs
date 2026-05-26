@@ -251,7 +251,7 @@ fn ensure_card_done_allows_merge(
         if !report_present {
             return Err(format!(
                 "Card {} has no final report. \
-                 Wait for the agent to call task_agent_finish, or pass force=true to merge anyway.",
+                 Wait for the agent to call agent_finish, or pass force=true to merge anyway.",
                 card.id
             ));
         }
@@ -427,7 +427,7 @@ impl ToolTaskMergeAgent {
 impl Tool for ToolTaskMergeAgent {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_merge_agent".to_string(),
+            name: "merge_agent".to_string(),
             display_name: "Task Merge Agent".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -457,7 +457,7 @@ impl Tool for ToolTaskMergeAgent {
             .unwrap_or(false);
 
         if !is_planner {
-            return Err("task_merge_agent can only be called by the task planner. \
+            return Err("merge_agent can only be called by the task planner. \
                  Switch to the planner chat to merge agent work."
                 .to_string());
         }
@@ -703,7 +703,7 @@ A previous merge is still in progress with unresolved conflicts.
 ```
 git merge --abort
 ```
-Then call `task_merge_agent` again."#,
+Then call `merge_agent` again."#,
                 if conflict_files.is_empty() {
                     "None detected (check `git status`)".to_string()
                 } else {
@@ -1203,7 +1203,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn task_merge_agent_rejects_mismatched_task_id() {
+    async fn merge_agent_rejects_mismatched_task_id() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let ccx = planner_ccx(gcx).await;
         let args = HashMap::from([
@@ -1223,7 +1223,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn task_merge_agent_uses_bound_task_when_no_args() {
+    async fn merge_agent_uses_bound_task_when_no_args() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1393,7 +1393,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn task_merge_agent_preserves_dirty_zero_commit_legacy_worktree() {
+    async fn merge_agent_preserves_dirty_zero_commit_legacy_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1434,7 +1434,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn task_merge_agent_cleans_empty_zero_commit_legacy_worktree() {
+    async fn merge_agent_cleans_empty_zero_commit_legacy_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1509,7 +1509,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn worktree_merge_task_merge_agent_uses_service_and_clears_board_mirrors() {
+    async fn worktree_merge_merge_agent_uses_service_and_clears_board_mirrors() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1639,7 +1639,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn task_merge_agent_refuses_doing_card_without_force() {
+    fn merge_agent_refuses_doing_card_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.column = "doing".to_string();
 
@@ -1651,7 +1651,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn task_merge_agent_refuses_failed_card_without_force() {
+    fn merge_agent_refuses_failed_card_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.column = "failed".to_string();
 
@@ -1663,7 +1663,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn task_merge_agent_refuses_done_card_with_empty_final_report_without_force() {
+    fn merge_agent_refuses_done_card_with_empty_final_report_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.final_report = None;
 
@@ -1674,7 +1674,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn task_merge_agent_allows_done_card_with_final_report() {
+    fn merge_agent_allows_done_card_with_final_report() {
         let card = test_card("wt", "agent", Path::new("/tmp/worktree"));
 
         assert!(ensure_card_done_allows_merge(&card, false)
@@ -1683,7 +1683,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn task_merge_agent_force_true_allows_doing_card_with_warning() {
+    async fn merge_agent_force_true_allows_doing_card_with_warning() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1737,7 +1737,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn task_merge_agent_force_true_allows_failed_card_with_warning() {
+    async fn merge_agent_force_true_allows_failed_card_with_warning() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();

@@ -274,7 +274,7 @@ pub(crate) async fn prepare_agent_worktree_with_suffix(
         );
     }
     if let Some(warning) = base_branch_mismatch_warning.as_deref() {
-        tracing::warn!("task_spawn_agent: {}", warning);
+        tracing::warn!("spawn_agent: {}", warning);
     }
 
     Ok(PreparedWorktree {
@@ -365,7 +365,7 @@ pub(crate) fn build_agent_prompt(
 - Suggested step budget: ~{suggested_steps} steps
 - Focus only on this specific card
 - Report progress clearly
-- **Remember to call `task_agent_finish()` when done!**"#
+- **Remember to call `agent_finish()` when done!**"#
     )
 }
 
@@ -574,7 +574,7 @@ async fn context_files_from_files_to_open(
 impl Tool for ToolTaskSpawnAgent {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_spawn_agent".to_string(),
+            name: "spawn_agent".to_string(),
             display_name: "Task Spawn Agent".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -582,7 +582,7 @@ impl Tool for ToolTaskSpawnAgent {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Spawn an agent to work on a specific task card. The agent runs in the background as a real chat session. Returns immediately with a hyperlink to view the agent's progress. The agent will call task_agent_finish() when done.".to_string(),
+            description: "Spawn an agent to work on a specific task card. The agent runs in the background as a real chat session. Returns immediately with a hyperlink to view the agent's progress. The agent will call agent_finish() when done.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -622,7 +622,7 @@ impl Tool for ToolTaskSpawnAgent {
             .unwrap_or(false);
 
         if !is_planner {
-            return Err("task_spawn_agent can only be called by the task planner. \
+            return Err("spawn_agent can only be called by the task planner. \
                  Switch to the planner chat to spawn agents."
                 .to_string());
         }
@@ -685,7 +685,7 @@ impl Tool for ToolTaskSpawnAgent {
         if !abandoned_worktrees.is_empty() {
             return Err(format!(
                 "Cannot spawn a new task agent while abandoned task worktrees exist. \
-                Clean them first with `task_merge_agent(card_id=...)` for merged cards, or remove them manually if they were intentionally abandoned.\n\n{}",
+                Clean them first with `merge_agent(card_id=...)` for merged cards, or remove them manually if they were intentionally abandoned.\n\n{}",
                 abandoned_worktrees.join("\n")
             ));
         }
@@ -710,7 +710,7 @@ impl Tool for ToolTaskSpawnAgent {
         }
         if card.column == "doing" && card.agent_chat_id.is_some() {
             return Err(format!(
-                "Card {} already has an active agent ({}). Use task_check_agents to monitor it, or move the card back to 'planned' to respawn.",
+                "Card {} already has an active agent ({}). Use check_agents to monitor it, or move the card back to 'planned' to respawn.",
                 card_id, card.agent_chat_id.as_ref().unwrap()
             ));
         }
@@ -792,7 +792,7 @@ impl Tool for ToolTaskSpawnAgent {
                 if card.column == "doing" && card.agent_chat_id.is_some() {
                     let existing_chat_id = card.agent_chat_id.as_ref().unwrap();
                     return Err(format!(
-                        "Card {} already has an active agent ({}). Use task_check_agents to monitor it, or move the card back to 'planned' to respawn.",
+                        "Card {} already has an active agent ({}). Use check_agents to monitor it, or move the card back to 'planned' to respawn.",
                         card_id_owned, existing_chat_id
                     ));
                 }
@@ -950,7 +950,7 @@ impl Tool for ToolTaskSpawnAgent {
 **Model:** {}
 **Status:** Running in background
 
-The agent will call `task_agent_finish()` when done. Use `task_check_agents` to monitor progress.{}{}"#,
+The agent will call `agent_finish()` when done. Use `check_agents` to monitor progress.{}{}"#,
             card_title, card_id, agent_id, model, dirty_note, branch_note
         );
 
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_non_git_workspace_fails_clearly() {
+    async fn spawn_agent_non_git_workspace_fails_clearly() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         std::fs::create_dir_all(&source).unwrap();
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_prepare_sets_worktree_meta_without_global_workspace_mutation() {
+    async fn spawn_agent_prepare_sets_worktree_meta_without_global_workspace_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_rollback_cleanup_removes_worktree_branch_and_registry() {
+    async fn spawn_agent_rollback_cleanup_removes_worktree_branch_and_registry() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_uses_stored_base_branch_not_current_head() {
+    async fn spawn_agent_uses_stored_base_branch_not_current_head() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_none_base_branch_falls_back_to_current_head() {
+    async fn spawn_agent_none_base_branch_falls_back_to_current_head() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1304,7 +1304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_deleted_base_branch_returns_clear_error() {
+    async fn spawn_agent_deleted_base_branch_returns_clear_error() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1333,7 +1333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_warns_when_current_head_differs_from_task_base_branch() {
+    async fn spawn_agent_warns_when_current_head_differs_from_task_base_branch() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1363,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn task_spawn_agent_successful_spawn_sets_board_mirrors_and_thread_worktree() {
+    fn spawn_agent_successful_spawn_sets_board_mirrors_and_thread_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = sample_worktree_meta(temp.path());
         let mut card = test_card("T-1", "planned", None);
@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn task_spawn_agent_rollback_restore_original_card_after_session_failure() {
+    fn spawn_agent_rollback_restore_original_card_after_session_failure() {
         let mut board = TaskBoard::default();
         let original = test_card("T-1", "planned", None);
         let mut spawned = original.clone();
@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn task_spawn_agent_rollback_guard_skips_different_agent() {
+    fn spawn_agent_rollback_guard_skips_different_agent() {
         let mut board = TaskBoard::default();
         let original = test_card("T-1", "planned", None);
         let mut spawned = original.clone();
@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_files_to_open_rejects_outside_traversal() {
+    async fn spawn_agent_files_to_open_rejects_outside_traversal() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("worktree");
         let source = temp.path().join("source");
@@ -1547,7 +1547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_files_to_open_rejects_privacy_blocked_file() {
+    async fn spawn_agent_files_to_open_rejects_privacy_blocked_file() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("worktree");
         let source = temp.path().join("source");
@@ -1565,7 +1565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_files_to_open_valid_file_works() {
+    async fn spawn_agent_files_to_open_valid_file_works() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("worktree");
         let source = temp.path().join("source");

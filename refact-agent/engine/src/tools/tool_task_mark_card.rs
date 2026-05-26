@@ -47,7 +47,7 @@ impl ToolTaskMarkCardFailed {
 impl Tool for ToolTaskMarkCardDone {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_mark_card_done".to_string(),
+            name: "mark_done".to_string(),
             display_name: "Task Mark Card Done".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -55,7 +55,7 @@ impl Tool for ToolTaskMarkCardDone {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Manually mark a card as done. Use this if an agent completed work but forgot to call task_agent_finish(), or to finalize a card after reviewing the agent's work.".to_string(),
+            description: "Manually mark a card as done. Use this if an agent completed work but forgot to call agent_finish(), or to finalize a card after reviewing the agent's work.".to_string(),
             input_schema: json_schema_from_params(&[("card_id", "string", "Card ID to mark as done"), ("report", "string", "Summary/report for the completed card")], &["card_id", "report"]),
             output_schema: None,
             annotations: None,
@@ -138,7 +138,7 @@ impl Tool for ToolTaskMarkCardDone {
 impl Tool for ToolTaskMarkCardFailed {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_mark_card_failed".to_string(),
+            name: "mark_failed".to_string(),
             display_name: "Task Mark Card Failed".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -146,7 +146,7 @@ impl Tool for ToolTaskMarkCardFailed {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Manually mark a card as failed. Use this to resolve stuck agents, mark cards that cannot be completed, or when an agent errored without calling task_agent_finish().".to_string(),
+            description: "Manually mark a card as failed. Use this to resolve stuck agents, mark cards that cannot be completed, or when an agent errored without calling agent_finish().".to_string(),
             input_schema: json_schema_from_params(&[("card_id", "string", "Card ID to mark as failed"), ("reason", "string", "Reason for failure")], &["card_id", "reason"]),
             output_schema: None,
             annotations: None,

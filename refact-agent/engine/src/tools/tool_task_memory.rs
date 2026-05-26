@@ -1715,7 +1715,7 @@ impl ToolTaskMemorySave {
 impl Tool for ToolTaskMemorySave {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_memory_save".to_string(),
+            name: "task_mem_save".to_string(),
             display_name: "Save Task Memory".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -1755,7 +1755,7 @@ impl Tool for ToolTaskMemorySave {
         let task_id = task_meta
             .as_ref()
             .map(|m| m.task_id.clone())
-            .ok_or("task_memory_save requires task context (task_id missing). This tool only works within task planner/agent chats.")?;
+            .ok_or("task_mem_save requires task context (task_id missing). This tool only works within task planner/agent chats.")?;
 
         let content = match args.get("content") {
             Some(Value::String(s)) => s.clone(),
@@ -2265,7 +2265,7 @@ impl Tool for ToolTaskMemoryUnarchive {
 impl Tool for ToolTaskMemoriesGet {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_memories_get".to_string(),
+            name: "task_mem_get".to_string(),
             display_name: "Get Task Memories".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -2294,7 +2294,7 @@ impl Tool for ToolTaskMemoriesGet {
         let task_id = task_meta
             .as_ref()
             .map(|m| m.task_id.clone())
-            .ok_or("task_memories_get requires task context (task_id missing). This tool only works within task planner/agent chats.")?;
+            .ok_or("task_mem_get requires task context (task_id missing). This tool only works within task planner/agent chats.")?;
 
         let format = args
             .get("format")

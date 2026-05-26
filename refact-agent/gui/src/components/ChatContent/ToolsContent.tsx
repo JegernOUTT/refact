@@ -919,7 +919,7 @@ function processToolCalls(
     );
   }
 
-  if (headName === "task_check_agents") {
+  if (headName === "check_agents") {
     const elem = (
       <AgentStatusView
         key={`agent-status-tool-${head.id ?? processed.length}`}
@@ -992,7 +992,7 @@ function processToolCalls(
     );
   }
 
-  if (headName === "task_agent_finish") {
+  if (headName === "agent_finish") {
     const elem =
       result && typeof result.content === "string" ? (
         <FinalReportToolCard

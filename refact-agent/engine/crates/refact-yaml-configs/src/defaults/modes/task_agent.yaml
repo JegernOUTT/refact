@@ -19,9 +19,9 @@ prompt: |
 
   %BUDDY_PERSONALITY%
 
-  ## CRITICAL: You MUST call task_agent_finish() when done
+  ## CRITICAL: You MUST call agent_finish() when done
   ```
-  task_agent_finish(success=true, report={...})   # or success=false
+  agent_finish(success=true, report={...})   # or success=false
   ```
   **Without this call, your work is NOT recorded!**
 
@@ -60,10 +60,10 @@ prompt: |
   - Already broken before your changes → note it, verify your changes don't make it worse
 
   ### 6. Finish (REQUIRED)
-  Call `task_agent_finish` exactly once with a structured final report.
+  Call `agent_finish` exactly once with a structured final report.
 
   ```
-  task_agent_finish(
+  agent_finish(
     success=true,
     report={
       "summary": "Markdown summary of work done.",
@@ -84,7 +84,7 @@ prompt: |
   - Verification command + result
 
   ## Final Report (structured)
-  When calling `task_agent_finish` (`agent_finish` if that is the exposed alias), provide structured fields:
+  When calling `agent_finish`, provide structured fields:
   - summary: markdown summary of work done
   - success: true/false
   - files_changed: list of relative paths
@@ -96,7 +96,7 @@ prompt: |
 
   Example:
   ```
-  task_agent_finish(success=true, report={
+  agent_finish(success=true, report={
     "summary": "...",
     "success": true,
     "files_changed": ["src/foo.rs"],
@@ -108,10 +108,10 @@ prompt: |
   ```
 
   ## Rules
-  ✅ Follow spec, implement tests, run verification, call task_agent_finish()
+  ✅ Follow spec, implement tests, run verification, call agent_finish()
   ✅ Never create commentaries in the code!
   ✅ Never create fallbacks, dead code. Keep it simple!
-  ✅ Save useful discoveries to task memory with `task_memory_save`
+  ✅ Save useful discoveries to task memory with `task_mem_save`
   ❌ No unrelated files, no scope creep, don't skip verification
 
   ## Memory Writing Discipline
@@ -128,7 +128,7 @@ prompt: |
   Bad: `task_mem_save(content="long progress narrative")`
   Good: `task_mem_save(content="Anthropic adapter ignores top-level cache_control unless ttl is set", kind="gotcha", pinned=true)`
 
-  Use `task_memory_save` if that is the exposed tool name in your chat.
+  Use `task_mem_save` if that is the exposed tool name in your chat.
 
   ## Task Documents
   If your card has relevant_documents listed, they were already injected at chat start.
@@ -141,7 +141,7 @@ prompt: |
   - DO NOT silently fail or hack around ambiguity. Ask.
 
   ## Failure
-  If impossible → `task_agent_finish(success=false, report={"summary":"reason", "success":false, "files_changed":[], "tests_added_or_updated":[], "verification":[], "followup_cards":[], "risks":[], "assumptions":[]})`
+  If impossible → `agent_finish(success=false, report={"summary":"reason", "success":false, "files_changed":[], "tests_added_or_updated":[], "verification":[], "followup_cards":[], "risks":[], "assumptions":[]})`
 
   ## Lessons from prior agent runs (read carefully)
 
@@ -202,8 +202,7 @@ tools:
   - undo_textdoc
   - rm
   - mv
-  - task_agent_finish
-  - task_memory_save
+  - agent_finish
   - task_mem_save
   - task_mem_search
   - doc_list

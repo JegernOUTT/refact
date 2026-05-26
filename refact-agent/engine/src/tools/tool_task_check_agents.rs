@@ -596,7 +596,7 @@ fn format_agent_statuses_at(
     let mut result = format_alerts(&alerts);
 
     if statuses.is_empty() {
-        result.push_str("# Agent Status\n\nNo agents have been spawned yet for this task.\n\nUse `task_spawn_agent(card_id)` to spawn an agent for a card.");
+        result.push_str("# Agent Status\n\nNo agents have been spawned yet for this task.\n\nUse `spawn_agent(card_id)` to spawn an agent for a card.");
         return Ok(result);
     }
 
@@ -963,7 +963,7 @@ fn format_pagination(total: usize, shown: usize, offset: usize, limit: usize) ->
 impl Tool for ToolTaskCheckAgents {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_check_agents".to_string(),
+            name: "check_agents".to_string(),
             display_name: "Task Check Agents".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -993,7 +993,7 @@ impl Tool for ToolTaskCheckAgents {
             .unwrap_or(false);
 
         if !is_planner {
-            return Err("task_check_agents can only be called by the task planner. \
+            return Err("check_agents can only be called by the task planner. \
                  Switch to the planner chat to check agent status."
                 .to_string());
         }
@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_check_agents_allows_same_task_id() {
+    async fn check_agents_allows_same_task_id() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_empty_task(temp.path()).await;
         let ccx = planner_ccx(gcx, "planner").await;

@@ -147,7 +147,7 @@ async fn enforce_bound_scope(
 
 fn legacy_finish_tool_error(tool_name: &str) -> String {
     format!(
-        "{} is deprecated and cannot update task boards. Use task_agent_finish instead.",
+        "{} is deprecated and cannot update task boards. Use agent_finish instead.",
         tool_name
     )
 }
@@ -224,7 +224,7 @@ impl Tool for ToolTaskAgentUpdate {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_agent_update".to_string(),
+            name: "agent_update".to_string(),
             display_name: "Task Agent Update".to_string(),
             source: make_source(),
             experimental: false,
@@ -258,7 +258,7 @@ impl Tool for ToolTaskAgentComplete {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         enforce_bound_scope(&ccx, args, true, true).await?;
-        Err(legacy_finish_tool_error("task_agent_complete"))
+        Err(legacy_finish_tool_error("agent_complete"))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -267,12 +267,12 @@ impl Tool for ToolTaskAgentComplete {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_agent_complete".to_string(),
+            name: "agent_complete".to_string(),
             display_name: "Task Agent Complete".to_string(),
             source: make_source(),
             experimental: false,
             allow_parallel: false,
-            description: "Deprecated. Always returns an error; use task_agent_finish instead."
+            description: "Deprecated. Always returns an error; use agent_finish instead."
                 .to_string(),
             input_schema: json_schema_from_params(
                 &[
@@ -306,7 +306,7 @@ impl Tool for ToolTaskAgentFail {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         enforce_bound_scope(&ccx, args, true, true).await?;
-        Err(legacy_finish_tool_error("task_agent_fail"))
+        Err(legacy_finish_tool_error("agent_fail"))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -315,12 +315,12 @@ impl Tool for ToolTaskAgentFail {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_agent_fail".to_string(),
+            name: "agent_fail".to_string(),
             display_name: "Task Agent Fail".to_string(),
             source: make_source(),
             experimental: false,
             allow_parallel: false,
-            description: "Deprecated. Always returns an error; use task_agent_finish instead."
+            description: "Deprecated. Always returns an error; use agent_finish instead."
                 .to_string(),
             input_schema: json_schema_from_params(
                 &[
@@ -406,7 +406,7 @@ impl Tool for ToolTaskAssignAgent {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_assign_agent".to_string(),
+            name: "assign_agent".to_string(),
             display_name: "Task Assign Agent".to_string(),
             source: make_source(),
             experimental: false,

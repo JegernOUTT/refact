@@ -3,7 +3,7 @@
 // This module monitors task agents and automatically marks them as failed when:
 // - Streaming errors occur (network, model, timeout)
 // - Agent becomes stuck (no activity beyond threshold)
-// - Session ends in Error state without calling task_agent_finish
+// - Session ends in Error state without calling agent_finish
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,9 +42,9 @@ const IDLE_AGENT_NUDGE_GRACE: Duration = Duration::from_secs(60);
 const IDLE_AGENT_NUDGE_COOLDOWN_SECONDS: i64 = 180;
 const IDLE_AGENT_NUDGE_STATUS_PREFIX: &str = "Auto-nudged idle agent:";
 const IDLE_AGENT_REMINDER_MESSAGE: &str = concat!(
-    "Automatic reminder: this task card is still marked as doing, but your chat stopped without calling `task_agent_finish`.\n",
-    "Continue working if more changes are needed. If the task is complete, call `task_agent_finish(success=true, report=\"...\")`. ",
-    "If it cannot be completed, call `task_agent_finish(success=false, report=\"...\")`."
+    "Automatic reminder: this task card is still marked as doing, but your chat stopped without calling `agent_finish`.\n",
+    "Continue working if more changes are needed. If the task is complete, call `agent_finish(success=true, report=\"...\")`. ",
+    "If it cannot be completed, call `agent_finish(success=false, report=\"...\")`."
 );
 
 fn make_runtime_event(
@@ -574,9 +574,9 @@ pub(crate) async fn notify_planner_agents_finished(
         "**Task agent finished.**"
     };
     let footer = if all_finished {
-        "Run `task_board_get(card_id)` to see full details for any card."
+        "Run `board_get(card_id)` to see full details for any card."
     } else {
-        "Other agents may still be running. Run `task_check_agents` to see live status or `task_board_get(card_id)` for full details."
+        "Other agents may still be running. Run `check_agents` to see live status or `board_get(card_id)` for full details."
     };
 
     let planner_message = format!(
@@ -1448,8 +1448,8 @@ mod tests {
         match &queued.command {
             ChatCommand::UserMessage { content, .. } => {
                 let text = content.as_str().unwrap();
-                assert!(text.contains("task_agent_finish(success=true, report=\"...\")"));
-                assert!(text.contains("task_agent_finish(success=false, report=\"...\")"));
+                assert!(text.contains("agent_finish(success=true, report=\"...\")"));
+                assert!(text.contains("agent_finish(success=false, report=\"...\")"));
             }
             _ => panic!("expected user message nudge"),
         }

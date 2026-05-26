@@ -725,7 +725,7 @@ impl Tool for ToolTaskBoardGet {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_board_get".to_string(),
+            name: "board_get".to_string(),
             display_name: "Task Board Get".to_string(),
             source: make_source(),
             experimental: false,
@@ -764,11 +764,9 @@ impl Tool for ToolTaskBoardCreateCard {
         };
 
         if !is_planner {
-            return Err(
-                "task_board_create_card can only be called by the task planner. \
+            return Err("board_create can only be called by the task planner. \
                  Switch to the planner chat to create cards."
-                    .to_string(),
-            );
+                .to_string());
         }
 
         let task_id = get_task_id(&ccx, args).await?;
@@ -855,7 +853,7 @@ impl Tool for ToolTaskBoardCreateCard {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_board_create_card".to_string(),
+            name: "board_create".to_string(),
             display_name: "Task Board Create Card".to_string(),
             source: make_source(),
             experimental: false,
@@ -894,11 +892,9 @@ impl Tool for ToolTaskBoardUpdateCard {
         };
 
         if !is_planner {
-            return Err(
-                "task_board_update_card can only be called by the task planner. \
+            return Err("board_update can only be called by the task planner. \
                  Switch to the planner chat to update cards."
-                    .to_string(),
-            );
+                .to_string());
         }
 
         let task_id = get_task_id(&ccx, args).await?;
@@ -959,7 +955,7 @@ impl Tool for ToolTaskBoardUpdateCard {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_board_update_card".to_string(),
+            name: "board_update".to_string(),
             display_name: "Task Board Update Card".to_string(),
             source: make_source(),
             experimental: false,
@@ -1016,11 +1012,9 @@ impl Tool for ToolTaskBoardMoveCard {
         };
 
         if !is_planner {
-            return Err(
-                "task_board_move_card can only be called by the task planner. \
+            return Err("board_move can only be called by the task planner. \
                  Switch to the planner chat to move cards."
-                    .to_string(),
-            );
+                .to_string());
         }
 
         let task_id = get_task_id(&ccx, args).await?;
@@ -1090,7 +1084,7 @@ impl Tool for ToolTaskBoardMoveCard {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_board_move_card".to_string(),
+            name: "board_move".to_string(),
             display_name: "Task Board Move Card".to_string(),
             source: make_source(),
             experimental: false,
@@ -1139,11 +1133,9 @@ impl Tool for ToolTaskBoardDeleteCard {
         };
 
         if !is_planner {
-            return Err(
-                "task_board_delete_card can only be called by the task planner. \
+            return Err("board_delete can only be called by the task planner. \
                  Switch to the planner chat to delete cards."
-                    .to_string(),
-            );
+                .to_string());
         }
 
         let task_id = get_task_id(&ccx, args).await?;
@@ -1192,7 +1184,7 @@ impl Tool for ToolTaskBoardDeleteCard {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_board_delete_card".to_string(),
+            name: "board_delete".to_string(),
             display_name: "Task Board Delete Card".to_string(),
             source: make_source(),
             experimental: false,
@@ -1246,7 +1238,7 @@ impl Tool for ToolTaskReadyCards {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_ready_cards".to_string(),
+            name: "ready_cards".to_string(),
             display_name: "Task Ready Cards".to_string(),
             source: make_source(),
             experimental: false,

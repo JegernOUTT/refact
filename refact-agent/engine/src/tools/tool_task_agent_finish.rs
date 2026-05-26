@@ -206,7 +206,7 @@ struct ParsedFinishReport {
     structured: Option<FinalReport>,
 }
 
-fn task_agent_finish_schema() -> Value {
+fn agent_finish_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -564,7 +564,7 @@ impl ToolTaskAgentFinish {
 impl Tool for ToolTaskAgentFinish {
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_agent_finish".to_string(),
+            name: "agent_finish".to_string(),
             display_name: "Task Agent Finish".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
@@ -573,7 +573,7 @@ impl Tool for ToolTaskAgentFinish {
             experimental: false,
             allow_parallel: false,
             description: "Mark the current card as completed or failed. Task agents MUST call this exactly once when finished. This updates the task board and notifies the planner.".to_string(),
-            input_schema: task_agent_finish_schema(),
+            input_schema: agent_finish_schema(),
             output_schema: None,
             annotations: None,
         }
@@ -642,7 +642,7 @@ impl Tool for ToolTaskAgentFinish {
                     Ok(hash) => hash,
                     Err(e) => {
                         return Err(format!(
-                            "Auto-commit failed in worktree '{}': {}. Please ensure your changes are committed before calling task_agent_finish(success=true). \
+                            "Auto-commit failed in worktree '{}': {}. Please ensure your changes are committed before calling agent_finish(success=true). \
                             You can run `git add -A && git commit -m 'your message'` in the worktree, or investigate the error.",
                             worktree.root.display(),
                             e
@@ -918,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn task_spawn_agent_finish_prefers_thread_worktree_over_board_mirror() {
+    fn spawn_agent_finish_prefers_thread_worktree_over_board_mirror() {
         let temp = tempfile::tempdir().unwrap();
         let meta = sample_worktree_meta(temp.path());
         let legacy_root = temp.path().join("legacy-root");
@@ -936,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn task_spawn_agent_finish_failure_retains_worktree_metadata() {
+    fn spawn_agent_finish_failure_retains_worktree_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp
             .path()
@@ -971,10 +971,10 @@ mod tests {
                 json!({
                     "summary": "Implemented structured finish reports.",
                     "success": false,
-                    "files_changed": ["refact-agent/engine/src/tools/tool_task_agent_finish.rs"],
+                    "files_changed": ["refact-agent/engine/src/tools/tool_agent_finish.rs"],
                     "tests_added_or_updated": ["tool_agent_finish_structured_object_populates_both_report_shapes"],
                     "verification": [{
-                        "command": "cargo test --lib -p refact-lsp -- tool_task_agent_finish",
+                        "command": "cargo test --lib -p refact-lsp -- tool_agent_finish",
                         "exit_code": 0,
                         "passed": true,
                         "output_tail": "ok"
@@ -1000,7 +1000,7 @@ mod tests {
         assert_eq!(structured.summary, "Implemented structured finish reports.");
         assert_eq!(
             structured.files_changed,
-            vec!["refact-agent/engine/src/tools/tool_task_agent_finish.rs"]
+            vec!["refact-agent/engine/src/tools/tool_agent_finish.rs"]
         );
         let markdown = card.final_report.unwrap();
         assert!(markdown.contains("## Summary\nImplemented structured finish reports."));
@@ -1040,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn task_agent_finish_rejects_invalid_success_string() {
+    fn agent_finish_rejects_invalid_success_string() {
         let tru_args = HashMap::from_iter([
             ("success".to_string(), json!("tru")),
             ("report".to_string(), json!("invalid success")),
@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn task_agent_finish_accepts_trimmed_boolean_strings() {
+    fn agent_finish_accepts_trimmed_boolean_strings() {
         let true_args = HashMap::from_iter([
             ("success".to_string(), json!(" true ")),
             ("report".to_string(), json!("success")),
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_finish_missing_worktree_returns_error() {
+    async fn spawn_agent_finish_missing_worktree_returns_error() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing-worktree");
         let result = auto_commit_worktree_with_message(
@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_finish_non_git_worktree_returns_error() {
+    async fn spawn_agent_finish_non_git_worktree_returns_error() {
         let temp = tempfile::tempdir().unwrap();
         let non_git = temp.path().join("non-git");
         std::fs::create_dir_all(&non_git).unwrap();
@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_finish_clean_worktree_returns_no_commit() {
+    async fn spawn_agent_finish_clean_worktree_returns_no_commit() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1143,7 +1143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_spawn_agent_finish_auto_commits_from_worktree_root() {
+    async fn spawn_agent_finish_auto_commits_from_worktree_root() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         let worktree = temp.path().join("agent-worktree");

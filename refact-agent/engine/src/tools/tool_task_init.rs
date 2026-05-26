@@ -36,7 +36,7 @@ impl Tool for ToolTaskInit {
         let meta = storage::create_task(gcx, name).await?;
 
         let result = format!(
-            "Created task workspace:\n- ID: {}\n- Name: {}\n- Path: .refact/tasks/{}/\n\nThe task is ready for planning. Use task_board_create_card to add cards.",
+            "Created task workspace:\n- ID: {}\n- Name: {}\n- Path: .refact/tasks/{}/\n\nThe task is ready for planning. Use board_create to add cards.",
             meta.id, meta.name, meta.id
         );
 
@@ -58,7 +58,7 @@ impl Tool for ToolTaskInit {
 
     fn tool_description(&self) -> ToolDesc {
         ToolDesc {
-            name: "task_init".to_string(),
+            name: "task_start".to_string(),
             display_name: "Task Init".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,

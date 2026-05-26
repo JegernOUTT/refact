@@ -20,13 +20,13 @@ const AGENT_PULSE_OUTPUT = `# Agent Pulse: T-29
 **State:** 🔄 generating response
 **Last activity:** 3m ago
 **Tokens used:** ~38k / 200k
-**Currently editing:** src/tools/tool_task_check_agents.rs
+**Currently editing:** src/tools/tool_check_agents.rs
 
 ## Last assistant message
 > Adding sticky alerts logic...
 
 ## Last tool call
-\`patch(path="src/tools/tool_task_check_agents.rs")\`
+\`patch(path="src/tools/tool_check_agents.rs")\`
 `;
 
 const AGENT_DIFF_OUTPUT = [
@@ -137,7 +137,7 @@ describe("ToolsContent routing", () => {
     ["agent_diff", AGENT_DIFF_OUTPUT, "agent-diff-view"],
     ["doc_list", DOC_LIST_OUTPUT, "task-documents-view"],
     ["doc_get", DOC_GET_OUTPUT, "task-documents-view"],
-    ["task_agent_finish", STRUCTURED_FINAL_REPORT, "final-report-tool"],
+    ["agent_finish", STRUCTURED_FINAL_REPORT, "final-report-tool"],
     ["task_done", TASK_DONE_OUTPUT, "task-done-tool"],
     ["unknown_tool", "unknown result", "generic-tool"],
   ])("routes %s to %s", (name, content, testId) => {
@@ -146,8 +146,8 @@ describe("ToolsContent routing", () => {
     expect(screen.getByTestId(testId)).toBeInTheDocument();
   });
 
-  it("routes plain-text task_agent_finish results through FinalReportView legacy fallback", () => {
-    renderToolContent("task_agent_finish", "Plain legacy report");
+  it("routes plain-text agent_finish results through FinalReportView legacy fallback", () => {
+    renderToolContent("agent_finish", "Plain legacy report");
 
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
     expect(screen.queryByTestId("final-report-view")).not.toBeInTheDocument();
@@ -157,7 +157,7 @@ describe("ToolsContent routing", () => {
 
   it("final_report_tool_card_uses_hidden_marker_not_display_contents", () => {
     const { container } = renderToolContent(
-      "task_agent_finish",
+      "agent_finish",
       STRUCTURED_FINAL_REPORT,
     );
 
@@ -170,7 +170,7 @@ describe("ToolsContent routing", () => {
   });
 
   it("final_report_tool_card_shows_error_when_success_false", () => {
-    renderToolContent("task_agent_finish", structuredFinalReport(false));
+    renderToolContent("agent_finish", structuredFinalReport(false));
 
     expect(
       screen.getByTestId("final-report-tool-error-icon"),
@@ -182,7 +182,7 @@ describe("ToolsContent routing", () => {
   });
 
   it("final_report_tool_card_shows_success_when_success_true", () => {
-    renderToolContent("task_agent_finish", structuredFinalReport(true));
+    renderToolContent("agent_finish", structuredFinalReport(true));
 
     expect(
       screen.getByTestId("final-report-tool-success-icon"),

@@ -64,7 +64,7 @@ function makeToolCall(): ToolCall {
     index: 0,
     type: "function",
     function: {
-      name: "task_agent_finish",
+      name: "agent_finish",
       arguments: "{}",
     },
   };
@@ -205,7 +205,7 @@ describe("FinalReportView", () => {
     expect(container.querySelector("details")).toBe(details);
   });
 
-  it("renders task_agent_finish reports inside a ToolCard wrapper", () => {
+  it("renders agent_finish reports inside a ToolCard wrapper", () => {
     renderFinalReportTool(structuredPayload);
 
     expect(screen.getByTestId("final-report-tool")).toBeInTheDocument();
