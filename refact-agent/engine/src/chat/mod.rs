@@ -10,6 +10,7 @@ pub mod internal_roles;
 pub mod linearize;
 pub(crate) mod openai_codex_ws;
 mod openai_merge;
+pub mod plan_role;
 pub mod post_merge_check;
 pub mod prepare;
 pub mod prompt_snippets;

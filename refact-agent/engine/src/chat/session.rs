@@ -333,6 +333,14 @@ impl ChatSession {
         self.touch();
     }
 
+    pub fn install_plan(
+        &mut self,
+        mode: &str,
+        body: &str,
+    ) -> crate::chat::plan_role::PlanInstallReport {
+        crate::chat::plan_role::install_plan(self, mode, body)
+    }
+
     pub fn insert_message(&mut self, index: usize, mut message: ChatMessage) {
         if message.message_id.is_empty() {
             message.message_id = Uuid::new_v4().to_string();
