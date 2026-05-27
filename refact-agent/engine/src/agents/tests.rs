@@ -221,6 +221,127 @@ async fn mark_failed_cancelled_and_waiting_for_approval_transition_and_persist()
 }
 
 #[tokio::test]
+async fn cancelled_agent_ignores_late_mark_completed() {
+    let (temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+    let running = registry
+        .mark_running(&record.agent_id, "child-running".to_string())
+        .await
+        .expect("running");
+    let cancelled = registry
+        .cancel("parent", &record.agent_id, Some("stop".to_string()))
+        .await
+        .expect("cancelled");
+
+    let late_completed = registry
+        .mark_completed(&record.agent_id, completion("child-late"))
+        .await
+        .expect("late completed");
+    let final_record = registry.get("parent", &record.agent_id).await.expect("get");
+
+    assert_eq!(cancelled.status, BgAgentStatus::Cancelled);
+    assert_eq!(cancelled.change_seq, running.change_seq + 1);
+    assert_eq!(late_completed, cancelled);
+    assert_eq!(final_record, cancelled);
+    assert!(late_completed.result_payload_path.is_none());
+    let records = load_all(temp.path()).await.expect("load");
+    assert_eq!(records.get(&record.agent_id), Some(&cancelled));
+}
+
+#[tokio::test]
+async fn cancelled_agent_ignores_late_mark_failed() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+    registry
+        .mark_running(&record.agent_id, "child-running".to_string())
+        .await
+        .expect("running");
+    let cancelled = registry
+        .cancel("parent", &record.agent_id, Some("stop".to_string()))
+        .await
+        .expect("cancelled");
+
+    let late_failed = registry
+        .mark_failed(&record.agent_id, "boom".to_string())
+        .await
+        .expect("late failed");
+    let final_record = registry.get("parent", &record.agent_id).await.expect("get");
+
+    assert_eq!(late_failed, cancelled);
+    assert_eq!(final_record.status, BgAgentStatus::Cancelled);
+    assert_eq!(final_record.error.as_deref(), Some("stop"));
+    assert_eq!(final_record.change_seq, cancelled.change_seq);
+}
+
+#[tokio::test]
+async fn mark_completed_on_completed_is_no_op() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+    let completed = registry
+        .mark_completed(&record.agent_id, completion("child-first"))
+        .await
+        .expect("completed");
+
+    let late_completed = registry
+        .mark_completed(&record.agent_id, completion("child-late"))
+        .await
+        .expect("late completed");
+    let final_record = registry.get("parent", &record.agent_id).await.expect("get");
+
+    assert_eq!(late_completed, completed);
+    assert_eq!(final_record, completed);
+    assert_eq!(final_record.child_chat_id.as_deref(), Some("child-first"));
+}
+
+#[tokio::test]
+async fn mark_cancelled_and_cancel_on_completed_are_no_ops() {
+    let (_temp, registry) = registry().await;
+    let (record, abort_flag, _) = registry
+        .create(create_request("parent", BgAgentKind::Delegate))
+        .await
+        .expect("create");
+    let completed = registry
+        .mark_completed(&record.agent_id, completion("child-first"))
+        .await
+        .expect("completed");
+
+    let mark_cancelled = registry
+        .mark_cancelled(&record.agent_id, Some("too late".to_string()))
+        .await
+        .expect("mark cancelled");
+    let cancel = registry
+        .cancel(
+            "parent",
+            &record.agent_id,
+            Some("also too late".to_string()),
+        )
+        .await
+        .expect("cancel");
+
+    assert_eq!(mark_cancelled, completed);
+    assert_eq!(cancel, completed);
+    assert!(!abort_flag.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn first_terminal_transition_bumps_change_seq_once() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+
+    let completed = registry
+        .mark_completed(&record.agent_id, completion("child-first"))
+        .await
+        .expect("completed");
+    let late_cancelled = registry
+        .mark_cancelled(&record.agent_id, Some("too late".to_string()))
+        .await
+        .expect("late cancelled");
+
+    assert_eq!(completed.change_seq, record.change_seq + 1);
+    assert_eq!(late_cancelled.change_seq, completed.change_seq);
+}
+
+#[tokio::test]
 async fn wait_returns_immediately_when_status_is_terminal() {
     let (_temp, registry) = registry().await;
     let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;

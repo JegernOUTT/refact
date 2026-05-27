@@ -136,37 +136,54 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         completion: AgentCompletion,
     ) -> Result<BackgroundAgent, String> {
-        let AgentCompletion {
-            result_summary,
-            edited_files,
-            diff_summary,
-            conflict_summary,
-            child_chat_id,
-        } = completion;
-        let payload = serde_json::json!({
-            "agent_id": agent_id,
-            "result_summary": result_summary.clone(),
-            "edited_files": edited_files.clone(),
-            "diff_summary": diff_summary.clone(),
-            "conflict_summary": conflict_summary.clone(),
-            "child_chat_id": child_chat_id.clone(),
-        });
-        let result_payload_path =
-            storage::save_result_payload(&self.storage_root, agent_id, &payload).await?;
-        self.update_record(agent_id, |record, now| {
-            record.status = BgAgentStatus::Completed;
-            record.result_summary = Some(result_summary);
-            record.result_payload_path = Some(result_payload_path);
-            record.edited_files = edited_files;
-            record.diff_summary = diff_summary;
-            record.conflict_summary = conflict_summary;
-            if child_chat_id.is_some() {
-                record.child_chat_id = child_chat_id;
+        let updated = {
+            let mut records = self.records.write().await;
+            let current = records
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| "agent not found".to_string())?;
+            if current.status.is_terminal() {
+                return Ok(current);
             }
-            record.error = None;
-            record.finished_at = Some(now);
-        })
-        .await
+            let AgentCompletion {
+                result_summary,
+                edited_files,
+                diff_summary,
+                conflict_summary,
+                child_chat_id,
+            } = completion;
+            let payload = serde_json::json!({
+                "agent_id": agent_id,
+                "result_summary": result_summary.clone(),
+                "edited_files": edited_files.clone(),
+                "diff_summary": diff_summary.clone(),
+                "conflict_summary": conflict_summary.clone(),
+                "child_chat_id": child_chat_id.clone(),
+            });
+            let result_payload_path =
+                storage::save_result_payload(&self.storage_root, agent_id, &payload).await?;
+            let mut updated = current;
+            let now = Utc::now();
+            updated.status = BgAgentStatus::Completed;
+            updated.result_summary = Some(result_summary);
+            updated.result_payload_path = Some(result_payload_path);
+            updated.edited_files = edited_files;
+            updated.diff_summary = diff_summary;
+            updated.conflict_summary = conflict_summary;
+            if child_chat_id.is_some() {
+                updated.child_chat_id = child_chat_id;
+            }
+            updated.error = None;
+            updated.finished_at = Some(now);
+            touch_record(&mut updated, now);
+            storage::save_record(&self.storage_root, &updated).await?;
+            records.insert(agent_id.to_string(), updated.clone());
+            updated
+        };
+        if let Some(notify) = self.notify_for(agent_id).await {
+            notify.notify_waiters();
+        }
+        Ok(updated)
     }
 
     pub async fn mark_failed(
@@ -174,7 +191,7 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         error: String,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, now| {
+        self.update_non_terminal_record(agent_id, |record, now| {
             record.status = BgAgentStatus::Failed;
             record.error = Some(error);
             record.finished_at = Some(now);
@@ -187,7 +204,7 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         reason: Option<String>,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, now| {
+        self.update_non_terminal_record(agent_id, |record, now| {
             record.status = BgAgentStatus::Cancelled;
             record.error = reason;
             record.finished_at = Some(now);
@@ -398,7 +415,10 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         reason: Option<String>,
     ) -> Result<BackgroundAgent, String> {
-        self.get(parent_chat_id, agent_id).await?;
+        let record = self.get(parent_chat_id, agent_id).await?;
+        if record.status.is_terminal() {
+            return Ok(record);
+        }
         if let Some(abort_flag) = self.abort_flag(agent_id).await {
             abort_flag.store(true, Ordering::SeqCst);
         }
@@ -466,6 +486,37 @@ impl BackgroundAgentRegistry {
                 .get(agent_id)
                 .cloned()
                 .ok_or_else(|| "agent not found".to_string())?;
+            let mut updated = current;
+            let now = Utc::now();
+            update(&mut updated, now);
+            touch_record(&mut updated, now);
+            storage::save_record(&self.storage_root, &updated).await?;
+            records.insert(agent_id.to_string(), updated.clone());
+            updated
+        };
+        if let Some(notify) = self.notify_for(agent_id).await {
+            notify.notify_waiters();
+        }
+        Ok(updated)
+    }
+
+    async fn update_non_terminal_record<F>(
+        &self,
+        agent_id: &str,
+        update: F,
+    ) -> Result<BackgroundAgent, String>
+    where
+        F: FnOnce(&mut BackgroundAgent, DateTime<Utc>),
+    {
+        let updated = {
+            let mut records = self.records.write().await;
+            let current = records
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| "agent not found".to_string())?;
+            if current.status.is_terminal() {
+                return Ok(current);
+            }
             let mut updated = current;
             let now = Utc::now();
             update(&mut updated, now);
