@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use crate::types::BuddyRuntimeEvent;
 
@@ -45,6 +46,8 @@ impl RuntimeQueue {
                 existing.persistent = event.persistent;
                 existing.controls = event.controls;
                 existing.chat_id = event.chat_id;
+                existing.created_at = event.created_at;
+                existing.bubble_policy = event.bubble_policy;
                 existing.dismissed = existing.dismissed || event.dismissed;
                 return Vec::new();
             }
@@ -67,6 +70,8 @@ impl RuntimeQueue {
                 existing.persistent = event.persistent;
                 existing.controls = event.controls;
                 existing.chat_id = event.chat_id;
+                existing.created_at = event.created_at;
+                existing.bubble_policy = event.bubble_policy;
                 // Sticky dismissal: once the user dismissed an event, any
                 // subsequent re-emission with the same dedupe_key (e.g.
                 // because the same window error fired again) stays hidden.
@@ -132,13 +137,92 @@ impl RuntimeQueue {
             e.status = status.to_string();
             e.persistent = false;
             e.ttl_ms.get_or_insert(4000);
+            e.created_at = Utc::now().to_rfc3339();
         }
         if let Some(ref mut np) = self.now_playing {
             if np.dedupe_key.as_deref() == Some(dedupe_key) {
                 np.status = status.to_string();
                 np.persistent = false;
                 np.ttl_ms.get_or_insert(4000);
+                np.created_at = Utc::now().to_rfc3339();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::BuddyBubblePolicy;
+
+    fn make_event(id: &str, dedupe_key: &str) -> BuddyRuntimeEvent {
+        BuddyRuntimeEvent {
+            id: id.to_string(),
+            signal_type: "streaming".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            source: "chat".to_string(),
+            status: "started".to_string(),
+            progress: None,
+            dedupe_key: Some(dedupe_key.to_string()),
+            priority: "normal".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            ttl_ms: None,
+            bubble_policy: None,
+            speech_text: None,
+            scene: None,
+            duration_hint: None,
+            persistent: false,
+            controls: vec![],
+            chat_id: None,
+            dismissed: false,
+        }
+    }
+
+    #[test]
+    fn coalesced_items_event_updates_bubble_policy_and_created_at() {
+        let mut queue = RuntimeQueue::new();
+        queue.enqueue(make_event("ev1", "key-1"));
+
+        let mut ev2 = make_event("ev2", "key-1");
+        ev2.bubble_policy = Some(BuddyBubblePolicy::Ambient);
+        ev2.created_at = "2024-06-01T00:00:00Z".to_string();
+        queue.enqueue(ev2);
+
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].bubble_policy, Some(BuddyBubblePolicy::Ambient));
+        assert_eq!(queue.items[0].created_at, "2024-06-01T00:00:00Z");
+    }
+
+    #[test]
+    fn coalesced_now_playing_updates_bubble_policy_and_created_at() {
+        let mut queue = RuntimeQueue::new();
+        queue.now_playing = Some(make_event("ev1", "np-key"));
+
+        let mut ev2 = make_event("ev2", "np-key");
+        ev2.bubble_policy = Some(BuddyBubblePolicy::Durable);
+        ev2.created_at = "2024-07-01T00:00:00Z".to_string();
+        queue.enqueue(ev2);
+
+        assert!(queue.items.is_empty());
+        let np = queue.now_playing.as_ref().unwrap();
+        assert_eq!(np.bubble_policy, Some(BuddyBubblePolicy::Durable));
+        assert_eq!(np.created_at, "2024-07-01T00:00:00Z");
+    }
+
+    #[test]
+    fn complete_refreshes_created_at_so_completion_is_fresh() {
+        let mut queue = RuntimeQueue::new();
+        let mut ev = make_event("ev1", "complete-key");
+        ev.persistent = true;
+        ev.created_at = "2020-01-01T00:00:00Z".to_string();
+        queue.enqueue(ev);
+
+        queue.complete("complete-key", "completed");
+
+        let stored = &queue.items[0];
+        assert_eq!(stored.status, "completed");
+        assert_ne!(stored.created_at, "2020-01-01T00:00:00Z");
+        assert!(chrono::DateTime::parse_from_rfc3339(&stored.created_at).is_ok());
     }
 }

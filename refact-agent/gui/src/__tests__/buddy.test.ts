@@ -3836,6 +3836,66 @@ describe("buddy chat reactions settings and bubbles", () => {
     expect(source).toContain("chat reactions enabled");
     expect(source).toContain("redacted");
   });
+
+  test("far-future created_at event-once runtime event is not accepted forever", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const farFutureRuntime = makeChatRuntimeEvent({
+        id: "runtime-far-future-ts",
+        title: "Far future event",
+        status: "completed",
+        priority: "normal",
+        controls: [],
+        bubble_policy: "event_once",
+        created_at: "2099-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [farFutureRuntime] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectNoCompanionNotification(
+        container,
+        "runtime:runtime-far-future-ts",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test.each<[string]>([["win"], ["suggestion"], ["error_alert"]])(
+    "speech with %s intent is actionable and survives freshness expiry",
+    async (intent) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+      try {
+        const store = setUpStore();
+        const durableSpeech = makeChatSpeech({
+          id: `${intent}-durable-fallback`,
+          text: `${intent} message`,
+          speech_intent: intent,
+          persistent: false,
+          ttl_seconds: 300,
+          created_at: "2024-01-01T00:00:00Z",
+        });
+        store.dispatch(
+          setBuddySnapshot(makeSnapshot({ active_speech: durableSpeech })),
+        );
+
+        const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+        await expectCompanionNotification(
+          container,
+          `speech:${intent}-durable-fallback`,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 describe("installBuddyErrorReporter and BuddyErrorBoundary integration", () => {

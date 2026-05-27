@@ -113,6 +113,9 @@ const DURABLE_SPEECH_INTENTS = new Set<string>([
   "quest_accept",
   "quest_complete",
   "milestone",
+  "win",
+  "suggestion",
+  "error_alert",
 ]);
 
 function normalizedPolicyToken(value: string | null | undefined): string {
@@ -169,7 +172,9 @@ function eventFreshnessMs(ttlMs: number | null | undefined): number {
 function isFreshEventOnce(createdAt: string, ttlMs?: number | null): boolean {
   const createdAtTime = validCreatedAtMs(createdAt);
   if (createdAtTime == null) return false;
-  return Date.now() - createdAtTime <= eventFreshnessMs(ttlMs);
+  const now = Date.now();
+  if (createdAtTime > now + 30_000) return false;
+  return now - createdAtTime <= eventFreshnessMs(ttlMs);
 }
 
 function isDurableSpeech(activeSpeech: {
