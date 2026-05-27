@@ -461,7 +461,7 @@ pub async fn try_load_caps_quickly_if_not_present(
     gcx: Arc<GlobalContext>,
     max_age_seconds: u64,
 ) -> Result<Arc<CodeAssistantCaps>, ScratchError> {
-    let cmdline = CommandLine::from_args(); // XXX make it Arc and don't reload all the time
+    let cmdline = gcx.cmdline.clone();
     let (caps_state, config_dir) = { (gcx.caps_state.clone(), gcx.config_dir.clone()) };
     let caps_reading_lock = caps_state.read().await.reading_lock.clone();
 

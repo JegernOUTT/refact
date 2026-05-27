@@ -195,6 +195,19 @@ impl BackgroundAgentRegistry {
         .await
     }
 
+    pub async fn mark_interrupted(
+        &self,
+        agent_id: &str,
+        reason: String,
+    ) -> Result<BackgroundAgent, String> {
+        self.update_record(agent_id, |record, now| {
+            record.status = BgAgentStatus::Interrupted;
+            record.error = Some(reason);
+            record.finished_at = Some(now);
+        })
+        .await
+    }
+
     pub async fn mark_waiting_for_approval(
         &self,
         agent_id: &str,
@@ -216,7 +229,21 @@ impl BackgroundAgentRegistry {
                 .get(agent_id)
                 .cloned()
                 .ok_or_else(|| "agent not found".to_string())?;
-            if current.completion_message_id.is_some() {
+            if let Some(current_id) = current.completion_message_id.as_deref() {
+                if current_id != "pending" && current_id != "deferred" {
+                    return Ok(());
+                }
+                if current_id == message_id {
+                    return Ok(());
+                }
+            }
+            if matches!(
+                (
+                    current.completion_message_id.as_deref(),
+                    message_id.as_str()
+                ),
+                (Some("deferred"), "pending")
+            ) {
                 return Ok(());
             }
             let mut updated = current;
@@ -265,6 +292,60 @@ impl BackgroundAgentRegistry {
             records.truncate(limit);
         }
         records
+    }
+
+    pub async fn list_all(&self) -> Vec<BackgroundAgent> {
+        let mut records: Vec<BackgroundAgent> =
+            self.records.read().await.values().cloned().collect();
+        records.sort_by(|a, b| {
+            b.last_update_at
+                .cmp(&a.last_update_at)
+                .then(b.created_at.cmp(&a.created_at))
+                .then(a.agent_id.cmp(&b.agent_id))
+        });
+        records
+    }
+
+    pub async fn list_with_completion_message_id(&self, ids: &[&str]) -> Vec<BackgroundAgent> {
+        let wanted: HashSet<&str> = ids.iter().copied().collect();
+        let mut records: Vec<BackgroundAgent> = self
+            .records
+            .read()
+            .await
+            .values()
+            .filter(|record| {
+                record
+                    .completion_message_id
+                    .as_deref()
+                    .map_or(false, |id| wanted.contains(id))
+            })
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| {
+            b.last_update_at
+                .cmp(&a.last_update_at)
+                .then(b.created_at.cmp(&a.created_at))
+                .then(a.agent_id.cmp(&b.agent_id))
+        });
+        records
+    }
+
+    pub async fn has_runtime(&self, agent_id: &str) -> bool {
+        self.runtime.read().await.contains_key(agent_id)
+    }
+
+    #[cfg(test)]
+    pub async fn set_last_update_at_for_test(
+        &self,
+        agent_id: &str,
+        last_update_at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let mut records = self.records.write().await;
+        let record = records
+            .get_mut(agent_id)
+            .ok_or_else(|| "agent not found".to_string())?;
+        record.last_update_at = last_update_at;
+        storage::save_record(&self.storage_root, record).await
     }
 
     pub async fn get(

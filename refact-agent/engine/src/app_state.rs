@@ -165,6 +165,30 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         session.cache_guard_force_next = true;
         session.increment_version();
         let snapshot = session.snapshot();
+        let snapshot = match snapshot {
+            refact_chat_api::ChatEvent::Snapshot {
+                thread,
+                runtime,
+                messages,
+                ..
+            } => {
+                let background_agents = self
+                    .gcx
+                    .agents
+                    .list_for_parent(chat_id, crate::agents::types::AgentListFilter::default())
+                    .await
+                    .iter()
+                    .map(crate::agents::types::BackgroundAgentSummary::from)
+                    .collect();
+                refact_chat_api::ChatEvent::Snapshot {
+                    thread,
+                    runtime,
+                    messages,
+                    background_agents,
+                }
+            }
+            event => event,
+        };
         session.emit(snapshot);
         Ok(())
     }

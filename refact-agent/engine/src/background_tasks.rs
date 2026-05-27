@@ -61,6 +61,8 @@ pub async fn start_background_tasks(
     let gcx_for_knowledge_index = gcx.clone();
     let gcx_for_stats = gcx.clone();
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let background_agent_monitor_app = app_state.clone();
+    let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let mut bg = BackgroundTasksHolder::new(vec![
         tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
             gcx.clone(),
@@ -81,6 +83,10 @@ pub async fn start_background_tasks(
             gcx.clone(),
         )),
         tokio::spawn(crate::chat::start_agent_monitor(app_state)),
+        tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
+            background_agent_monitor_app,
+            background_agent_monitor_shutdown,
+        )),
         tokio::spawn(
             crate::providers::oauth_refresh::oauth_token_refresh_background_task(gcx.clone()),
         ),

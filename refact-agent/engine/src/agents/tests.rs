@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::{TimeDelta, Utc};
@@ -11,6 +12,9 @@ use crate::agents::types::{
     AgentCompletion, AgentListFilter, BackgroundAgent, BgAgentKind, BgAgentStatus,
     CreateAgentRequest,
 };
+use crate::app_state::AppState;
+use crate::call_validation::ChatMessage;
+use crate::chat::types::{ChatCommand, ChatSession};
 
 fn create_request(parent_chat_id: &str, kind: BgAgentKind) -> CreateAgentRequest {
     CreateAgentRequest {
@@ -57,6 +61,26 @@ async fn create_agent(
         .await
         .expect("create")
         .0
+}
+
+async fn app_with_parent_session(
+    parent_chat_id: &str,
+) -> (
+    std::sync::Arc<crate::global_context::GlobalContext>,
+    AppState,
+    Arc<tokio::sync::Mutex<ChatSession>>,
+) {
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+        parent_chat_id.to_string(),
+    )));
+    app.chat
+        .sessions
+        .write()
+        .await
+        .insert(parent_chat_id.to_string(), session.clone());
+    (gcx, app, session)
 }
 
 #[tokio::test]
@@ -498,6 +522,174 @@ async fn set_completion_message_id_is_idempotent() {
         Some("message-one")
     );
 }
+
+#[tokio::test]
+async fn set_completion_message_id_allows_pending_and_deferred_retry_markers_to_advance() {
+    let (_temp, registry) = registry().await;
+    let first = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+    let second = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+
+    registry
+        .set_completion_message_id(&first.agent_id, "pending".to_string())
+        .await
+        .expect("pending");
+    registry
+        .set_completion_message_id(&first.agent_id, "message-one".to_string())
+        .await
+        .expect("message");
+    registry
+        .set_completion_message_id(&second.agent_id, "deferred".to_string())
+        .await
+        .expect("deferred");
+    registry
+        .set_completion_message_id(&second.agent_id, "pending".to_string())
+        .await
+        .expect("pending ignored");
+    registry
+        .set_completion_message_id(&second.agent_id, "message-two".to_string())
+        .await
+        .expect("message");
+
+    let first = registry
+        .get("parent", &first.agent_id)
+        .await
+        .expect("first");
+    let second = registry
+        .get("parent", &second.agent_id)
+        .await
+        .expect("second");
+    assert_eq!(first.completion_message_id.as_deref(), Some("message-one"));
+    assert_eq!(second.completion_message_id.as_deref(), Some("message-two"));
+}
+
+#[tokio::test]
+async fn push_completion_to_parent_is_idempotent() {
+    let (_gcx, app, session_arc) = app_with_parent_session("parent-push").await;
+    let record = create_agent(&app.agents, "parent-push", BgAgentKind::Delegate).await;
+    let completed = app
+        .agents
+        .mark_completed(&record.agent_id, completion("child-push"))
+        .await
+        .expect("completed");
+
+    crate::agents::push::push_completion_to_parent(app.clone(), &completed)
+        .await
+        .expect("first push");
+    let pushed = app
+        .agents
+        .get("parent-push", &record.agent_id)
+        .await
+        .unwrap();
+    crate::agents::push::push_completion_to_parent(app, &pushed)
+        .await
+        .expect("second push");
+
+    let session = session_arc.lock().await;
+    assert_eq!(session.command_queue.len(), 1);
+    match &session.command_queue.front().unwrap().command {
+        ChatCommand::UserMessage { content, .. } => {
+            assert!(content
+                .as_str()
+                .unwrap()
+                .contains("[background delegate finished]"));
+        }
+        _ => panic!("expected UserMessage"),
+    }
+}
+
+#[tokio::test]
+async fn push_completion_to_parent_marks_pending_when_session_not_loaded_and_flush_retries() {
+    let (_gcx, app, _session_arc) = app_with_parent_session("parent-flush").await;
+    app.chat.sessions.write().await.remove("parent-flush");
+    let record = create_agent(&app.agents, "parent-flush", BgAgentKind::Subagent).await;
+    let completed = app
+        .agents
+        .mark_completed(&record.agent_id, completion("child-flush"))
+        .await
+        .expect("completed");
+
+    crate::agents::push::push_completion_to_parent(app.clone(), &completed)
+        .await
+        .expect("pending push");
+    let pending = app
+        .agents
+        .get("parent-flush", &record.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(pending.completion_message_id.as_deref(), Some("pending"));
+
+    let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+        "parent-flush".to_string(),
+    )));
+    app.chat
+        .sessions
+        .write()
+        .await
+        .insert("parent-flush".to_string(), session.clone());
+    let count = crate::agents::push::flush_pending_pushes_for_parent(app.clone(), "parent-flush")
+        .await
+        .expect("flush");
+
+    assert_eq!(count, 1);
+    assert_eq!(session.lock().await.command_queue.len(), 1);
+    let updated = app
+        .agents
+        .get("parent-flush", &record.agent_id)
+        .await
+        .unwrap();
+    assert_ne!(updated.completion_message_id.as_deref(), Some("pending"));
+}
+
+
+#[tokio::test]
+async fn spawn_and_wait_timeout_returns_error() {
+    let (_gcx, app, _session_arc) = app_with_parent_session("parent-timeout").await;
+    let req = crate::agents::spawn::SpawnRequest {
+        kind: BgAgentKind::Subagent,
+        parent_chat_id: "parent-timeout".to_string(),
+        parent_root_chat_id: None,
+        parent_tool_call_id: None,
+        config_name: "missing-subagent-config".to_string(),
+        title: "Missing".to_string(),
+        prompt: "prompt".to_string(),
+        target_files: vec![],
+        max_steps: 1,
+        model: "model".to_string(),
+        parent_subchat_tx: None,
+        parent_worktree: None,
+        parent_task_meta: None,
+        subchat_depth: 0,
+        notify_parent: crate::agents::spawn::NotifyParent::Silent,
+    };
+
+    let err = crate::agents::spawn::spawn_and_wait(app, req, Some(Duration::from_millis(1)))
+        .await
+        .expect_err("missing config should error before waiting");
+    assert!(err.contains("not found") || err.contains("missing"));
+}
+
+fn spawn_request(parent_chat_id: &str) -> crate::agents::spawn::SpawnRequest {
+    crate::agents::spawn::SpawnRequest {
+        kind: BgAgentKind::Subagent,
+        parent_chat_id: parent_chat_id.to_string(),
+        parent_root_chat_id: Some(parent_chat_id.to_string()),
+        parent_tool_call_id: None,
+        config_name: "test_spawn".to_string(),
+        title: "Test spawn".to_string(),
+        prompt: "prompt".to_string(),
+        target_files: vec![],
+        max_steps: 1,
+        model: "model".to_string(),
+        parent_subchat_tx: None,
+        parent_worktree: None,
+        parent_task_meta: None,
+        subchat_depth: 0,
+        notify_parent: crate::agents::spawn::NotifyParent::Silent,
+    }
+}
+
+
+
 
 #[tokio::test]
 async fn storage_save_record_preserves_existing_records() {
