@@ -6,8 +6,12 @@ import {
   isDiffMessage,
   isToolMessage,
   isUserMessage,
+  isEventMessage,
+  isPlanMessage,
   ChatMessages,
   DiffMessage,
+  EventMessage,
+  PlanMessage,
   ToolResult,
   ToolMessage,
 } from "../../../services/refact/types";
@@ -25,6 +29,8 @@ import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import type { BackgroundAgentSummary } from "../../../services/refact/types";
 
 const EMPTY_MESSAGES: ChatMessages = [];
+const EMPTY_EVENT_MESSAGES: EventMessage[] = [];
+const EMPTY_PLAN_MESSAGES: PlanMessage[] = [];
 const EMPTY_QUEUED: QueuedItem[] = [];
 const EMPTY_PAUSE_REASONS: ThreadConfirmation["pause_reasons"] = [];
 const EMPTY_IMAGES: ImageFile[] = [];
@@ -185,6 +191,40 @@ export const selectMessages = (state: RootState) =>
 
 export const selectMessagesById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread.messages ?? EMPTY_MESSAGES;
+
+export const selectVisibleMessages = (
+  state: RootState,
+  threadId: string,
+): ChatMessages =>
+  selectMessagesById(state, threadId).filter(
+    (message) => message.role !== "event" && message.role !== "plan",
+  );
+
+export const selectEventLog = (
+  state: RootState,
+  threadId: string,
+): EventMessage[] => {
+  const eventMessages = selectMessagesById(state, threadId).filter(
+    isEventMessage,
+  );
+  return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
+};
+
+export const selectPlanHistory = (
+  state: RootState,
+  threadId: string,
+): PlanMessage[] => {
+  const planMessages = selectMessagesById(state, threadId).filter(
+    isPlanMessage,
+  );
+  if (planMessages.length === 0) return EMPTY_PLAN_MESSAGES;
+  return [...planMessages].sort((a, b) => b.version - a.version);
+};
+
+export const selectCurrentPlan = (
+  state: RootState,
+  threadId: string,
+): PlanMessage | undefined => selectPlanHistory(state, threadId)[0];
 
 export const selectToolUse = (state: RootState) => state.chat.tool_use;
 

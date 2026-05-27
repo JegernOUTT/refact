@@ -13,7 +13,9 @@ export type ChatRole =
   | "diff"
   | "plain_text"
   | "cd_instruction"
-  | "summarization";
+  | "summarization"
+  | "event"
+  | "plan";
 
 export type ChatContextFile = {
   file_name: string;
@@ -256,6 +258,8 @@ interface BaseMessage {
   extra?: Record<string, unknown>;
 }
 
+type MessageEnvelope = Pick<BaseMessage, "message_id" | "extra">;
+
 export interface ChatContextFileMessage extends BaseMessage {
   role: "context_file";
   content: ChatContextFile[];
@@ -437,10 +441,47 @@ export interface SummarizationMessage extends BaseMessage {
   summarized_token_estimate?: number;
 }
 
+export type EventSubkind =
+  | "mode_switch"
+  | "tool_decision"
+  | "ide_callback"
+  | "process_completed"
+  | "cron_fire"
+  | "tick"
+  | "summarization_marker"
+  | "verifier_report"
+  | "cancellation_note"
+  | "system_notice";
+
+export type EventMessage = MessageEnvelope & {
+  role: "event";
+  content: string;
+  subkind: EventSubkind;
+  source: string;
+  payload?: unknown;
+};
+
+export type PlanMessage = MessageEnvelope & {
+  role: "plan";
+  content: string;
+  mode: string;
+  version: number;
+  created_at_ms: number;
+  supersedes?: string;
+};
+
 export function isSummarizationMessage(
   message: ChatMessage,
 ): message is SummarizationMessage {
   return message.role === "summarization";
+}
+
+export function isEventMessage(message: ChatMessage): message is EventMessage {
+  return message.role === "event";
+}
+
+export function isPlanMessage(message: ChatMessage): message is PlanMessage {
+  return message.role === "plan";
 }
 
 export type ChatMessage =
@@ -453,7 +494,9 @@ export type ChatMessage =
   | DiffMessage
   | PlainTextMessage
   | CDInstructionMessage
-  | SummarizationMessage;
+  | SummarizationMessage
+  | EventMessage
+  | PlanMessage;
 
 export type ChatMessages = ChatMessage[];
 
