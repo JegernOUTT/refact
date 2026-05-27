@@ -257,6 +257,7 @@ describe("SSE Protocol - Message Variations", () => {
         queue_size: 0,
         pause_reasons: [],
       },
+      background_agents: [],
       messages: [
         {
           role: "context_file",
@@ -315,6 +316,7 @@ describe("SSE Protocol - Message Variations", () => {
         queue_size: 0,
         pause_reasons: [],
       },
+      background_agents: [],
       messages: [
         {
           role: "assistant",
@@ -382,6 +384,7 @@ describe("SSE Protocol - Message Variations", () => {
           queue_size: 0,
           pause_reasons: [],
         },
+        background_agents: [],
         messages: [
           {
             role: "tool",
@@ -435,6 +438,7 @@ describe("SSE Protocol - Message Variations", () => {
         queue_size: 0,
         pause_reasons: [],
       },
+      background_agents: [],
       messages: [
         {
           role: "tool",

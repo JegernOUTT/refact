@@ -22,6 +22,7 @@ import {
 } from "./types";
 import type { SessionState } from "../../../utils/sessionStatus";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
+import type { BackgroundAgentSummary } from "../../../services/refact/types";
 
 const EMPTY_MESSAGES: ChatMessages = [];
 const EMPTY_QUEUED: QueuedItem[] = [];
@@ -33,6 +34,7 @@ const EMPTY_DIFF_MESSAGES_BY_ID: ReadonlyMap<string, DiffMessage[]> = new Map();
 const EMPTY_DIFF_MESSAGES: DiffMessage[] = [];
 const EMPTY_MANUAL_PREVIEW_ITEMS: ChatThreadRuntime["manual_preview_items"] =
   [];
+const EMPTY_BACKGROUND_AGENTS: Record<string, BackgroundAgentSummary> = {};
 const EMPTY_TASKS: TodoItem[] = [];
 const DEFAULT_NEW_CHAT_SUGGESTED = { wasSuggested: false } as const;
 const DEFAULT_CONFIRMATION: ThreadConfirmation = {
@@ -152,6 +154,19 @@ export const selectCurrentRuntime = (
 
 export const selectThreadById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread ?? null;
+
+export const selectBackgroundAgentsByThread = (
+  state: RootState,
+  threadId: string,
+): Record<string, BackgroundAgentSummary> =>
+  state.chat.threads[threadId]?.background_agents ?? EMPTY_BACKGROUND_AGENTS;
+
+export const selectBackgroundAgent = (
+  state: RootState,
+  threadId: string,
+  agentId: string,
+): BackgroundAgentSummary | undefined =>
+  state.chat.threads[threadId]?.background_agents[agentId];
 
 export const selectThread = (state: RootState) =>
   state.chat.threads[state.chat.current_thread_id]?.thread ?? null;

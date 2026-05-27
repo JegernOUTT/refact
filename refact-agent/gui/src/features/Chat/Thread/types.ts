@@ -1,6 +1,9 @@
 import { ToolConfirmationPauseReason, Usage } from "../../../services/refact";
 import { SystemPrompts } from "../../../services/refact/prompts";
-import { ChatMessages } from "../../../services/refact/types";
+import {
+  BackgroundAgentSummary,
+  ChatMessages,
+} from "../../../services/refact/types";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import { parseOrElse } from "../../../utils/parseOrElse";
 import { BuddyThreadMeta } from "../../Buddy/types";
@@ -202,6 +205,7 @@ export type ChatThreadRuntime = {
   send_immediately: boolean;
   attached_images: ImageFile[];
   attached_text_files: TextFile[];
+  background_agents: Record<string, BackgroundAgentSummary>;
   confirmation: ThreadConfirmation;
   /** Whether the initial snapshot has been received from the backend */
   snapshot_received: boolean;

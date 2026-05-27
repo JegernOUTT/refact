@@ -207,7 +207,7 @@ describe("chatSubscription", () => {
       const encoder = new TextEncoder();
 
       const events =
-        'data: {"type":"snapshot","seq":"1","chat_id":"test"}\r\n\r\n';
+        'data: {"type":"snapshot","seq":"1","chat_id":"test","background_agents":[]}\r\n\r\n';
 
       mockFetch.mockResolvedValueOnce({
         ok: true,

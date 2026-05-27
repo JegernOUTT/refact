@@ -70,6 +70,7 @@ describe("SSE Protocol - Event Types", () => {
           queue_size: 0,
           pause_reasons: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -117,6 +118,7 @@ describe("SSE Protocol - Event Types", () => {
           queue_size: 0,
           pause_reasons: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "Hello", message_id: "msg-1" },
           { role: "assistant", content: "Hi there", message_id: "msg-2" },
@@ -617,6 +619,7 @@ describe("SSE Protocol - Field Variations", () => {
             },
           ],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -661,6 +664,7 @@ describe("SSE Protocol - Field Variations", () => {
           queue_size: 0,
           pause_reasons: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -705,6 +709,7 @@ describe("SSE Protocol - Field Variations", () => {
           queue_size: 5,
           pause_reasons: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -750,6 +755,7 @@ describe("SSE Protocol - Field Variations", () => {
           queue_size: 0,
           pause_reasons: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -800,6 +806,7 @@ describe("SSE Protocol - Field Variations", () => {
             queue_size: 0,
             pause_reasons: [],
           },
+          background_agents: [],
           messages: [],
         };
 
@@ -920,6 +927,7 @@ describe("SSE Protocol - Edge Cases", () => {
         queue_size: 0,
         pause_reasons: [],
       },
+      background_agents: [],
       messages: [],
     };
 
@@ -1054,6 +1062,7 @@ describe("SSE Protocol - Edge Cases", () => {
         queue_size: 0,
         pause_reasons: [],
       },
+      background_agents: [],
       messages: [
         {
           role: "user",
@@ -1127,6 +1136,7 @@ describe("SSE Protocol - Edge Cases", () => {
         queue_size: 0,
         pause_reasons: [],
       },
+      background_agents: [],
       messages: [
         {
           role: "user",

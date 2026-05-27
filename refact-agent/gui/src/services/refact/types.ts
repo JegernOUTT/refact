@@ -43,6 +43,38 @@ export type ToolUsage = {
   amountOfCalls: number;
 };
 
+export type BackgroundAgentKind = "subagent" | "delegate";
+
+export type BackgroundAgentStatus =
+  | "queued"
+  | "running"
+  | "waiting_for_approval"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export interface BackgroundAgentSummary {
+  agent_id: string;
+  parent_chat_id: string;
+  child_chat_id: string | null;
+  kind: BackgroundAgentKind;
+  status: BackgroundAgentStatus;
+  title: string;
+  progress: string | null;
+  step_count: number;
+  last_activity: string | null;
+  target_files: string[];
+  edited_files: string[];
+  diff_summary: string | null;
+  conflict_summary: string | null;
+  result_summary: string | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  change_seq: number;
+}
+
 function isToolCall(call: unknown): call is ToolCall {
   if (!call) return false;
   if (typeof call !== "object") return false;

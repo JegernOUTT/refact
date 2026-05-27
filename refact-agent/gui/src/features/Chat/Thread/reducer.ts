@@ -136,6 +136,7 @@ const createThreadRuntime = (
     send_immediately: false,
     attached_images: [],
     attached_text_files: [],
+    background_agents: {},
     confirmation: {
       pause: false,
       pause_reasons: [],
@@ -753,6 +754,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       send_immediately: false,
       attached_images: [],
       attached_text_files: [],
+      background_agents: {},
       confirmation: {
         pause: false,
         pause_reasons: [],
@@ -1090,6 +1092,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const snapshotMessages = (event.messages as ChatMessages).map(
           normalizeMessage,
         );
+        const backgroundAgents = Object.fromEntries(
+          event.background_agents.map((agent) => [agent.agent_id, agent]),
+        );
 
         const backendModel = event.thread.model.trim();
         const backendToolUse = event.thread.tool_use;
@@ -1207,6 +1212,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           send_immediately: existingRuntime?.send_immediately ?? false,
           attached_images: existingRuntime?.attached_images ?? [],
           attached_text_files: existingRuntime?.attached_text_files ?? [],
+          background_agents: backgroundAgents,
           confirmation: {
             pause: event.runtime.paused,
             pause_reasons: event.runtime
@@ -1239,6 +1245,21 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if (!state.current_thread_id) {
           state.current_thread_id = chat_id;
         }
+        break;
+      }
+
+      case "background_agent_updated": {
+        if (!rt) break;
+        const eventSeq = parseEventSeq(event.seq);
+        const lastSeq =
+          rt.last_applied_seq != null
+            ? parseEventSeq(rt.last_applied_seq)
+            : null;
+        if (eventSeq != null && lastSeq != null && eventSeq <= lastSeq) {
+          break;
+        }
+        rt.background_agents[event.agent.agent_id] = event.agent;
+        rt.last_applied_seq = event.seq;
         break;
       }
 

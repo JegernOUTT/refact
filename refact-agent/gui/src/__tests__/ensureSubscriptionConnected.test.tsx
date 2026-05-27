@@ -22,6 +22,7 @@ const createThreadRuntime = (
   send_immediately: false,
   attached_images: [],
   attached_text_files: [],
+  background_agents: {},
   confirmation: {
     pause: false,
     pause_reasons: [],

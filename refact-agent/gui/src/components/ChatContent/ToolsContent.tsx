@@ -10,6 +10,7 @@ import { Container, Flex, Text, Box, Spinner } from "@radix-ui/themes";
 import {
   ChatContextFile,
   DiffChunk,
+  BackgroundAgentSummary,
   isMultiModalToolResult,
   isExecToolMetadata,
   MultiModalToolResult,
@@ -21,10 +22,12 @@ import styles from "./ChatContent.module.css";
 import { CommandMarkdown } from "../Command";
 import { Chevron } from "../Collapsible";
 import { Reveal } from "../Reveal";
-import { useAppSelector, useHideScroll } from "../../hooks";
+import { useAppDispatch, useAppSelector, useHideScroll } from "../../hooks";
 import {
+  selectChatId,
   selectIsStreaming,
   selectIsWaiting,
+  selectBackgroundAgentsByThread,
   selectManyDiffMessageByIds,
   selectManyToolResultsByIds,
   selectToolResultById,
@@ -33,7 +36,9 @@ import { ScrollArea } from "../ScrollArea";
 import { takeWhile } from "../../utils";
 import { DialogImage } from "../DialogImage";
 import { RootState } from "../../app/store";
+import { createChatWithId, switchToThread } from "../../features/Chat/Thread";
 import { selectFeatures } from "../../features/Config/configSlice";
+import { push } from "../../features/Pages/pagesSlice";
 import { isRawTextDocToolCall } from "../Tools/types";
 import {
   normalizeToolCall,
@@ -91,6 +96,7 @@ import { AgentPulseView } from "./AgentPulseView";
 import { AgentDiffView } from "./AgentDiffView";
 import { TaskDocumentsView } from "./TaskDocumentsView";
 import { FinalReportView } from "./FinalReportView";
+import { BackgroundAgentCard } from "../BackgroundAgentCard";
 
 function finalReportSuccess(content: string): boolean | null {
   try {
@@ -254,6 +260,134 @@ function isProcessToolName(name: string | undefined): name is ProcessToolName {
 
 function hasExecMetadata(result: ToolResult | undefined): boolean {
   return isExecToolMetadata(result?.extra?.exec);
+}
+
+type BackgroundAgentExtra = Partial<
+  Pick<
+    BackgroundAgentSummary,
+    | "child_chat_id"
+    | "kind"
+    | "status"
+    | "title"
+    | "progress"
+    | "step_count"
+    | "last_activity"
+    | "target_files"
+    | "edited_files"
+    | "diff_summary"
+    | "conflict_summary"
+    | "result_summary"
+    | "error"
+    | "started_at"
+    | "finished_at"
+    | "change_seq"
+  >
+> & {
+  background_agent_id: string;
+  parent_chat_id?: string;
+};
+
+function isBackgroundAgentTool(
+  toolName: string | undefined,
+): toolName is "subagent" | "delegate" {
+  return toolName === "subagent" || toolName === "delegate";
+}
+
+function getBackgroundAgentId(extra: Record<string, unknown> | undefined) {
+  return typeof extra?.background_agent_id === "string"
+    ? extra.background_agent_id
+    : null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
+}
+
+function readStringField(
+  record: Record<string, unknown>,
+  key: keyof BackgroundAgentExtra,
+): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function readNumberField(
+  record: Record<string, unknown>,
+  key: keyof BackgroundAgentExtra,
+): number | null {
+  const value = record[key];
+  return typeof value === "number" ? value : null;
+}
+
+function readStringArrayField(
+  record: Record<string, unknown>,
+  key: keyof BackgroundAgentExtra,
+): string[] {
+  const value = record[key];
+  return isStringArray(value) ? value : [];
+}
+
+function backgroundAgentPlaceholder(
+  extra: Record<string, unknown>,
+  toolName: "subagent" | "delegate",
+): BackgroundAgentSummary | null {
+  const agentId = getBackgroundAgentId(extra);
+  if (!agentId) return null;
+  const kind = toolName === "delegate" ? "delegate" : "subagent";
+  return {
+    agent_id: agentId,
+    parent_chat_id: readStringField(extra, "parent_chat_id") ?? "",
+    child_chat_id: readStringField(extra, "child_chat_id"),
+    kind,
+    status: "queued",
+    title: readStringField(extra, "title") ?? formatToolDisplayName(toolName),
+    progress: readStringField(extra, "progress"),
+    step_count: readNumberField(extra, "step_count") ?? 0,
+    last_activity: readStringField(extra, "last_activity"),
+    target_files: readStringArrayField(extra, "target_files"),
+    edited_files: readStringArrayField(extra, "edited_files"),
+    diff_summary: readStringField(extra, "diff_summary"),
+    conflict_summary: readStringField(extra, "conflict_summary"),
+    result_summary: readStringField(extra, "result_summary"),
+    error: readStringField(extra, "error"),
+    started_at: readStringField(extra, "started_at"),
+    finished_at: readStringField(extra, "finished_at"),
+    change_seq: readNumberField(extra, "change_seq") ?? 0,
+  } satisfies BackgroundAgentSummary;
+}
+
+function decorateBackgroundAgentTool(
+  elem: React.ReactNode,
+  toolName: string | undefined,
+  result: ToolResult | undefined,
+  backgroundAgents: Partial<Record<string, BackgroundAgentSummary>>,
+  onOpenTrajectory: (
+    agent: BackgroundAgentSummary,
+    childChatId: string,
+  ) => void,
+): React.ReactNode {
+  if (!isBackgroundAgentTool(toolName)) return elem;
+  const extra = result?.extra;
+  const agentId = getBackgroundAgentId(extra);
+  if (!extra || !agentId) return elem;
+  const agent =
+    backgroundAgents[agentId] ?? backgroundAgentPlaceholder(extra, toolName);
+  if (!agent) return elem;
+  return (
+    <React.Fragment key={`background-agent-${agent.agent_id}`}>
+      {elem}
+      <BackgroundAgentCard
+        agent={agent}
+        onOpenTrajectory={
+          agent.child_chat_id
+            ? (childChatId) => onOpenTrajectory(agent, childChatId)
+            : undefined
+        }
+      />
+    </React.Fragment>
+  );
 }
 
 // TODO: Sort of duplicated
@@ -461,7 +595,27 @@ export const ToolContent: React.FC<ToolContentProps> = ({
   diffsByToolId,
   isActiveAssistant = false,
 }) => {
+  const dispatch = useAppDispatch();
+  const chatId = useAppSelector(selectChatId);
   const features = useAppSelector(selectFeatures);
+  const backgroundAgents = useAppSelector((state) =>
+    selectBackgroundAgentsByThread(state, chatId),
+  );
+  const handleOpenTrajectory = useCallback(
+    (agent: BackgroundAgentSummary, childChatId: string) => {
+      dispatch(
+        createChatWithId({
+          id: childChatId,
+          title: agent.title,
+          parentId: agent.parent_chat_id || chatId,
+          linkType: agent.kind,
+        }),
+      );
+      dispatch(switchToThread({ id: childChatId }));
+      dispatch(push({ name: "chat" }));
+    },
+    [chatId, dispatch],
+  );
   const ids = useMemo(() => {
     const out: string[] = [];
     for (const toolCall of toolCalls) {
@@ -488,6 +642,8 @@ export const ToolContent: React.FC<ToolContentProps> = ({
     contextFilesByToolId,
     diffsByToolId,
     activeToolCallId,
+    backgroundAgents,
+    handleOpenTrajectory,
   );
 };
 
@@ -499,6 +655,11 @@ function processToolCalls(
   contextFilesByToolId: Record<string, ChatContextFile[]> = {},
   diffsByToolId: Record<string, DiffChunk[]> = {},
   activeToolCallId?: string,
+  backgroundAgents: Record<string, BackgroundAgentSummary> = {},
+  onOpenTrajectory: (
+    agent: BackgroundAgentSummary,
+    childChatId: string,
+  ) => void = () => undefined,
 ) {
   if (toolCalls.length === 0) return processed;
   const [head, ...tail] = toolCalls;
@@ -525,6 +686,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -544,6 +707,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -564,6 +729,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -584,6 +751,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -604,6 +773,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -623,6 +794,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -641,6 +814,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -659,6 +834,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -669,14 +846,50 @@ function processToolCalls(
         toolCall={normalizedHead}
       />
     );
+    const decoratedElem = decorateBackgroundAgentTool(
+      elem,
+      headName,
+      result,
+      backgroundAgents,
+      onOpenTrajectory,
+    );
     return processToolCalls(
       tail,
       toolResults,
       features,
-      [...processed, elem],
+      [...processed, decoratedElem],
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
+    );
+  }
+
+  if (headName === "delegate") {
+    const elem = (
+      <GenericTool
+        key={`delegate-tool-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+      />
+    );
+    const decoratedElem = decorateBackgroundAgentTool(
+      elem,
+      headName,
+      result,
+      backgroundAgents,
+      onOpenTrajectory,
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, decoratedElem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -695,6 +908,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -713,6 +928,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -731,6 +948,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -751,6 +970,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -771,6 +992,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -791,6 +1014,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -811,6 +1036,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -823,6 +1050,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -843,6 +1072,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -863,6 +1094,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -883,6 +1116,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -903,6 +1138,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -924,6 +1161,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -944,6 +1183,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -962,6 +1203,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -980,6 +1223,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -998,6 +1243,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1016,6 +1263,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1035,6 +1284,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1061,6 +1312,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1079,6 +1332,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1097,6 +1352,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1201,6 +1458,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1223,6 +1482,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1241,6 +1502,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1260,6 +1523,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1296,6 +1561,8 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
+      backgroundAgents,
+      onOpenTrajectory,
     );
   }
 
@@ -1314,6 +1581,8 @@ function processToolCalls(
     contextFilesByToolId,
     diffsByToolId,
     activeToolCallId,
+    backgroundAgents,
+    onOpenTrajectory,
   );
 }
 

@@ -59,6 +59,7 @@ function makeSnapshot(
       pause_reasons: [],
       queued_items: [],
     },
+    background_agents: [],
     messages: [],
   };
 }

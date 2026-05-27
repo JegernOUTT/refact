@@ -1,4 +1,4 @@
-import type { ChatMessage } from "./types";
+import type { BackgroundAgentSummary, ChatMessage } from "./types";
 import type { WorktreeMeta } from "./worktrees";
 
 export type SessionState =
@@ -72,6 +72,31 @@ export type RuntimeState = {
   queued_items: QueuedItem[];
 };
 
+type BackgroundAgentSummaryWire =
+  | BackgroundAgentSummary
+  | BackgroundAgentSummaryCamelCase;
+
+type BackgroundAgentSummaryCamelCase = {
+  agentId: string;
+  parentChatId: string;
+  childChatId: string | null;
+  kind: BackgroundAgentSummary["kind"];
+  status: BackgroundAgentSummary["status"];
+  title: string;
+  progress: string | null;
+  stepCount: number;
+  lastActivity: string | null;
+  targetFiles: string[];
+  editedFiles: string[];
+  diffSummary: string | null;
+  conflictSummary: string | null;
+  resultSummary: string | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  changeSeq: number;
+};
+
 export type DeltaOp =
   | { op: "append_content"; text: string }
   | { op: "append_reasoning"; text: string }
@@ -90,6 +115,13 @@ export type EventEnvelope =
       thread: ThreadParams;
       runtime: RuntimeState;
       messages: ChatMessage[];
+      background_agents: BackgroundAgentSummary[];
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "background_agent_updated";
+      agent: BackgroundAgentSummary;
     }
   | {
       chat_id: string;
@@ -427,6 +459,7 @@ export function subscribeToChatEvents(
               continue;
             }
             normalizeSeq(parsed);
+            normalizeBackgroundAgentFields(parsed);
             if (parsed.chat_id !== chatId) {
               continue;
             }
@@ -504,6 +537,44 @@ function normalizeSeq(obj: EventEnvelope): void {
     return;
   }
   throw new Error("Missing/invalid seq");
+}
+
+function normalizeBackgroundAgentFields(obj: EventEnvelope): void {
+  if (obj.type === "background_agent_updated") {
+    obj.agent = normalizeBackgroundAgentSummary(obj.agent);
+    return;
+  }
+  if (obj.type === "snapshot") {
+    obj.background_agents = obj.background_agents.map((agent) =>
+      normalizeBackgroundAgentSummary(agent),
+    );
+  }
+}
+
+function normalizeBackgroundAgentSummary(
+  agent: BackgroundAgentSummaryWire,
+): BackgroundAgentSummary {
+  if ("agent_id" in agent) return agent;
+  return {
+    agent_id: agent.agentId,
+    parent_chat_id: agent.parentChatId,
+    child_chat_id: agent.childChatId,
+    kind: agent.kind,
+    status: agent.status,
+    title: agent.title,
+    progress: agent.progress,
+    step_count: agent.stepCount,
+    last_activity: agent.lastActivity,
+    target_files: agent.targetFiles,
+    edited_files: agent.editedFiles,
+    diff_summary: agent.diffSummary,
+    conflict_summary: agent.conflictSummary,
+    result_summary: agent.resultSummary,
+    error: agent.error,
+    started_at: agent.startedAt,
+    finished_at: agent.finishedAt,
+    change_seq: agent.changeSeq,
+  };
 }
 
 export function applyDeltaOps(

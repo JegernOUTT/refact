@@ -44,6 +44,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "Hello" },
           { role: "assistant", content: "Hi there!" },
@@ -86,6 +87,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -121,6 +123,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -155,6 +158,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -194,6 +198,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 
@@ -251,6 +256,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Explain" }],
       };
 
@@ -312,6 +318,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 
@@ -357,6 +364,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 
@@ -428,6 +436,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 
@@ -545,6 +554,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "Existing-1", message_id: "m1" },
           { role: "assistant", content: "Existing-2", message_id: "m2" },
@@ -600,6 +610,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -659,6 +670,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "Original", message_id: "msg-user-1" },
         ],
@@ -710,6 +722,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "First", message_id: "msg-1" },
           { role: "assistant", content: "Response", message_id: "msg-2" },
@@ -767,6 +780,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "Hello", message_id: "msg-1" },
           { role: "assistant", content: "Hi", message_id: "msg-2" },
@@ -814,6 +828,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello", message_id: "msg-1" }],
       };
 
@@ -859,6 +874,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "First", message_id: "msg-1" },
           { role: "assistant", content: "Response 1", message_id: "msg-2" },
@@ -909,6 +925,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "Hello", message_id: "msg-1" },
           { role: "assistant", content: "Hi", message_id: "msg-2" },
@@ -955,6 +972,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "A", message_id: "m1" },
           { role: "assistant", content: "B", message_id: "m2" },
@@ -1004,6 +1022,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -1066,6 +1085,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hi" }],
       };
 
@@ -1132,6 +1152,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 
@@ -1178,6 +1199,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 
@@ -1237,6 +1259,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello", message_id: "m1" }],
       };
 
@@ -1299,6 +1322,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -1360,6 +1384,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [
           { role: "user", content: "Test", message_id: "__proto__" },
           { role: "assistant", content: "Reply", message_id: "constructor" },
@@ -1428,6 +1453,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 
@@ -1496,6 +1522,7 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [{ role: "user", content: "Hello" }],
       };
 

@@ -109,6 +109,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -161,6 +162,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -325,6 +327,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -368,6 +371,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
@@ -404,6 +408,7 @@ describe("Chat Thread Reducer - Core Functionality", () => {
           pause_reasons: [],
           queued_items: [],
         },
+        background_agents: [],
         messages: [],
       };
 
