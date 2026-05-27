@@ -10,7 +10,7 @@ use tokio::process::Command;
 
 use crate::call_validation::ChatMessage;
 use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
-use crate::chat::verify_cmd::parse_safe_argv;
+use crate::chat::verify_cmd::parse_restricted_argv;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate, VerificationResult, VerifierReport};
@@ -305,7 +305,7 @@ async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
     command: &str,
     runner: &mut R,
 ) -> VerificationResult {
-    let (cwd, argv) = match parse_safe_argv(command) {
+    let (cwd, argv) = match parse_restricted_argv(command) {
         Ok(parsed) => parsed,
         Err(reason) => {
             return VerificationResult {

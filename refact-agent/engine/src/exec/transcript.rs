@@ -64,13 +64,18 @@ impl ExecTranscript {
         text: String,
     ) -> ExecOutputChunk {
         let seq = self.next_seq;
+        if text.is_empty() {
+            return ExecOutputChunk {
+                process_id: self.process_id.clone(),
+                seq,
+                stream,
+                text,
+                timestamp_ms: current_timestamp_ms(),
+            };
+        }
         self.next_seq += 1;
 
-        let line_count = if text.is_empty() {
-            0
-        } else {
-            text.lines().count().max(1) as u64
-        };
+        let line_count = text.lines().count().max(1) as u64;
         self.total_bytes_appended += text.len();
         self.total_lines_appended += line_count;
 
@@ -408,6 +413,19 @@ mod tests {
         let mut t = make_transcript(4096);
         t.append(ExecOutputStream::Stdout, "".to_string());
         assert_eq!(t.total_lines_appended(), 0);
+    }
+
+    #[test]
+    fn test_empty_appends_do_not_store_chunks() {
+        let mut t = make_transcript(4096);
+        for _ in 0..10_000 {
+            t.append(ExecOutputStream::Stdout, "".to_string());
+        }
+
+        assert_eq!(t.chunk_count(), 0);
+        assert_eq!(t.current_bytes(), 0);
+        assert_eq!(t.next_seq(), 0);
+        assert!(t.read_since(0).is_empty());
     }
 
     #[test]

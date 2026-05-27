@@ -154,6 +154,12 @@ impl ExecRegistry {
         let record = ExecProcessRecord::new(meta, transcript_limit_bytes);
         let snapshot = record.snapshot.clone();
         let mut records = self.records.lock().await;
+        match records.get(&process_id) {
+            Some(existing) if !existing.snapshot.status.is_terminal() => {
+                return existing.snapshot.clone();
+            }
+            Some(_) | None => {}
+        }
         records.insert(process_id, record);
         snapshot
     }
@@ -872,6 +878,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_register_does_not_overwrite_active_record() {
+        let registry = ExecRegistry::new();
+        let first = registry
+            .register(
+                meta("exec_duplicate", ExecMode::Background, "sleep 1").with_chat_id("chat-a"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = first.meta.process_id.clone();
+        registry.mark_started(&process_id).await.unwrap();
+
+        let second = registry
+            .register(
+                meta("exec_duplicate", ExecMode::Background, "echo replacement")
+                    .with_chat_id("chat-b"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let stored = registry.get(&process_id).await.unwrap();
+
+        assert_eq!(second, stored);
+        assert_eq!(stored.status, ExecStatus::Running);
+        assert_eq!(stored.meta.command, "sleep 1");
+        assert_eq!(stored.meta.owner.chat_id.as_deref(), Some("chat-a"));
+    }
+
+    #[tokio::test]
     async fn test_list_filters_owner_and_status() {
         let registry = ExecRegistry::new();
         let first = meta("exec_one", ExecMode::Service, "server")
@@ -1284,8 +1317,18 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_shutdown_kills_registered_child() {
         let registry = ExecRegistry::new();
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("sleep 30");
+        let mut command = if cfg!(target_os = "windows") {
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg("Start-Sleep -Seconds 30");
+            command
+        } else {
+            let mut command = tokio::process::Command::new("sh");
+            command.arg("-c").arg("sleep 30");
+            command
+        };
         #[cfg(unix)]
         unsafe {
             command.pre_exec(|| {

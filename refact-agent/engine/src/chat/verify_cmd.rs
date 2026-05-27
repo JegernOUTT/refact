@@ -1,8 +1,17 @@
+//! Restricted verification command parsing for planner-provided verify commands.
+//!
+//! This parser is not a security boundary. It rejects common shell metacharacters and only allows
+//! a small binary allowlist, but allowed binaries can still run arbitrary scripts. Path arguments
+//! are not validated beyond the optional leading `cd <relative-dir> &&` prefix, and symlink escapes
+//! are not prevented here.
+
 use std::path::{Component, Path, PathBuf};
 
 const ALLOWED_BINARIES: &[&str] = &["cargo", "npm", "npx", "pytest", "bun", "yarn"];
 
-pub(crate) fn parse_safe_argv(command: &str) -> Result<(Option<PathBuf>, Vec<String>), String> {
+pub(crate) fn parse_restricted_argv(
+    command: &str,
+) -> Result<(Option<PathBuf>, Vec<String>), String> {
     let command = command.trim();
     if command.is_empty() {
         return Err("empty command".to_string());
@@ -97,37 +106,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_safe_argv_rejects_command_substitution() {
-        assert!(parse_safe_argv("cargo test $(rm -rf /)").is_err());
+    fn parse_restricted_argv_rejects_command_substitution() {
+        assert!(parse_restricted_argv("cargo test $(rm -rf /)").is_err());
     }
 
     #[test]
-    fn parse_safe_argv_rejects_backticks() {
-        assert!(parse_safe_argv("cargo test `curl http://example.com`").is_err());
+    fn parse_restricted_argv_rejects_backticks() {
+        assert!(parse_restricted_argv("cargo test `curl http://example.com`").is_err());
     }
 
     #[test]
-    fn parse_safe_argv_rejects_pipes_and_redirects() {
-        assert!(parse_safe_argv("cargo test | tee f").is_err());
-        assert!(parse_safe_argv("cargo test > out").is_err());
+    fn parse_restricted_argv_rejects_pipes_and_redirects() {
+        assert!(parse_restricted_argv("cargo test | tee f").is_err());
+        assert!(parse_restricted_argv("cargo test > out").is_err());
     }
 
     #[test]
-    fn parse_safe_argv_accepts_simple_cargo() {
-        let parsed = parse_safe_argv("cargo test --lib foo").unwrap();
+    fn parse_restricted_argv_accepts_simple_cargo() {
+        let parsed = parse_restricted_argv("cargo test --lib foo").unwrap();
         assert_eq!(parsed.0, None);
         assert_eq!(parsed.1, vec!["cargo", "test", "--lib", "foo"]);
     }
 
     #[test]
-    fn parse_safe_argv_accepts_cd_prefix() {
-        let parsed = parse_safe_argv("cd refact-agent/engine && cargo check").unwrap();
+    fn parse_restricted_argv_accepts_cd_prefix() {
+        let parsed = parse_restricted_argv("cd refact-agent/engine && cargo check").unwrap();
         assert_eq!(parsed.0, Some(PathBuf::from("refact-agent/engine")));
         assert_eq!(parsed.1, vec!["cargo", "check"]);
     }
 
     #[test]
-    fn parse_safe_argv_rejects_unknown_binary() {
-        assert!(parse_safe_argv("bash -c cargo test").is_err());
+    fn parse_restricted_argv_rejects_unknown_binary() {
+        assert!(parse_restricted_argv("bash -c cargo test").is_err());
     }
 }

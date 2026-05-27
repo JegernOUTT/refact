@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::process::Command;
 
-use crate::chat::verify_cmd::parse_safe_argv;
+use crate::chat::verify_cmd::parse_restricted_argv;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, BoardColumn, StatusUpdate};
@@ -170,7 +170,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
     let mut rejected = None;
     let mut selected = None;
     for command in commands {
-        match parse_safe_argv(&command) {
+        match parse_restricted_argv(&command) {
             Ok((cwd, argv)) => {
                 selected = Some((command, cwd, argv));
                 break;
@@ -514,7 +514,7 @@ pub fn is_supported_deterministic_command(command: &str) -> bool {
     {
         return false;
     }
-    parse_safe_argv(command).is_ok()
+    parse_restricted_argv(command).is_ok()
 }
 
 async fn store_regression_result(
