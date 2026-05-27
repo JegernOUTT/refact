@@ -12,7 +12,7 @@ use crate::call_validation::{ChatContent, ChatMessage};
 use crate::worktrees::types::WorktreeMeta;
 
 use super::types::*;
-use super::queue::{add_mode_switch_event_if_changed, resolve_worktree_setparams_update};
+use super::queue::{add_mode_switch_event_and_plan_if_changed, resolve_worktree_setparams_update};
 use super::session::get_or_create_session_with_trajectory;
 use super::content::{validate_content_with_attachments, validate_context_files};
 use super::queue::process_command_queue;
@@ -359,12 +359,14 @@ pub async fn handle_v1_chat_command(
             session.touch();
         }
         if mode_changed {
-            add_mode_switch_event_if_changed(
+            add_mode_switch_event_and_plan_if_changed(
+                app.clone(),
                 &mut session,
                 &old_mode,
                 mode_switch_reason.as_deref(),
                 "chat.session",
-            );
+            )
+            .await;
         }
         if let Some(worktree) = activated_worktree {
             session.add_message(worktree_activation_message(&worktree));

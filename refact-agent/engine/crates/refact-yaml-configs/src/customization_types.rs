@@ -14,6 +14,8 @@ pub struct ModeConfig {
     #[serde(default)]
     pub prompt: String,
     #[serde(default)]
+    pub plan_template: String,
+    #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
     pub allow_integrations: bool,
@@ -159,6 +161,8 @@ pub struct ModeOverride {
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
+    pub plan_template: Option<String>,
+    #[serde(default)]
     pub tools_replace: Option<Vec<String>>,
     #[serde(default)]
     pub tools_add: Option<Vec<String>>,
@@ -183,6 +187,9 @@ impl ModeConfig {
         let mut result = self.clone();
         if let Some(prompt) = &override_config.prompt {
             result.prompt = prompt.clone();
+        }
+        if let Some(plan_template) = &override_config.plan_template {
+            result.plan_template = plan_template.clone();
         }
         if let Some(tools) = &override_config.tools_replace {
             result.tools = tools.clone();
@@ -324,6 +331,7 @@ title: Test Mode
 description: A test mode
 specific: false
 prompt: "Test prompt"
+plan_template: "Plan for %MODE_NAME%"
 tools:
   - tree
   - cat
@@ -337,6 +345,7 @@ tool_confirm:
         let config: ModeConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.id, "test_mode");
         assert_eq!(config.tools, vec!["tree", "cat"]);
+        assert_eq!(config.plan_template, "Plan for %MODE_NAME%");
         assert_eq!(config.tool_confirm.rules.len(), 2);
         assert_eq!(config.tool_confirm.rules[0].match_pattern, "tree");
         assert_eq!(config.tool_confirm.rules[0].action, "auto");
@@ -355,6 +364,7 @@ tool_confirm:
             description: "".to_string(),
             specific: false,
             prompt: "Base prompt".to_string(),
+            plan_template: "Base plan".to_string(),
             tools: vec!["tree".to_string(), "cat".to_string()],
             model_defaults: ModeModelDefaults {
                 default: Some(ModelTypeConfig {
@@ -377,6 +387,7 @@ tool_confirm:
 
         let override_cfg = ModeOverride {
             prompt: Some("Override prompt".to_string()),
+            plan_template: Some("Override plan".to_string()),
             tools_add: Some(vec!["shell".to_string()]),
             model_defaults: Some(ModeModelDefaults {
                 default: Some(ModelTypeConfig {
@@ -390,6 +401,7 @@ tool_confirm:
 
         let result = base.apply_override(&override_cfg);
         assert_eq!(result.prompt, "Override prompt");
+        assert_eq!(result.plan_template, "Override plan");
         assert_eq!(result.tools, vec!["tree", "cat", "shell"]);
         assert_eq!(
             result
@@ -415,6 +427,7 @@ tool_confirm:
             description: "".to_string(),
             specific: false,
             prompt: "".to_string(),
+            plan_template: String::new(),
             tools: vec!["tree".to_string(), "cat".to_string()],
             model_defaults: ModeModelDefaults::default(),
             tool_confirm: ToolConfirmConfig::default(),
@@ -446,6 +459,7 @@ tool_confirm:
             description: "".to_string(),
             specific: false,
             prompt: "".to_string(),
+            plan_template: String::new(),
             tools: vec!["tree".to_string(), "cat".to_string(), "shell".to_string()],
             model_defaults: ModeModelDefaults::default(),
             tool_confirm: ToolConfirmConfig::default(),

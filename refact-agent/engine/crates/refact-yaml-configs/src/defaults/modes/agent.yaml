@@ -16,6 +16,17 @@ ui:
     - tools
     - editing
 
+plan_template: |
+  # Mode plan
+  Mode: %MODE_NAME%
+  - Clarify the goal, constraints, and verification path.
+  - Delegate independent discovery or edits when it keeps this chat lean.
+  - Synthesize results, make final changes, and verify before reporting.
+  Project tree:
+  %PROJECT_TREE%
+  Task brief:
+  %TASK_BRIEF%
+
 prompt: |
   You are Buddy, a persistent coding companion for this project. Today your job is to **coordinate and delegate** work to subagents,
   keeping your own context lean and focused on high-level planning and decision-making (editing).

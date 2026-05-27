@@ -14,6 +14,7 @@ use crate::files_correction::get_project_dirs;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
 use crate::chat::internal_roles::mode_switch_event;
+use crate::yaml_configs::customization_registry::get_mode_config;
 
 use super::types::*;
 use super::browser_context;
@@ -529,7 +530,8 @@ pub fn apply_setparams_patch(
     (changed, sanitized_patch)
 }
 
-pub(crate) fn add_mode_switch_event_if_changed(
+pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
+    app: AppState,
     session: &mut ChatSession,
     old_mode: &str,
     reason: Option<&str>,
@@ -539,7 +541,30 @@ pub(crate) fn add_mode_switch_event_if_changed(
     if new_mode == old_mode {
         return false;
     }
-    session.add_message(mode_switch_event(source, old_mode, new_mode, reason));
+    session.add_message(mode_switch_event(source, old_mode, &new_mode, reason));
+
+    let model_id = if session.thread.model.is_empty() {
+        None
+    } else {
+        Some(session.thread.model.as_str())
+    };
+    if let Some(mode_config) = get_mode_config(app.gcx.clone(), &new_mode, model_id).await {
+        let plan_template = mode_config.plan_template.trim();
+        if !plan_template.is_empty() {
+            let rendered = super::prompts::render_mode_plan_template(
+                app,
+                plan_template,
+                &mode_config.title,
+                session.thread.include_project_info,
+                &session.thread.task_meta,
+            )
+            .await;
+            if !rendered.trim().is_empty() {
+                session.install_plan(&new_mode, rendered.trim());
+            }
+        }
+    }
+
     true
 }
 
@@ -1241,12 +1266,14 @@ pub async fn process_command_queue(
                     session.touch();
                 }
                 if mode_changed {
-                    add_mode_switch_event_if_changed(
+                    add_mode_switch_event_and_plan_if_changed(
+                        app.clone(),
                         &mut session,
                         &old_mode,
                         mode_switch_reason.as_deref(),
                         "chat.session",
-                    );
+                    )
+                    .await;
                 }
                 drop(session);
                 if changed {

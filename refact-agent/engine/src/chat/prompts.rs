@@ -62,6 +62,82 @@ pub async fn get_mode_system_prompt(
     }
 }
 
+pub async fn render_mode_plan_template(
+    app: AppState,
+    template: &str,
+    mode_name: &str,
+    include_project_info: bool,
+    task_meta: &Option<crate::chat::types::TaskMeta>,
+) -> String {
+    let mut rendered = template.replace("%MODE_NAME%", mode_name);
+
+    if rendered.contains("%PROJECT_TREE%") {
+        if include_project_info {
+            match system_context::generate_compact_project_tree(app.gcx.clone(), 1).await {
+                Ok(tree) if !tree.is_empty() => {
+                    let first_level = tree
+                        .lines()
+                        .filter(|line| !line.starts_with("    "))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let tree_content = truncate_to_chars(&first_level, 600);
+                    rendered = rendered.replace("%PROJECT_TREE%", &tree_content);
+                }
+                _ => {
+                    rendered = rendered.replace("%PROJECT_TREE%", "");
+                }
+            }
+        } else {
+            rendered = rendered.replace("%PROJECT_TREE%", "");
+        }
+    }
+
+    if rendered.contains("%TASK_BRIEF%") {
+        let task_brief = task_brief_for_plan_template(&app, task_meta).await;
+        rendered = rendered.replace("%TASK_BRIEF%", &task_brief);
+    }
+
+    rendered
+}
+
+async fn task_brief_for_plan_template(
+    app: &AppState,
+    task_meta: &Option<crate::chat::types::TaskMeta>,
+) -> String {
+    let Some(meta) = task_meta else {
+        return String::new();
+    };
+
+    match crate::tasks::storage::load_task_meta(app.gcx.clone(), &meta.task_id).await {
+        Ok(task) => {
+            let mut lines = vec![format!("Task: {} ({:?})", task.name, task.status)];
+            if let Some(card_id) = meta.card_id.as_deref() {
+                if let Ok(board) =
+                    crate::tasks::storage::load_board(app.gcx.clone(), &meta.task_id).await
+                {
+                    if let Some(card) = board.get_card(card_id) {
+                        lines.push(format!(
+                            "Card: {} — {} ({}, {})",
+                            card.id, card.title, card.column, card.priority
+                        ));
+                        if !card.target_files.is_empty() {
+                            lines.push(format!("Target files: {}", card.target_files.join(", ")));
+                        }
+                        if !card.instructions.trim().is_empty() {
+                            lines.push(
+                                crate::llm::safe_truncate(card.instructions.trim(), 500)
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            crate::llm::safe_truncate(&lines.join("\n"), 700).to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
 async fn _workspace_info(workspace_dirs: &[String], active_file_path: &Option<PathBuf>) -> String {
     async fn get_vcs_info(detect_vcs_at: &PathBuf) -> String {
         let mut info = String::new();
@@ -105,6 +181,28 @@ async fn _workspace_info(workspace_dirs: &[String], active_file_path: &Option<Pa
     info
 }
 
+async fn workspace_files_info(app: &AppState) -> (Vec<String>, Option<PathBuf>) {
+    let documents_state = &app.workspace.documents_state;
+    let workspace_dirs: Vec<String> = {
+        let dirs_locked = documents_state.workspace_folders.lock().unwrap();
+        dirs_locked
+            .iter()
+            .map(|x| x.to_string_lossy().to_string())
+            .collect()
+    };
+    let active_file_path = documents_state.active_file_path.lock().await.clone();
+    (workspace_dirs, active_file_path)
+}
+
+fn truncate_to_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}\n[TRUNCATED]", truncated)
+    }
+}
+
 pub async fn system_prompt_add_extra_instructions(
     app: AppState,
     system_prompt: String,
@@ -119,29 +217,6 @@ pub async fn system_prompt_add_extra_instructions(
     let config = load_project_information_config(app.gcx.clone()).await;
     // If config is globally disabled, treat as if include_project_info is false
     let include_project_info = include_project_info && config.enabled;
-
-    async fn workspace_files_info(app: &AppState) -> (Vec<String>, Option<PathBuf>) {
-        let documents_state = &app.workspace.documents_state;
-        let workspace_dirs: Vec<String> = {
-            let dirs_locked = documents_state.workspace_folders.lock().unwrap();
-            dirs_locked
-                .iter()
-                .map(|x| x.to_string_lossy().to_string())
-                .collect()
-        };
-        let active_file_path = documents_state.active_file_path.lock().await.clone();
-        (workspace_dirs, active_file_path)
-    }
-
-    // Helper to truncate content to max chars
-    fn truncate_to_chars(s: &str, max_chars: usize) -> String {
-        if s.chars().count() <= max_chars {
-            s.to_string()
-        } else {
-            let truncated: String = s.chars().take(max_chars).collect();
-            format!("{}\n[TRUNCATED]", truncated)
-        }
-    }
 
     let mut system_prompt = system_prompt.clone();
 

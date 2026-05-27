@@ -1610,8 +1610,10 @@ mod tests {
         assert!(client_calls.is_empty());
     }
 
-    #[test]
-    fn mode_switch_emits_event_not_user_message() {
+    #[tokio::test]
+    async fn mode_switch_emits_event_not_user_message() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
         let mut session = ChatSession::new("mode-switch-test".to_string());
         session.thread.mode = "agent".to_string();
         session.add_message(ChatMessage {
@@ -1625,12 +1627,14 @@ mod tests {
         let patch = json!({"mode": "TASK_AGENT"});
         let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
         assert!(changed);
-        crate::chat::queue::add_mode_switch_event_if_changed(
+        crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
+            app,
             &mut session,
             &old_mode,
             None,
             "chat.session",
-        );
+        )
+        .await;
 
         let event_messages: Vec<_> = session
             .messages
@@ -1659,6 +1663,126 @@ mod tests {
         assert_eq!(
             event_messages[0].content.content_text_only(),
             "Mode switched: agent → task_agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_switch_to_agent_installs_plan_v1() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("lib.rs"), "pub fn frog() {}\n").unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![src_dir.join("lib.rs")];
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("plan-agent-test".to_string());
+        session.thread.mode = "explore".to_string();
+
+        let old_mode = session.thread.mode.clone();
+        let patch = json!({"mode": "agent"});
+        let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
+        assert!(changed);
+        crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
+            app,
+            &mut session,
+            &old_mode,
+            None,
+            "chat.session",
+        )
+        .await;
+
+        let plans = crate::chat::plan_role::plan_history(&session);
+        assert_eq!(plans.len(), 1);
+        let plan = plans[0];
+        assert_eq!(plan.extra["plan"]["mode"], json!("agent"));
+        assert_eq!(plan.extra["plan"]["version"], json!(1));
+        assert!(plan.extra["plan"]["supersedes"].is_null());
+        let content = plan.content.content_text_only();
+        assert!(content.contains("Mode: Agent"));
+        assert!(content.contains("src/"));
+        assert!(!content.contains("%MODE_NAME%"));
+        assert!(!content.contains("%PROJECT_TREE%"));
+        assert!(!content.contains("%TASK_BRIEF%"));
+    }
+
+    #[tokio::test]
+    async fn three_mode_switches_increment_plan_version() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("plan-version-test".to_string());
+        session.thread.mode = "explore".to_string();
+
+        for mode in ["agent", "task_planner", "agent"] {
+            let old_mode = session.thread.mode.clone();
+            let patch = json!({"mode": mode});
+            let (changed, _) =
+                crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
+            assert!(changed);
+            crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
+                app.clone(),
+                &mut session,
+                &old_mode,
+                None,
+                "chat.session",
+            )
+            .await;
+        }
+
+        let chronological: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|message| message.role == "plan")
+            .collect();
+        assert_eq!(chronological.len(), 3);
+        assert_eq!(chronological[0].extra["plan"]["version"], json!(1));
+        assert_eq!(chronological[1].extra["plan"]["version"], json!(2));
+        assert_eq!(chronological[2].extra["plan"]["version"], json!(3));
+        assert_eq!(chronological[0].extra["plan"]["mode"], json!("agent"));
+        assert_eq!(
+            chronological[1].extra["plan"]["mode"],
+            json!("task_planner")
+        );
+        assert_eq!(chronological[2].extra["plan"]["mode"], json!("agent"));
+        assert!(chronological[0].extra["plan"]["supersedes"].is_null());
+        assert_eq!(
+            chronological[1].extra["plan"]["supersedes"].as_str(),
+            Some(chronological[0].message_id.as_str())
+        );
+        assert_eq!(
+            chronological[2].extra["plan"]["supersedes"].as_str(),
+            Some(chronological[1].message_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_without_plan_template_installs_no_plan() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("plan-none-test".to_string());
+        session.thread.mode = "agent".to_string();
+
+        let old_mode = session.thread.mode.clone();
+        let patch = json!({"mode": "ask"});
+        let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
+        assert!(changed);
+        crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
+            app,
+            &mut session,
+            &old_mode,
+            None,
+            "chat.session",
+        )
+        .await;
+
+        assert!(crate::chat::plan_role::plan_history(&session).is_empty());
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|m| m.role == "event")
+                .count(),
+            1
         );
     }
 

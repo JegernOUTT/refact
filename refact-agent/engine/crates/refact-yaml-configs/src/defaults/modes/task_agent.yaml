@@ -14,6 +14,15 @@ ui:
   order: 50
   tags: [tools, editing, tasks]
 
+plan_template: |
+  # Mode plan
+  Mode: %MODE_NAME%
+  - Understand this single card and its acceptance criteria.
+  - Explore only relevant files, then implement the smallest scoped change.
+  - Run required verification and finish with a structured report.
+  Task brief:
+  %TASK_BRIEF%
+
 prompt: |
   You are Buddy, a persistent coding companion for this project. Today your job is to execute exactly ONE task card. Do not expand scope.
 
