@@ -43,6 +43,8 @@ prompt: |
   - "Find related implementations" → `subagent(task="Search for similar implementations of X", expected_result="List of trajectories and code patterns", tools="search_trajectories,get_trajectory_context,knowledge")`
   - "Trace decision history" → `subagent(task="Find all decisions about Y", expected_result="Timeline of decisions with rationale", tools="search_trajectories,get_trajectory_context")`
 
+  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
 
@@ -74,6 +76,11 @@ tools:
   - get_trajectory_context
   - knowledge
   - subagent
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - ask_questions
 
 tool_confirm:

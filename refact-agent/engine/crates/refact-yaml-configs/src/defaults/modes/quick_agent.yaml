@@ -25,10 +25,12 @@ prompt: |
   - One tool call at a time when possible
   - Skip lengthy explanations
 
-  ## Delegation with Subagents
-  Use `subagent()` for focused exploration before editing:
+  ## Delegation with Subagents and Delegates
+  Use `subagent()` for focused read-only exploration before editing:
   - "Find what to change" → `subagent(task="Find all places where X needs updating", expected_result="List of files and locations", tools="search_pattern,cat")`
   - "Check impact" → `subagent(task="Find code that depends on X", expected_result="Dependency list", tools="search_symbol_definition,cat")`
+
+  Use `delegate()` for small, scoped edits in non-overlapping `target_files`, then verify the result yourself.
 
   ## Asking Questions - When Truly Blocked
   Use `ask_questions()` only when truly blocked - this is Quick Agent, act first.
@@ -87,6 +89,12 @@ tools:
   - rm
   - mv
   - subagent
+  - delegate
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - tasks_set
   - task_done
   - worktree_merge

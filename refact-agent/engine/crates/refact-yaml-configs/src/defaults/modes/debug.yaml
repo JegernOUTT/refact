@@ -58,6 +58,8 @@ prompt: |
   - "Find similar bugs" → `subagent(task="Search for similar error handling patterns", expected_result="List of related code patterns", tools="search_pattern,cat,search_trajectories")`
   - "Check dependencies" → `subagent(task="Analyze dependencies of module X", expected_result="Dependency graph and potential issues", tools="tree,cat,search_pattern")`
 
+  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
 
@@ -106,6 +108,11 @@ tools:
   - chrome
   - shell
   - subagent
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - ask_questions
 
 tool_confirm:

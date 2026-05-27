@@ -32,6 +32,8 @@ prompt: |
   - "Check test coverage" → `subagent(task="Find tests related to module X", expected_result="List of test files and coverage gaps", tools="search_pattern,cat")`
   - "Verify API usage" → `subagent(task="Check if X API is used correctly", expected_result="Usage analysis with documentation links", tools="cat,web_search,web")`
 
+  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+
   ## Phase 2: Review Focus
   - **Bugs**: Logic errors, null handling, race conditions
   - **Security**: Input validation, auth checks, data exposure
@@ -106,6 +108,11 @@ tools:
   - chrome
   - shell
   - subagent
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - task_done
   - ask_questions
 

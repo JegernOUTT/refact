@@ -40,6 +40,8 @@ prompt: |
 
   Subagents work independently and return summarized results. Use them for focused investigation tasks.
 
+  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
 
@@ -87,6 +89,11 @@ tools:
   - web_search
   - chrome
   - subagent
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - ask_questions
   - handoff_to_mode
 

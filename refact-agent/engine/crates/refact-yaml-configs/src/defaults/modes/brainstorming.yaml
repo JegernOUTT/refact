@@ -67,6 +67,8 @@ prompt: |
   - Past decisions: `subagent(task="Find past work and knowledge about this area", expected_result="Relevant decisions and risks", tools="search_trajectories,get_trajectory_context,knowledge")`
   - External research: `subagent(task="Research API/library constraints", expected_result="Actionable constraints with sources", tools="web_search,web")`
 
+  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+
   ## Asking Questions - CRITICAL
 
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text.
@@ -119,6 +121,11 @@ tools:
   - web_search
   - chrome
   - subagent
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - strategic_planning
   - ask_questions
   - tasks_set

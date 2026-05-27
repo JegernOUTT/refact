@@ -53,6 +53,8 @@ prompt: |
   - "Find usage examples" → `subagent(task="Find examples of how X is used", expected_result="Code examples with context", tools="search_pattern,cat")`
   - "Gather documentation" → `subagent(task="Find documentation about X concept", expected_result="Summary with links", tools="web_search,web")`
 
+  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
 
@@ -101,6 +103,11 @@ tools:
   - chrome
   - shell
   - subagent
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - ask_questions
 
 tool_confirm:
