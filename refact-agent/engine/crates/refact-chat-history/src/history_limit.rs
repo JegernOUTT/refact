@@ -1,6 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use serde_json::Value;
 use serde::{Serialize, Deserialize};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use uuid::Uuid;
+
+use crate::compression_exemption::{event_source, event_subkind, exemption_for, CompressionExemption};
 use refact_core::chat_types::{ChatMessage, ChatContent, ContextFile, SamplingParameters};
 use refact_core::custom_error::first_n_chars;
 
@@ -25,6 +28,180 @@ pub enum CompactAggression {
     Aggressive,
 }
 
+impl CompactAggression {
+    fn keep_recent_event_count(self) -> usize {
+        match self {
+            CompactAggression::Standard => 3,
+            CompactAggression::Aggressive => 3,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct EventHistorySummary {
+    insert_at: usize,
+    source: String,
+    subkind: String,
+    count: usize,
+}
+
+fn estimated_message_tokens(msg: &ChatMessage) -> usize {
+    msg.content.content_text_only().len() / 4 + 10
+}
+
+fn cutoff_excluding_never(messages: &[ChatMessage], preserve_last_n: usize) -> usize {
+    if preserve_last_n == 0 {
+        return messages.len();
+    }
+    let mut kept = 0usize;
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        if exemption_for(msg) == CompressionExemption::Never {
+            continue;
+        }
+        kept += 1;
+        if kept >= preserve_last_n {
+            return idx;
+        }
+    }
+    0
+}
+
+fn event_history_attr_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn event_history_summary_message(summary: EventHistorySummary) -> ChatMessage {
+    let source = summary.source;
+    let subkind = summary.subkind;
+    let count = summary.count;
+    let escaped_source = event_history_attr_escape(&source);
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "event".to_string(),
+        json!({
+            "subkind": "summarization_marker",
+            "source": source.clone(),
+            "payload": {
+                "summarized_subkind": subkind.clone(),
+                "count": count,
+            },
+        }),
+    );
+    ChatMessage {
+        message_id: Uuid::new_v4().to_string(),
+        role: "event".to_string(),
+        content: ChatContent::SimpleText(format!(
+            "<event-history source=\"{}\">{} earlier {} events</event-history>",
+            escaped_source, count, subkind
+        )),
+        extra,
+        ..Default::default()
+    }
+}
+
+fn compact_event_messages(
+    messages: &mut Vec<ChatMessage>,
+    preserve_last_n: usize,
+    keep_recent_n: usize,
+) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+
+    let window_start = messages.len().saturating_sub(preserve_last_n);
+    let mut keep = vec![true; messages.len()];
+    let mut keep_recent_seen: HashMap<(String, String), usize> = HashMap::new();
+    let mut summaries: HashMap<(String, String), EventHistorySummary> = HashMap::new();
+    let mut most_recent_mode_switch_seen = false;
+    let mut tokens_saved_estimate = 0usize;
+
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        match exemption_for(msg) {
+            CompressionExemption::Never | CompressionExemption::PreserveAnchor => {}
+            CompressionExemption::KeepRecentN => {
+                let source = event_source(msg).to_string();
+                let subkind = event_subkind(msg).unwrap_or("event").to_string();
+                let key = (source.clone(), subkind.clone());
+                let seen = keep_recent_seen.entry(key.clone()).or_insert(0);
+                if *seen < keep_recent_n {
+                    *seen += 1;
+                    continue;
+                }
+                keep[idx] = false;
+                tokens_saved_estimate += estimated_message_tokens(msg);
+                summaries
+                    .entry(key)
+                    .and_modify(|summary| {
+                        summary.insert_at = summary.insert_at.min(idx);
+                        summary.count += 1;
+                    })
+                    .or_insert(EventHistorySummary {
+                        insert_at: idx,
+                        source,
+                        subkind,
+                        count: 1,
+                    });
+            }
+            CompressionExemption::PreserveWindow => {
+                if idx < window_start {
+                    keep[idx] = false;
+                    tokens_saved_estimate += estimated_message_tokens(msg);
+                }
+            }
+            CompressionExemption::DropOnAge => {
+                if event_subkind(msg) == Some("mode_switch") && !most_recent_mode_switch_seen {
+                    most_recent_mode_switch_seen = true;
+                    continue;
+                }
+                if idx < window_start {
+                    keep[idx] = false;
+                    tokens_saved_estimate += estimated_message_tokens(msg);
+                }
+            }
+        }
+    }
+
+    if keep.iter().all(|keep_message| *keep_message) && summaries.is_empty() {
+        return 0;
+    }
+
+    let mut summaries: Vec<EventHistorySummary> = summaries.into_values().collect();
+    summaries.sort_by(|left, right| {
+        left.insert_at
+            .cmp(&right.insert_at)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.subkind.cmp(&right.subkind))
+    });
+    let mut summaries_by_insert: BTreeMap<usize, Vec<ChatMessage>> = BTreeMap::new();
+    for summary in summaries {
+        summaries_by_insert
+            .entry(summary.insert_at)
+            .or_default()
+            .push(event_history_summary_message(summary));
+    }
+
+    let old_messages = std::mem::take(messages);
+    let mut compacted = Vec::with_capacity(old_messages.len());
+    for (idx, msg) in old_messages.into_iter().enumerate() {
+        if let Some(summary_messages) = summaries_by_insert.remove(&idx) {
+            compacted.extend(summary_messages);
+        }
+        if keep[idx] {
+            compacted.push(msg);
+        }
+    }
+    for (_, summary_messages) in summaries_by_insert {
+        compacted.extend(summary_messages);
+    }
+    *messages = compacted;
+
+    tokens_saved_estimate
+}
+
 pub fn tier0_deterministic_compact(
     messages: &mut Vec<ChatMessage>,
     preserve_last_n: usize,
@@ -40,6 +217,12 @@ pub fn tier0_deterministic_compact_with(
     let mut context_files_deduped = 0usize;
     let mut tool_outputs_truncated = 0usize;
     let mut tokens_saved_estimate = 0usize;
+
+    tokens_saved_estimate += compact_event_messages(
+        messages,
+        preserve_last_n,
+        aggression.keep_recent_event_count(),
+    );
 
     let mut last_occurrence: HashMap<String, usize> = HashMap::new();
     for (i, msg) in messages.iter().enumerate() {
@@ -82,7 +265,7 @@ pub fn tier0_deterministic_compact_with(
         CompactAggression::Aggressive => (80usize, preserve_last_n.min(2), Some(40usize)),
     };
 
-    let tool_cutoff = messages.len().saturating_sub(tool_preserve_last_n);
+    let tool_cutoff = cutoff_excluding_never(messages, tool_preserve_last_n);
     for (i, msg) in messages.iter_mut().enumerate() {
         if i >= tool_cutoff {
             break;
@@ -110,7 +293,7 @@ pub fn tier0_deterministic_compact_with(
     }
 
     if let Some(keep_lines) = ctx_file_keep_lines {
-        let ctx_cutoff = messages.len().saturating_sub(preserve_last_n.min(4));
+        let ctx_cutoff = cutoff_excluding_never(messages, preserve_last_n.min(4));
         for (i, msg) in messages.iter_mut().enumerate() {
             if i >= ctx_cutoff {
                 break;
@@ -186,7 +369,12 @@ pub fn compute_context_budget(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
 ) -> ContextBudgetReport {
-    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(messages);
+    let measured_messages: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|msg| exemption_for(msg) != CompressionExemption::Never)
+        .cloned()
+        .collect();
+    let used_tokens_estimate = crate::trajectory_ops::approx_token_count(&measured_messages);
     let remaining_estimate = (effective_n_ctx as isize) - (used_tokens_estimate as isize);
     let pressure = if effective_n_ctx == 0 {
         ContextPressure::Low

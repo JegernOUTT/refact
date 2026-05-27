@@ -1,3 +1,4 @@
+pub mod compression_exemption;
 pub mod config;
 pub mod content;
 pub mod history_limit;
@@ -8,3 +9,6 @@ pub mod tool_call_recovery;
 pub mod tool_call_recovery_oss;
 pub mod trajectory_ops;
 pub mod trajectory_snapshot;
+
+#[cfg(test)]
+mod compression_event_plan_tests;

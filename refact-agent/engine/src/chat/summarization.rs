@@ -9,6 +9,7 @@ use crate::chat::history_limit::{compute_context_budget, ContextPressure};
 use crate::chat::linearize::apply_summarization_linearize;
 use crate::chat::trajectory_ops::approx_token_count;
 use crate::subchat::{SubchatConfig, ToolsPolicy, run_subchat};
+use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
 
 pub const MAX_TIER1_COMPACT_ATTEMPTS: usize = 2;
 pub const MAX_TIER1_ANCHORS_BEFORE_MERGE: usize = 4;
@@ -119,7 +120,7 @@ fn find_tool_safe_boundary(messages: &[ChatMessage], target_idx: usize) -> usize
 fn range_contains_preserved(messages: &[ChatMessage], start: usize, end: usize) -> bool {
     messages[start..end]
         .iter()
-        .any(|msg| msg.preserve == Some(true))
+        .any(|msg| msg.preserve == Some(true) || exemption_for(msg) == CompressionExemption::Never)
 }
 
 fn is_real_summarization_anchor(message: &ChatMessage) -> bool {
@@ -200,7 +201,9 @@ fn find_summarization_boundary_visible(
         if start >= safe_end {
             return (start, start);
         }
-        if messages[start].preserve == Some(true) {
+        if messages[start].preserve == Some(true)
+            || exemption_for(&messages[start]) == CompressionExemption::Never
+        {
             start += 1;
             continue;
         }
@@ -213,10 +216,9 @@ fn find_summarization_boundary_visible(
         let mut adjusted_end = find_tool_safe_boundary(messages, target_end);
 
         if adjusted_end > start && range_contains_preserved(messages, start, adjusted_end) {
-            if let Some(offset) = messages[start..adjusted_end]
-                .iter()
-                .position(|msg| msg.preserve == Some(true))
-            {
+            if let Some(offset) = messages[start..adjusted_end].iter().position(|msg| {
+                msg.preserve == Some(true) || exemption_for(msg) == CompressionExemption::Never
+            }) {
                 if offset > 1 {
                     adjusted_end = find_tool_safe_boundary(messages, start + offset);
                 } else {

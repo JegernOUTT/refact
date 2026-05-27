@@ -1,5 +1,6 @@
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::diagnostics::is_ui_only_message;
+use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
 use std::collections::{HashMap, HashSet};
 
 fn is_authoritative_summary(msg: &ChatMessage) -> bool {
@@ -29,14 +30,29 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
     let mut suppressed: HashSet<usize> = HashSet::new();
     for (start, end, _) in &summaries {
         for i in *start..=*end {
+            if messages
+                .get(i)
+                .map(|msg| exemption_for(msg) == CompressionExemption::Never)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             suppressed.insert(i);
         }
     }
 
     let mut summary_by_start: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
     for (start, end, content) in summaries {
+        let Some(insert_at) = (start..=end).find(|idx| {
+            messages
+                .get(*idx)
+                .map(|msg| exemption_for(msg) != CompressionExemption::Never)
+                .unwrap_or(false)
+        }) else {
+            continue;
+        };
         summary_by_start
-            .entry(start)
+            .entry(insert_at)
             .or_default()
             .push((end, content));
     }
@@ -94,6 +110,32 @@ mod tests {
             content: ChatContent::SimpleText(content.to_string()),
             summarized_range: Some(range),
             summarization_tier: Some("tier0_deterministic".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn event(text: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            serde_json::json!({
+                "subkind": "tool_decision",
+                "source": "test",
+                "payload": {},
+            }),
+        );
+        ChatMessage {
+            role: "event".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn plan(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "plan".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
             ..Default::default()
         }
     }
@@ -206,5 +248,33 @@ mod tests {
         assert_eq!(result[1].content.content_text_only(), "msg1");
         assert_eq!(result[2].content.content_text_only(), "sum");
         assert_eq!(result[3].content.content_text_only(), "msg3");
+    }
+
+    #[test]
+    fn linearize_does_not_merge_event_with_user() {
+        let messages = vec![user("before"), event("hidden event"), user("after")];
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "event", "user"]);
+        assert_eq!(result[0].content.content_text_only(), "before");
+        assert_eq!(result[1].content.content_text_only(), "hidden event");
+        assert_eq!(result[2].content.content_text_only(), "after");
+    }
+
+    #[test]
+    fn linearize_keeps_plan_when_summary_range_overlaps_it() {
+        let messages = vec![
+            user("old"),
+            plan("sacred plan"),
+            user("new"),
+            summarization("sum", (0, 2)),
+        ];
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "plan"]);
+        assert_eq!(result[0].content.content_text_only(), "sum");
+        assert_eq!(result[1].content.content_text_only(), "sacred plan");
     }
 }

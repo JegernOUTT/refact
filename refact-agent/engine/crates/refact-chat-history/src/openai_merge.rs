@@ -23,6 +23,13 @@ pub struct ToolCallEntry {
 
 impl ToolCallAccumulator {
     pub fn merge(&mut self, new_tc: &serde_json::Value) {
+        if matches!(
+            new_tc.get("role").and_then(|role| role.as_str()),
+            Some("event" | "plan")
+        ) {
+            return;
+        }
+
         let index = new_tc
             .get("index")
             .and_then(|i| {
