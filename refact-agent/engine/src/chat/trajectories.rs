@@ -25,10 +25,28 @@ use crate::worktrees::types::WorktreeMeta;
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
-    if dest_path.exists() {
-        fs::remove_file(dest_path)
-            .await
-            .map_err(|e| format!("Failed to remove existing file: {}", e))?;
+    {
+        if dest_path.exists() {
+            let backup_extension = format!(
+                "{}.replace.{}",
+                dest_path.extension().and_then(|ext| ext.to_str()).unwrap_or("tmp"),
+                Uuid::new_v4().simple()
+            );
+            let backup_path = dest_path.with_extension(backup_extension);
+            fs::rename(dest_path, &backup_path)
+                .await
+                .map_err(|e| format!("Failed to move existing file aside: {}", e))?;
+            match fs::rename(tmp_path, dest_path).await {
+                Ok(()) => {
+                    let _ = fs::remove_file(&backup_path).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    let _ = fs::rename(&backup_path, dest_path).await;
+                    return Err(format!("Failed to rename: {}", e));
+                }
+            }
+        }
     }
     fs::rename(tmp_path, dest_path)
         .await
