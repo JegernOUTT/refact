@@ -64,6 +64,10 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
+fn now_filename_stamp() -> String {
+    now_rfc3339().replace(':', "-")
+}
+
 fn validate_slug(slug: &str) -> Result<(), String> {
     if slug.is_empty() {
         return Err("slug cannot be empty".to_string());
@@ -287,7 +291,7 @@ async fn snapshot_existing(documents_dir: &Path, slug: &str) -> Result<(), Strin
     fs::create_dir_all(&history)
         .await
         .map_err(|e| format!("failed to create history directory: {}", e))?;
-    let history_path = history.join(format!("{}__{}.md", slug, now_rfc3339()));
+    let history_path = history.join(format!("{}__{}.md", slug, now_filename_stamp()));
     atomic_write(&history_path, &raw).await?;
     cap_history(documents_dir, slug).await
 }
@@ -467,7 +471,7 @@ async fn delete_document_at(documents_dir: &Path, slug: &str) -> Result<PathBuf,
     fs::create_dir_all(&deleted)
         .await
         .map_err(|e| format!("failed to create deleted history directory: {}", e))?;
-    let deleted_path = deleted.join(format!("{}__{}.md", slug, now_rfc3339()));
+    let deleted_path = deleted.join(format!("{}__{}.md", slug, now_filename_stamp()));
     fs::rename(&path, &deleted_path)
         .await
         .map_err(|e| format!("failed to move deleted document: {}", e))?;

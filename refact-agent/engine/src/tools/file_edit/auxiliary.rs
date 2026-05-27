@@ -110,14 +110,14 @@ pub async fn check_scope_guard(
         return Ok(());
     }
 
-    let canon = match dunce::canonicalize(edit_path) {
-        Ok(path) => path.to_string_lossy().to_string(),
-        Err(_) => edit_path.to_string_lossy().to_string(),
-    };
-    let allowed = card
-        .target_files
-        .iter()
-        .any(|target| canon.ends_with(target.trim_start_matches('/')));
+    let canon_path = dunce::canonicalize(edit_path)
+        .map(|path| dunce::simplified(&path).to_path_buf())
+        .unwrap_or_else(|_| edit_path.to_path_buf());
+    let canon = canon_path.to_string_lossy().to_string();
+    let allowed = card.target_files.iter().any(|target| {
+        let target = Path::new(target.trim_start_matches(|c| c == '/' || c == '\\'));
+        canon_path.ends_with(target)
+    });
     if allowed {
         return Ok(());
     }

@@ -284,12 +284,22 @@ pub async fn check_if_its_inside_a_workspace_or_config(
 ) -> Result<(), String> {
     let workspace_folders = get_project_dirs(gcx.clone()).await;
     let config_dir = gcx.config_dir.clone();
+    let path = canonicalize_normalized_path(path.to_path_buf());
+    let workspace_folders_normalized = workspace_folders
+        .iter()
+        .map(|path| canonicalize_normalized_path(path.clone()))
+        .collect::<Vec<_>>();
+    let config_dir = canonicalize_normalized_path(config_dir);
 
-    if workspace_folders.iter().any(|d| path.starts_with(d)) || path.starts_with(&config_dir) {
+    if workspace_folders_normalized
+        .iter()
+        .any(|dir| path.starts_with(dir))
+        || path.starts_with(&config_dir)
+    {
         Ok(())
     } else {
         Err(format!(
-            "Path '{path:?}' is outside of project directories:\n{workspace_folders:?}"
+            "Path '{path:?}' is outside of project directories:\n{workspace_folders_normalized:?}"
         ))
     }
 }

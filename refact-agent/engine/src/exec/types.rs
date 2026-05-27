@@ -13,7 +13,7 @@ pub const DEFAULT_EXEC_OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 
 pub(crate) fn normalize_workspace_path(path: &Path) -> PathBuf {
     let normalized = dunce::canonicalize(path).unwrap_or_else(|_| lexical_normalize_path(path));
-    normalize_windows_drive(normalized)
+    normalize_windows_drive(dunce::simplified(&normalized).to_path_buf())
 }
 
 fn lexical_normalize_path(path: &Path) -> PathBuf {

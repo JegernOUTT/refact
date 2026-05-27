@@ -123,7 +123,12 @@ pub fn canonical_path<T: Into<String>>(p: T) -> PathBuf {
 
 pub fn canonicalize_normalized_path(p: PathBuf) -> PathBuf {
     p.canonicalize()
-        .unwrap_or_else(|_| absolute(&p).unwrap_or(p))
+        .map(|path| dunce::simplified(&path).to_path_buf())
+        .unwrap_or_else(|_| {
+            absolute(&p)
+                .map(|path| dunce::simplified(&path).to_path_buf())
+                .unwrap_or(p)
+        })
 }
 
 pub fn any_glob_matches_path(globs: &[String], path: &Path) -> bool {
