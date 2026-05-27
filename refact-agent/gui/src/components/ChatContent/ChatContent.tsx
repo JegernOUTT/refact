@@ -75,6 +75,7 @@ import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
 import { EventLog } from "./EventLog";
+import { PlanBanner } from "./PlanBanner";
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -376,7 +377,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           return null;
       }
     },
-    [handleBranch, handleDelete, onRetryWrapper, collapsibleState, renderChatId],
+    [
+      handleBranch,
+      handleDelete,
+      onRetryWrapper,
+      collapsibleState,
+      renderChatId,
+    ],
   );
 
   if (showLoading) {
@@ -424,6 +431,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           renderItem={renderDisplayItem}
           initialScrollIndex={initialScrollIndex}
           footer={virtuosoFooter}
+          header={<PlanBanner threadId={renderChatId} />}
           isStreaming={isStreaming}
         />
 
@@ -657,7 +665,7 @@ function findRebuildStartIndex(messages: ChatMessages, index: number): number {
   for (let i = index - 1; i >= 0; i--) {
     const msg = messages[i];
 
-    if (isEventMessage(msg)) {
+    if (isEventMessage(msg) || msg.role === "plan") {
       rebuildStart = i;
       continue;
     }
@@ -758,6 +766,7 @@ function buildDisplayItemsFromIndex(
 
     if (isToolMessage(head)) continue;
     if (isEventMessage(head)) continue;
+    if (head.role === "plan") continue;
 
     if (isErrorMessage(head)) {
       const errors = [head];
@@ -1118,6 +1127,7 @@ function buildDisplayItems(
 
     if (isToolMessage(head)) continue;
     if (isEventMessage(head)) continue;
+    if (head.role === "plan") continue;
 
     if (isErrorMessage(head)) {
       const errors = [head];

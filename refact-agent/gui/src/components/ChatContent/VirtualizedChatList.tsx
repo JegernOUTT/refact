@@ -58,6 +58,7 @@ export type VirtualizedChatListProps<T extends { key: string }> = {
   renderItem: (item: T) => React.ReactNode;
   initialScrollIndex?: number;
   footer?: React.ReactNode;
+  header?: React.ReactNode;
   isStreaming?: boolean;
 };
 
@@ -66,6 +67,7 @@ export function VirtualizedChatList<T extends { key: string }>({
   renderItem,
   initialScrollIndex,
   footer,
+  header,
   isStreaming = false,
 }: VirtualizedChatListProps<T>) {
   const virtuosoRef = useRef<VirtuosoHandle>(null);
@@ -385,6 +387,8 @@ export function VirtualizedChatList<T extends { key: string }>({
     return ListComponent;
   }, []);
 
+  const Header = useCallback(() => <>{header}</>, [header]);
+
   const Footer = useCallback(
     () => (
       <>
@@ -396,8 +400,8 @@ export function VirtualizedChatList<T extends { key: string }>({
   );
 
   const components = useMemo(
-    () => ({ Scroller, List, Footer }),
-    [Scroller, List, Footer],
+    () => ({ Header, Scroller, List, Footer }),
+    [Header, Scroller, List, Footer],
   );
 
   const viewportPadding = useMemo(

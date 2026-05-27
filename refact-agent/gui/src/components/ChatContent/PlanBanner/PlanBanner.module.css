@@ -1,0 +1,59 @@
+.sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  width: 100%;
+  background: var(--color-panel-solid);
+  padding-bottom: var(--space-2);
+}
+
+.card {
+  background: var(--color-panel-solid);
+}
+
+.header {
+  min-width: 0;
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  flex-shrink: 0;
+}
+
+.body {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--gray-a4);
+}
+
+.modalContent {
+  max-width: 720px;
+}
+
+.historyList {
+  max-height: 60vh;
+  overflow-y: auto;
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+}
+
+.historyItem {
+  padding: var(--space-3);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-3);
+  background: var(--gray-a2);
+}
+
+.historyTitle {
+  margin-bottom: var(--space-2);
+}
+
+.historyBody {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--gray-a4);
+}

@@ -12,6 +12,7 @@ type VirtuosoMockProps = {
   data?: unknown[];
   itemContent: (index: number, item: unknown) => React.ReactNode;
   components?: {
+    Header?: React.ComponentType;
     Scroller?: React.ComponentType<React.HTMLAttributes<HTMLDivElement>>;
     List?: React.ComponentType<React.HTMLAttributes<HTMLDivElement>>;
     Footer?: React.ComponentType;
@@ -32,10 +33,13 @@ vi.mock("react-virtuoso", async () => {
             | undefined) ?? [];
         calls.push(props);
         (globalThis as Record<string, unknown>).__VIRTUOSO_CALLS__ = calls;
-
+        const header = components?.Header
+          ? ReactModule.createElement(components.Header)
+          : null;
         const list = ReactModule.createElement(
           components?.List ?? "div",
           null,
+          header,
           ...(data ?? []).map((item, i) => itemContent(i, item)),
           components?.Footer
             ? ReactModule.createElement(components.Footer)
