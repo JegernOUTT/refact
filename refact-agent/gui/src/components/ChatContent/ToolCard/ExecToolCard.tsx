@@ -12,8 +12,8 @@ import type {
   ToolCall,
 } from "../../../services/refact/types";
 import {
+  extractExecMetadata,
   isExecProcessStatus,
-  isExecToolMetadata,
 } from "../../../services/refact/types";
 import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
@@ -85,8 +85,7 @@ function parseArgs(args: string): ProcessArgs {
 function getExecMetadata(
   extra: Record<string, unknown> | undefined,
 ): ExecToolMetadata | null {
-  const exec = extra?.exec;
-  return isExecToolMetadata(exec) ? exec : null;
+  return extractExecMetadata(extra) ?? null;
 }
 
 function normalizeStatus(
@@ -349,7 +348,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
                 >
                   {listedProcesses.map((item) => (
                     <Flex
-                      key={item.process_id ?? processItemLabel(item)}
+                      key={item.process_id}
                       className={styles.processListItem}
                       align="center"
                       justify="between"

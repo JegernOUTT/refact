@@ -11,6 +11,11 @@ import type {
   ToolCall,
   ToolMessage,
 } from "../../../services/refact/types";
+import {
+  extractExecMetadata,
+  isExecToolMetadata,
+} from "../../../services/refact/types";
+import { INCIDENTAL_EXTRA_EXEC } from "../../../__fixtures__";
 
 type RenderExecToolOptions = {
   toolName?: React.ComponentProps<typeof ExecToolCard>["toolName"];
@@ -220,6 +225,26 @@ describe("ExecToolCard", () => {
     expect(screen.queryByRole("heading")).not.toBeInTheDocument();
   });
 
+  test("process_list metadata routes with an empty process array", () => {
+    renderExecTool({
+      toolName: "process_list",
+      args: { status: "all" },
+      content: "Processes (status: all, scope: all)\ncount: 0\n",
+      extra: {
+        count: 0,
+        status_filter: "all",
+        scope_filter: "all",
+        processes: [],
+      },
+    });
+
+    expect(screen.getByTestId("exec-tool-process_list")).toBeInTheDocument();
+    expect(screen.getByText("0 processes · all · all")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/structured process metadata was not available/u),
+    ).not.toBeInTheDocument();
+  });
+
   test("plain text exec result without metadata degrades gracefully", () => {
     renderExecTool({ content: "legacy plain output" });
 
@@ -228,5 +253,30 @@ describe("ExecToolCard", () => {
     expect(
       screen.getByText(/structured process metadata was not available/u),
     ).toBeInTheDocument();
+  });
+});
+
+describe("isExecToolMetadata", () => {
+  test("isExecToolMetadata_accepts_single_process_shape", () => {
+    expect(
+      isExecToolMetadata({ process_id: "exec_shell_1", status: "running" }),
+    ).toBe(true);
+  });
+
+  test("isExecToolMetadata_accepts_process_list_shape", () => {
+    expect(isExecToolMetadata({ processes: [] })).toBe(true);
+  });
+
+  test("isExecToolMetadata_rejects_incidental_command_only", () => {
+    expect(isExecToolMetadata(INCIDENTAL_EXTRA_EXEC.exec)).toBe(false);
+    expect(extractExecMetadata(INCIDENTAL_EXTRA_EXEC)).toBeUndefined();
+  });
+
+  test("isExecToolMetadata_rejects_status_only_without_process_id", () => {
+    expect(isExecToolMetadata({ status: "running" })).toBe(false);
+  });
+
+  test("isExecToolMetadata_rejects_empty_object", () => {
+    expect(isExecToolMetadata({})).toBe(false);
   });
 });

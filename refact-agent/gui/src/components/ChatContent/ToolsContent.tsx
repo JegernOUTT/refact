@@ -12,7 +12,7 @@ import {
   DiffChunk,
   BackgroundAgentSummary,
   isMultiModalToolResult,
-  isExecToolMetadata,
+  extractExecMetadata,
   MultiModalToolResult,
   ToolCall,
   ToolResult,
@@ -259,7 +259,7 @@ function isProcessToolName(name: string | undefined): name is ProcessToolName {
 }
 
 function hasExecMetadata(result: ToolResult | undefined): boolean {
-  return isExecToolMetadata(result?.extra?.exec);
+  return extractExecMetadata(result?.extra) !== undefined;
 }
 
 type BackgroundAgentExtra = Partial<

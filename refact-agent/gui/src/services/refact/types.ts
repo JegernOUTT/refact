@@ -179,12 +179,22 @@ export type ExecProcessMetadata = {
   transcript?: ExecTranscriptMetadata;
 };
 
-export type ExecToolMetadata = ExecProcessMetadata & {
+export type ExecSingleProcessMetadata = ExecProcessMetadata & {
+  process_id: string;
+  status: ExecProcessStatus;
+  processes?: never;
+};
+
+export type ExecProcessListMetadata = ExecProcessMetadata & {
   count?: number;
   status_filter?: string;
   scope_filter?: string;
-  processes?: ExecProcessMetadata[];
+  processes: ExecSingleProcessMetadata[];
 };
+
+export type ExecToolMetadata =
+  | ExecSingleProcessMetadata
+  | ExecProcessListMetadata;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -205,12 +215,28 @@ export function isExecProcessStatus(
 
 export function isExecToolMetadata(value: unknown): value is ExecToolMetadata {
   if (!isRecord(value)) return false;
-  if (typeof value.process_id === "string") return true;
-  if (typeof value.command === "string") return true;
-  if (typeof value.short_description === "string") return true;
-  if (isExecProcessStatus(value.status)) return true;
-  if (Array.isArray(value.processes)) return true;
+  if (
+    typeof value.process_id === "string" &&
+    isExecProcessStatus(value.status)
+  ) {
+    return true;
+  }
+  if (Array.isArray(value.processes)) {
+    return value.processes.every(
+      (process) =>
+        isRecord(process) &&
+        typeof process.process_id === "string" &&
+        isExecProcessStatus(process.status),
+    );
+  }
   return false;
+}
+
+export function extractExecMetadata(
+  extra: Record<string, unknown> | undefined,
+): ExecToolMetadata | undefined {
+  const exec = extra?.exec;
+  return isExecToolMetadata(exec) ? exec : undefined;
 }
 
 export type MultiModalToolContent = {
