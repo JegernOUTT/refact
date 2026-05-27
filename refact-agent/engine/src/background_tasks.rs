@@ -82,6 +82,7 @@ pub async fn start_background_tasks(
         tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
             gcx.clone(),
         )),
+        crate::chat::notifications::spawn_notification_subscriber(gcx.clone()),
         tokio::spawn(crate::chat::start_agent_monitor(app_state)),
         tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
             background_agent_monitor_app,

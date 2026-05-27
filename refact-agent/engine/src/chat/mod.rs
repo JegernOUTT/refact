@@ -8,6 +8,7 @@ mod handlers;
 pub mod history_limit;
 pub mod internal_roles;
 pub mod linearize;
+pub mod notifications;
 pub(crate) mod openai_codex_ws;
 mod openai_merge;
 pub mod plan_role;

@@ -3,15 +3,30 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
 use crate::exec::transcript::{ExecRawCapture, ExecRawOutput, ExecTranscript};
 use crate::exec::types::{
-    current_timestamp_ms, ExecOutputChunk, ExecOutputStream, ExecProcessFilter, ExecProcessId,
-    ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecServiceLookup, ExecStatus,
+    current_timestamp_ms, ExecMode, ExecOutputChunk, ExecOutputStream, ExecProcessFilter,
+    ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecServiceLookup,
+    ExecStatus,
 };
 
 const REMOVE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
+const PROCESS_COMPLETION_CHANNEL_CAPACITY: usize = 256;
+
+pub type ProcessCompletionTx = broadcast::Sender<ProcessCompletionEvent>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessCompletionEvent {
+    pub process_id: ExecProcessId,
+    pub chat_id: String,
+    pub status: ExecStatus,
+    pub exit_code: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub short_description: String,
+    pub mode: ExecMode,
+}
 
 pub(crate) enum ExecProcessCommand {
     Kill {
@@ -98,6 +113,41 @@ impl ExecProcessRecord {
     }
 }
 
+fn process_completion_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessCompletionEvent> {
+    if !matches!(snapshot.meta.mode, ExecMode::Background | ExecMode::Service) {
+        return None;
+    }
+    let chat_id = snapshot.meta.owner.chat_id.clone()?;
+    let duration_ms = snapshot.meta.ended_at_ms.and_then(|ended| {
+        ended.checked_sub(
+            snapshot
+                .meta
+                .started_at_ms
+                .unwrap_or(snapshot.meta.created_at_ms),
+        )
+    });
+    Some(ProcessCompletionEvent {
+        process_id: snapshot.meta.process_id.clone(),
+        chat_id,
+        status: snapshot.status.clone(),
+        exit_code: status_exit_code(&snapshot.status),
+        duration_ms,
+        short_description: snapshot.meta.short_description.clone(),
+        mode: snapshot.meta.mode.clone(),
+    })
+}
+
+fn status_exit_code(status: &ExecStatus) -> Option<i32> {
+    match status {
+        ExecStatus::Exited { exit_code } => *exit_code,
+        ExecStatus::Starting
+        | ExecStatus::Running
+        | ExecStatus::Failed { .. }
+        | ExecStatus::Killed
+        | ExecStatus::TimedOut => None,
+    }
+}
+
 struct ExecCleanupTarget {
     snapshot: ExecProcessSnapshot,
     child: Option<tokio::process::Child>,
@@ -149,14 +199,33 @@ struct ExecRemoveTarget {
     child: Option<tokio::process::Child>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ExecRegistry {
     records: Arc<Mutex<HashMap<ExecProcessId, ExecProcessRecord>>>,
+    completion_tx: ProcessCompletionTx,
+}
+
+impl Default for ExecRegistry {
+    fn default() -> Self {
+        let (completion_tx, _) = broadcast::channel(PROCESS_COMPLETION_CHANNEL_CAPACITY);
+        Self {
+            records: Arc::new(Mutex::new(HashMap::new())),
+            completion_tx,
+        }
+    }
 }
 
 impl ExecRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn subscribe_completion(&self) -> broadcast::Receiver<ProcessCompletionEvent> {
+        self.completion_tx.subscribe()
+    }
+
+    pub fn completion_tx(&self) -> ProcessCompletionTx {
+        self.completion_tx.clone()
     }
 
     pub async fn register(
@@ -357,8 +426,14 @@ impl ExecRegistry {
         let record = records
             .get_mut(process_id)
             .ok_or_else(|| format!("process not found: {process_id}"))?;
+        let was_terminal = record.snapshot.status.is_terminal();
         record.set_status(status);
         let snapshot = record.snapshot.clone();
+        let completion_event = if !was_terminal && snapshot.status.is_terminal() {
+            process_completion_event(&snapshot)
+        } else {
+            None
+        };
         let terminal = if snapshot.status.is_terminal() {
             record
                 .runtime
@@ -368,6 +443,9 @@ impl ExecRegistry {
             None
         };
         drop(records);
+        if let Some(event) = completion_event {
+            let _ = self.completion_tx.send(event);
+        }
         if let Some(terminal) = terminal {
             terminal.notify_waiters();
         }
@@ -1129,6 +1207,128 @@ mod tests {
         assert_eq!(exited.status, ExecStatus::Exited { exit_code: Some(0) });
         assert_eq!(exited.meta.started_at_ms, Some(started_at));
         assert!(exited.meta.ended_at_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn process_completion_broadcasts_background_terminal_status_with_chat_id() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_completion();
+        let snapshot = registry
+            .register(
+                meta("exec_notify_background", ExecMode::Background, "sleep 1")
+                    .with_chat_id("chat-notify")
+                    .with_short_description("notify background".to_string()),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry.mark_started(&process_id).await.unwrap();
+        registry.mark_exited(&process_id, Some(7)).await.unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.process_id, process_id);
+        assert_eq!(event.chat_id, "chat-notify");
+        assert_eq!(event.status, ExecStatus::Exited { exit_code: Some(7) });
+        assert_eq!(event.exit_code, Some(7));
+        assert!(event.duration_ms.is_some());
+        assert_eq!(event.short_description, "notify background");
+        assert_eq!(event.mode, ExecMode::Background);
+    }
+
+    #[tokio::test]
+    async fn process_completion_broadcasts_service_terminal_status_with_chat_id() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_completion();
+        let snapshot = registry
+            .register(
+                meta("exec_notify_service", ExecMode::Service, "server")
+                    .with_chat_id("chat-service")
+                    .with_service_name("api"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry.mark_started(&process_id).await.unwrap();
+        registry
+            .mark_failed(&process_id, "boom".to_string())
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.process_id, process_id);
+        assert_eq!(event.chat_id, "chat-service");
+        assert_eq!(
+            event.status,
+            ExecStatus::Failed {
+                message: "boom".to_string()
+            }
+        );
+        assert_eq!(event.exit_code, None);
+        assert_eq!(event.short_description, "server");
+        assert_eq!(event.mode, ExecMode::Service);
+    }
+
+    #[tokio::test]
+    async fn process_completion_does_not_broadcast_foreground_terminal_status() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_completion();
+        let snapshot = registry
+            .register(
+                meta("exec_notify_foreground", ExecMode::Foreground, "true")
+                    .with_chat_id("chat-foreground"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry.mark_started(&process_id).await.unwrap();
+        registry.mark_exited(&process_id, Some(0)).await.unwrap();
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn process_completion_does_not_broadcast_without_chat_id() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_completion();
+        let snapshot = registry
+            .register(
+                meta("exec_notify_no_chat", ExecMode::Background, "sleep 1"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry.mark_started(&process_id).await.unwrap();
+        registry.mark_exited(&process_id, Some(0)).await.unwrap();
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn process_completion_broadcasts_only_once() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_completion();
+        let snapshot = registry
+            .register(
+                meta("exec_notify_once", ExecMode::Background, "sleep 1").with_chat_id("chat-once"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+
+        registry.mark_started(&process_id).await.unwrap();
+        registry.mark_exited(&process_id, Some(0)).await.unwrap();
+        registry
+            .mark_failed(&process_id, "late".to_string())
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.process_id, process_id);
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

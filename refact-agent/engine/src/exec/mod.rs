@@ -4,7 +4,9 @@ pub mod spawn;
 pub mod transcript;
 pub mod types;
 
-pub use registry::{ExecRegistry, ExecShutdownCleanupSummary};
+pub use registry::{
+    ExecRegistry, ExecShutdownCleanupSummary, ProcessCompletionEvent, ProcessCompletionTx,
+};
 pub use spawn::ExecSpawnResult;
 pub use transcript::{ExecRawOutput, ExecTranscript};
 pub use types::{
