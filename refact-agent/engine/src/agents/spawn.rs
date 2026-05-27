@@ -16,7 +16,7 @@ use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::types::{ChatEvent, TaskMeta};
 use crate::global_context::GlobalContext;
-use crate::subchat::{SubchatConfig, SubchatResult, ToolsPolicy, resolve_subchat_config_with_parent};
+use crate::subchat::{SubchatConfig, SubchatResult, resolve_subchat_config_with_parent};
 use crate::worktrees::types::WorktreeMeta;
 
 #[cfg(test)]
