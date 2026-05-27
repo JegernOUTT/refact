@@ -741,15 +741,15 @@ impl Tool for ToolAgentCancel {
                 ),
             ));
         }
-        app.agents
+        let updated = app
+            .agents
             .cancel(&parent_chat_id, &agent_id, reason)
             .await
             .map_err(|error| map_registry_error(&agent_id, error))?;
+        crate::agents::spawn::emit_background_agent_update(app, &updated).await;
         Ok(tool_message(
             tool_call_id,
-            format!(
-                "✓ Cancel requested for {agent_id}. Status will become cancelled once the child exits."
-            ),
+            format!("✓ Cancel requested for {agent_id}. Status is now cancelled."),
         ))
     }
 
@@ -765,6 +765,7 @@ mod tests {
 
     use crate::agents::types::{AgentCompletion, CreateAgentRequest};
     use crate::app_state::AppState;
+    use crate::chat::types::ChatSession;
     use crate::tools::tools_description::Tool;
     use serde_json::json;
     use tempfile::TempDir;
@@ -1301,6 +1302,13 @@ mod tests {
     #[tokio::test]
     async fn agent_cancel_on_running_flips_abort_flag() {
         let (_temp, app, ccx) = test_context(PARENT).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(PARENT.to_string())));
+        let mut rx = session_arc.lock().await.subscribe();
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(PARENT.to_string(), session_arc);
         let (record, abort_flag, _) = app
             .agents
             .create(create_request(PARENT, BgAgentKind::Delegate, "Abort me"))
@@ -1328,6 +1336,16 @@ mod tests {
         assert!(abort_flag.load(Ordering::SeqCst));
         assert_eq!(after.status, BgAgentStatus::Cancelled);
         assert!(output.contains("Cancel requested"));
+        let json = rx.try_recv().expect("background agent update");
+        let envelope: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(envelope["chat_id"], PARENT);
+        assert_eq!(envelope["seq"], 1);
+        assert_eq!(envelope["type"], "background_agent_updated");
+        assert_eq!(envelope["agent"]["agentId"], record.agent_id);
+        assert_eq!(
+            envelope["agent"]["status"],
+            BgAgentStatus::Cancelled.as_str()
+        );
     }
 
     #[test]
