@@ -349,7 +349,7 @@ fn build_background_start_msg(
         format!("- child_chat_id: {}", handle.child_chat_id),
         String::new(),
         format!(
-            "Open the child trajectory: [view](EDITOR:trajectory/{})",
+            "Open the child trajectory: [view](refact://chat/{})",
             handle.child_chat_id
         ),
         String::new(),
@@ -391,7 +391,7 @@ fn build_foreground_result_msg(
     ];
     if let Some(child_chat_id) = child_chat_id {
         lines.push(format!(
-            "Open the child trajectory: [view](EDITOR:trajectory/{child_chat_id})"
+            "Open the child trajectory: [view](refact://chat/{child_chat_id})"
         ));
         lines.push(String::new());
     }
@@ -776,6 +776,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(messages.len(), 1);
+        let (text, _) = message_text(messages.into_iter().next().unwrap());
+        assert!(text.contains(
+            "Open the child trajectory: [view](refact://chat/subchat-test)"
+        ));
         let logged = calls.lock().unwrap().clone();
         assert_eq!(logged.len(), 1);
         assert!(matches!(logged[0].kind, LoggedSpawnKind::Wait));
@@ -800,6 +804,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.1.len(), 1);
+        let (text, _) = message_text(result.1.into_iter().next().unwrap());
+        assert!(text.contains(
+            "Open the child trajectory: [view](refact://chat/subchat-test)"
+        ));
         let logged = calls.lock().unwrap().clone();
         assert_eq!(logged.len(), 1);
         assert!(matches!(logged[0].kind, LoggedSpawnKind::Background));

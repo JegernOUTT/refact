@@ -140,6 +140,13 @@ fn build_push_message(record: &BackgroundAgent) -> String {
         lines.push(String::new());
     }
 
+    if let Some(child_chat_id) = &record.child_chat_id {
+        lines.push(format!(
+            "Open the child trajectory: [view](refact://chat/{child_chat_id})"
+        ));
+        lines.push(String::new());
+    }
+
     match record.status {
         BgAgentStatus::Completed => {
             lines.push("Summary:".to_string());
@@ -243,6 +250,7 @@ mod tests {
         assert!(message.contains("[background delegate finished]"));
         assert!(message.contains("Edited files:"));
         assert!(message.contains("src/auth/retry.ts"));
+        assert!(message.contains("Open the child trajectory: [view](refact://chat/child)"));
     }
 
     #[tokio::test]
@@ -251,5 +259,6 @@ mod tests {
         let message = build_push_message(&record);
         assert!(message.contains("[background subagent finished]"));
         assert!(!message.contains("Edited files:"));
+        assert!(message.contains("Open the child trajectory: [view](refact://chat/child)"));
     }
 }

@@ -342,7 +342,7 @@ fn build_background_start_tool_result(
 ) -> ContextEnum {
     let task_preview = truncate_chars_with_ellipsis(task, 60);
     let content = format!(
-        "✓ Started background subagent: {task_preview}\n- agent_id: {agent_id}\n- status: running\n- child_chat_id: {child_chat_id}\n\nOpen the child trajectory: [view](EDITOR:trajectory/{child_chat_id})\n\nThe completion will be pushed back into this chat automatically. Use `agent_status`, `agent_wait`, or `agent_result` if you need to follow up sooner.",
+        "✓ Started background subagent: {task_preview}\n- agent_id: {agent_id}\n- status: running\n- child_chat_id: {child_chat_id}\n\nOpen the child trajectory: [view](refact://chat/{child_chat_id})\n\nThe completion will be pushed back into this chat automatically. Use `agent_status`, `agent_wait`, or `agent_result` if you need to follow up sooner.",
         agent_id = handle.agent_id,
         child_chat_id = handle.child_chat_id,
     );
@@ -365,7 +365,7 @@ fn build_foreground_tool_result(record: &BackgroundAgent, tool_call_id: &String)
     let link = if child_chat_id.is_empty() {
         String::new()
     } else {
-        format!("\nOpen the child trajectory: [view](EDITOR:trajectory/{child_chat_id})\n")
+        format!("\nOpen the child trajectory: [view](refact://chat/{child_chat_id})\n")
     };
     let content = format!(
         "# Subagent Result\n\n- agent_id: {agent_id}\n- status: {status}\n- child_chat_id: {child_chat_id}\n{link}\n## Result\n\n{result}",
@@ -636,7 +636,7 @@ mod tests {
             Some("subagent")
         );
         assert!(message_text(&message).contains("✓ Started background subagent"));
-        assert!(message_text(&message).contains("EDITOR:trajectory/subchat-"));
+        assert!(message_text(&message).contains("refact://chat/subchat-"));
         let _ = release_tx.send(());
         let finished = app
             .agents
@@ -692,7 +692,7 @@ mod tests {
         let text = message_text(&message);
         assert!(text.contains("# Subagent Result"));
         assert!(text.contains("full wait result"));
-        assert!(text.contains("EDITOR:trajectory/subchat-"));
+        assert!(text.contains("refact://chat/subchat-"));
         assert_eq!(
             message
                 .extra

@@ -29,6 +29,14 @@ import { useLinksFromLsp } from "../../hooks";
 
 const REMARK_PLUGINS: PluggableList = [remarkBreaks, remarkMath, remarkGfm];
 const REHYPE_PLUGINS: PluggableList = [rehypeKatex];
+const SAFE_URL_PREFIXES = ["refact://", "http://", "https://", "mailto:"];
+
+function transformMarkdownUrl(url: string): string {
+  const lowerUrl = url.toLowerCase();
+  return SAFE_URL_PREFIXES.some((prefix) => lowerUrl.startsWith(prefix))
+    ? url
+    : "";
+}
 
 import { ChatLinkButton } from "../ChatLinks";
 import { extractLinkFromPuzzle } from "../../utils/extractLinkFromPuzzle";
@@ -218,6 +226,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
           return (
             <Link
               {...props}
+              href={href}
               onClick={(e: React.MouseEvent) => {
                 if (internalLinkContext?.handleInternalLink(href)) {
                   e.preventDefault();
@@ -286,6 +295,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
       className={styles.markdown}
       remarkPlugins={REMARK_PLUGINS}
       rehypePlugins={REHYPE_PLUGINS}
+      urlTransform={transformMarkdownUrl}
       allowedElements={allowedElements}
       unwrapDisallowed={unwrapDisallowed}
       components={components}

@@ -20,7 +20,7 @@ import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { pop } from "../Pages/pagesSlice";
+import { pop, popBackTo, push } from "../Pages/pagesSlice";
 import { KanbanBoard } from "./KanbanBoard";
 import {
   useGetTaskQuery,
@@ -54,7 +54,11 @@ import {
   selectTaskActiveChat,
   PlannerInfo,
 } from "./tasksSlice";
-import { selectThreadById, selectRuntimeById } from "../Chat/Thread";
+import {
+  selectBackgroundAgentsByThread,
+  selectRuntimeById,
+  selectThreadById,
+} from "../Chat/Thread";
 import { InternalLinkProvider } from "../../contexts/InternalLinkContext";
 import { parseRefactLink } from "../../contexts/internalLinkUtils";
 import { resolveChatLink } from "./internalLinkResolver";
@@ -699,6 +703,9 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const activeChat = useAppSelector((state) =>
     selectTaskActiveChat(state, taskId),
   );
+  const activeChatBackgroundAgents = useAppSelector((state) =>
+    activeChat ? selectBackgroundAgentsByThread(state, activeChat.chatId) : {},
+  );
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const selectedCard = useMemo(
     () =>
@@ -1064,29 +1071,45 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       const parsed = parseRefactLink(url);
       if (!parsed) return false;
 
-      if (parsed.type === "chat") {
-        const action = resolveChatLink(parsed.id, plannerChats, board);
-        switch (action.kind) {
-          case "planner":
-            dispatch(
-              setTaskActiveChat({
-                taskId,
-                activeChat: { type: "planner", chatId: action.chatId },
-              }),
-            );
-            return true;
-          case "agent":
-            handleSelectAgent(action.cardId, action.chatId);
-            return true;
-          case "unknown":
-            showNotification(`Chat not found: ${action.chatId}`);
-            return true;
+      if (parsed.type !== "chat" || !parsed.id) return false;
+
+      const action = resolveChatLink(parsed.id, plannerChats, board);
+      switch (action.kind) {
+        case "planner":
+          dispatch(
+            setTaskActiveChat({
+              taskId,
+              activeChat: { type: "planner", chatId: action.chatId },
+            }),
+          );
+          return true;
+        case "agent":
+          handleSelectAgent(action.cardId, action.chatId);
+          return true;
+        case "unknown": {
+          const agent = Object.values(activeChatBackgroundAgents).find(
+            (candidate) => candidate.child_chat_id === action.chatId,
+          );
+          if (!agent) showNotification(`Chat not found: ${action.chatId}`);
+          dispatch(
+            createChatWithId({
+              id: action.chatId,
+              parentId: activeChat?.chatId,
+              linkType:
+                agent?.kind ??
+                (activeChat?.type === "agent" ? "delegate" : "subagent"),
+            }),
+          );
+          dispatch(switchToThread({ id: action.chatId }));
+          dispatch(popBackTo({ name: "history" }));
+          dispatch(push({ name: "chat" }));
+          return true;
         }
       }
-
-      return false;
     },
     [
+      activeChat,
+      activeChatBackgroundAgents,
       board,
       taskId,
       dispatch,

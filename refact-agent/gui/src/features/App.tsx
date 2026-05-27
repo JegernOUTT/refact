@@ -8,9 +8,12 @@ import React, {
 import { Flex } from "@radix-ui/themes";
 import {
   Chat,
+  createChatWithId,
   selectAllThreads,
+  selectBackgroundAgentsByThread,
   selectChatId,
   selectIsStreaming,
+  selectThread,
   switchToThread,
 } from "./Chat";
 
@@ -82,6 +85,8 @@ import {
   loadPersistedActiveTab,
   savePersistedActiveTab,
 } from "../utils/chatUiPersistence";
+import { InternalLinkProvider } from "../contexts/InternalLinkContext";
+import { parseRefactLink } from "../contexts/internalLinkUtils";
 
 export interface AppProps {
   style?: React.CSSProperties;
@@ -109,6 +114,10 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const { chatPageChange, setIsChatStreaming, setIsChatReady } =
     useEventsBusForIDE();
   const chatId = useAppSelector(selectChatId);
+  const currentThread = useAppSelector(selectThread);
+  const backgroundAgents = useAppSelector((state) =>
+    selectBackgroundAgentsByThread(state, chatId),
+  );
   const backendStatus = useAppSelector(selectBackendStatus);
   const backendLastOkAt = useAppSelector(selectBackendLastOkAt);
   const providersQuery = useGetConfiguredProvidersQuery();
@@ -335,6 +344,29 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     dispatch(integrationsApi.util.resetApiState());
   }, [dispatch]);
 
+  const handleInternalLink = useCallback(
+    (url: string): boolean => {
+      const parsed = parseRefactLink(url);
+      if (!parsed || parsed.type !== "chat" || !parsed.id) return false;
+
+      const agent = Object.values(backgroundAgents).find(
+        (candidate) => candidate.child_chat_id === parsed.id,
+      );
+      dispatch(
+        createChatWithId({
+          id: parsed.id,
+          parentId: currentThread?.id,
+          linkType: agent?.kind ?? currentThread?.link_type ?? "subagent",
+        }),
+      );
+      dispatch(switchToThread({ id: parsed.id }));
+      dispatch(popBackTo({ name: "history" }));
+      dispatch(push({ name: "chat" }));
+      return true;
+    },
+    [backgroundAgents, currentThread?.id, currentThread?.link_type, dispatch],
+  );
+
   const activeTab: Tab | undefined = useMemo(() => {
     if (desiredPage.name === "chat") {
       return {
@@ -437,11 +469,13 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
             {pageSwitching && <ChatLoading />}
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
             {!pageSwitching && renderedPage.name === "chat" && (
-              <Chat
-                host={config.host}
-                tabbed={config.tabbed}
-                backFromChat={goBack}
-              />
+              <InternalLinkProvider onInternalLink={handleInternalLink}>
+                <Chat
+                  host={config.host}
+                  tabbed={config.tabbed}
+                  backFromChat={goBack}
+                />
+              </InternalLinkProvider>
             )}
             {!pageSwitching &&
               renderedPage.name === "fill in the middle debug page" && (

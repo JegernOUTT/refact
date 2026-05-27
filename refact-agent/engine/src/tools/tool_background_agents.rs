@@ -480,7 +480,7 @@ fn format_agent_status_block(record: &BackgroundAgent) -> String {
     format_optional_line(&mut result, "Progress", record.progress.as_deref());
     if let Some(child_chat_id) = &record.child_chat_id {
         result.push_str(&format!(
-            "\nChild trajectory: [view](EDITOR:trajectory/{child_chat_id})\n"
+            "\nChild trajectory: [view](refact://chat/{child_chat_id})\n"
         ));
     }
     if record.status.is_terminal() {
@@ -528,7 +528,7 @@ async fn format_agent_result(
     result.push_str(&format!("- Kind: {}\n", kind_label(record.kind)));
     if let Some(child_chat_id) = &record.child_chat_id {
         result.push_str(&format!(
-            "- Child trajectory: [view](EDITOR:trajectory/{child_chat_id})\n"
+            "- Child trajectory: [view](refact://chat/{child_chat_id})\n"
         ));
     }
     result.push_str("\n");
@@ -933,7 +933,7 @@ mod tests {
         assert!(output.contains("- Step count: 5"));
         assert!(output.contains("- Last activity: regex_search"));
         assert!(output.contains("- Progress: searching call sites in src/"));
-        assert!(output.contains("Child trajectory: [view](EDITOR:trajectory/subchat-status)"));
+        assert!(output.contains("Child trajectory: [view](refact://chat/subchat-status)"));
     }
 
     #[tokio::test]
