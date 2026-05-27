@@ -213,9 +213,11 @@ pub fn build_reaction_event(
     let (signal_type, ttl_ms, bubble_policy) = match reaction.kind {
         ChatReactionKind::Humor => ("speech_humor", 90_000u64, BuddyBubblePolicy::Ambient),
         ChatReactionKind::Insight => ("speech_insight", 90_000u64, BuddyBubblePolicy::Ambient),
-        ChatReactionKind::BugCandidate => {
-            ("chat_bug_candidate", 120_000u64, BuddyBubblePolicy::EventOnce)
-        }
+        ChatReactionKind::BugCandidate => (
+            "chat_bug_candidate",
+            120_000u64,
+            BuddyBubblePolicy::EventOnce,
+        ),
     };
     let kind_str = match reaction.kind {
         ChatReactionKind::Humor => "humor",
@@ -365,8 +367,14 @@ mod tests {
     fn prepare_analysis_text_redacts_secret() {
         let raw = "use Bearer sk-MYSECRET123 for auth in the function call";
         let result = prepare_analysis_text(raw).unwrap();
-        assert!(!result.contains("sk-MYSECRET123"), "raw secret must not appear");
-        assert!(!result.contains("MYSECRET123"), "partial secret must not appear");
+        assert!(
+            !result.contains("sk-MYSECRET123"),
+            "raw secret must not appear"
+        );
+        assert!(
+            !result.contains("MYSECRET123"),
+            "partial secret must not appear"
+        );
     }
 
     #[test]
@@ -430,7 +438,10 @@ mod tests {
 
         let dedupe = ev.dedupe_key.unwrap();
         assert!(dedupe.contains("chat-1"));
-        assert!(!dedupe.contains("crash"), "raw content must not appear in dedupe key");
+        assert!(
+            !dedupe.contains("crash"),
+            "raw content must not appear in dedupe key"
+        );
     }
 
     #[test]
@@ -441,11 +452,23 @@ mod tests {
         let reaction = classify_chat_reaction(&analysis, &s).unwrap();
         let ev = build_reaction_event("chat-sec", &analysis, &reaction);
 
-        assert!(!ev.title.contains("sk-VERYSECRET"), "secret must not appear in title");
-        assert!(!ev.title.contains("VERYSECRET"), "secret must not appear in title");
+        assert!(
+            !ev.title.contains("sk-VERYSECRET"),
+            "secret must not appear in title"
+        );
+        assert!(
+            !ev.title.contains("VERYSECRET"),
+            "secret must not appear in title"
+        );
         let dedupe = ev.dedupe_key.unwrap();
-        assert!(!dedupe.contains("sk-VERYSECRET"), "secret must not appear in dedupe key");
-        assert!(!dedupe.contains("VERYSECRET"), "secret must not appear in dedupe key");
+        assert!(
+            !dedupe.contains("sk-VERYSECRET"),
+            "secret must not appear in dedupe key"
+        );
+        assert!(
+            !dedupe.contains("VERYSECRET"),
+            "secret must not appear in dedupe key"
+        );
     }
 
     #[test]
@@ -454,7 +477,10 @@ mod tests {
         let now = Utc::now();
         assert!(lim.allow("chat-a", now));
         assert!(!lim.allow("chat-a", now + Duration::seconds(10)));
-        assert!(lim.allow("chat-a", now + Duration::seconds(PER_CHAT_COOLDOWN_SECS + 1)));
+        assert!(lim.allow(
+            "chat-a",
+            now + Duration::seconds(PER_CHAT_COOLDOWN_SECS + 1)
+        ));
     }
 
     #[test]
@@ -553,8 +579,7 @@ mod tests {
     #[test]
     fn keywords_match_multi_word_not_working_phrases() {
         let s = BuddySettings::default();
-        let reaction =
-            classify_chat_reaction("the upload is not working anymore", &s).unwrap();
+        let reaction = classify_chat_reaction("the upload is not working anymore", &s).unwrap();
         assert_eq!(
             reaction.kind,
             ChatReactionKind::BugCandidate,
@@ -579,6 +604,9 @@ mod tests {
             !speech.contains(input),
             "speech_text must not contain raw analysis text"
         );
-        assert_eq!(speech, reaction.text, "speech_text must equal reaction.text");
+        assert_eq!(
+            speech, reaction.text,
+            "speech_text must equal reaction.text"
+        );
     }
 }

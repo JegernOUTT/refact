@@ -7,7 +7,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -39,15 +38,10 @@ const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 
 const TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
-const MAX_IDLE_AGENT_NUDGES_PER_CARD: usize = 4;
-const IDLE_AGENT_NUDGE_GRACE: Duration = Duration::from_secs(60);
-const IDLE_AGENT_NUDGE_COOLDOWN_SECONDS: i64 = 180;
-const IDLE_AGENT_NUDGE_STATUS_PREFIX: &str = "Auto-nudged idle agent:";
-const IDLE_AGENT_REMINDER_MESSAGE: &str = concat!(
-    "Automatic reminder: this task card is still marked as doing, but your chat stopped without calling `agent_finish`.\n",
-    "Continue working if more changes are needed. If the task is complete, call `agent_finish(success=true, report=\"...\")`. ",
-    "If it cannot be completed, call `agent_finish(success=false, report=\"...\")`."
-);
+const MAX_STALL_PLANNER_NOTIFICATIONS_PER_CARD: usize = 2;
+const STALL_PLANNER_NOTIFY_GRACE: Duration = Duration::from_secs(60);
+const STALL_PLANNER_NOTIFY_COOLDOWN_SECONDS: i64 = 5 * 60;
+const STALL_PLANNER_NOTIFY_STATUS_PREFIX: &str = "Planner notified about stall:";
 
 fn make_runtime_event(
     signal_type: &str,
@@ -80,12 +74,15 @@ fn make_runtime_event(
     }
 }
 
-fn idle_agent_nudge_updates(card: &BoardCard) -> (usize, Option<chrono::DateTime<Utc>>) {
+fn stall_planner_notifications(card: &BoardCard) -> (usize, Option<chrono::DateTime<Utc>>) {
     let mut count = 0usize;
     let mut latest = None;
 
     for update in &card.status_updates {
-        if !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX) {
+        if !update
+            .message
+            .starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
+        {
             continue;
         }
         count += 1;
@@ -101,14 +98,14 @@ fn idle_agent_nudge_updates(card: &BoardCard) -> (usize, Option<chrono::DateTime
     (count, latest)
 }
 
-fn idle_agent_nudge_allowed_at(card: &BoardCard, now: chrono::DateTime<Utc>) -> bool {
-    let (count, latest) = idle_agent_nudge_updates(card);
-    if count >= MAX_IDLE_AGENT_NUDGES_PER_CARD {
+fn stall_planner_notify_allowed(card: &BoardCard, now: chrono::DateTime<Utc>) -> bool {
+    let (count, latest) = stall_planner_notifications(card);
+    if count >= MAX_STALL_PLANNER_NOTIFICATIONS_PER_CARD {
         return false;
     }
     if let Some(latest) = latest {
         let since = now.signed_duration_since(latest).num_seconds();
-        if since < IDLE_AGENT_NUDGE_COOLDOWN_SECONDS {
+        if since < STALL_PLANNER_NOTIFY_COOLDOWN_SECONDS {
             return false;
         }
     }
@@ -132,12 +129,7 @@ fn linked_agent_session_matches(session: &ChatSession, task_id: &str, card: &Boa
     true
 }
 
-fn idle_agent_session_can_be_nudged(
-    session: &ChatSession,
-    task_id: &str,
-    card: &BoardCard,
-    now: chrono::DateTime<Utc>,
-) -> bool {
+fn agent_session_idle_stall_ready(session: &ChatSession, task_id: &str, card: &BoardCard) -> bool {
     if card.column != "doing" || card.agent_chat_id.is_none() {
         return false;
     }
@@ -164,13 +156,29 @@ fn idle_agent_session_can_be_nudged(
     {
         return false;
     }
-    if session.last_activity.elapsed() < IDLE_AGENT_NUDGE_GRACE {
-        return false;
-    }
-    idle_agent_nudge_allowed_at(card, now)
+    session.last_activity.elapsed() >= STALL_PLANNER_NOTIFY_GRACE
 }
 
-async fn record_idle_agent_nudge(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallKind {
+    IdleNoFinish,
+    Completed,
+    GeneratingNoTokens,
+    ExecutingToolsNoProgress,
+}
+
+impl StallKind {
+    fn short_reason(self) -> &'static str {
+        match self {
+            StallKind::IdleNoFinish => "idle, stream finished without agent_finish",
+            StallKind::Completed => "Completed state but card still in doing",
+            StallKind::GeneratingNoTokens => "stream appears stalled, no token activity",
+            StallKind::ExecutingToolsNoProgress => "tool execution stalled, no tool progress",
+        }
+    }
+}
+
+async fn record_stall_planner_notification(
     app: AppState,
     task_id: &str,
     card_id: &str,
@@ -183,7 +191,7 @@ async fn record_idle_agent_nudge(
     let timestamp = now.to_rfc3339();
     let message = format!(
         "{} {} ({})",
-        IDLE_AGENT_NUDGE_STATUS_PREFIX, agent_chat_id, reason
+        STALL_PLANNER_NOTIFY_STATUS_PREFIX, agent_chat_id, reason
     );
 
     storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
@@ -193,7 +201,7 @@ async fn record_idle_agent_nudge(
         if card.column != "doing"
             || card.agent_chat_id.as_deref() != Some(agent_chat_id_owned.as_str())
             || card.assignee.is_none()
-            || !idle_agent_nudge_allowed_at(card, now)
+            || !stall_planner_notify_allowed(card, now)
         {
             return Ok(false);
         }
@@ -208,33 +216,151 @@ async fn record_idle_agent_nudge(
     .map(|(_, recorded)| recorded)
 }
 
-fn make_idle_agent_nudge_request() -> CommandRequest {
-    CommandRequest {
-        client_request_id: format!("idle-agent-nudge-{}", uuid::Uuid::new_v4()),
+fn build_stalled_agent_planner_message(
+    card_id: &str,
+    card_title: &str,
+    agent_chat_id: &str,
+    assignee: Option<&str>,
+    kind: StallKind,
+    stalled_for: Duration,
+) -> String {
+    let header = match kind {
+        StallKind::GeneratingNoTokens => "**Task agent stream stalled.**",
+        StallKind::ExecutingToolsNoProgress => "**Task agent tool execution stalled.**",
+        StallKind::IdleNoFinish => "**Task agent appears stalled.**",
+        StallKind::Completed => {
+            "**Task agent reached Completed state but the card is still in `doing`.**"
+        }
+    };
+
+    let state_line = match kind {
+        StallKind::GeneratingNoTokens => format!(
+            "State: Generating — no tokens received for {}.",
+            humantime::format_duration(stalled_for)
+        ),
+        StallKind::ExecutingToolsNoProgress => format!(
+            "State: ExecutingTools — no tool progress for {}.",
+            humantime::format_duration(stalled_for)
+        ),
+        StallKind::IdleNoFinish => format!(
+            "State: Idle — stream finished but `agent_finish` was not called. Idle for {}.",
+            humantime::format_duration(stalled_for)
+        ),
+        StallKind::Completed => format!(
+            "State: Completed — finish-like tool reached the agent but the card was not updated. Idle for {}.",
+            humantime::format_duration(stalled_for)
+        ),
+    };
+
+    let context_line = match kind {
+        StallKind::GeneratingNoTokens => {
+            "The model is connected but is not producing output. This often happens when a reasoning model gets stuck without progress, hits a thinking budget, or the provider stops sending data without an error."
+        }
+        StallKind::ExecutingToolsNoProgress => {
+            "A tool started but has not reported progress for a long time. The tool process may be hung, waiting on input, or otherwise unresponsive."
+        }
+        StallKind::IdleNoFinish => {
+            "The agent stopped producing output without calling `agent_finish`. This often happens when the model hits a token/thinking budget or returns an empty response."
+        }
+        StallKind::Completed => {
+            "The agent emitted a finish-like tool (e.g. `agent_finish`) but the card was not moved out of `doing`. The agent's work may be effectively done already, or the transition may have failed."
+        }
+    };
+
+    let assignee_line = assignee
+        .map(|a| format!(" (assignee: `{}`)", a))
+        .unwrap_or_default();
+
+    format!(
+        "{}\n\nCard: `{}` ({}){}\nAgent chat: `{}`\n{}\n\n{}\n\nOptions:\n\
+1. Send a continue/guidance message to the agent.\n\
+2. Restart the agent with `restart_agent(card_id=\"{}\", instructions=\"...\")`.\n\
+3. Inspect via `agent_pulse(card_id=\"{}\")` or `board_get(card_id=\"{}\")`.\n\
+4. If the task cannot proceed, move the card or mark it accordingly.",
+        header,
+        card_id,
+        card_title,
+        assignee_line,
+        agent_chat_id,
+        state_line,
+        context_line,
+        card_id,
+        card_id,
+        card_id,
+    )
+}
+
+async fn notify_planner_about_stalled_agent(
+    app: AppState,
+    task_id: &str,
+    card: &BoardCard,
+    agent_chat_id: &str,
+    planner_chat_id: Option<&str>,
+    kind: StallKind,
+    stalled_for: Duration,
+) -> Result<bool, String> {
+    let card_id = card.id.as_str();
+    let short_reason = kind.short_reason();
+
+    if !record_stall_planner_notification(
+        app.clone(),
+        task_id,
+        card_id,
+        agent_chat_id,
+        short_reason,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+
+    let Some(planner_chat_id) = planner_chat_id else {
+        tracing::warn!(
+            "Cannot notify planner about stalled agent for card {} in task {}: no planner_chat_id",
+            card_id,
+            task_id
+        );
+        return Ok(false);
+    };
+
+    let message = build_stalled_agent_planner_message(
+        card_id,
+        card.title.as_str(),
+        agent_chat_id,
+        card.assignee.as_deref(),
+        kind,
+        stalled_for,
+    );
+
+    let sessions = app.chat.sessions.clone();
+    let planner_session =
+        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id).await;
+
+    {
+        let session = planner_session.lock().await;
+        if session.thread.task_meta.is_none() {
+            return Err(format!(
+                "Cannot notify task planner {}: trajectory is missing or deleted",
+                planner_chat_id
+            ));
+        }
+    }
+
+    let request = CommandRequest {
+        client_request_id: format!("task-agent-stall-{}", uuid::Uuid::new_v4()),
         priority: true,
         command: ChatCommand::UserMessage {
-            content: serde_json::Value::String(IDLE_AGENT_REMINDER_MESSAGE.to_string()),
+            content: serde_json::Value::String(message),
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
         },
-    }
-}
+    };
 
-async fn enqueue_idle_agent_nudge_command(
-    app: AppState,
-    session_arc: Arc<tokio::sync::Mutex<ChatSession>>,
-) -> Result<(), String> {
     let processor_flag = {
-        let mut session = session_arc.lock().await;
-        if session.closed {
-            return Err(format!("Session {} is closed", session.chat_id));
-        }
-        session
-            .command_queue
-            .push_back(make_idle_agent_nudge_request());
+        let mut session = planner_session.lock().await;
+        session.command_queue.push_back(request);
         session.emit_queue_update();
-        session.touch();
         session.queue_notify.notify_one();
         session.queue_processor_running.clone()
     };
@@ -242,33 +368,19 @@ async fn enqueue_idle_agent_nudge_command(
     if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
         tokio::spawn(process_command_queue(
             app.clone(),
-            session_arc.clone(),
+            planner_session.clone(),
             processor_flag,
         ));
     }
 
-    Ok(())
-}
-
-async fn nudge_idle_agent(
-    app: AppState,
-    task_id: &str,
-    card_id: &str,
-    agent_chat_id: &str,
-    session_arc: Arc<tokio::sync::Mutex<ChatSession>>,
-    reason: &str,
-) -> Result<bool, String> {
-    if !record_idle_agent_nudge(app.clone(), task_id, card_id, agent_chat_id, reason).await? {
-        return Ok(false);
-    }
-
-    enqueue_idle_agent_nudge_command(app, session_arc).await?;
     tracing::info!(
-        "Auto-nudged task agent for card {} in chat {}: {}",
+        "Notified planner {} about stalled agent for card {} ({}): {}",
+        planner_chat_id,
         card_id,
         agent_chat_id,
-        reason
+        short_reason
     );
+
     Ok(true)
 }
 
@@ -1397,72 +1509,48 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                 .task_meta
                 .as_ref()
                 .and_then(|meta| meta.planner_chat_id.clone());
-            let can_nudge = idle_agent_session_can_be_nudged(&session, task_id, card, Utc::now());
 
-            if can_nudge {
-                drop(session);
-
-                let _ = nudge_idle_agent(
-                    app.clone(),
-                    task_id,
-                    &card.id,
-                    agent_chat_id,
-                    session_arc.clone(),
-                    &format!("idle for {}", humantime::format_duration(elapsed)),
-                )
-                .await?;
-                continue;
-            }
-
-            let stalled = match session.runtime.state {
-                SessionState::Generating => session
-                    .last_stream_delta_at
-                    .map(|t| t.elapsed() > STREAM_STALL_TIMEOUT)
-                    .unwrap_or_else(|| session.last_activity.elapsed() > STREAM_STALL_TIMEOUT),
-                SessionState::ExecutingTools => session
-                    .last_tool_progress_at
-                    .or(session.last_tool_started_at)
-                    .map(|t| t.elapsed() > TOOL_STALL_TIMEOUT)
-                    .unwrap_or(false),
-                _ => false,
-            };
-
-            if stalled {
-                let stall_elapsed = match session.runtime.state {
-                    SessionState::Generating => session
+            let now = Utc::now();
+            let stall_info: Option<(StallKind, Duration)> =
+                if agent_session_idle_stall_ready(&session, task_id, card) {
+                    let kind = match session.runtime.state {
+                        SessionState::Completed => StallKind::Completed,
+                        _ => StallKind::IdleNoFinish,
+                    };
+                    Some((kind, elapsed))
+                } else if session.runtime.state == SessionState::Generating
+                    && session
                         .last_stream_delta_at
-                        .unwrap_or(session.last_activity)
-                        .elapsed(),
-                    SessionState::ExecutingTools => session
+                        .map(|t| t.elapsed() > STREAM_STALL_TIMEOUT)
+                        .unwrap_or(elapsed > STREAM_STALL_TIMEOUT)
+                {
+                    let stall_elapsed = session
+                        .last_stream_delta_at
+                        .map(|t| t.elapsed())
+                        .unwrap_or(elapsed);
+                    Some((StallKind::GeneratingNoTokens, stall_elapsed))
+                } else if session.runtime.state == SessionState::ExecutingTools
+                    && session
+                        .last_tool_progress_at
+                        .or(session.last_tool_started_at)
+                        .map(|t| t.elapsed() > TOOL_STALL_TIMEOUT)
+                        .unwrap_or(false)
+                {
+                    let stall_elapsed = session
                         .last_tool_progress_at
                         .or(session.last_tool_started_at)
                         .map(|t| t.elapsed())
-                        .unwrap_or(elapsed),
-                    _ => elapsed,
+                        .unwrap_or(elapsed);
+                    Some((StallKind::ExecutingToolsNoProgress, stall_elapsed))
+                } else {
+                    None
                 };
-                let stall_reason = match session.runtime.state {
-                    SessionState::Generating => "stream appears stalled, no token activity",
-                    SessionState::ExecutingTools => {
-                        "tool execution appears stalled, no tool progress"
-                    }
-                    _ => "agent appears stalled",
-                };
-                let (nudge_count, _) = idle_agent_nudge_updates(card);
+
+            if let Some((kind, stall_elapsed)) = stall_info {
+                let (notify_count, _) = stall_planner_notifications(card);
                 drop(session);
 
-                if nudge_count < MAX_IDLE_AGENT_NUDGES_PER_CARD
-                    && idle_agent_nudge_allowed_at(card, Utc::now())
-                {
-                    let _ = nudge_idle_agent(
-                        app.clone(),
-                        task_id,
-                        &card.id,
-                        agent_chat_id,
-                        session_arc.clone(),
-                        stall_reason,
-                    )
-                    .await?;
-                } else {
+                if notify_count >= MAX_STALL_PLANNER_NOTIFICATIONS_PER_CARD {
                     mark_agent_as_failed(
                         app.clone(),
                         task_id,
@@ -1470,11 +1558,22 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                         card.assignee.as_deref(),
                         planner_chat_id.as_deref(),
                         &format!(
-                            "{} for {}, nudge retries exhausted",
-                            stall_reason,
+                            "{} for {}, planner-notify retries exhausted",
+                            kind.short_reason(),
                             humantime::format_duration(stall_elapsed)
                         ),
                         AgentFailureKind::TransientExhausted,
+                    )
+                    .await?;
+                } else if stall_planner_notify_allowed(card, now) {
+                    let _ = notify_planner_about_stalled_agent(
+                        app.clone(),
+                        task_id,
+                        card,
+                        agent_chat_id,
+                        planner_chat_id.as_deref(),
+                        kind,
+                        stall_elapsed,
                     )
                     .await?;
                 }
@@ -1522,6 +1621,7 @@ mod tests {
     use crate::tasks::types::{
         BoardCard, StatusUpdate, TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus,
     };
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Instant;
 
@@ -1598,6 +1698,7 @@ mod tests {
         String,
         String,
         Arc<tokio::sync::Mutex<ChatSession>>,
+        Arc<tokio::sync::Mutex<ChatSession>>,
     ) {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1607,7 +1708,7 @@ mod tests {
             .workspace_folders
             .lock()
             .unwrap() = vec![temp.path().to_path_buf()];
-        let task = crate::tasks::storage::create_task(gcx.clone(), "Nudge task")
+        let task = crate::tasks::storage::create_task(gcx.clone(), "Stall task")
             .await
             .unwrap();
         let now = Utc::now().to_rfc3339();
@@ -1665,12 +1766,32 @@ mod tests {
             .await
             .insert(agent_chat_id.clone(), session_arc.clone());
 
-        (temp, app, task.id, agent_chat_id, session_arc)
+        let planner_chat_id = "planner-test".to_string();
+        let mut planner_session = ChatSession::new(planner_chat_id.clone());
+        planner_session.thread.task_meta = Some(TaskMeta {
+            task_id: task.id.clone(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: None,
+        });
+        planner_session.runtime.state = SessionState::WaitingUserInput;
+        planner_session
+            .queue_processor_running
+            .store(true, Ordering::SeqCst);
+        let planner_arc = Arc::new(tokio::sync::Mutex::new(planner_session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(planner_chat_id, planner_arc.clone());
+
+        (temp, app, task.id, agent_chat_id, session_arc, planner_arc)
     }
 
     #[tokio::test]
-    async fn idle_doing_agent_without_finish_gets_nudged() {
-        let (_temp, app, task_id, agent_chat_id, session_arc) =
+    async fn idle_doing_agent_without_finish_notifies_planner() {
+        let (_temp, app, task_id, agent_chat_id, agent_arc, planner_arc) =
             setup_monitor_case("doing", SessionState::Idle, Duration::from_secs(90), vec![]).await;
 
         check_for_stuck_agents(app.clone()).await.unwrap();
@@ -1680,28 +1801,37 @@ mod tests {
             .unwrap();
         let card = board.get_card("T-1").unwrap();
         assert!(card.status_updates.iter().any(|update| {
-            update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
+            update
+                .message
+                .starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
                 && update.message.contains(&agent_chat_id)
         }));
 
-        let session = session_arc.lock().await;
-        assert_eq!(session.command_queue.len(), 1);
-        let queued = session.command_queue.front().unwrap();
+        assert!(
+            agent_arc.lock().await.command_queue.is_empty(),
+            "agent itself should NOT receive a message"
+        );
+
+        let planner = planner_arc.lock().await;
+        assert_eq!(planner.command_queue.len(), 1);
+        let queued = planner.command_queue.front().unwrap();
         assert!(queued.priority);
         match &queued.command {
             ChatCommand::UserMessage { content, .. } => {
                 let text = content.as_str().unwrap();
-                assert!(text.contains("agent_finish(success=true, report=\"...\")"));
-                assert!(text.contains("agent_finish(success=false, report=\"...\")"));
+                assert!(text.contains("appears stalled"));
+                assert!(text.contains("T-1"));
+                assert!(text.contains("restart_agent"));
+                assert!(text.contains(&agent_chat_id));
             }
-            _ => panic!("expected user message nudge"),
+            _ => panic!("expected user message to planner"),
         }
     }
 
     #[tokio::test]
-    async fn active_agent_is_not_nudged() {
+    async fn active_agent_does_not_notify_planner() {
         for state in [SessionState::WaitingUserInput, SessionState::WaitingIde] {
-            let (_temp, app, task_id, _agent_chat_id, session_arc) =
+            let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) =
                 setup_monitor_case("doing", state, Duration::from_secs(90), vec![]).await;
 
             check_for_stuck_agents(app.clone()).await.unwrap();
@@ -1710,18 +1840,19 @@ mod tests {
                 .await
                 .unwrap();
             let card = board.get_card("T-1").unwrap();
-            assert!(card
-                .status_updates
-                .iter()
-                .all(|update| { !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX) }));
-            assert!(session_arc.lock().await.command_queue.is_empty());
+            assert!(card.status_updates.iter().all(|update| {
+                !update
+                    .message
+                    .starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
+            }));
+            assert!(planner_arc.lock().await.command_queue.is_empty());
         }
     }
 
     #[tokio::test]
-    async fn done_or_failed_card_is_not_nudged() {
+    async fn done_or_failed_card_does_not_notify_planner() {
         for column in ["done", "failed"] {
-            let (_temp, app, task_id, _agent_chat_id, session_arc) =
+            let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) =
                 setup_monitor_case(column, SessionState::Idle, Duration::from_secs(90), vec![])
                     .await;
 
@@ -1731,21 +1862,22 @@ mod tests {
                 .await
                 .unwrap();
             let card = board.get_card("T-1").unwrap();
-            assert!(card
-                .status_updates
-                .iter()
-                .all(|update| { !update.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX) }));
-            assert!(session_arc.lock().await.command_queue.is_empty());
+            assert!(card.status_updates.iter().all(|update| {
+                !update
+                    .message
+                    .starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
+            }));
+            assert!(planner_arc.lock().await.command_queue.is_empty());
         }
     }
 
     #[tokio::test]
-    async fn nudge_rate_limit_prevents_spam() {
+    async fn planner_notify_cooldown_prevents_spam() {
         let recent = StatusUpdate {
             timestamp: Utc::now().to_rfc3339(),
-            message: format!("{} agent-T-1", IDLE_AGENT_NUDGE_STATUS_PREFIX),
+            message: format!("{} agent-T-1", STALL_PLANNER_NOTIFY_STATUS_PREFIX),
         };
-        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+        let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) = setup_monitor_case(
             "doing",
             SessionState::Idle,
             Duration::from_secs(90),
@@ -1759,40 +1891,13 @@ mod tests {
             .await
             .unwrap();
         let card = board.get_card("T-1").unwrap();
-        assert_eq!(idle_agent_nudge_updates(card).0, 1);
-        assert!(session_arc.lock().await.command_queue.is_empty());
-
-        let old_timestamp = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
-        let maxed_updates = (0..MAX_IDLE_AGENT_NUDGES_PER_CARD)
-            .map(|_| StatusUpdate {
-                timestamp: old_timestamp.clone(),
-                message: format!("{} agent-T-1", IDLE_AGENT_NUDGE_STATUS_PREFIX),
-            })
-            .collect::<Vec<_>>();
-        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
-            "doing",
-            SessionState::Idle,
-            Duration::from_secs(90),
-            maxed_updates,
-        )
-        .await;
-
-        check_for_stuck_agents(app.clone()).await.unwrap();
-
-        let board = storage::load_board(app.gcx.clone(), &task_id)
-            .await
-            .unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert_eq!(
-            idle_agent_nudge_updates(card).0,
-            MAX_IDLE_AGENT_NUDGES_PER_CARD
-        );
-        assert!(session_arc.lock().await.command_queue.is_empty());
+        assert_eq!(stall_planner_notifications(card).0, 1);
+        assert!(planner_arc.lock().await.command_queue.is_empty());
     }
 
     #[tokio::test]
-    async fn nudge_triggers_regeneration_or_command_queue() {
-        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+    async fn completed_state_on_doing_card_notifies_planner() {
+        let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) = setup_monitor_case(
             "doing",
             SessionState::Completed,
             Duration::from_secs(90),
@@ -1805,16 +1910,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            idle_agent_nudge_updates(board.get_card("T-1").unwrap()).0,
+            stall_planner_notifications(board.get_card("T-1").unwrap()).0,
             1
         );
-        let session = session_arc.lock().await;
-        assert_eq!(session.command_queue.len(), 1);
-        assert_eq!(session.runtime.queue_size, 1);
-        assert!(matches!(
-            &session.command_queue.front().unwrap().command,
-            ChatCommand::UserMessage { .. }
-        ));
+        let planner = planner_arc.lock().await;
+        assert_eq!(planner.command_queue.len(), 1);
+        match &planner.command_queue.front().unwrap().command {
+            ChatCommand::UserMessage { content, .. } => {
+                let text = content.as_str().unwrap();
+                assert!(text.contains("Completed state but the card is still in `doing`"));
+            }
+            _ => panic!("expected user message to planner"),
+        }
     }
 
     #[test]
@@ -2002,7 +2109,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_agent_failure_attempts_cleanup() {
-        let (_temp, app, task_id, _agent_chat_id, _session_arc) =
+        let (_temp, app, task_id, _agent_chat_id, _agent_arc, _planner_arc) =
             setup_monitor_case("doing", SessionState::Idle, Duration::from_secs(90), vec![]).await;
 
         mark_agent_as_failed(
@@ -2030,8 +2137,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_stall_triggers_nudge() {
-        let (_temp, app, task_id, agent_chat_id, session_arc) = setup_monitor_case(
+    async fn stream_stall_notifies_planner() {
+        let (_temp, app, task_id, agent_chat_id, agent_arc, planner_arc) = setup_monitor_case(
             "doing",
             SessionState::Generating,
             STREAM_STALL_TIMEOUT + Duration::from_secs(10),
@@ -2047,19 +2154,33 @@ mod tests {
         let card = board.get_card("T-1").unwrap();
         assert!(
             card.status_updates.iter().any(|u| {
-                u.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
+                u.message.starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
                     && u.message.contains(&agent_chat_id)
+                    && u.message.contains("stream appears stalled")
             }),
-            "expected nudge status update"
+            "expected stream-stall status update"
         );
 
-        let session = session_arc.lock().await;
-        assert_eq!(session.command_queue.len(), 1, "nudge command queued");
+        assert!(
+            agent_arc.lock().await.command_queue.is_empty(),
+            "agent itself should NOT receive a message"
+        );
+
+        let planner = planner_arc.lock().await;
+        assert_eq!(planner.command_queue.len(), 1, "planner should be notified");
+        match &planner.command_queue.front().unwrap().command {
+            ChatCommand::UserMessage { content, .. } => {
+                let text = content.as_str().unwrap();
+                assert!(text.contains("stream stalled"));
+                assert!(text.contains("Generating"));
+            }
+            _ => panic!("expected user message to planner"),
+        }
     }
 
     #[tokio::test]
-    async fn tool_state_without_progress_for_long_time_is_flagged_stalled() {
-        let (_temp, app, task_id, agent_chat_id, session_arc) = setup_monitor_case(
+    async fn tool_stall_notifies_planner() {
+        let (_temp, app, task_id, agent_chat_id, agent_arc, planner_arc) = setup_monitor_case(
             "doing",
             SessionState::ExecutingTools,
             TOOL_STALL_TIMEOUT + Duration::from_secs(10),
@@ -2075,20 +2196,28 @@ mod tests {
         let card = board.get_card("T-1").unwrap();
         assert!(
             card.status_updates.iter().any(|u| {
-                u.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX)
+                u.message.starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
                     && u.message.contains(&agent_chat_id)
-                    && u.message.contains("tool execution appears stalled")
+                    && u.message.contains("tool execution stalled")
             }),
-            "expected tool-stall nudge status update"
+            "expected tool-stall status update"
         );
 
-        let session = session_arc.lock().await;
-        assert_eq!(session.command_queue.len(), 1, "nudge command queued");
+        assert!(agent_arc.lock().await.command_queue.is_empty());
+        let planner = planner_arc.lock().await;
+        assert_eq!(planner.command_queue.len(), 1);
+        match &planner.command_queue.front().unwrap().command {
+            ChatCommand::UserMessage { content, .. } => {
+                let text = content.as_str().unwrap();
+                assert!(text.contains("tool execution stalled"));
+            }
+            _ => panic!("expected user message to planner"),
+        }
     }
 
     #[tokio::test]
-    async fn tool_state_with_recent_progress_is_not_flagged_stalled() {
-        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+    async fn tool_state_with_recent_progress_is_not_notified() {
+        let (_temp, app, task_id, _agent_chat_id, agent_arc, planner_arc) = setup_monitor_case(
             "doing",
             SessionState::ExecutingTools,
             TOOL_STALL_TIMEOUT + Duration::from_secs(10),
@@ -2096,7 +2225,7 @@ mod tests {
         )
         .await;
         {
-            let mut session = session_arc.lock().await;
+            let mut session = agent_arc.lock().await;
             session.last_tool_progress_at = Some(Instant::now());
         }
 
@@ -2109,24 +2238,24 @@ mod tests {
         assert!(card
             .status_updates
             .iter()
-            .all(|u| { !u.message.starts_with(IDLE_AGENT_NUDGE_STATUS_PREFIX) }));
-        assert!(session_arc.lock().await.command_queue.is_empty());
+            .all(|u| { !u.message.starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX) }));
+        assert!(planner_arc.lock().await.command_queue.is_empty());
     }
 
     #[tokio::test]
-    async fn stream_stall_after_max_nudges_marks_failed_transient() {
+    async fn stream_stall_after_max_planner_notifications_marks_failed_transient() {
         let old_ts = (Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
-        let maxed = (0..MAX_IDLE_AGENT_NUDGES_PER_CARD)
+        let maxed = (0..MAX_STALL_PLANNER_NOTIFICATIONS_PER_CARD)
             .map(|_| StatusUpdate {
                 timestamp: old_ts.clone(),
                 message: format!(
                     "{} agent-T-1 (stream appears stalled, no token activity)",
-                    IDLE_AGENT_NUDGE_STATUS_PREFIX
+                    STALL_PLANNER_NOTIFY_STATUS_PREFIX
                 ),
             })
             .collect::<Vec<_>>();
 
-        let (_temp, app, task_id, _agent_chat_id, session_arc) = setup_monitor_case(
+        let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) = setup_monitor_case(
             "doing",
             SessionState::Generating,
             STREAM_STALL_TIMEOUT + Duration::from_secs(10),
@@ -2148,9 +2277,13 @@ mod tests {
                 .contains("stalled"),
             "report should mention stalled"
         );
+
+        // Failure path goes through notify_planner_agents_finished which posts
+        // the standard "agent finished" planner summary message.
+        let planner = planner_arc.lock().await;
         assert!(
-            session_arc.lock().await.command_queue.is_empty(),
-            "no nudge command when marking failed"
+            !planner.command_queue.is_empty(),
+            "planner should receive a failure summary, not a stall notification"
         );
     }
 

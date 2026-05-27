@@ -8429,4 +8429,3 @@ fn limiter_prunes_stale_chat_ids() {
         "stale chat-1 entry must be pruned after second call"
     );
 }
-
