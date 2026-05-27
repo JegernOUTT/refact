@@ -243,3 +243,4 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 serial_test = "3"
 tower = { version = "0.4", features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }

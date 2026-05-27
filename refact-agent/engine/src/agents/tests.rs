@@ -16,7 +16,7 @@ use crate::agents::types::{
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::chat::types::{ChatCommand, ChatSession};
+use crate::chat::types::{ChatCommand, ChatEvent, ChatSession};
 use crate::subchat::{SubchatConfig, SubchatResult};
 use crate::tools::tools_description::Tool;
 use serial_test::serial;
@@ -994,6 +994,172 @@ async fn burst_guard_defers_sixth_background_completion_then_allows_later_flush(
     assert_ne!(updated.completion_message_id.as_deref(), Some("pending"));
     assert!(updated.completion_pushed_at.is_some());
     assert!(updated.deferred_at.is_none());
+}
+
+#[serial]
+#[tokio::test]
+async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits_transitions() {
+    let runner_started = Arc::new(tokio::sync::Notify::new());
+    let finish_runner = Arc::new(tokio::sync::Notify::new());
+    let _runner = {
+        let runner_started = runner_started.clone();
+        let finish_runner = finish_runner.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, mut messages, config| {
+            let runner_started = runner_started.clone();
+            let finish_runner = finish_runner.clone();
+            Box::pin(async move {
+                runner_started.notify_one();
+                finish_runner.notified().await;
+                messages.push(ChatMessage::new(
+                    "assistant".to_string(),
+                    "Status: DONE\nCompleted spawn".to_string(),
+                ));
+                Ok(SubchatResult {
+                    messages,
+                    metering: serde_json::Map::new(),
+                    chat_id: config.chat_id,
+                })
+            })
+        }))
+    };
+    let (_gcx, app, session_arc) = app_with_parent_session("parent-spawn-immediate").await;
+    let mut rx = session_arc.lock().await.subscribe();
+    let mut req = delegate_spawn_request("parent-spawn-immediate", "src/frog.rs");
+    req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
+
+    let handle = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::agents::spawn::spawn_background_agent(app.clone(), req),
+    )
+    .await
+    .expect("spawn returned before runner finished")
+    .expect("spawn handle");
+
+    assert!(handle.child_chat_id.starts_with("subchat-"));
+    tokio::time::timeout(Duration::from_secs(1), runner_started.notified())
+        .await
+        .expect("runner started");
+
+    let mut statuses = Vec::new();
+    while !statuses.iter().any(|status| status == "running") {
+        let json = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("background update before running")
+            .expect("event");
+        let value: serde_json::Value = serde_json::from_str(json.as_str()).expect("event json");
+        let event: ChatEvent = serde_json::from_value(value).expect("event");
+        if let ChatEvent::BackgroundAgentUpdated { agent, .. } = event {
+            if agent.agent_id == handle.agent_id {
+                statuses.push(agent.status);
+            }
+        }
+    }
+
+    let running = app
+        .agents
+        .get("parent-spawn-immediate", &handle.agent_id)
+        .await
+        .expect("running record");
+    assert_eq!(running.status, BgAgentStatus::Running);
+    assert_eq!(
+        running.child_chat_id.as_deref(),
+        Some(handle.child_chat_id.as_str())
+    );
+
+    finish_runner.notify_one();
+    let completed = tokio::time::timeout(Duration::from_secs(1), handle.completion_rx)
+        .await
+        .expect("completion received")
+        .expect("completion record");
+    assert_eq!(completed.status, BgAgentStatus::Completed);
+
+    while !statuses.iter().any(|status| status == "completed") {
+        let json = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("background update before completed")
+            .expect("event");
+        let value: serde_json::Value = serde_json::from_str(json.as_str()).expect("event json");
+        let event: ChatEvent = serde_json::from_value(value).expect("event");
+        if let ChatEvent::BackgroundAgentUpdated { agent, .. } = event {
+            if agent.agent_id == completed.agent_id {
+                statuses.push(agent.status);
+            }
+        }
+    }
+
+    assert_eq!(statuses, vec!["queued", "running", "completed"]);
+}
+
+#[serial]
+#[tokio::test]
+async fn spawn_and_wait_returns_terminal_record_within_timeout() {
+    let _runner = install_spawn_runner(Arc::new(AtomicBool::new(false)));
+    let (_gcx, app, _session_arc) = app_with_parent_session("parent-wait-terminal").await;
+    let mut req = delegate_spawn_request("parent-wait-terminal", "src/frog.rs");
+    req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
+
+    let completed =
+        crate::agents::spawn::spawn_and_wait(app.clone(), req, Some(Duration::from_secs(2)))
+            .await
+            .expect("spawn completed");
+
+    assert_eq!(completed.status, BgAgentStatus::Completed);
+    assert_eq!(completed.parent_chat_id, "parent-wait-terminal");
+    assert!(completed
+        .child_chat_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("subchat-")));
+    assert!(completed
+        .result_summary
+        .as_deref()
+        .is_some_and(|summary| summary.contains("Completed Edit src/frog.rs")));
+    let persisted = app
+        .agents
+        .get("parent-wait-terminal", &completed.agent_id)
+        .await
+        .expect("persisted");
+    assert_eq!(persisted, completed);
+}
+
+#[serial]
+#[tokio::test]
+async fn spawn_and_wait_times_out_when_runner_hangs() {
+    tokio::time::pause();
+    let runner_started = Arc::new(tokio::sync::Notify::new());
+    let _runner = {
+        let runner_started = runner_started.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, _messages, _config| {
+            let runner_started = runner_started.clone();
+            Box::pin(async move {
+                runner_started.notify_one();
+                std::future::pending::<Result<SubchatResult, String>>().await
+            })
+        }))
+    };
+    let (_gcx, app, _session_arc) = app_with_parent_session("parent-wait-timeout").await;
+    let mut req = delegate_spawn_request("parent-wait-timeout", "src/frog.rs");
+    req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
+    let wait_task = tokio::spawn(crate::agents::spawn::spawn_and_wait(
+        app.clone(),
+        req,
+        Some(Duration::from_secs(5)),
+    ));
+
+    runner_started.notified().await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let err = wait_task
+        .await
+        .expect("spawn task joined")
+        .expect_err("spawn should time out");
+
+    assert_eq!(err, "background agent timed out");
+    let records = app
+        .agents
+        .list_for_parent("parent-wait-timeout", AgentListFilter::default())
+        .await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, BgAgentStatus::Running);
 }
 
 #[tokio::test]
