@@ -145,6 +145,8 @@ async-trait = "0.1.73"
 backtrace = "0.3.71"
 base64 = "0.22.1"
 chrono = { version = "0.4.31", features = ["serde"] }
+chrono-tz = "0.10"
+cron = "0.12"
 diff = "0.1.13"
 dunce = "1.0.5"
 dyn_partial_eq = "=0.1.2"
@@ -219,7 +221,7 @@ tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"
 typetag = "0.2"
 url = "2.4.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3"
 which = "7.0.2"
 petgraph = "0.6"

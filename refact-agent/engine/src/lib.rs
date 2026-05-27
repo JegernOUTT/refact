@@ -67,6 +67,7 @@ pub mod files_in_jsonl;
 pub mod files_in_workspace;
 
 pub mod postprocessing;
+pub mod scheduler;
 pub mod scratchpad_abstract;
 pub mod scratchpads;
 pub mod subchat;
