@@ -12,7 +12,7 @@ use crate::call_validation::{ChatContent, ChatMessage};
 use crate::worktrees::types::WorktreeMeta;
 
 use super::types::*;
-use super::queue::resolve_worktree_setparams_update;
+use super::queue::{add_mode_switch_event_if_changed, resolve_worktree_setparams_update};
 use super::session::get_or_create_session_with_trajectory;
 use super::content::{validate_content_with_attachments, validate_context_files};
 use super::queue::process_command_queue;
@@ -221,6 +221,11 @@ pub async fn handle_v1_chat_command(
                 error,
             ));
         }
+        let mode_switch_reason = patch
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let thread_before = session.thread.clone();
         drop(session);
         let worktree_update =
@@ -352,6 +357,14 @@ pub async fn handle_v1_chat_command(
         if changed {
             session.increment_version();
             session.touch();
+        }
+        if mode_changed {
+            add_mode_switch_event_if_changed(
+                &mut session,
+                &old_mode,
+                mode_switch_reason.as_deref(),
+                "chat.session",
+            );
         }
         if let Some(worktree) = activated_worktree {
             session.add_message(worktree_activation_message(&worktree));

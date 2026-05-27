@@ -1611,6 +1611,58 @@ mod tests {
     }
 
     #[test]
+    fn mode_switch_emits_event_not_user_message() {
+        let mut session = ChatSession::new("mode-switch-test".to_string());
+        session.thread.mode = "agent".to_string();
+        session.add_message(ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("real user prompt".to_string()),
+            ..Default::default()
+        });
+        let user_count_before = session.messages.iter().filter(|m| m.role == "user").count();
+        let old_mode = session.thread.mode.clone();
+
+        let patch = json!({"mode": "TASK_AGENT"});
+        let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
+        assert!(changed);
+        crate::chat::queue::add_mode_switch_event_if_changed(
+            &mut session,
+            &old_mode,
+            None,
+            "chat.session",
+        );
+
+        let event_messages: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == "event"
+                    && m.extra
+                        .get("event")
+                        .and_then(|event| event.get("subkind"))
+                        .and_then(|subkind| subkind.as_str())
+                        == Some("mode_switch")
+            })
+            .collect();
+        assert_eq!(event_messages.len(), 1);
+        assert_eq!(
+            session.messages.iter().filter(|m| m.role == "user").count(),
+            user_count_before
+        );
+
+        let event = event_messages[0].extra.get("event").unwrap();
+        assert_eq!(event["source"], json!("chat.session"));
+        assert_eq!(
+            event["payload"],
+            json!({"from": "agent", "to": "task_agent", "reason": null})
+        );
+        assert_eq!(
+            event_messages[0].content.content_text_only(),
+            "Mode switched: agent → task_agent"
+        );
+    }
+
+    #[test]
     fn test_normalize_mode_id() {
         use crate::call_validation::normalize_mode_id;
 

@@ -13,6 +13,7 @@ use refact_buddy_core::user_action::UserAction;
 use crate::files_correction::get_project_dirs;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
+use crate::chat::internal_roles::mode_switch_event;
 
 use super::types::*;
 use super::browser_context;
@@ -526,6 +527,20 @@ pub fn apply_setparams_patch(
     }
 
     (changed, sanitized_patch)
+}
+
+pub(crate) fn add_mode_switch_event_if_changed(
+    session: &mut ChatSession,
+    old_mode: &str,
+    reason: Option<&str>,
+    source: &str,
+) -> bool {
+    let new_mode = session.thread.mode.clone();
+    if new_mode == old_mode {
+        return false;
+    }
+    session.add_message(mode_switch_event(source, old_mode, new_mode, reason));
+    true
 }
 
 #[derive(Clone)]
@@ -1159,6 +1174,11 @@ pub async fn process_command_queue(
                     warn!("SetParams patch must be an object, ignoring");
                     continue;
                 }
+                let mode_switch_reason = patch
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
                 let (chat_id, thread_before) = {
                     let session = session_arc.lock().await;
                     (session.chat_id.clone(), session.thread.clone())
@@ -1184,8 +1204,10 @@ pub async fn process_command_queue(
                     }
                 };
                 let mut session = session_arc.lock().await;
+                let old_mode = session.thread.mode.clone();
                 let (mut changed, sanitized_patch) =
                     apply_setparams_patch(&mut session.thread, &patch);
+                let mode_changed = session.thread.mode != old_mode;
                 if let Some(update) = worktree_update.clone() {
                     session.thread.worktree = update.worktree;
                     changed |= update.changed;
@@ -1217,6 +1239,14 @@ pub async fn process_command_queue(
                 if changed {
                     session.increment_version();
                     session.touch();
+                }
+                if mode_changed {
+                    add_mode_switch_event_if_changed(
+                        &mut session,
+                        &old_mode,
+                        mode_switch_reason.as_deref(),
+                        "chat.session",
+                    );
                 }
                 drop(session);
                 if changed {

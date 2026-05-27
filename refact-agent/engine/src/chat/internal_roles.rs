@@ -46,6 +46,22 @@ pub fn event(
     }
 }
 
+pub fn mode_switch_event(
+    source: impl Into<String>,
+    from: impl AsRef<str>,
+    to: impl AsRef<str>,
+    reason: Option<&str>,
+) -> ChatMessage {
+    let from = from.as_ref();
+    let to = to.as_ref();
+    event(
+        EventSubkind::ModeSwitch,
+        source,
+        json!({ "from": from, "to": to, "reason": reason }),
+        format!("Mode switched: {} → {}", from, to),
+    )
+}
+
 pub fn plan(
     mode: impl Into<String>,
     version: u32,
