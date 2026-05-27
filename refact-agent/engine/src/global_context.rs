@@ -7,6 +7,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use hyper::StatusCode;
+use serde::Deserialize;
 use structopt::StructOpt;
 use tokio::signal;
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
@@ -30,6 +31,7 @@ use crate::integrations::browser_runtime::BrowserRuntime;
 use crate::integrations::sessions::IntegrationSession;
 use crate::privacy::PrivacySettings;
 use crate::background_tasks::BackgroundTasksHolder;
+use crate::scheduler::SchedulerConfig;
 use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
 use crate::knowledge_index::KnowledgeIndex;
@@ -187,6 +189,22 @@ pub struct CommandLine {
         help = "Specify the privacy.yaml, replacing the global one"
     )]
     pub privacy_yaml: String,
+    #[structopt(long, help = "Disable the scheduler runner and cron scheduling tools.")]
+    pub no_scheduler: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EngineGlobalConfig {
+    #[serde(default)]
+    scheduler: SchedulerConfig,
+}
+
+impl Default for EngineGlobalConfig {
+    fn default() -> Self {
+        Self {
+            scheduler: SchedulerConfig::default(),
+        }
+    }
 }
 
 pub struct AtCommandsPreviewCache {
@@ -264,6 +282,7 @@ pub struct GlobalContext {
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
     pub agents: Arc<BackgroundAgentRegistry>,
+    pub scheduler_config: SchedulerConfig,
 }
 
 pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type alias, confusing
@@ -352,6 +371,35 @@ impl GlobalContext {
             agents: self.agents.clone(),
         }
     }
+}
+
+async fn load_engine_global_config(config_dir: &PathBuf, cmdline: &CommandLine) -> SchedulerConfig {
+    let path = if cmdline.privacy_yaml.is_empty() {
+        config_dir.join("privacy.yaml")
+    } else {
+        crate::files_correction::canonical_path(cmdline.privacy_yaml.clone())
+    };
+    let config = match tokio::fs::read_to_string(&path).await {
+        Ok(content) => {
+            serde_yaml::from_str::<EngineGlobalConfig>(&content).unwrap_or_else(|error| {
+                tracing::warn!(
+                    "failed to parse scheduler config from {}: {error}",
+                    path.display()
+                );
+                EngineGlobalConfig::default()
+            })
+        }
+        Err(error) => {
+            tracing::warn!(
+                "failed to read scheduler config from {}: {error}",
+                path.display()
+            );
+            EngineGlobalConfig::default()
+        }
+    };
+    config
+        .scheduler
+        .with_startup_overrides(cmdline.no_scheduler)
 }
 
 impl ShutdownAccess for GlobalContext {
@@ -631,6 +679,7 @@ pub async fn create_global_context(
         http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
     }
     let http_client = http_client_builder.build().unwrap();
+    let scheduler_config = load_engine_global_config(&config_dir, &cmdline).await;
 
     let mut workspace_dirs: Vec<PathBuf> = vec![];
     if !cmdline.workspace_folder.is_empty() {
@@ -706,6 +755,7 @@ pub async fn create_global_context(
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         user_activity: Arc::new(AMutex::new(user_activity)),
         agents,
+        scheduler_config,
     };
     let gcx = Arc::new(cx);
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
@@ -821,6 +871,7 @@ pub mod tests {
             secrets_yaml: String::new(),
             indexing_yaml: String::new(),
             privacy_yaml: String::new(),
+            no_scheduler: false,
         };
 
         let http_client = build_shared_http_client_builder()
@@ -880,6 +931,7 @@ pub mod tests {
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             user_activity: Arc::new(AMutex::new(user_activity)),
             agents,
+            scheduler_config: SchedulerConfig::default(),
         };
         Arc::new(cx)
     }

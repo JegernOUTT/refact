@@ -109,6 +109,10 @@ Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, V
 
 `AtCommandsContext` provides: global_context, chat_id, n_ctx, abort_flag, messages, current_model, task_meta, subchat depth/channels, postprocess params.
 
+## Scheduler
+
+The scheduler owns cron-style scheduled tasks and is spawned from background tasks only when enabled. Startup kill switches are `REFACT_DISABLE_SCHEDULER=1`, the `--no-scheduler` CLI flag, or `scheduler.enabled: false` in the engine global config. Durable schedules can be restricted with `scheduler.disable_durable: true`; cron creation should fall back to session-only and return the note `durable schedules disabled by config`. The default job cap is `scheduler.max_jobs: 50`.
+
 ## HTTP API
 
 Base: `http://127.0.0.1:{port}/v1/`. Middleware: permissive CORS, 15MB body limit.

@@ -18,3 +18,8 @@ privacy_rules:
 
 
 # See unit tests in privacy.rs for more examples.
+
+scheduler:
+  enabled: true
+  disable_durable: false
+  max_jobs: 50

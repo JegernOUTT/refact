@@ -120,6 +120,12 @@ pub async fn start_background_tasks(
             crate::ast::ast_indexer_thread::ast_indexer_start(ast_service, gcx.clone()).await,
         );
     }
+    if let Some(scheduler_task) = crate::scheduler::spawn_if_enabled(
+        Arc::new(crate::scheduler::InMemoryCronStore::new()),
+        gcx.scheduler_config,
+    ) {
+        bg.push_back(scheduler_task);
+    }
     let files_jsonl_path = gcx.clone().cmdline.files_jsonl_path.clone();
     if !files_jsonl_path.is_empty() {
         bg.extend(vec![tokio::spawn(
