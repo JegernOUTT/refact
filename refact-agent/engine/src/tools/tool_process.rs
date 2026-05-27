@@ -35,6 +35,7 @@ use crate::tools::tools_description::{
 use crate::worktrees::scope::ExecutionScope;
 
 const PROCESS_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
+const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
 const ASK_USER_DEFAULT: &[&str] = &[
     "*rm*",
     "*rmdir*",
@@ -150,6 +151,7 @@ struct ProcessStartArgs {
     startup_wait: Option<Duration>,
     readiness: Option<ExecReadinessProbe>,
     description: String,
+    tty: Option<bool>,
     scope_warnings: Vec<String>,
 }
 
@@ -218,6 +220,7 @@ impl Tool for ToolProcessStart {
             }
         }
         let short_description = sanitize_short_description(&parsed.description);
+        let tty = parsed.tty.unwrap_or(false);
         let owner = ExecOwnerMeta {
             chat_id: Some(chat_id),
             tool_call_id: Some(tool_call_id.clone()),
@@ -228,7 +231,8 @@ impl Tool for ToolProcessStart {
             .with_env_map(env_variables)
             .with_owner(owner)
             .with_transcript_limit(PROCESS_TRANSCRIPT_MAX_BYTES)
-            .with_short_description(short_description);
+            .with_short_description(short_description)
+            .with_tty(tty);
         if let Some(cwd) = parsed.workdir.clone() {
             request = request.with_cwd(cwd);
         }
@@ -254,7 +258,7 @@ impl Tool for ToolProcessStart {
         Ok(tool_result(
             tool_call_id,
             content,
-            Some(exec_extra(&result.snapshot, Some(&read), None)),
+            Some(exec_extra(&result.snapshot, Some(&read), None, Some(tty))),
             tool_failed_for_status(&result.snapshot.status),
         ))
     }
@@ -266,20 +270,8 @@ impl Tool for ToolProcessStart {
             source: source(&self.config_path),
             experimental: false,
             allow_parallel: false,
-            description: "Start a runtime-owned background or service process and return its process ID, initial status, output cursor, and metadata.".to_string(),
-            input_schema: json_schema_from_params(
-                &[
-                    ("command", "string", "Command to start."),
-                    ("description", "string", "Required. A single concise active-voice sentence describing what the command does. Short for simple commands: 'Start development server'. More descriptive for piped/obscure commands: 'Build and tail log output in background'. Never use words like 'complex' or 'risk'."),
-                    ("workdir", "string", "Optional working directory."),
-                    ("mode", "string", "Optional mode: background or service. Default: background."),
-                    ("service_name", "string", "Optional service name stored in process metadata."),
-                    ("startup_wait_ms", "integer", "Optional milliseconds to wait before returning the initial snapshot."),
-                    ("startup_wait_port", "integer", "Optional readiness port stored with startup metadata."),
-                    ("startup_wait_keyword", "string", "Optional readiness keyword stored with startup metadata."),
-                ],
-                &["command", "description"],
-            ),
+            description: "Start a runtime-owned background or service process and return its process ID, initial status, output cursor, and metadata. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream.".to_string(),
+            input_schema: process_start_input_schema(),
             output_schema: None,
             annotations: None,
         }
@@ -433,6 +425,7 @@ impl Tool for ToolProcessRead {
                 &snapshot,
                 Some(&read),
                 Some(stream_label(stream)),
+                None,
             )),
             None,
         ))
@@ -489,7 +482,7 @@ impl Tool for ToolProcessKill {
         Ok(tool_result(
             tool_call_id,
             content,
-            Some(exec_extra(&snapshot, None, None)),
+            Some(exec_extra(&snapshot, None, None, None)),
             tool_failed_for_status(&snapshot.status),
         ))
     }
@@ -567,7 +560,7 @@ impl Tool for ToolProcessWait {
         Ok(tool_result(
             tool_call_id,
             content,
-            Some(exec_extra(&snapshot, Some(&read), None)),
+            Some(exec_extra(&snapshot, Some(&read), None, None)),
             tool_failed_for_status(&snapshot.status),
         ))
     }
@@ -797,6 +790,28 @@ async fn service_process_id(
         .ok_or_else(|| format!("Service '{service_name}' is not running"))
 }
 
+fn process_start_input_schema() -> Value {
+    let mut schema = json_schema_from_params(
+        &[
+            ("command", "string", "Command to start."),
+            ("description", "string", "Required. A single concise active-voice sentence describing what the command does. Short for simple commands: 'Start development server'. More descriptive for piped/obscure commands: 'Build and tail log output in background'. Never use words like 'complex' or 'risk'."),
+            ("workdir", "string", "Optional working directory."),
+            ("mode", "string", "Optional mode: background or service. Default: background."),
+            ("service_name", "string", "Optional service name stored in process metadata."),
+            ("startup_wait_ms", "integer", "Optional milliseconds to wait before returning the initial snapshot."),
+            ("startup_wait_port", "integer", "Optional readiness port stored with startup metadata."),
+            ("startup_wait_keyword", "string", "Optional readiness keyword stored with startup metadata."),
+        ],
+        &["command", "description"],
+    );
+    schema["properties"]["tty"] = json!({
+        "type": "boolean",
+        "default": false,
+        "description": TTY_DESCRIPTION,
+    });
+    schema
+}
+
 fn source(config_path: &str) -> ToolSource {
     ToolSource {
         source_type: ToolSourceType::Builtin,
@@ -881,6 +896,14 @@ fn parse_optional_u16(args: &HashMap<String, Value>, name: &str) -> Result<Optio
     }
 }
 
+fn parse_optional_bool(args: &HashMap<String, Value>, name: &str) -> Result<Option<bool>, String> {
+    match args.get(name) {
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(v) => Err(format!("argument `{name}` is not a boolean: {v:?}")),
+        None => Ok(Some(false)),
+    }
+}
+
 fn parse_process_id(args: &HashMap<String, Value>) -> Result<ExecProcessId, String> {
     let process_id = parse_required_string(args, "process_id")?;
     if !process_id.starts_with("exec_") {
@@ -916,6 +939,7 @@ async fn parse_start_args(
     let startup_wait = parse_optional_u64(args, "startup_wait_ms")?.map(Duration::from_millis);
     let wait_port = parse_optional_u16(args, "startup_wait_port")?;
     let wait_keyword = parse_optional_string(args, "startup_wait_keyword")?;
+    let tty = parse_optional_bool(args, "tty")?;
     let readiness = if wait_port.is_some() || wait_keyword.is_some() {
         Some(ExecReadinessProbe {
             wait_keyword,
@@ -932,6 +956,7 @@ async fn parse_start_args(
         startup_wait,
         readiness,
         description,
+        tty,
         scope_warnings,
     })
 }
@@ -1264,8 +1289,12 @@ fn exec_extra(
     snapshot: &ExecProcessSnapshot,
     read: Option<&ExecReadResult>,
     stream: Option<&str>,
+    tty: Option<bool>,
 ) -> serde_json::Map<String, Value> {
     let mut value = process_value(snapshot);
+    if let Some(tty) = tty {
+        value["tty"] = json!(tty);
+    }
     if let Some(read) = read {
         value["transcript"] = read_value(read);
     }
@@ -1545,6 +1574,23 @@ mod tests {
             ),
             vec!["command".to_string(), "description".to_string()]
         );
+        let start_desc = ToolProcessStart {
+            config_path: String::new(),
+        }
+        .tool_description();
+        assert_eq!(
+            start_desc.input_schema["properties"]["tty"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            start_desc.input_schema["properties"]["tty"]["default"],
+            false
+        );
+        assert_eq!(
+            start_desc.input_schema["properties"]["tty"]["description"],
+            TTY_DESCRIPTION
+        );
+        assert!(start_desc.description.contains("merges stdout and stderr"));
         assert!(required_names(
             ToolProcessList {
                 config_path: String::new(),
@@ -1610,6 +1656,7 @@ mod tests {
             "Run background gremlin"
         );
         assert_eq!(exec(&message)["status"], "running");
+        assert_eq!(exec(&message)["tty"], false);
         wait_for_output(gcx.clone(), &process_id, "ready").await;
 
         let mut list = ToolProcessList {
@@ -1645,6 +1692,41 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(exec(&killed)["status"], "killed");
+    }
+
+    #[tokio::test]
+    async fn process_start_tty_true_uses_pty() {
+        let (gcx, ccx) = test_ccx().await;
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        let message = run_tool(
+            &mut start,
+            ccx.clone(),
+            make_args_map(vec![
+                ("command", json!(long_running_command("pty-ready"))),
+                ("description", json!("Run background process through pty")),
+                ("startup_wait_ms", json!(100)),
+                ("tty", json!(true)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let process_id = process_id(&message);
+        assert_eq!(exec(&message)["tty"], true);
+        assert_eq!(exec(&message)["status"], "running");
+        wait_for_output(gcx, &process_id, "pty-ready").await;
+
+        let mut kill = ToolProcessKill {
+            config_path: String::new(),
+        };
+        run_tool(
+            &mut kill,
+            ccx,
+            make_args_map(vec![("process_id", json!(process_id.as_str()))]),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

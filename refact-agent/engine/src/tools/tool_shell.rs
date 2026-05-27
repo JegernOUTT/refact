@@ -111,6 +111,7 @@ const ASK_USER_DEFAULT: &[&str] = &[
 
 const DENY_DEFAULT: &[&str] = &["sudo*"];
 const SHELL_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
+const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
 
 struct ParsedShellArgs {
     command: String,
@@ -118,6 +119,7 @@ struct ParsedShellArgs {
     custom_filter: Option<OutputFilter>,
     timeout: Option<u64>,
     description: Option<String>,
+    tty: Option<bool>,
     scope_warnings: Vec<String>,
 }
 
@@ -174,13 +176,15 @@ impl Tool for ToolShell {
             workspace: active_execution_scope(execution_scope.as_ref())
                 .map(|scope| scope.effective_root().to_path_buf()),
         };
+        let tty = parsed.tty.unwrap_or(false);
         let mut request = ExecSpawnRequest::foreground(parsed.command.clone())
             .with_timeout(Duration::from_secs(timeout))
             .with_env_map(env_variables)
             .with_owner(owner)
             .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES)
             .with_short_description(short_description)
-            .with_abort_flag(abort_flag);
+            .with_abort_flag(abort_flag)
+            .with_tty(tty);
         if let Some(cwd) = cwd {
             request = request.with_cwd(cwd);
         }
@@ -231,7 +235,7 @@ impl Tool for ToolShell {
             tool_call_id: tool_call_id.clone(),
             tool_failed: tool_failed_for_status(&result.snapshot.status),
             output_filter: Some(OutputFilter::no_limits()),
-            extra: exec_extra(&result.snapshot, &read, duration_secs, timeout),
+            extra: exec_extra(&result.snapshot, &read, duration_secs, timeout, tty),
             ..Default::default()
         })];
 
@@ -252,8 +256,8 @@ impl Tool for ToolShell {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths with visible warnings; the shell command text itself is not OS-sandboxed. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
-            input_schema: json_schema_from_params(&[("command", "string", "shell command to execute"), ("description", "string", "Required. A single concise active-voice sentence describing what the command does. Short for simple commands: 'List files in current directory'. More descriptive for piped/obscure commands: 'Find and delete all .tmp files recursively'. Never use words like 'complex' or 'risk'."), ("workdir", "string", "workdir for the command"), ("timeout", "string", "Optional. Timeout in seconds for the command (default: 10). Use higher values for long-running commands."), ("output_filter", "string", "Optional regex pattern to filter output lines. Only lines matching this pattern (and context) will be shown. Use to find specific errors or content in large outputs."), ("output_limit", "string", "Optional. Max lines to show (default: 40). Use higher values like '200' or 'all' to see more output.")], &["command", "description"]),
+            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths with visible warnings; the shell command text itself is not OS-sandboxed. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
+            input_schema: shell_input_schema(),
             output_schema: None,
             annotations: None,
         }
@@ -282,6 +286,26 @@ impl Tool for ToolShell {
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())
     }
+}
+
+fn shell_input_schema() -> Value {
+    let mut schema = json_schema_from_params(
+        &[
+            ("command", "string", "shell command to execute"),
+            ("description", "string", "Required. A single concise active-voice sentence describing what the command does. Short for simple commands: 'List files in current directory'. More descriptive for piped/obscure commands: 'Find and delete all .tmp files recursively'. Never use words like 'complex' or 'risk'."),
+            ("workdir", "string", "workdir for the command"),
+            ("timeout", "string", "Optional. Timeout in seconds for the command (default: 10). Use higher values for long-running commands."),
+            ("output_filter", "string", "Optional regex pattern to filter output lines. Only lines matching this pattern (and context) will be shown. Use to find specific errors or content in large outputs."),
+            ("output_limit", "string", "Optional. Max lines to show (default: 40). Use higher values like '200' or 'all' to see more output."),
+        ],
+        &["command", "description"],
+    );
+    schema["properties"]["tty"] = json!({
+        "type": "boolean",
+        "default": false,
+        "description": TTY_DESCRIPTION,
+    });
+    schema
 }
 
 fn collect_exec_output(read: &ExecReadResult) -> (String, String) {
@@ -371,6 +395,7 @@ fn exec_extra(
     read: &ExecReadResult,
     duration_secs: f64,
     timeout_secs: u64,
+    tty: bool,
 ) -> serde_json::Map<String, Value> {
     let mut extra = serde_json::Map::new();
     let cwd = snapshot
@@ -390,6 +415,7 @@ fn exec_extra(
             "command": snapshot.meta.command,
             "cwd": cwd,
             "mode": snapshot.meta.mode.to_string(),
+            "tty": tty,
             "duration_secs": duration_secs,
             "timeout_secs": timeout_secs,
             "created_at_ms": snapshot.meta.created_at_ms,
@@ -488,12 +514,19 @@ async fn parse_args_with_filter(
         }
     };
 
+    let tty = match args.get("tty") {
+        Some(Value::Bool(value)) => Some(*value),
+        Some(v) => return Err(format!("argument `tty` is not a boolean: {v:?}")),
+        None => Some(false),
+    };
+
     Ok(ParsedShellArgs {
         command,
         workdir,
         custom_filter,
         timeout,
         description,
+        tty,
         scope_warnings,
     })
 }
@@ -698,6 +731,19 @@ mod tests {
         assert!(!required_names.contains(&"workdir"));
     }
 
+    #[test]
+    fn shell_tool_schema_includes_tty_default_false() {
+        let tool = ToolShell::default();
+        let desc = tool.tool_description();
+        assert_eq!(desc.input_schema["properties"]["tty"]["type"], "boolean");
+        assert_eq!(desc.input_schema["properties"]["tty"]["default"], false);
+        assert_eq!(
+            desc.input_schema["properties"]["tty"]["description"],
+            TTY_DESCRIPTION
+        );
+        assert!(desc.description.contains("merges stdout and stderr"));
+    }
+
     #[tokio::test]
     async fn shell_exec_success_contains_output_and_metadata() {
         let message = run_shell(args(vec![
@@ -713,7 +759,24 @@ mod tests {
         assert_eq!(exec["status"], "exited");
         assert_eq!(exec["exit_code"], 0);
         assert_eq!(exec["short_description"], "Run hello");
+        assert_eq!(exec["tty"], false);
         assert!(exec["process_id"].as_str().unwrap().starts_with("exec_"));
+        assert!(message.tool_failed.is_none());
+    }
+
+    #[tokio::test]
+    async fn tty_true_uses_pty() {
+        let message = run_shell(args(vec![
+            ("command", json!(stderr_command())),
+            ("description", json!("Run stderr through pty")),
+            ("tty", json!(true)),
+        ]))
+        .await;
+
+        assert!(text(&message).contains("warn"));
+        assert!(!text(&message).contains("STDERR"));
+        assert_eq!(exec(&message)["tty"], true);
+        assert_eq!(exec(&message)["status"], "exited");
         assert!(message.tool_failed.is_none());
     }
 
