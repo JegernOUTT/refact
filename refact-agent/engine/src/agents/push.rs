@@ -1,3 +1,4 @@
+use chrono::{TimeDelta, Utc};
 use uuid::Uuid;
 
 use crate::agents::types::{BackgroundAgent, BgAgentKind, BgAgentStatus};
@@ -6,6 +7,7 @@ use crate::chat::process_command_queue;
 use crate::chat::types::{BurstGuardDecision, ChatCommand, CommandRequest};
 
 const SUMMARY_LIMIT: usize = 1500;
+const DEFERRED_RETRY_AFTER: TimeDelta = TimeDelta::seconds(10);
 
 pub async fn push_completion_to_parent(
     app: AppState,
@@ -84,12 +86,23 @@ pub async fn flush_pending_pushes_for_parent(
         .await;
     let mut pushed = 0usize;
     for record in records {
-        if record.completion_message_id.as_deref() == Some("pending") {
+        if should_retry_completion_push(&record) {
             push_completion_to_parent(app.clone(), &record).await?;
             pushed += 1;
         }
     }
     Ok(pushed)
+}
+
+pub(crate) fn should_retry_completion_push(record: &BackgroundAgent) -> bool {
+    match record.completion_message_id.as_deref() {
+        Some("pending") => true,
+        Some("deferred") => record
+            .deferred_at
+            .map(|deferred_at| deferred_at <= Utc::now() - DEFERRED_RETRY_AFTER)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn already_pushed(record: &BackgroundAgent) -> bool {

@@ -683,6 +683,8 @@ async fn set_completion_message_id_allows_pending_and_deferred_retry_markers_to_
         .expect("second");
     assert_eq!(first.completion_message_id.as_deref(), Some("message-one"));
     assert_eq!(second.completion_message_id.as_deref(), Some("message-two"));
+    assert!(first.deferred_at.is_none());
+    assert!(second.deferred_at.is_none());
 }
 
 #[tokio::test]
@@ -761,6 +763,69 @@ async fn push_completion_to_parent_marks_pending_when_session_not_loaded_and_flu
         .await
         .unwrap();
     assert_ne!(updated.completion_message_id.as_deref(), Some("pending"));
+}
+
+#[tokio::test]
+async fn burst_guard_defers_sixth_background_completion_then_allows_later_flush() {
+    let (_gcx, app, session_arc) = app_with_parent_session("parent-burst").await;
+    session_arc
+        .lock()
+        .await
+        .queue_processor_running
+        .store(true, Ordering::SeqCst);
+    let mut completed = Vec::new();
+    for index in 0..6 {
+        let record = create_agent(&app.agents, "parent-burst", BgAgentKind::Delegate).await;
+        completed.push(
+            app.agents
+                .mark_completed(
+                    &record.agent_id,
+                    completion(&format!("child-burst-{index}")),
+                )
+                .await
+                .expect("completed"),
+        );
+    }
+
+    for record in &completed {
+        crate::agents::push::push_completion_to_parent(app.clone(), record)
+            .await
+            .expect("push");
+    }
+
+    let queued_count = {
+        let session = session_arc.lock().await;
+        synthetic_completion_command_count(&session, "[background delegate finished]")
+    };
+    assert_eq!(queued_count, 5);
+    let deferred = app
+        .agents
+        .get("parent-burst", &completed[5].agent_id)
+        .await
+        .expect("deferred");
+    assert_eq!(deferred.completion_message_id.as_deref(), Some("deferred"));
+    assert!(deferred.deferred_at.is_some());
+
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let pushed = crate::agents::push::flush_pending_pushes_for_parent(app.clone(), "parent-burst")
+        .await
+        .expect("flush");
+
+    assert_eq!(pushed, 1);
+    let queued_count = {
+        let session = session_arc.lock().await;
+        synthetic_completion_command_count(&session, "[background delegate finished]")
+    };
+    assert_eq!(queued_count, 6);
+    let updated = app
+        .agents
+        .get("parent-burst", &completed[5].agent_id)
+        .await
+        .expect("updated");
+    assert_ne!(updated.completion_message_id.as_deref(), Some("deferred"));
+    assert_ne!(updated.completion_message_id.as_deref(), Some("pending"));
+    assert!(updated.completion_pushed_at.is_some());
+    assert!(updated.deferred_at.is_none());
 }
 
 #[tokio::test]

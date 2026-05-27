@@ -519,6 +519,7 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         conflict_summary: None,
         completion_message_id: None,
         completion_pushed_at: None,
+        deferred_at: None,
         model: req.model,
         created_at: now,
         started_at: None,

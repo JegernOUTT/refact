@@ -74,6 +74,7 @@ impl BackgroundAgentRegistry {
             conflict_summary: None,
             completion_message_id: None,
             completion_pushed_at: None,
+            deferred_at: None,
             model: req.model,
             created_at: now,
             started_at: None,
@@ -250,7 +251,7 @@ impl BackgroundAgentRegistry {
                 if current_id != "pending" && current_id != "deferred" {
                     return Ok(());
                 }
-                if current_id == message_id {
+                if current_id == message_id && current_id != "deferred" {
                     return Ok(());
                 }
             }
@@ -265,8 +266,11 @@ impl BackgroundAgentRegistry {
             }
             let mut updated = current;
             let now = Utc::now();
+            let pushed = message_id != "pending" && message_id != "deferred";
+            let deferred = message_id == "deferred";
             updated.completion_message_id = Some(message_id);
-            updated.completion_pushed_at = Some(now);
+            updated.completion_pushed_at = pushed.then_some(now);
+            updated.deferred_at = deferred.then_some(now);
             touch_record(&mut updated, now);
             storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated);
@@ -362,6 +366,20 @@ impl BackgroundAgentRegistry {
             .get_mut(agent_id)
             .ok_or_else(|| "agent not found".to_string())?;
         record.last_update_at = last_update_at;
+        storage::save_record(&self.storage_root, record).await
+    }
+
+    #[cfg(test)]
+    pub async fn set_deferred_at_for_test(
+        &self,
+        agent_id: &str,
+        deferred_at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let mut records = self.records.write().await;
+        let record = records
+            .get_mut(agent_id)
+            .ok_or_else(|| "agent not found".to_string())?;
+        record.deferred_at = Some(deferred_at);
         storage::save_record(&self.storage_root, record).await
     }
 

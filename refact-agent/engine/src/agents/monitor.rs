@@ -65,7 +65,9 @@ pub(crate) async fn monitor_once(app: AppState) -> Result<(), String> {
         .list_with_completion_message_id(&["pending", "deferred"])
         .await
     {
-        crate::agents::push::push_completion_to_parent(app.clone(), &record).await?;
+        if crate::agents::push::should_retry_completion_push(&record) {
+            crate::agents::push::push_completion_to_parent(app.clone(), &record).await?;
+        }
     }
 
     Ok(())
@@ -133,5 +135,72 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("20+ minutes"));
+    }
+
+    #[tokio::test]
+    async fn monitor_retries_cooled_deferred_completion() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new("parent-monitor-deferred".to_string()),
+        ));
+        session
+            .lock()
+            .await
+            .queue_processor_running
+            .store(true, Ordering::SeqCst);
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("parent-monitor-deferred".to_string(), session.clone());
+        let (record, _, _) = app
+            .agents
+            .create(CreateAgentRequest {
+                parent_chat_id: "parent-monitor-deferred".to_string(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: BgAgentKind::Delegate,
+                config_name: "delegate_with_editing".to_string(),
+                title: "title".to_string(),
+                prompt: "prompt".to_string(),
+                target_files: vec![],
+                model: "model".to_string(),
+            })
+            .await
+            .unwrap();
+        app.agents
+            .mark_completed(
+                &record.agent_id,
+                crate::agents::types::AgentCompletion {
+                    result_summary: "done".to_string(),
+                    edited_files: vec![],
+                    diff_summary: None,
+                    conflict_summary: None,
+                    child_chat_id: Some("child-monitor-deferred".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        app.agents
+            .set_completion_message_id(&record.agent_id, "deferred".to_string())
+            .await
+            .unwrap();
+        app.agents
+            .set_deferred_at_for_test(&record.agent_id, Utc::now() - TimeDelta::seconds(11))
+            .await
+            .unwrap();
+
+        monitor_once(app.clone()).await.unwrap();
+
+        assert_eq!(session.lock().await.command_queue.len(), 1);
+        let updated = app
+            .agents
+            .get("parent-monitor-deferred", &record.agent_id)
+            .await
+            .unwrap();
+        assert_ne!(updated.completion_message_id.as_deref(), Some("deferred"));
+        assert!(updated.completion_pushed_at.is_some());
+        assert!(updated.deferred_at.is_none());
     }
 }

@@ -78,6 +78,8 @@ pub struct BackgroundAgent {
     pub conflict_summary: Option<String>,
     pub completion_message_id: Option<String>,
     pub completion_pushed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub deferred_at: Option<DateTime<Utc>>,
     pub model: String,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
