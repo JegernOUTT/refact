@@ -87,6 +87,29 @@ pub struct SpawnHandle {
     pub completion_rx: oneshot::Receiver<BackgroundAgent>,
 }
 
+fn tools_for_kind(kind: BgAgentKind) -> Option<Vec<String>> {
+    match kind {
+        BgAgentKind::Subagent => None,
+        BgAgentKind::Delegate => Some(vec![
+            "tree".to_string(),
+            "cat".to_string(),
+            "search_pattern".to_string(),
+            "search_symbol_definition".to_string(),
+            "search_semantic".to_string(),
+            "knowledge".to_string(),
+            "apply_patch".to_string(),
+            "create_textdoc".to_string(),
+            "update_textdoc".to_string(),
+            "update_textdoc_anchored".to_string(),
+            "update_textdoc_by_lines".to_string(),
+            "update_textdoc_regex".to_string(),
+            "undo_textdoc".to_string(),
+            "mv".to_string(),
+            "tasks_set".to_string(),
+        ]),
+    }
+}
+
 pub async fn spawn_background_agent(
     app: AppState,
     req: SpawnRequest,
@@ -108,6 +131,7 @@ pub async fn spawn_background_agent(
     let parent_tool_call_id = req.parent_tool_call_id.clone();
     let parent_subchat_tx = req.parent_subchat_tx.clone();
     let max_steps = req.max_steps;
+    let tools = tools_for_kind(req.kind);
     let subchat_depth = req.subchat_depth;
     #[cfg(test)]
     let config = if config_name == "test_spawn" {
@@ -120,7 +144,7 @@ pub async fn spawn_background_agent(
             parent_id: Some(parent_chat_id.clone()),
             link_type: Some(link_type.clone()),
             root_chat_id: parent_root_chat_id.clone(),
-            tools: ToolsPolicy::None,
+            tools: ToolsPolicy::from_option(tools.clone()),
             max_steps,
             prepend_system_prompt: false,
             wrap_up: None,
@@ -148,7 +172,7 @@ pub async fn spawn_background_agent(
             Some(parent_chat_id),
             Some(link_type),
             parent_root_chat_id,
-            None,
+            tools.clone(),
             max_steps,
             false,
             None,
@@ -172,7 +196,7 @@ pub async fn spawn_background_agent(
         Some(parent_chat_id),
         Some(link_type),
         parent_root_chat_id,
-        None,
+        tools,
         max_steps,
         false,
         None,

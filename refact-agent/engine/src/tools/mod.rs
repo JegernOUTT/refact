@@ -28,6 +28,7 @@ mod tool_code_review;
 mod tool_compress_chat;
 pub mod tool_config_subagent;
 mod tool_deep_research;
+pub mod tool_delegate;
 mod tool_handoff_to_mode;
 mod tool_knowledge;
 mod tool_mcp_search;
