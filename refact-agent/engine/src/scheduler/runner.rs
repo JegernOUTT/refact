@@ -1,4 +1,25 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Notify;
+
+use super::store::InMemoryCronStore;
+
+static SESSION_CRON_STORE: OnceLock<Arc<InMemoryCronStore>> = OnceLock::new();
+static RUNNER_CHANGE_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
+
+pub fn session_cron_store() -> Arc<dyn super::store::CronStore> {
+    SESSION_CRON_STORE
+        .get_or_init(|| Arc::new(InMemoryCronStore::new()))
+        .clone()
+}
+
+pub fn runner_change_notify() -> Arc<Notify> {
+    RUNNER_CHANGE_NOTIFY
+        .get_or_init(|| Arc::new(Notify::new()))
+        .clone()
+}
+
+
 
 use tokio::task::JoinHandle;
 

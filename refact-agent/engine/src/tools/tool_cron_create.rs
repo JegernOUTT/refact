@@ -1,0 +1,519 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use chrono_tz::Tz;
+use serde_json::{json, Value};
+use tokio::sync::{Mutex as AMutex, Notify};
+
+use crate::at_commands::at_commands::AtCommandsContext;
+use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::internal_roles::{event, EventSubkind};
+use crate::files_correction::get_active_project_path;
+use crate::scheduler::{
+    human_schedule, next_run_ms, parse_cron, session_cron_store, CronStore, JsonFileCronStore,
+    ScheduledTask,
+};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+
+pub const MAX_CRON_JOBS: usize = 50;
+const ONE_YEAR_MS: u64 = 365 * 24 * 60 * 60 * 1000;
+
+pub struct ToolCronCreate {
+    pub config_path: String,
+}
+
+#[derive(Clone)]
+struct CronCreateInput {
+    cron: String,
+    prompt: String,
+    recurring: bool,
+    durable: bool,
+    description: String,
+}
+
+#[derive(Clone)]
+struct CronCreateRuntime {
+    session_store: Arc<dyn CronStore>,
+    durable_store: Option<Arc<dyn CronStore>>,
+    change_notify: Arc<Notify>,
+    now_ms: u64,
+    timezone: Tz,
+    chat_id: Option<String>,
+    mode: Option<String>,
+}
+
+#[derive(Debug)]
+struct CronCreateOutcome {
+    task: ScheduledTask,
+    human_schedule: String,
+    summary: String,
+}
+
+#[async_trait]
+impl Tool for ToolCronCreate {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "cron_create".to_string(),
+            display_name: "Create Scheduled Prompt".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Schedule a prompt to be enqueued later. Use a standard 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in the local timezone. Set `recurring` to true for repeated prompts or false for a one-shot prompt that is removed after it fires. Set `durable` to true when the job should survive engine restarts in the current project; leave it false for a session-only in-memory schedule. Scheduler jitter is applied automatically so jobs may run shortly after the exact cron instant. Recurring jobs auto-expire after 30 days unless canceled earlier.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time." },
+                    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time." },
+                    "recurring": { "type": "boolean", "default": true },
+                    "durable": { "type": "boolean", "default": false },
+                    "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
+                },
+                "required": ["cron", "prompt", "description"]
+            }),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let input = input_from_args(args)?;
+        let (app, chat_id, project_root) = cron_tool_context(ccx).await;
+        let runtime = runtime_for_project(
+            project_root,
+            Some(chat_id.clone()),
+            None,
+            unix_now_ms(),
+            local_timezone(),
+        )?;
+        let outcome = create_cron_job(input, runtime).await?;
+
+        emit_created_notice(app, &chat_id, &outcome.task, &outcome.summary).await;
+
+        let output = json!({
+            "id": outcome.task.id,
+            "human_schedule": outcome.human_schedule,
+            "recurring": outcome.task.recurring,
+            "durable": outcome.task.durable,
+        });
+
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(output.to_string()),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, String> {
+    let cron = required_string_arg(args, "cron")?;
+    let prompt = required_string_arg(args, "prompt")?;
+    let description = required_string_arg(args, "description")?;
+    if description.chars().count() > 80 {
+        return Err("description must be at most 80 characters".to_string());
+    }
+    Ok(CronCreateInput {
+        cron,
+        prompt,
+        recurring: optional_bool_arg(args, "recurring")?.unwrap_or(true),
+        durable: optional_bool_arg(args, "durable")?.unwrap_or(false),
+        description,
+    })
+}
+
+fn required_string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
+    match args.get(name) {
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(value.trim().to_string()),
+        Some(Value::String(_)) | Some(Value::Null) | None => {
+            Err(format!("argument `{name}` is required"))
+        }
+        Some(value) => Err(format!("argument `{name}` is not a string: {value:?}")),
+    }
+}
+
+fn optional_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option<bool>, String> {
+    match args.get(name) {
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => Err(format!("argument `{name}` is not a boolean: {value:?}")),
+    }
+}
+
+fn runtime_for_project(
+    project_root: Option<PathBuf>,
+    chat_id: Option<String>,
+    mode: Option<String>,
+    now_ms: u64,
+    timezone: Tz,
+) -> Result<CronCreateRuntime, String> {
+    let durable_store = project_root
+        .map(|project_root| {
+            JsonFileCronStore::new(project_root).map(|store| Arc::new(store) as Arc<dyn CronStore>)
+        })
+        .transpose()?;
+    Ok(CronCreateRuntime {
+        session_store: session_cron_store(),
+        durable_store,
+        change_notify: crate::scheduler::runner_change_notify(),
+        now_ms,
+        timezone,
+        chat_id,
+        mode,
+    })
+}
+
+async fn cron_tool_context(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+) -> (crate::app_state::AppState, String, Option<PathBuf>) {
+    let (app, gcx, chat_id, scoped_root) = {
+        let locked = ccx.lock().await;
+        (
+            locked.app.clone(),
+            locked.global_context.clone(),
+            locked.chat_id.clone(),
+            locked
+                .execution_scope
+                .as_ref()
+                .map(|scope| scope.effective_root().to_path_buf()),
+        )
+    };
+    let project_root = match scoped_root {
+        Some(root) => Some(root),
+        None => get_active_project_path(gcx).await,
+    };
+    (app, chat_id, project_root)
+}
+
+async fn create_cron_job(
+    input: CronCreateInput,
+    runtime: CronCreateRuntime,
+) -> Result<CronCreateOutcome, String> {
+    parse_cron(&input.cron).map_err(|error| format!("Invalid cron expression: {error}"))?;
+    let next = next_run_ms(&input.cron, runtime.now_ms, runtime.timezone)
+        .ok_or_else(no_match_in_year_error)?;
+    if next.saturating_sub(runtime.now_ms) > ONE_YEAR_MS {
+        return Err(no_match_in_year_error());
+    }
+
+    let durable_count = match &runtime.durable_store {
+        Some(store) => store.list().await.len(),
+        None => 0,
+    };
+    let total_tasks = runtime.session_store.list().await.len() + durable_count;
+    if total_tasks >= MAX_CRON_JOBS {
+        return Err(format!(
+            "Too many scheduled jobs (max {MAX_CRON_JOBS}). Cancel one first."
+        ));
+    }
+    if input.durable && runtime.durable_store.is_none() {
+        return Err("No project root available for durable scheduled jobs".to_string());
+    }
+
+    let mut task = ScheduledTask::new(
+        input.cron,
+        input.prompt,
+        input.description,
+        input.recurring,
+        input.durable,
+        runtime.now_ms,
+    );
+    task.chat_id = runtime.chat_id;
+    task.mode = runtime.mode;
+    let human = human_schedule(&task.cron);
+    let store = if task.durable {
+        runtime.durable_store.as_ref().unwrap().clone()
+    } else {
+        runtime.session_store.clone()
+    };
+    store.add(task.clone()).await?;
+    runtime.change_notify.notify_waiters();
+    let summary = format!("Scheduled {}: {} ({})", task.id, task.description, human);
+    Ok(CronCreateOutcome {
+        task,
+        human_schedule: human,
+        summary,
+    })
+}
+
+fn no_match_in_year_error() -> String {
+    "matches no calendar date in the next year".to_string()
+}
+
+async fn emit_created_notice(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    task: &ScheduledTask,
+    summary: &str,
+) {
+    let session_arc = crate::chat::get_or_create_session_with_trajectory(
+        app.clone(),
+        &app.chat.sessions,
+        chat_id,
+    )
+    .await;
+    let mut session = session_arc.lock().await;
+    session.add_message(event(
+        EventSubkind::SystemNotice,
+        "scheduler.cron",
+        json!({
+            "id": task.id,
+            "cron": task.cron,
+            "recurring": task.recurring,
+            "durable": task.durable,
+        }),
+        summary.to_string(),
+    ));
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn local_timezone() -> Tz {
+    iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|value| value.parse::<Tz>().ok())
+        .or_else(|| {
+            std::env::var("TZ")
+                .ok()
+                .and_then(|value| value.trim_start_matches(':').parse::<Tz>().ok())
+        })
+        .unwrap_or(chrono_tz::UTC)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    use super::*;
+    use crate::scheduler::{scheduled_tasks_path, InMemoryCronStore};
+
+    fn fixed_now_ms() -> u64 {
+        Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis() as u64
+    }
+
+    fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
+        items
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), value.clone()))
+            .collect()
+    }
+
+    fn input(items: &[(&str, Value)]) -> CronCreateInput {
+        input_from_args(&args(items)).unwrap()
+    }
+
+    fn default_input() -> CronCreateInput {
+        input(&[
+            ("cron", json!("*/5 * * * *")),
+            ("prompt", json!("Check the build")),
+            ("description", json!("Check build")),
+        ])
+    }
+
+    fn tool_output_text(result: (bool, Vec<ContextEnum>)) -> String {
+        match result.1.into_iter().next().unwrap() {
+            ContextEnum::ChatMessage(message) => match message.content {
+                ChatContent::SimpleText(text) => text,
+                _ => panic!("expected simple text"),
+            },
+            _ => panic!("expected chat message"),
+        }
+    }
+
+    fn runtime(
+        session_store: Arc<dyn CronStore>,
+        durable_store: Option<Arc<dyn CronStore>>,
+        change_notify: Arc<Notify>,
+    ) -> CronCreateRuntime {
+        CronCreateRuntime {
+            session_store,
+            durable_store,
+            change_notify,
+            now_ms: fixed_now_ms(),
+            timezone: chrono_tz::UTC,
+            chat_id: Some("chat-1".to_string()),
+            mode: Some("agent".to_string()),
+        }
+    }
+
+    fn test_task(id: &str) -> ScheduledTask {
+        let mut task = ScheduledTask::new(
+            "*/5 * * * *".to_string(),
+            "Check".to_string(),
+            "Check".to_string(),
+            true,
+            false,
+            fixed_now_ms(),
+        );
+        task.id = id.to_string();
+        task
+    }
+
+    #[tokio::test]
+    async fn valid_recurring_creates() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                20,
+                false,
+                vec![],
+                "cron-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        let before = session_cron_store().list().await.len();
+        let change_notify = crate::scheduler::runner_change_notify();
+        let notified = change_notify.notified();
+        let mut tool = ToolCronCreate {
+            config_path: String::new(),
+        };
+        let output = tool_output_text(
+            tool.tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[
+                    ("cron", json!("*/5 * * * *")),
+                    ("prompt", json!("Check the build")),
+                    ("description", json!("Check build")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+        let output: Value = serde_json::from_str(&output).unwrap();
+        let after = session_cron_store().list().await;
+        let created = after
+            .iter()
+            .find(|task| task.id == output["id"].as_str().unwrap())
+            .unwrap();
+
+        assert_eq!(after.len(), before + 1);
+        assert!(created.id.starts_with("cron_"));
+        assert_eq!(output["human_schedule"], json!("every 5 minutes"));
+        assert!(created.recurring);
+        assert!(!created.durable);
+        assert_eq!(created.chat_id.as_deref(), Some("cron-chat"));
+        tokio::time::timeout(std::time::Duration::from_secs(1), notified)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_cron_rejected() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let err = create_cron_job(
+            input(&[
+                ("cron", json!("* * * *")),
+                ("prompt", json!("Check")),
+                ("description", json!("Check")),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("Invalid cron expression"));
+    }
+
+    #[tokio::test]
+    async fn no_match_in_year_rejected() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let err = create_cron_job(
+            input(&[
+                ("cron", json!("0 0 29 2 *")),
+                ("prompt", json!("Leap check")),
+                ("description", json!("Leap check")),
+            ]),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "matches no calendar date in the next year");
+    }
+
+    #[tokio::test]
+    async fn cap_enforced() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        for idx in 0..MAX_CRON_JOBS {
+            session_store
+                .add(test_task(&format!("cron_{idx}")))
+                .await
+                .unwrap();
+        }
+
+        let err = create_cron_job(
+            default_input(),
+            runtime(session_store, None, Arc::new(Notify::new())),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "Too many scheduled jobs (max 50). Cancel one first.");
+    }
+
+    #[tokio::test]
+    async fn durable_writes_to_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let durable_store: Arc<dyn CronStore> =
+            Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
+        let outcome = create_cron_job(
+            input(&[
+                ("cron", json!("0 9 * * 1-5")),
+                ("prompt", json!("Standup prep")),
+                ("description", json!("Standup prep")),
+                ("durable", json!(true)),
+            ]),
+            runtime(
+                session_store.clone(),
+                Some(durable_store),
+                Arc::new(Notify::new()),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.task.durable);
+        assert!(session_store.list().await.is_empty());
+        assert!(scheduled_tasks_path(temp.path()).is_file());
+        let reloaded = JsonFileCronStore::new(temp.path()).unwrap();
+        assert_eq!(reloaded.list().await, vec![outcome.task]);
+    }
+}

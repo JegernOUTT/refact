@@ -147,6 +147,7 @@ base64 = "0.22.1"
 chrono = { version = "0.4.31", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.12"
+iana-time-zone = "0.1"
 diff = "0.1.13"
 dunce = "1.0.5"
 dyn_partial_eq = "=0.1.2"
