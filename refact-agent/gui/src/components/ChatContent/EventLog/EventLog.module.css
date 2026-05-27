@@ -1,0 +1,135 @@
+.card {
+  margin: var(--space-1) 0 var(--space-2);
+  border: 1px solid var(--gray-a5);
+  background: var(--gray-a2);
+}
+
+.summary {
+  cursor: pointer;
+  color: var(--gray-12);
+  list-style-position: outside;
+  padding: var(--space-1) 0;
+  user-select: none;
+}
+
+.summary::marker {
+  color: var(--accent-9);
+}
+
+.count {
+  color: var(--gray-10);
+}
+
+.body {
+  padding-top: var(--space-2);
+}
+
+.filters {
+  padding-bottom: var(--space-2);
+}
+
+.filterChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-full);
+  padding: var(--space-1) var(--space-2);
+  color: var(--gray-11);
+  background: var(--gray-a2);
+  cursor: pointer;
+}
+
+.filterChip:hover {
+  border-color: var(--accent-a7);
+  color: var(--gray-12);
+}
+
+.filterChip input {
+  accent-color: var(--accent-9);
+}
+
+.entry {
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-2);
+  background: var(--color-panel-solid);
+  overflow: hidden;
+}
+
+.entryButton {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  cursor: pointer;
+}
+
+.entryButton:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: -2px;
+}
+
+.entryRow {
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+}
+
+.icon {
+  flex: 0 0 auto;
+  line-height: 1;
+}
+
+.timestamp {
+  flex: 0 0 auto;
+  color: var(--gray-10);
+  font-variant-numeric: tabular-nums;
+}
+
+.subkindChip {
+  flex: 0 0 auto;
+  border-radius: var(--radius-full);
+  padding: 0 var(--space-1);
+  background: var(--accent-a3);
+  color: var(--accent-11);
+  font-family: var(--code-font-family);
+}
+
+.source {
+  flex: 0 1 auto;
+  min-width: var(--space-7);
+  color: var(--gray-10);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summaryText {
+  flex: 1 1 auto;
+  min-width: var(--space-7);
+  color: var(--gray-12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jsonPanel {
+  border-top: 1px solid var(--gray-a4);
+  padding: var(--space-2);
+  background: var(--gray-a2);
+}
+
+.jsonPre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--gray-12);
+  font-family: var(--code-font-family);
+  font-size: var(--font-size-1);
+  line-height: var(--line-height-1);
+}
+
+.emptyState {
+  color: var(--gray-10);
+  padding: var(--space-2);
+}

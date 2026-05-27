@@ -12,10 +12,12 @@ import {
   ChatMessages,
   DiffChunk,
   DiffMessage,
+  EventMessage,
   ErrorMessage,
   isChatContextFileMessage,
   isDiffMessage,
   isAssistantMessage,
+  isEventMessage,
   isErrorMessage,
   isToolMessage,
   isSystemMessage,
@@ -72,6 +74,7 @@ import { CollapsibleStoreProvider } from "./useStoredOpen";
 import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
+import { EventLog } from "./EventLog";
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -276,22 +279,25 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
         case "assistant":
           return (
-            <AssistantInput
-              message={item.message.content}
-              reasoningContent={item.message.reasoning_content}
-              thinkingBlocks={item.message.thinking_blocks}
-              toolCalls={item.message.tool_calls}
-              serverExecutedTools={item.message.server_executed_tools}
-              serverContentBlocks={item.message.server_content_blocks}
-              citations={item.message.citations}
-              messageId={item.message.message_id}
-              onBranch={handleBranch}
-              onDelete={handleDelete}
-              contextFilesByToolId={item.contextFilesByToolId}
-              diffsByToolId={item.diffsByToolId}
-              usage={item.message.usage}
-              isStreaming={item.isStreaming}
-            />
+            <>
+              <AssistantInput
+                message={item.message.content}
+                reasoningContent={item.message.reasoning_content}
+                thinkingBlocks={item.message.thinking_blocks}
+                toolCalls={item.message.tool_calls}
+                serverExecutedTools={item.message.server_executed_tools}
+                serverContentBlocks={item.message.server_content_blocks}
+                citations={item.message.citations}
+                messageId={item.message.message_id}
+                onBranch={handleBranch}
+                onDelete={handleDelete}
+                contextFilesByToolId={item.contextFilesByToolId}
+                diffsByToolId={item.diffsByToolId}
+                usage={item.message.usage}
+                isStreaming={item.isStreaming}
+              />
+              <EventLog events={item.events} threadId={renderChatId} />
+            </>
           );
 
         case "user":
@@ -370,7 +376,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           return null;
       }
     },
-    [handleBranch, handleDelete, onRetryWrapper, collapsibleState],
+    [handleBranch, handleDelete, onRetryWrapper, collapsibleState, renderChatId],
   );
 
   if (showLoading) {
@@ -524,6 +530,7 @@ type DisplayItemAssistant = {
   message: AssistantMessage;
   contextFilesByToolId: Record<string, ChatContextFile[]>;
   diffsByToolId: Record<string, DiffChunk[]>;
+  events: EventMessage[];
   isStreaming: boolean;
 };
 
@@ -650,6 +657,11 @@ function findRebuildStartIndex(messages: ChatMessages, index: number): number {
   for (let i = index - 1; i >= 0; i--) {
     const msg = messages[i];
 
+    if (isEventMessage(msg)) {
+      rebuildStart = i;
+      continue;
+    }
+
     if (
       isToolMessage(msg) ||
       isChatContextFileMessage(msg) ||
@@ -704,6 +716,21 @@ function assistantGroupingSignature(message: AssistantMessage): string {
     .join("|");
 }
 
+function collectPrecedingEvents(
+  messages: ChatMessages,
+  assistantIndex: number,
+): EventMessage[] {
+  const events: EventMessage[] = [];
+  for (let i = assistantIndex - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "assistant") break;
+    if (isEventMessage(message)) {
+      events.unshift(message);
+    }
+  }
+  return events;
+}
+
 function buildDisplayItemsFromIndex(
   messages: ChatMessages,
   isStreaming: boolean,
@@ -730,6 +757,7 @@ function buildDisplayItemsFromIndex(
     const head = messages[i];
 
     if (isToolMessage(head)) continue;
+    if (isEventMessage(head)) continue;
 
     if (isErrorMessage(head)) {
       const errors = [head];
@@ -898,6 +926,7 @@ function buildDisplayItemsFromIndex(
           ChatContextFile[]
         >,
         diffsByToolId: diffsByToolId as Record<string, DiffChunk[]>,
+        events: collectPrecedingEvents(messages, i),
         isStreaming: isStreaming && i === lastAssistantIdx,
       });
 
@@ -1088,6 +1117,7 @@ function buildDisplayItems(
     const head = messages[i];
 
     if (isToolMessage(head)) continue;
+    if (isEventMessage(head)) continue;
 
     if (isErrorMessage(head)) {
       const errors = [head];
@@ -1254,6 +1284,7 @@ function buildDisplayItems(
         message: head,
         contextFilesByToolId,
         diffsByToolId,
+        events: collectPrecedingEvents(messages, i),
         isStreaming: isStreaming && i === lastAssistantIdx,
       });
 
