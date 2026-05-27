@@ -495,7 +495,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let read = registry.read(process_id, 0, None).await;
-        panic!("process output did not contain {needle:?}: {:?}", read.chunks);
+        panic!(
+            "process output did not contain {needle:?}: {:?}",
+            read.chunks
+        );
     }
 
     #[cfg(unix)]
@@ -521,8 +524,13 @@ mod tests {
     #[tokio::test]
     async fn foreground_success_captures_stdout() {
         let registry = ExecRegistry::new();
+        let command = if cfg!(windows) {
+            "[Console]::Out.Write('hello')"
+        } else {
+            "printf hello"
+        };
         let result = registry
-            .spawn(ExecSpawnRequest::foreground(shell_script("printf hello")))
+            .spawn(ExecSpawnRequest::foreground(shell_script(command)))
             .await
             .unwrap();
 

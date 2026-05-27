@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -971,14 +971,18 @@ async fn resolve_process_workdir(
     }
 
     let Some(raw_path) = raw_path else {
-        return Ok((get_active_project_path(gcx).await, Vec::new()));
+        return Ok((process_workspace(gcx, None).await, Vec::new()));
     };
     let path_str = preprocess_path_for_normalization(raw_path.to_string());
     let path = PathBuf::from(&path_str);
     let workdir = if path.is_absolute() {
-        let path = canonicalize_normalized_path(path);
-        check_if_its_inside_a_workspace_or_config(gcx.clone(), &path).await?;
-        path
+        let workdir = canonicalize_normalized_path(path);
+        if let Some(workspace) = workspace_containing_path(gcx.clone(), &workdir).await {
+            workspace
+        } else {
+            check_if_its_inside_a_workspace_or_config(gcx.clone(), &workdir).await?;
+            workdir
+        }
     } else {
         let project_dirs = get_project_dirs(gcx.clone()).await;
         let candidates = correct_to_nearest_dir_path(gcx.clone(), &path_str, false, 3).await;
@@ -1000,6 +1004,16 @@ async fn resolve_process_workdir(
     }
 }
 
+async fn workspace_containing_path(gcx: Arc<GlobalContext>, path: &Path) -> Option<PathBuf> {
+    let path = normalize_workspace_path(path);
+    get_project_dirs(gcx)
+        .await
+        .into_iter()
+        .map(|workspace| normalize_workspace_path(&workspace))
+        .filter(|workspace| path.starts_with(workspace))
+        .max_by_key(|workspace| workspace.components().count())
+}
+
 async fn process_workspace(
     gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
@@ -1015,7 +1029,7 @@ async fn process_workspace(
 fn parse_list_status(args: &HashMap<String, Value>) -> Result<ProcessListStatus, String> {
     match parse_optional_string(args, "status")?.as_deref() {
         Some("running") | None => Ok(ProcessListStatus::Running),
-        Some("completed") => Ok(ProcessListStatus::Completed),
+        Some("completed") | Some("exited") => Ok(ProcessListStatus::Completed),
         Some("all") => Ok(ProcessListStatus::All),
         Some(other) => Err(format!(
             "Invalid status `{other}`. Must be one of: running, completed, all"
@@ -1945,7 +1959,10 @@ mod tests {
             ccx.clone(),
             make_args_map(vec![
                 ("command", json!(long_running_command("svc-b"))),
-                ("description", json!("Start duplicate api service in equivalent workspace")),
+                (
+                    "description",
+                    json!("Start duplicate api service in equivalent workspace"),
+                ),
                 (
                     "workdir",
                     json!(workspace.join(".").to_string_lossy().to_string()),
@@ -2225,7 +2242,10 @@ mod tests {
             ccx.clone(),
             make_args_map(vec![
                 ("command", json!(quick_command("done"))),
-                ("description", json!("Run quick command for wait completion test")),
+                (
+                    "description",
+                    json!("Run quick command for wait completion test"),
+                ),
             ]),
         )
         .await

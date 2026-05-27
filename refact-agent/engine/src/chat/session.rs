@@ -1822,7 +1822,8 @@ mod tests {
         let mut session = make_session();
         session.runtime.state = SessionState::WaitingUserInput;
         session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
-        session.last_activity = Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
+        session.last_activity =
+            Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
 
         assert!(session.is_pending_wake_up());
         assert!(!session.is_idle_for_cleanup());
@@ -1833,7 +1834,8 @@ mod tests {
         let mut session = make_session();
         session.runtime.state = SessionState::WaitingUserInput;
         session.wake_up_at = Some(chrono::Utc::now() - chrono::Duration::minutes(10));
-        session.last_activity = Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
+        session.last_activity =
+            Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
 
         assert!(!session.is_pending_wake_up());
         assert!(session.is_idle_for_cleanup());

@@ -117,7 +117,10 @@ mod tests {
         let serialized = serde_json::to_string(&msg).unwrap();
         let deserialized: ChatMessage = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.role, EVENT_ROLE);
-        let event_meta = deserialized.extra.get("event").expect("extra.event missing");
+        let event_meta = deserialized
+            .extra
+            .get("event")
+            .expect("extra.event missing");
         assert_eq!(event_meta["subkind"], json!("tool_decision"));
         assert_eq!(event_meta["source"], json!("tool.process_start"));
         assert_eq!(event_meta["payload"], json!({"tool": "shell"}));

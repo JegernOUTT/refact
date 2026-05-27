@@ -13,8 +13,8 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::exec::{
-    sanitize_short_description, ExecOutputStream, ExecOwnerMeta, ExecProcessSnapshot, ExecRawOutput,
-    ExecReadResult, ExecSpawnRequest, ExecStatus,
+    sanitize_short_description, ExecOutputStream, ExecOwnerMeta, ExecProcessSnapshot,
+    ExecRawOutput, ExecReadResult, ExecSpawnRequest, ExecStatus,
 };
 use crate::files_correction::canonical_path;
 use crate::files_correction::canonicalize_normalized_path;
@@ -719,8 +719,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_exec_captures_stderr() {
-        let message =
-            run_shell(args(vec![("command", json!(stderr_command())), ("description", json!("Capture stderr output"))])).await;
+        let message = run_shell(args(vec![
+            ("command", json!(stderr_command())),
+            ("description", json!("Capture stderr output")),
+        ]))
+        .await;
         let body = text(&message);
 
         assert!(body.contains("STDERR"));
@@ -796,7 +799,10 @@ mod tests {
     async fn shell_exec_output_filter_is_applied() {
         let message = run_shell(args(vec![
             ("command", json!(multiline_command())),
-            ("description", json!("Print multiple lines and filter output")),
+            (
+                "description",
+                json!("Print multiple lines and filter output"),
+            ),
             ("output_filter", json!("line4")),
             ("output_limit", json!("3")),
         ]))
@@ -835,7 +841,10 @@ mod tests {
     async fn foreground_output_filter_bounded() {
         let message = run_shell(args(vec![
             ("command", json!(above_raw_capture_limit_command())),
-            ("description", json!("Generate output above raw capture limit")),
+            (
+                "description",
+                json!("Generate output above raw capture limit"),
+            ),
             ("timeout", json!(20)),
             ("output_filter", json!("small|bytes elided")),
             ("output_limit", json!("20")),

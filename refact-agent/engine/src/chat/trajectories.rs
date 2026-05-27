@@ -29,7 +29,10 @@ pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), 
         if dest_path.exists() {
             let backup_extension = format!(
                 "{}.replace.{}",
-                dest_path.extension().and_then(|ext| ext.to_str()).unwrap_or("tmp"),
+                dest_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("tmp"),
                 Uuid::new_v4().simple()
             );
             let backup_path = dest_path.with_extension(backup_extension);
