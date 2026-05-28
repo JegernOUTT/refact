@@ -307,6 +307,14 @@ export type BuddySettingsPatch = Partial<BuddySettings> & {
   clear_personality_prompt?: boolean;
 };
 
+export type BuddySettingsPatchKey = keyof BuddySettings;
+
+interface PendingBuddySettingsRequest {
+  requestSeq: number;
+  keys: BuddySettingsPatchKey[];
+  patch: BuddySettingsPatch;
+}
+
 function applyBuddySettingsPatch(
   current: BuddySettings,
   patch: BuddySettingsPatch,
@@ -326,6 +334,67 @@ function applyBuddySettingsPatch(
     };
   }
   return normalizeBuddySettings(next);
+}
+
+function applyBuddySettingsPatchToSnapshot(
+  snapshot: BuddySnapshot,
+  patch: BuddySettingsPatch,
+): void {
+  const normalized = applyBuddySettingsPatch(snapshot.settings, patch);
+  snapshot.settings = normalized;
+  snapshot.enabled = normalized.enabled;
+}
+
+function getBuddySettingsPatchFromSettings(
+  settings: BuddySettings,
+  keys: BuddySettingsPatchKey[],
+): BuddySettingsPatch {
+  const patch: BuddySettingsPatch = {};
+  if (keys.includes("enabled")) patch.enabled = settings.enabled;
+  if (keys.includes("auto_diagnostics")) {
+    patch.auto_diagnostics = settings.auto_diagnostics;
+  }
+  if (keys.includes("auto_issue_creation")) {
+    patch.auto_issue_creation = settings.auto_issue_creation;
+  }
+  if (keys.includes("personality_prompt")) {
+    patch.personality_prompt = settings.personality_prompt;
+  }
+  if (keys.includes("autonomous_chats_enabled")) {
+    patch.autonomous_chats_enabled = settings.autonomous_chats_enabled;
+  }
+  if (keys.includes("proactive_enabled")) {
+    patch.proactive_enabled = settings.proactive_enabled;
+  }
+  if (keys.includes("message_observation_enabled")) {
+    patch.message_observation_enabled = settings.message_observation_enabled;
+  }
+  if (keys.includes("chat_reactions_enabled")) {
+    patch.chat_reactions_enabled = settings.chat_reactions_enabled;
+  }
+  if (keys.includes("housekeeping_enabled")) {
+    patch.housekeeping_enabled = settings.housekeeping_enabled;
+  }
+  if (keys.includes("humor_enabled")) {
+    patch.humor_enabled = settings.humor_enabled;
+  }
+  if (keys.includes("humor_level")) patch.humor_level = settings.humor_level;
+  if (keys.includes("autonomy_level")) {
+    patch.autonomy_level = settings.autonomy_level;
+  }
+  if (keys.includes("quiet_mode")) patch.quiet_mode = settings.quiet_mode;
+  if (keys.includes("daily_digest_hour")) {
+    patch.daily_digest_hour = settings.daily_digest_hour;
+  }
+  if (keys.includes("observers")) patch.observers = { ...settings.observers };
+  return patch;
+}
+
+function doBuddySettingsKeysIntersect(
+  left: BuddySettingsPatchKey[],
+  right: BuddySettingsPatchKey[],
+): boolean {
+  return left.some((key) => right.includes(key));
 }
 
 export function defaultBuddyPulse(): BuddyPulse {
@@ -451,6 +520,7 @@ export interface BuddySliceState {
   seenNotificationIds: Record<string, number>;
   chatBubbleSnoozedUntil: number | null;
   chatBubbleImpressions: BuddyChatBubbleImpression[];
+  pendingSettingsRequests: PendingBuddySettingsRequest[];
 }
 
 const EMPTY_BUDDY_ACTIVITIES: BuddyActivityEntry[] = [];
@@ -473,7 +543,25 @@ function initialState(): BuddySliceState {
     seenNotificationIds: pruneSeenNotificationIds(loadSeenNotificationIds()),
     chatBubbleSnoozedUntil: initialChatBubblePolicy.snoozedUntil,
     chatBubbleImpressions: initialChatBubblePolicy.impressions,
+    pendingSettingsRequests: [],
   };
+}
+
+function applyPendingSettingsRequests(state: BuddySliceState): void {
+  if (!state.snapshot) return;
+  for (const request of state.pendingSettingsRequests) {
+    applyBuddySettingsPatchToSnapshot(state.snapshot, request.patch);
+  }
+}
+
+function setSnapshotSettingsPreservingDisabled(
+  state: BuddySliceState,
+  settings: BuddySettings,
+): void {
+  if (!state.snapshot) return;
+  const normalized = normalizeBuddySettings(settings);
+  state.snapshot.settings = normalized;
+  state.snapshot.enabled = normalized.enabled;
 }
 function syncSnapshotRuntime(state: BuddySliceState) {
   if (state.snapshot) {
@@ -527,14 +615,15 @@ export const buddySlice = createSlice({
       const raw = action.payload;
       const snapshot = normalizeBuddySnapshot(raw);
       state.snapshot = snapshot;
+      applyPendingSettingsRequests(state);
       state.loaded = true;
-      state.recentDiagnostics = snapshot.recent_diagnostics ?? [];
-      state.activeSpeech = snapshot.active_speech ?? null;
-      state.runtimeQueue = snapshot.runtime_queue ?? [];
-      state.nowPlaying = snapshot.now_playing ?? null;
-      state.opportunities = snapshot.state.opportunities;
-      state.pulse = snapshot.pulse ?? defaultBuddyPulse();
-      state.activeDrafts = snapshot.active_drafts ?? [];
+      state.recentDiagnostics = state.snapshot?.recent_diagnostics ?? [];
+      state.activeSpeech = state.snapshot?.active_speech ?? null;
+      state.runtimeQueue = state.snapshot?.runtime_queue ?? [];
+      state.nowPlaying = state.snapshot?.now_playing ?? null;
+      state.opportunities = state.snapshot?.state.opportunities ?? [];
+      state.pulse = state.snapshot?.pulse ?? defaultBuddyPulse();
+      state.activeDrafts = state.snapshot?.active_drafts ?? [];
     },
     /** Called when SSE snapshot reports buddy as disabled/not-ready (no state). */
     setBuddyUnavailable: (state) => {
@@ -592,22 +681,79 @@ export const buddySlice = createSlice({
     },
     updateBuddySettings: (state, action: PayloadAction<BuddySettings>) => {
       if (state.snapshot) {
-        const normalized = normalizeBuddySettings(action.payload);
-        state.snapshot.settings = normalized;
-        state.snapshot.enabled = normalized.enabled;
+        setSnapshotSettingsPreservingDisabled(state, action.payload);
+        applyPendingSettingsRequests(state);
       }
       // If snapshot is null but buddy is being re-enabled, wait for the next
       // StateUpdated event which will bootstrap the full snapshot via updateBuddyState.
     },
     patchBuddySettings: (state, action: PayloadAction<BuddySettingsPatch>) => {
       if (state.snapshot) {
-        const normalized = applyBuddySettingsPatch(
-          state.snapshot.settings,
-          action.payload,
-        );
-        state.snapshot.settings = normalized;
-        state.snapshot.enabled = normalized.enabled;
+        applyBuddySettingsPatchToSnapshot(state.snapshot, action.payload);
       }
+    },
+    beginBuddySettingsRequest: (
+      state,
+      action: PayloadAction<{
+        requestSeq: number;
+        keys: BuddySettingsPatchKey[];
+        patch: BuddySettingsPatch;
+      }>,
+    ) => {
+      state.pendingSettingsRequests = [
+        ...state.pendingSettingsRequests.filter(
+          (request) =>
+            !doBuddySettingsKeysIntersect(request.keys, action.payload.keys),
+        ),
+        action.payload,
+      ].sort((left, right) => left.requestSeq - right.requestSeq);
+      if (state.snapshot) {
+        applyBuddySettingsPatchToSnapshot(state.snapshot, action.payload.patch);
+      }
+    },
+    finishBuddySettingsRequest: (
+      state,
+      action: PayloadAction<{ requestSeq: number; settings?: BuddySettings }>,
+    ) => {
+      const request = state.pendingSettingsRequests.find(
+        (entry) => entry.requestSeq === action.payload.requestSeq,
+      );
+      state.pendingSettingsRequests = state.pendingSettingsRequests.filter(
+        (entry) => entry.requestSeq !== action.payload.requestSeq,
+      );
+      if (!state.snapshot || !request) return;
+      if (action.payload.settings) {
+        const settingsPatch = getBuddySettingsPatchFromSettings(
+          action.payload.settings,
+          request.keys,
+        );
+        applyBuddySettingsPatchToSnapshot(state.snapshot, settingsPatch);
+      }
+      applyPendingSettingsRequests(state);
+    },
+    failBuddySettingsRequest: (
+      state,
+      action: PayloadAction<{
+        requestSeq: number;
+        rollbackPatch: BuddySettingsPatch | null;
+      }>,
+    ) => {
+      const request = state.pendingSettingsRequests.find(
+        (entry) => entry.requestSeq === action.payload.requestSeq,
+      );
+      state.pendingSettingsRequests = state.pendingSettingsRequests.filter(
+        (entry) => entry.requestSeq !== action.payload.requestSeq,
+      );
+      if (!state.snapshot || !request || !action.payload.rollbackPatch) return;
+      const superseded = state.pendingSettingsRequests.some((entry) =>
+        doBuddySettingsKeysIntersect(entry.keys, request.keys),
+      );
+      if (superseded) return;
+      applyBuddySettingsPatchToSnapshot(
+        state.snapshot,
+        action.payload.rollbackPatch,
+      );
+      applyPendingSettingsRequests(state);
     },
     setBuddyConversations: (
       state,
@@ -867,6 +1013,9 @@ export const {
   dismissBuddySuggestion,
   updateBuddySettings,
   patchBuddySettings,
+  beginBuddySettingsRequest,
+  finishBuddySettingsRequest,
+  failBuddySettingsRequest,
   setBuddyConversations,
   addBuddyDiagnostic,
   enqueueRuntimeEvent,

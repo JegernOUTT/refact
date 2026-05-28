@@ -17,12 +17,14 @@ import type {
 } from "../../features/Buddy/types";
 import {
   addDraft,
-  patchBuddySettings,
+  beginBuddySettingsRequest,
+  failBuddySettingsRequest,
+  finishBuddySettingsRequest,
   removeDraft,
   replaceOpportunities,
   selectBuddySettings,
+  type BuddySettingsPatchKey,
   type BuddySliceState,
-  updateBuddySettings as updateBuddySettingsAction,
 } from "../../features/Buddy/buddySlice";
 
 type BuddyApiState = {
@@ -54,25 +56,16 @@ const BUDDY_SETTINGS_PATCH_KEYS = [
   "observers",
   "clear_personality_prompt",
 ] as const satisfies readonly (keyof BuddySettingsUpdateRequest)[];
-
-const buddySettingsRequestSeqByKey = new Map<
-  keyof BuddySettingsUpdateRequest,
-  number
->();
-const buddySettingsPatchByKey = new Map<
-  keyof BuddySettingsUpdateRequest,
-  BuddySettingsUpdateRequest
->();
 let buddySettingsRequestSeq = 0;
 
 function getBuddySettingsPatchKeys(
   settings: BuddySettingsUpdateRequest,
-): (keyof BuddySettingsUpdateRequest)[] {
-  const keys = BUDDY_SETTINGS_PATCH_KEYS.filter(
-    (key) =>
-      key !== "clear_personality_prompt" &&
-      Object.prototype.hasOwnProperty.call(settings, key),
-  );
+): BuddySettingsPatchKey[] {
+  const keys: BuddySettingsPatchKey[] = [];
+  for (const key of BUDDY_SETTINGS_PATCH_KEYS) {
+    if (key === "clear_personality_prompt") continue;
+    if (Object.prototype.hasOwnProperty.call(settings, key)) keys.push(key);
+  }
   if (
     Object.prototype.hasOwnProperty.call(settings, "clear_personality_prompt")
   ) {
@@ -81,46 +74,9 @@ function getBuddySettingsPatchKeys(
   return keys;
 }
 
-function mergeBuddySettingsPatch(
-  left: BuddySettingsUpdateRequest,
-  right: BuddySettingsUpdateRequest,
-): BuddySettingsUpdateRequest {
-  const next: BuddySettingsUpdateRequest = { ...left, ...right };
-  if (right.observers) {
-    next.observers = { ...left.observers, ...right.observers };
-  }
-  if (Object.prototype.hasOwnProperty.call(right, "clear_personality_prompt")) {
-    delete next.personality_prompt;
-  }
-  if (Object.prototype.hasOwnProperty.call(right, "personality_prompt")) {
-    delete next.clear_personality_prompt;
-  }
-  return next;
-}
-
-function getNewerBuddySettingsPatch(
-  requestSeq: number,
-): BuddySettingsUpdateRequest | null {
-  const newerPatches = [...buddySettingsRequestSeqByKey.entries()]
-    .filter(([, seq]) => seq > requestSeq)
-    .sort((left, right) => left[1] - right[1])
-    .flatMap(([key, seq]) => {
-      const patch = buddySettingsPatchByKey.get(key);
-      return patch ? [{ key, seq, patch }] : [];
-    });
-  const seenSeqs = new Set<number>();
-  let merged: BuddySettingsUpdateRequest | null = null;
-  for (const { seq, patch } of newerPatches) {
-    if (seenSeqs.has(seq)) continue;
-    seenSeqs.add(seq);
-    merged = mergeBuddySettingsPatch(merged ?? {}, patch);
-  }
-  return merged;
-}
-
 function getBuddySettingsRollbackPatch(
   settings: BuddySettings,
-  keys: (keyof BuddySettingsUpdateRequest)[],
+  keys: BuddySettingsPatchKey[],
 ): BuddySettingsUpdateRequest {
   const patch: BuddySettingsUpdateRequest = {};
   if (keys.includes("enabled")) patch.enabled = settings.enabled;
@@ -429,36 +385,25 @@ export const buddyApi = createApi({
         const patchKeys = getBuddySettingsPatchKeys(arg);
         const requestSeq = buddySettingsRequestSeq + 1;
         buddySettingsRequestSeq = requestSeq;
-        for (const key of patchKeys) {
-          buddySettingsRequestSeqByKey.set(key, requestSeq);
-          buddySettingsPatchByKey.set(key, arg);
-        }
-        dispatch(patchBuddySettings(arg));
+        dispatch(
+          beginBuddySettingsRequest({
+            requestSeq,
+            keys: patchKeys,
+            patch: arg,
+          }),
+        );
         try {
           const { data } = await queryFulfilled;
-          if (
-            patchKeys.some(
-              (key) => buddySettingsRequestSeqByKey.get(key) !== requestSeq,
-            )
-          ) {
-            return;
-          }
-          dispatch(updateBuddySettingsAction(data));
-          const newerPatch = getNewerBuddySettingsPatch(requestSeq);
-          if (newerPatch) dispatch(patchBuddySettings(newerPatch));
+          dispatch(finishBuddySettingsRequest({ requestSeq, settings: data }));
         } catch {
-          if (
-            previousSettings &&
-            patchKeys.every(
-              (key) => buddySettingsRequestSeqByKey.get(key) === requestSeq,
-            )
-          ) {
-            dispatch(
-              patchBuddySettings(
-                getBuddySettingsRollbackPatch(previousSettings, patchKeys),
-              ),
-            );
-          }
+          dispatch(
+            failBuddySettingsRequest({
+              requestSeq,
+              rollbackPatch: previousSettings
+                ? getBuddySettingsRollbackPatch(previousSettings, patchKeys)
+                : null,
+            }),
+          );
         }
       },
     }),

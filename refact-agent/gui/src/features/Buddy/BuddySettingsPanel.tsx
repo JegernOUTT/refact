@@ -44,6 +44,8 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
   const [promptFocused, setPromptFocused] = useState(false);
   const [promptDirty, setPromptDirty] = useState(false);
   const promptDraftRef = useRef("");
+  const promptBaselineRef = useRef("");
+  const saveSeqRef = useRef(0);
   const promptDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -51,6 +53,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
     if (promptFocused || promptDirty) return;
     const nextPrompt = liveSettings?.personality_prompt ?? "";
     promptDraftRef.current = nextPrompt;
+    promptBaselineRef.current = nextPrompt;
     setPromptDraft(nextPrompt);
   }, [liveSettings?.personality_prompt, promptDirty, promptFocused]);
 
@@ -64,15 +67,21 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
 
   const autoSave = useCallback(
     async (patch: BuddySettingsPatch) => {
+      const requestSeq = saveSeqRef.current + 1;
+      saveSeqRef.current = requestSeq;
       setSaveStatus("saving");
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       try {
         await updateSettingsMutation(patch).unwrap();
-        setSaveStatus("saved");
-        savedTimerRef.current = setTimeout(() => setSaveStatus("idle"), 2000);
+        if (saveSeqRef.current === requestSeq) {
+          setSaveStatus("saved");
+          savedTimerRef.current = setTimeout(() => {
+            if (saveSeqRef.current === requestSeq) setSaveStatus("idle");
+          }, 2000);
+        }
         return true;
       } catch {
-        setSaveStatus("failed");
+        if (saveSeqRef.current === requestSeq) setSaveStatus("failed");
         return false;
       }
     },
@@ -81,8 +90,16 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
 
   const savePromptValue = useCallback(
     async (value: string) => {
+      if (value === promptBaselineRef.current) {
+        setPromptDirty(false);
+        return true;
+      }
       const saved = await autoSave(buildPromptPatch(value));
-      if (saved && promptDraftRef.current === value) setPromptDirty(false);
+      if (saved && promptDraftRef.current === value) {
+        promptBaselineRef.current = value;
+        setPromptDirty(false);
+      }
+      return saved;
     },
     [autoSave],
   );

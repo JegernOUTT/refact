@@ -3045,9 +3045,14 @@ describe("BuddySettingsPanel_autosave", () => {
   });
 
   it("failed switch autosave rolls back the optimistic Redux and control state", async () => {
+    const responseResolvers: ((response: Response) => void)[] = [];
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/settings", () =>
-        HttpResponse.json({ error: "nope" }, { status: 500 }),
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        () =>
+          new Promise<Response>((resolve) => {
+            responseResolvers.push(resolve);
+          }),
       ),
     );
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3059,6 +3064,17 @@ describe("BuddySettingsPanel_autosave", () => {
       name: /housekeeping enabled/i,
     });
     await user.click(housekeepingSwitch);
+
+    await waitFor(() => {
+      expect(
+        store.getState().buddy.snapshot?.settings.housekeeping_enabled,
+      ).toBe(false);
+    });
+    expect(housekeepingSwitch).not.toBeChecked();
+
+    responseResolvers[0]?.(
+      HttpResponse.json({ error: "nope" }, { status: 500 }),
+    );
 
     await waitFor(() => {
       expect(
@@ -3107,6 +3123,193 @@ describe("BuddySettingsPanel_autosave", () => {
     expect(
       screen.getByRole("switch", { name: /buddy enabled/i }),
     ).toBeChecked();
+  });
+
+  it("stale snapshot while a toggle is pending keeps the optimistic value visible", async () => {
+    const responseResolvers: ((settings: BuddySnapshot["settings"]) => void)[] =
+      [];
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        () =>
+          new Promise<Response>((resolve) => {
+            responseResolvers.push((settings) =>
+              resolve(HttpResponse.json(settings)),
+            );
+          }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    const { user } = render(<BuddySettingsPanel />, { store });
+
+    const quietSwitch = await screen.findByRole("switch", {
+      name: /quiet mode/i,
+    });
+    await user.click(quietSwitch);
+    expect(quietSwitch).toBeChecked();
+
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(undefined, {
+          settings: { ...makeSnapshot().settings, quiet_mode: false },
+        }),
+      ),
+    );
+
+    expect(store.getState().buddy.snapshot?.settings.quiet_mode).toBe(true);
+    expect(quietSwitch).toBeChecked();
+
+    responseResolvers[0]?.({ ...makeSnapshot().settings, quiet_mode: true });
+    await waitFor(() => {
+      expect(screen.getByText("Saved")).toBeInTheDocument();
+    });
+  });
+
+  it("out-of-order different setting requests keep pending settings visible", async () => {
+    const capturedBodies: unknown[] = [];
+    const responseResolvers: ((settings: BuddySnapshot["settings"]) => void)[] =
+      [];
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        async ({ request }) => {
+          capturedBodies.push(await request.json());
+          const settings = await new Promise<BuddySnapshot["settings"]>(
+            (resolve) => responseResolvers.push(resolve),
+          );
+          return HttpResponse.json(settings);
+        },
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    const { user } = render(<BuddySettingsPanel />, { store });
+
+    const quietSwitch = await screen.findByRole("switch", {
+      name: /quiet mode/i,
+    });
+    const housekeepingSwitch = screen.getByRole("switch", {
+      name: /housekeeping enabled/i,
+    });
+    await user.click(quietSwitch);
+    await user.click(housekeepingSwitch);
+
+    await waitFor(() => {
+      expect(capturedBodies).toEqual([
+        { quiet_mode: true },
+        { housekeeping_enabled: false },
+      ]);
+    });
+    expect(quietSwitch).toBeChecked();
+    expect(housekeepingSwitch).not.toBeChecked();
+
+    responseResolvers[0]?.({
+      ...makeSnapshot().settings,
+      quiet_mode: true,
+      housekeeping_enabled: true,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(store.getState().buddy.snapshot?.settings.quiet_mode).toBe(true);
+    expect(store.getState().buddy.snapshot?.settings.housekeeping_enabled).toBe(
+      false,
+    );
+    expect(quietSwitch).toBeChecked();
+    expect(housekeepingSwitch).not.toBeChecked();
+
+    responseResolvers[1]?.({
+      ...makeSnapshot().settings,
+      quiet_mode: false,
+      housekeeping_enabled: false,
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Saved")).toBeInTheDocument();
+    });
+    expect(store.getState().buddy.snapshot?.settings.quiet_mode).toBe(true);
+    expect(store.getState().buddy.snapshot?.settings.housekeeping_enabled).toBe(
+      false,
+    );
+  });
+
+  it("slow failed request followed by fast success leaves status saved", async () => {
+    const responseResolvers: ((response: Response) => void)[] = [];
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        () =>
+          new Promise<Response>((resolve) => responseResolvers.push(resolve)),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    const { user } = render(<BuddySettingsPanel />, { store });
+
+    await user.click(screen.getByRole("switch", { name: /quiet mode/i }));
+    await user.click(
+      screen.getByRole("switch", { name: /housekeeping enabled/i }),
+    );
+    await waitFor(() => {
+      expect(responseResolvers).toHaveLength(2);
+    });
+
+    responseResolvers[1]?.(
+      HttpResponse.json({
+        ...makeSnapshot().settings,
+        quiet_mode: false,
+        housekeeping_enabled: false,
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Saved")).toBeInTheDocument();
+    });
+
+    responseResolvers[0]?.(
+      HttpResponse.json({ error: "nope" }, { status: 500 }),
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("prompt focus and blur without edits does not save", async () => {
+    const capturedBodies: unknown[] = [];
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        async ({ request }) => {
+          capturedBodies.push(await request.json());
+          return HttpResponse.json(makeSnapshot().settings);
+        },
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(undefined, {
+          settings: {
+            ...makeSnapshot().settings,
+            personality_prompt: "Already saved prompt",
+          },
+        }),
+      ),
+    );
+
+    render(<BuddySettingsPanel />, { store });
+
+    const textarea = screen.getByRole("textbox", {
+      name: /personality prompt/i,
+    });
+    fireEvent.focus(textarea);
+    fireEvent.blur(textarea);
+
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(capturedBodies).toEqual([]);
+    expect(screen.queryByText("Saving…")).not.toBeInTheDocument();
   });
 });
 

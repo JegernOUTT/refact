@@ -40,6 +40,8 @@ import {
   snoozeChatBubbles,
   clearExpiredChatBubbleSnooze,
   recordChatBubbleImpression,
+  beginBuddySettingsRequest,
+  finishBuddySettingsRequest,
   defaultBuddyPulse,
   defaultBuddySettings,
   updateBuddySettings,
@@ -1738,6 +1740,99 @@ describe("buddySlice reducers", () => {
     expect(state.snapshot?.enabled).toBe(false);
     expect(state.snapshot?.settings.enabled).toBe(false);
     expect(selectIsBuddyEnabled(rootState)).toBe(false);
+  });
+
+  test("pending optimistic settings survive stale snapshots", () => {
+    const initial = reducer(undefined, setBuddySnapshot(makeSnapshot()));
+    const pending = reducer(
+      initial,
+      beginBuddySettingsRequest({
+        requestSeq: 1,
+        keys: ["quiet_mode"],
+        patch: { quiet_mode: true },
+      }),
+    );
+    expect(pending.snapshot?.settings.quiet_mode).toBe(true);
+
+    const staleSnapshot = makeSnapshot({
+      settings: { ...defaultBuddySettings(), quiet_mode: false },
+    });
+    const afterSnapshot = reducer(pending, setBuddySnapshot(staleSnapshot));
+
+    expect(afterSnapshot.snapshot?.settings.quiet_mode).toBe(true);
+  });
+
+  test("mutation response for one key keeps another pending key visible", () => {
+    const initial = reducer(undefined, setBuddySnapshot(makeSnapshot()));
+    const withQuietPending = reducer(
+      initial,
+      beginBuddySettingsRequest({
+        requestSeq: 1,
+        keys: ["quiet_mode"],
+        patch: { quiet_mode: true },
+      }),
+    );
+    const withHousekeepingPending = reducer(
+      withQuietPending,
+      beginBuddySettingsRequest({
+        requestSeq: 2,
+        keys: ["housekeeping_enabled"],
+        patch: { housekeeping_enabled: false },
+      }),
+    );
+
+    const afterQuietResponse = reducer(
+      withHousekeepingPending,
+      finishBuddySettingsRequest({
+        requestSeq: 1,
+        settings: {
+          ...defaultBuddySettings(),
+          quiet_mode: true,
+          housekeeping_enabled: true,
+        },
+      }),
+    );
+
+    expect(afterQuietResponse.snapshot?.settings.quiet_mode).toBe(true);
+    expect(afterQuietResponse.snapshot?.settings.housekeeping_enabled).toBe(
+      false,
+    );
+  });
+
+  test("unrelated settings request preserves top-level disabled contract", () => {
+    const initial = reducer(
+      undefined,
+      setBuddySnapshot(
+        makeSnapshot({
+          enabled: false,
+          settings: { ...defaultBuddySettings(), enabled: false },
+        }),
+      ),
+    );
+
+    const pending = reducer(
+      initial,
+      beginBuddySettingsRequest({
+        requestSeq: 1,
+        keys: ["quiet_mode"],
+        patch: { quiet_mode: true },
+      }),
+    );
+    const next = reducer(
+      pending,
+      finishBuddySettingsRequest({
+        requestSeq: 1,
+        settings: {
+          ...defaultBuddySettings(),
+          enabled: true,
+          quiet_mode: true,
+        },
+      }),
+    );
+
+    expect(next.snapshot?.enabled).toBe(false);
+    expect(next.snapshot?.settings.enabled).toBe(false);
+    expect(next.snapshot?.settings.quiet_mode).toBe(true);
   });
 
   test("normalize_settings_deep_merges_observers", () => {
