@@ -200,11 +200,10 @@ fn reasoning_requested(reasoning: &ReasoningIntent) -> bool {
 
 fn convert_messages_to_ollama(messages: &[ChatMessage]) -> Vec<Value> {
     use super::render_extra::{
-        append_plan_blocks, append_text_to_tool_json, is_context_role, is_event_role, is_plan_role,
-        render_context_message, render_event_message, render_plan_system_blocks,
+        append_text_to_tool_json, is_context_role, is_event_role, is_plan_role,
+        render_context_message, render_event_message, render_plan_message,
     };
 
-    let plan_blocks = render_plan_system_blocks(messages);
     let mut result: Vec<Value> = Vec::new();
     let mut pending_user_text = Vec::new();
     let mut pending_user_images = Vec::new();
@@ -215,6 +214,14 @@ fn convert_messages_to_ollama(messages: &[ChatMessage]) -> Vec<Value> {
     // to the next user message because Ollama expects images on user messages.
     for msg in messages {
         if is_plan_role(&msg.role) {
+            push_pending_user_message(
+                &mut result,
+                &mut pending_user_text,
+                &mut pending_user_images,
+            );
+            if let Some(text) = render_plan_message(msg) {
+                result.push(json!({"role": "user", "content": text}));
+            }
             continue;
         }
 
@@ -331,19 +338,6 @@ fn convert_messages_to_ollama(messages: &[ChatMessage]) -> Vec<Value> {
         &mut pending_user_text,
         &mut pending_user_images,
     );
-    if !plan_blocks.is_empty() {
-        if let Some(system_msg) = result
-            .iter_mut()
-            .find(|msg| msg["role"].as_str() == Some("system"))
-        {
-            let existing = system_msg["content"].as_str().map(str::to_string);
-            if let Some(text) = append_plan_blocks(existing, plan_blocks) {
-                system_msg["content"] = json!(text);
-            }
-        } else if let Some(text) = append_plan_blocks(None, plan_blocks) {
-            result.insert(0, json!({"role": "system", "content": text}));
-        }
-    }
     result
 }
 

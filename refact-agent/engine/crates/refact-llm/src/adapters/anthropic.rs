@@ -458,12 +458,11 @@ fn convert_to_anthropic(
     context_sanitizer: Option<&dyn Fn(&str) -> String>,
 ) -> (Option<Value>, Vec<Value>) {
     use super::render_extra::{
-        append_plan_blocks, is_context_role, is_event_role, is_plan_role, render_context_message,
-        render_event_message, render_plan_system_blocks,
+        is_context_role, is_event_role, is_plan_role, render_context_message, render_event_message,
+        render_plan_message,
     };
 
     let mut system_text = None;
-    let plan_blocks = render_plan_system_blocks(messages);
     let mut result: Vec<Value> = Vec::new();
     let mut pending_tool_results: Vec<Value> = Vec::new();
     let mut pending_context_text: Vec<PendingText> = Vec::new();
@@ -472,6 +471,18 @@ fn convert_to_anthropic(
         match msg.role.as_str() {
             "system" => {
                 system_text = Some(msg.content.content_text_only());
+            }
+            role if is_plan_role(role) => {
+                if !pending_context_text.is_empty() && pending_tool_results.is_empty() {
+                    flush_pending_context_text(&mut result, &mut pending_context_text);
+                }
+                flush_tool_results(&mut result, &mut pending_tool_results);
+                if let Some(text) = render_plan_message(msg) {
+                    result.push(json!({
+                        "role": "user",
+                        "content": [{"type": "text", "text": text}]
+                    }));
+                }
             }
             role if is_context_role(role) || is_event_role(role) => {
                 let raw_text = if is_event_role(role) {
@@ -780,7 +791,6 @@ fn convert_to_anthropic(
                     }));
                 }
             }
-            role if is_plan_role(role) => {}
             _ => {}
         }
     }
@@ -797,10 +807,6 @@ fn convert_to_anthropic(
         }
     }
     flush_tool_results(&mut result, &mut pending_tool_results);
-
-    if !plan_blocks.is_empty() {
-        system_text = append_plan_blocks(system_text, plan_blocks);
-    }
 
     // Claude prompt caching breakpoints are handled on messages (not system).
     let system = system_text.map(|text| json!(text));
@@ -988,34 +994,50 @@ mod tests {
     }
 
     #[test]
-    fn convert_plan_to_system() {
+    fn convert_plan_to_user_wrapped_xml() {
         let messages = vec![plan_message("agent", 1, "Do the thing")];
 
         let (system, converted) = convert_to_anthropic(&messages, None);
 
-        assert!(converted.is_empty());
-        let system = system.unwrap();
-        let content = system.as_str().unwrap();
-        assert!(content.contains("<plan mode=\"agent\" version=\"1\">"));
-        assert!(content.contains("Do the thing"));
+        assert!(system.is_none());
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "user");
+        let text = converted[0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
+        assert!(text.contains("Do the thing"));
     }
 
     #[test]
-    fn convert_multiple_plan_versions() {
+    fn convert_multiple_plan_versions_chronologically() {
         let messages = vec![
+            ChatMessage::new("user".to_string(), "first user".to_string()),
             plan_message("agent", 1, "first plan"),
-            plan_message("agent", 3, "latest plan"),
+            ChatMessage::new("user".to_string(), "second user".to_string()),
             plan_message("agent", 2, "second plan"),
+            ChatMessage::new("user".to_string(), "third user".to_string()),
         ];
 
-        let (system, _) = convert_to_anthropic(&messages, None);
-        let content = system.unwrap().as_str().unwrap().to_string();
+        let (system, converted) = convert_to_anthropic(&messages, None);
+        let serialized = json!({"system": system, "messages": converted}).to_string();
 
-        assert_eq!(content.matches("<plan mode=").count(), 1);
-        assert_eq!(content.matches("<plan-history>").count(), 1);
-        assert!(content.contains("version=\"3\""));
-        assert!(content.contains("- v1: first plan"));
-        assert!(content.contains("- v2: second plan"));
+        assert!(system.is_none());
+        assert_eq!(converted.len(), 5);
+        assert_eq!(converted[0]["role"], "user");
+        assert_eq!(converted[0]["content"][0]["text"], "first user");
+        assert!(converted[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("version=\"1\""));
+        assert_eq!(converted[2]["role"], "user");
+        assert_eq!(converted[2]["content"][0]["text"], "second user");
+        assert!(converted[3]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("version=\"2\""));
+        assert_eq!(converted[4]["role"], "user");
+        assert_eq!(converted[4]["content"][0]["text"], "third user");
+        assert_eq!(serialized.matches("<plan mode=").count(), 2);
+        assert!(!serialized.contains("<plan-history>"));
     }
 
     #[test]

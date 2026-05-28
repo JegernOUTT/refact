@@ -721,12 +721,11 @@ fn convert_to_responses_format(
     messages: &[refact_core::chat_types::ChatMessage],
 ) -> (Value, Option<String>) {
     use super::render_extra::{
-        append_plan_blocks, is_context_role, is_event_role, is_plan_role, render_context_message,
-        render_event_message, render_plan_system_blocks,
+        is_context_role, is_event_role, is_plan_role, render_context_message, render_event_message,
+        render_plan_message,
     };
 
     let mut instructions = None;
-    let plan_blocks = render_plan_system_blocks(messages);
     let mut input_messages: Vec<Value> = Vec::new();
     let mut system_count = 0;
     // Unified buffer of Responses API content blocks to inject into the next user turn.
@@ -745,6 +744,22 @@ fn convert_to_responses_format(
                     );
                 }
                 instructions = Some(msg.content.content_text_only());
+            }
+            role if is_plan_role(role) => {
+                if !pending_user_content.is_empty() {
+                    input_messages.push(json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": std::mem::take(&mut pending_user_content),
+                    }));
+                }
+                if let Some(text) = render_plan_message(msg) {
+                    input_messages.push(json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}]
+                    }));
+                }
             }
             role if is_context_role(role) || is_event_role(role) => {
                 let text = if is_event_role(role) {
@@ -854,7 +869,6 @@ fn convert_to_responses_format(
                     }
                 }
             }
-            role if is_plan_role(role) => {}
             _ => {}
         }
     }
@@ -865,10 +879,6 @@ fn convert_to_responses_format(
             "role": "user",
             "content": pending_user_content,
         }));
-    }
-
-    if !plan_blocks.is_empty() {
-        instructions = append_plan_blocks(instructions, plan_blocks);
     }
 
     let input = if input_messages.is_empty() {
@@ -1208,33 +1218,52 @@ mod tests {
     }
 
     #[test]
-    fn convert_plan_to_system() {
+    fn convert_plan_to_user_wrapped_xml() {
         let messages = vec![plan_message("agent", 1, "Do the thing")];
 
         let (input, instructions) = convert_to_responses_format(&messages);
+        let input = input.as_array().unwrap();
 
-        assert!(input.is_null());
-        let instructions = instructions.unwrap();
-        assert!(instructions.contains("<plan mode=\"agent\" version=\"1\">"));
-        assert!(instructions.contains("Do the thing"));
+        assert!(instructions.is_none());
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        let text = input[0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
+        assert!(text.contains("Do the thing"));
     }
 
     #[test]
-    fn convert_multiple_plan_versions() {
+    fn convert_multiple_plan_versions_chronologically() {
         let messages = vec![
+            ChatMessage::new("user".to_string(), "first user".to_string()),
             plan_message("agent", 1, "first plan"),
-            plan_message("agent", 3, "latest plan"),
+            ChatMessage::new("user".to_string(), "second user".to_string()),
             plan_message("agent", 2, "second plan"),
+            ChatMessage::new("user".to_string(), "third user".to_string()),
         ];
 
-        let (_, instructions) = convert_to_responses_format(&messages);
-        let instructions = instructions.unwrap();
+        let (input, instructions) = convert_to_responses_format(&messages);
+        let input = input.as_array().unwrap();
+        let serialized = json!({"input": input, "instructions": instructions}).to_string();
 
-        assert_eq!(instructions.matches("<plan mode=").count(), 1);
-        assert_eq!(instructions.matches("<plan-history>").count(), 1);
-        assert!(instructions.contains("version=\"3\""));
-        assert!(instructions.contains("- v1: first plan"));
-        assert!(instructions.contains("- v2: second plan"));
+        assert!(instructions.is_none());
+        assert_eq!(input.len(), 5);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "first user");
+        assert!(input[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("version=\"1\""));
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"][0]["text"], "second user");
+        assert!(input[3]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("version=\"2\""));
+        assert_eq!(input[4]["role"], "user");
+        assert_eq!(input[4]["content"][0]["text"], "third user");
+        assert_eq!(serialized.matches("<plan mode=").count(), 2);
+        assert!(!serialized.contains("<plan-history>"));
     }
 
     #[test]

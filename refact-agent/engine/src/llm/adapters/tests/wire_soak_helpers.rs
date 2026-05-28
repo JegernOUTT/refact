@@ -92,23 +92,34 @@ pub fn assert_no_literal_role_strings_in_body(body: &Value) {
     let serialized = body.to_string();
     assert!(!serialized.contains("\"role\":\"event\""));
     assert!(!serialized.contains("\"role\":\"plan\""));
+    assert!(!serialized.contains("\"role\": \"event\""));
+    assert!(!serialized.contains("\"role\": \"plan\""));
 }
 
 pub fn assert_plan_count_in_body(body: &Value, expected: usize) {
     assert_eq!(body.to_string().matches("<plan mode=").count(), expected);
 }
 
-pub fn assert_multiple_plan_history_in_body(body: &Value) {
-    let serialized = body.to_string();
-    assert!(serialized.contains("<plan-history>"));
-    assert_eq!(serialized.matches("<plan mode=").count(), 1);
+pub fn assert_no_plan_history_in_body(body: &Value) {
+    assert!(!body.to_string().contains("<plan-history>"));
+}
+
+pub fn chronological_plan_messages() -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::new("system".to_string(), "Mode system prompt".to_string()),
+        ChatMessage::new("user".to_string(), "user one".to_string()),
+        plan_message("agent", 1, "first plan"),
+        ChatMessage::new("user".to_string(), "user two".to_string()),
+        plan_message("agent", 2, "second plan"),
+        ChatMessage::new("user".to_string(), "user three".to_string()),
+    ]
 }
 
 pub fn three_plan_versions() -> Vec<ChatMessage> {
     vec![
-        ChatMessage::new("user".to_string(), "start".to_string()),
+        ChatMessage::new("user".to_string(), "first user".to_string()),
         plan_message("agent", 1, "first plan"),
-        ChatMessage::new("assistant".to_string(), "ack one".to_string()),
+        ChatMessage::new("user".to_string(), "second user".to_string()),
         plan_message("agent", 2, "second plan"),
         event_message(
             "mode_switch",
@@ -117,7 +128,7 @@ pub fn three_plan_versions() -> Vec<ChatMessage> {
             "mode changed",
         ),
         plan_message("agent", 3, "third plan"),
-        ChatMessage::new("user".to_string(), "continue".to_string()),
+        ChatMessage::new("user".to_string(), "third user".to_string()),
     ]
 }
 

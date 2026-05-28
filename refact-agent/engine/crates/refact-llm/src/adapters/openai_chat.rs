@@ -391,16 +391,24 @@ impl LlmWireAdapter for OpenAiChatAdapter {
 
 fn convert_messages_to_openai(messages: &[refact_core::chat_types::ChatMessage]) -> Vec<Value> {
     use super::render_extra::{
-        append_plan_blocks, append_text_to_tool_json, is_context_role, is_event_role, is_plan_role,
-        render_context_message, render_event_message, render_plan_system_blocks,
+        append_text_to_tool_json, is_context_role, is_event_role, is_plan_role,
+        render_context_message, render_event_message, render_plan_message,
     };
 
-    let plan_blocks = render_plan_system_blocks(messages);
     let mut result: Vec<Value> = Vec::new();
     let mut pending_user_content: Vec<Value> = Vec::new();
 
     for msg in messages {
         if is_plan_role(&msg.role) {
+            if !pending_user_content.is_empty() {
+                result.push(json!({
+                    "role": "user",
+                    "content": std::mem::take(&mut pending_user_content),
+                }));
+            }
+            if let Some(text) = render_plan_message(msg) {
+                result.push(json!({"role": "user", "content": text}));
+            }
             continue;
         }
 
@@ -575,20 +583,6 @@ fn convert_messages_to_openai(messages: &[refact_core::chat_types::ChatMessage])
             "role": "user",
             "content": pending_user_content,
         }));
-    }
-
-    if !plan_blocks.is_empty() {
-        if let Some(system_msg) = result
-            .iter_mut()
-            .find(|msg| msg["role"].as_str() == Some("system"))
-        {
-            let existing = system_msg["content"].as_str().map(str::to_string);
-            if let Some(text) = append_plan_blocks(existing, plan_blocks) {
-                system_msg["content"] = json!(text);
-            }
-        } else if let Some(text) = append_plan_blocks(None, plan_blocks) {
-            result.insert(0, json!({"role": "system", "content": text}));
-        }
     }
 
     result
@@ -856,34 +850,54 @@ mod tests {
     }
 
     #[test]
-    fn convert_plan_to_system() {
+    fn convert_plan_to_user_wrapped_xml() {
         let messages = vec![plan_message("agent", 1, "Do the thing")];
 
         let converted = convert_messages_to_openai(&messages);
 
         assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0]["role"], "system");
-        let content = converted[0]["content"].as_str().unwrap();
-        assert!(content.contains("<plan mode=\"agent\" version=\"1\">"));
-        assert!(content.contains("Do the thing"));
+        assert_eq!(converted[0]["role"], "user");
+        let text = converted[0]["content"].as_str().unwrap();
+        assert!(text.contains("<plan mode=\"agent\" version=\"1\">"));
+        assert!(text.contains("Do the thing"));
     }
 
     #[test]
-    fn convert_multiple_plan_versions() {
+    fn convert_multiple_plan_versions_chronologically() {
         let messages = vec![
+            ChatMessage::new("user".to_string(), "first user".to_string()),
             plan_message("agent", 1, "first plan"),
-            plan_message("agent", 3, "latest plan"),
+            ChatMessage::new("user".to_string(), "second user".to_string()),
             plan_message("agent", 2, "second plan"),
+            ChatMessage::new("user".to_string(), "third user".to_string()),
         ];
 
         let converted = convert_messages_to_openai(&messages);
-        let content = converted[0]["content"].as_str().unwrap();
+        let serialized = json!({"messages": converted}).to_string();
 
-        assert_eq!(content.matches("<plan mode=").count(), 1);
-        assert_eq!(content.matches("<plan-history>").count(), 1);
-        assert!(content.contains("version=\"3\""));
-        assert!(content.contains("- v1: first plan"));
-        assert!(content.contains("- v2: second plan"));
+        assert_eq!(converted.len(), 5);
+        assert_eq!(
+            converted[0],
+            json!({"role": "user", "content": "first user"})
+        );
+        assert!(converted[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("version=\"1\""));
+        assert_eq!(
+            converted[2],
+            json!({"role": "user", "content": "second user"})
+        );
+        assert!(converted[3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("version=\"2\""));
+        assert_eq!(
+            converted[4],
+            json!({"role": "user", "content": "third user"})
+        );
+        assert_eq!(serialized.matches("<plan mode=").count(), 2);
+        assert!(!serialized.contains("<plan-history>"));
     }
 
     #[test]

@@ -206,7 +206,10 @@ fn append_section(out: &mut String, title: &str, text: &str) {
     if text.is_empty() {
         out.push_str("<empty>\n");
     } else {
-        out.push_str(&output_mini_postprocessing(&OutputFilter::no_limits(), text));
+        out.push_str(&output_mini_postprocessing(
+            &OutputFilter::no_limits(),
+            text,
+        ));
         if !out.ends_with('\n') {
             out.push('\n');
         }
