@@ -46,7 +46,7 @@ function looksLikeMarkdown(text: string): boolean {
   return false;
 }
 
-export type ReportVariant = "taskDone" | "report";
+export type ReportVariant = "taskDone" | "report" | "plan";
 type ToolStatus = "running" | "success" | "error";
 
 export interface ReportData {
@@ -257,7 +257,8 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     animateContent,
   );
 
-  const showActions = status === "success" && !!deferredReportMarkdown;
+  const showActions =
+    variant !== "plan" && status === "success" && !!deferredReportMarkdown;
   const showSaveButton = isIdeHost();
 
   const header = (
@@ -321,10 +322,11 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
 
   return (
     <div
-      className={classNames(
-        styles.card,
-        variant === "taskDone" ? styles.variantTaskDone : styles.variantReport,
-      )}
+      className={classNames(styles.card, {
+        [styles.variantTaskDone]: variant === "taskDone",
+        [styles.variantPlan]: variant === "plan",
+        [styles.variantReport]: variant === "report",
+      })}
     >
       <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
 

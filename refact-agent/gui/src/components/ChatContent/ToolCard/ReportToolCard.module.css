@@ -4,6 +4,11 @@
   padding-left: var(--space-2);
 }
 
+.variantPlan {
+  border-left: 2px solid var(--red-9);
+  padding-left: var(--space-2);
+}
+
 .variantReport {
   border-left: 2px solid var(--blue-9);
   padding-left: var(--space-2);
