@@ -290,6 +290,9 @@ impl ExecRegistry {
             Some(existing) if !existing.snapshot.status.is_terminal() => {
                 return existing.snapshot.clone();
             }
+            Some(existing) if existing.child.is_some() => {
+                return existing.snapshot.clone();
+            }
             Some(_) | None => {}
         }
         records.insert(process_id, record);
@@ -305,12 +308,14 @@ impl ExecRegistry {
         let record = ExecProcessRecord::new(meta, transcript_limit_bytes, false);
         let snapshot = record.snapshot.clone();
         let mut records = self.records.lock().await;
-        match records
-            .get(&process_id)
-            .map(|existing| existing.snapshot.status.is_terminal())
-        {
-            Some(false) => return Err(format!("process already exists: {process_id}")),
-            Some(true) | None => {}
+        match records.get(&process_id) {
+            Some(existing) if !existing.snapshot.status.is_terminal() => {
+                return Err(format!("process already exists: {process_id}"));
+            }
+            Some(existing) if existing.child.is_some() => {
+                return Err(format!("process already exists: {process_id}"));
+            }
+            Some(_) | None => {}
         }
         records.insert(process_id, record);
         Ok(snapshot)
@@ -328,12 +333,14 @@ impl ExecRegistry {
             ExecProcessRecord::with_runtime(meta, transcript_limit_bytes, runtime, capture_raw);
         let snapshot = record.snapshot.clone();
         let mut records = self.records.lock().await;
-        match records
-            .get(&process_id)
-            .map(|existing| existing.snapshot.status.is_terminal())
-        {
-            Some(false) => return Err(format!("process already exists: {process_id}")),
-            Some(true) | None => {}
+        match records.get(&process_id) {
+            Some(existing) if !existing.snapshot.status.is_terminal() => {
+                return Err(format!("process already exists: {process_id}"));
+            }
+            Some(existing) if existing.child.is_some() => {
+                return Err(format!("process already exists: {process_id}"));
+            }
+            Some(_) | None => {}
         }
         records.insert(process_id, record);
         Ok(snapshot)
@@ -349,6 +356,15 @@ impl ExecRegistry {
         let record = ExecProcessRecord::with_child(meta, transcript_limit_bytes, child);
         let snapshot = record.snapshot.clone();
         let mut records = self.records.lock().await;
+        match records.get(&process_id) {
+            Some(existing) if !existing.snapshot.status.is_terminal() => {
+                return existing.snapshot.clone();
+            }
+            Some(existing) if existing.child.is_some() => {
+                return existing.snapshot.clone();
+            }
+            Some(_) | None => {}
+        }
         records.insert(process_id, record);
         snapshot
     }
@@ -2398,5 +2414,145 @@ mod tests {
         assert!(registry.get(&process_id).await.is_none());
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!process_exists(child_pid));
+    }
+
+    #[tokio::test]
+    async fn register_does_not_overwrite_terminal_record_with_retained_child() {
+        let registry = ExecRegistry::new();
+        let snapshot = registry
+            .register(
+                meta("exec_retain_overwrite_guard", ExecMode::Background, "sleep 30"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id.clone();
+        registry.mark_started(&process_id).await.unwrap();
+
+        let mut command = if cfg!(target_os = "windows") {
+            let mut cmd = tokio::process::Command::new("powershell.exe");
+            cmd.arg("-Command").arg("Start-Sleep 30");
+            cmd
+        } else {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg("sleep 30");
+            cmd
+        };
+        let child = command.spawn().expect("spawn child");
+        registry
+            .keep_cleanup_failure(&process_id, "timed out".to_string(), Some(child))
+            .await;
+
+        let retained = registry.get(&process_id).await.unwrap();
+        assert!(matches!(retained.status, ExecStatus::Failed { .. }));
+
+        let replacement = registry
+            .register(
+                meta(
+                    "exec_retain_overwrite_guard",
+                    ExecMode::Background,
+                    "echo replacement",
+                ),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+
+        let stored = registry.get(&process_id).await.unwrap();
+        assert_eq!(replacement.meta.command, "sleep 30");
+        assert_eq!(stored.meta.command, "sleep 30");
+        let _ = registry.remove(&process_id).await;
+    }
+
+    #[tokio::test]
+    async fn register_new_with_runtime_rejects_retained_cleanup_record() {
+        let registry = ExecRegistry::new();
+        let snapshot = registry
+            .register(
+                meta(
+                    "exec_runtime_retain_guard",
+                    ExecMode::Background,
+                    "sleep 30",
+                ),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id.clone();
+        registry.mark_started(&process_id).await.unwrap();
+
+        let mut command = if cfg!(target_os = "windows") {
+            let mut cmd = tokio::process::Command::new("powershell.exe");
+            cmd.arg("-Command").arg("Start-Sleep 30");
+            cmd
+        } else {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg("sleep 30");
+            cmd
+        };
+        let child = command.spawn().expect("spawn child");
+        registry
+            .keep_cleanup_failure(&process_id, "timed out".to_string(), Some(child))
+            .await;
+
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        let runtime = ExecProcessRuntime {
+            control_tx,
+            terminal: Arc::new(Notify::new()),
+            stdin_writer: None,
+        };
+        let result = registry
+            .register_new_with_runtime(
+                meta(
+                    "exec_runtime_retain_guard",
+                    ExecMode::Background,
+                    "echo replacement",
+                ),
+                DEFAULT_MAX_BYTES,
+                runtime,
+                false,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let stored = registry.get(&process_id).await.unwrap();
+        assert_eq!(stored.meta.command, "sleep 30");
+        let _ = registry.remove(&process_id).await;
+    }
+
+    #[tokio::test]
+    async fn register_with_child_does_not_overwrite_active_record() {
+        let registry = ExecRegistry::new();
+        let first = registry
+            .register(
+                meta("exec_child_guard_active", ExecMode::Background, "sleep 1")
+                    .with_chat_id("chat-a"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = first.meta.process_id.clone();
+        registry.mark_started(&process_id).await.unwrap();
+
+        let mut command = if cfg!(target_os = "windows") {
+            let mut cmd = tokio::process::Command::new("powershell.exe");
+            cmd.arg("-Command").arg("Start-Sleep 1");
+            cmd
+        } else {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg("sleep 1");
+            cmd
+        };
+        let child = command.spawn().expect("spawn child");
+        let second = registry
+            .register_with_child(
+                meta("exec_child_guard_active", ExecMode::Background, "echo replacement")
+                    .with_chat_id("chat-b"),
+                DEFAULT_MAX_BYTES,
+                child,
+            )
+            .await;
+
+        let stored = registry.get(&process_id).await.unwrap();
+        assert_eq!(second, stored);
+        assert_eq!(stored.status, ExecStatus::Running);
+        assert_eq!(stored.meta.command, "sleep 1");
+        assert_eq!(stored.meta.owner.chat_id.as_deref(), Some("chat-a"));
     }
 }
