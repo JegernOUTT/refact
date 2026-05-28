@@ -1610,6 +1610,87 @@ mod tests {
         assert!(client_calls.is_empty());
     }
 
+    #[test]
+    fn hidden_roles_compression_preserves_plan_and_drops_old_ticks() {
+        let preserve_last_n = 3;
+        let plan_content = "Keep this plan exactly intact.";
+        let mut messages = vec![crate::chat::internal_roles::plan(
+            "agent",
+            1,
+            plan_content,
+            None,
+        )];
+        let mut expected_turns = Vec::new();
+
+        for turn_idx in 0..20 {
+            let role = if turn_idx % 2 == 0 {
+                "user"
+            } else {
+                "assistant"
+            };
+            let content = format!("{role} turn {turn_idx}");
+            expected_turns.push((role.to_string(), content.clone()));
+            messages.push(ChatMessage {
+                role: role.to_string(),
+                content: ChatContent::SimpleText(content),
+                ..Default::default()
+            });
+
+            if turn_idx % 2 == 1 {
+                let tick_idx = turn_idx / 2;
+                messages.push(crate::chat::internal_roles::event(
+                    crate::chat::internal_roles::EventSubkind::Tick,
+                    "smoke.tick",
+                    json!({ "tick": tick_idx }),
+                    format!("tick {tick_idx}"),
+                ));
+            }
+        }
+
+        for tick_idx in 10..15 {
+            messages.push(crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::Tick,
+                "smoke.tick",
+                json!({ "tick": tick_idx }),
+                format!("tick {tick_idx}"),
+            ));
+        }
+
+        refact_chat_history::history_limit::tier0_deterministic_compact_with(
+            &mut messages,
+            preserve_last_n,
+            refact_chat_history::history_limit::CompactAggression::Standard,
+        );
+
+        let plans: Vec<_> = messages
+            .iter()
+            .filter(|message| message.role == "plan")
+            .collect();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].content.content_text_only(), plan_content);
+
+        let tick_count = messages
+            .iter()
+            .filter(|message| {
+                message.role == "event"
+                    && message
+                        .extra
+                        .get("event")
+                        .and_then(|event| event.get("subkind"))
+                        .and_then(|subkind| subkind.as_str())
+                        == Some("tick")
+            })
+            .count();
+        assert!(tick_count <= preserve_last_n);
+
+        let actual_turns: Vec<_> = messages
+            .iter()
+            .filter(|message| message.role == "user" || message.role == "assistant")
+            .map(|message| (message.role.clone(), message.content.content_text_only()))
+            .collect();
+        assert_eq!(actual_turns, expected_turns);
+    }
+
     #[tokio::test]
     async fn mode_switch_emits_event_not_user_message() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
