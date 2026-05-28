@@ -1452,6 +1452,40 @@ pub async fn get_or_create_session_with_trajectory(
     session_arc
 }
 
+pub async fn try_restore_session_if_trajectory_exists(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+) -> bool {
+    let maybe_existing = {
+        let sessions_read = sessions.read().await;
+        sessions_read.get(chat_id).cloned()
+    };
+
+    if let Some(session_arc) = maybe_existing {
+        let is_closed = session_arc.lock().await.closed;
+        if !is_closed {
+            return true;
+        }
+        let mut sessions_write = sessions.write().await;
+        if let Some(current) = sessions_write.get(chat_id) {
+            if Arc::ptr_eq(current, &session_arc) {
+                sessions_write.remove(chat_id);
+            }
+        }
+    }
+
+    if super::trajectories::load_trajectory_for_chat(app.gcx.clone(), chat_id)
+        .await
+        .is_none()
+    {
+        return false;
+    }
+
+    get_or_create_session_with_trajectory(app, sessions, chat_id).await;
+    true
+}
+
 pub async fn close_all_chat_sessions(app: AppState) {
     let sessions = app.chat.sessions.clone();
     let session_arcs: Vec<Arc<AMutex<ChatSession>>> = {

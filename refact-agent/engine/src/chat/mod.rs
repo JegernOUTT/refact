@@ -38,6 +38,7 @@ pub(crate) mod verify_cmd;
 pub use session::{
     SessionsMap, create_sessions_map, start_session_cleanup_task,
     get_or_create_session_with_trajectory, close_all_chat_sessions,
+    try_restore_session_if_trajectory_exists,
 };
 pub use queue::process_command_queue;
 pub use trajectories::{

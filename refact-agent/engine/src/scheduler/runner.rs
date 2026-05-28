@@ -15,7 +15,7 @@ use crate::app_state::AppState;
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::process_command_queue;
-use crate::chat::get_or_create_session_with_trajectory;
+use crate::chat::try_restore_session_if_trajectory_exists;
 use crate::chat::types::{ChatCommand, CommandRequest};
 use crate::files_correction::get_active_project_path;
 use crate::global_context::SharedGlobalContext;
@@ -108,6 +108,18 @@ impl CronRunner {
             let Some(chat_id) = task.chat_id.clone() else {
                 continue;
             };
+            let app = AppState::from_gcx(self.gcx.clone()).await;
+            let restored =
+                try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, &chat_id)
+                    .await;
+            if !restored {
+                tracing::warn!(
+                    "skipping missed durable one-shot {}: no trajectory found for chat {}",
+                    task.id,
+                    chat_id
+                );
+                continue;
+            }
             match self.fire_with_missed(&task, true, true).await {
                 Ok(true) => {
                     *missed_counts.entry(chat_id).or_default() += 1;
@@ -179,8 +191,21 @@ impl CronRunner {
             ChatFireStatus::Missing => {
                 if task.durable {
                     let app = AppState::from_gcx(self.gcx.clone()).await;
-                    get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id)
-                        .await;
+                    let restored = try_restore_session_if_trajectory_exists(
+                        app,
+                        &self.gcx.chat_sessions,
+                        chat_id,
+                    )
+                    .await;
+                    if !restored {
+                        tracing::warn!(
+                            "durable task {} deferred: no trajectory found for chat {}",
+                            task.id,
+                            chat_id
+                        );
+                        self.defer_invalid_target_task(&task, now);
+                        return;
+                    }
                     match chat_fire_status(&self.gcx, chat_id).await {
                         ChatFireStatus::Fireable => {}
                         status => {
@@ -938,11 +963,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_one_shot_missing_chat_is_restored_not_deleted() {
+    async fn durable_one_shot_missing_trajectory_is_deferred_not_fired() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
-        let mut one_shot = one_shot_task("cron_durable_restore_one_shot", now);
-        one_shot.chat_id = Some("lazy-durable-chat".to_string());
+        let mut one_shot = one_shot_task("cron_durable_no_traj", now);
+        one_shot.chat_id = Some("missing-traj-chat".to_string());
         one_shot.durable = true;
         store.add(one_shot).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -950,29 +975,28 @@ mod tests {
 
         runner.fire_due_tasks(now).await;
 
+        assert_eq!(
+            store.list().await.len(),
+            1,
+            "durable one-shot must remain in store when no trajectory exists"
+        );
         assert!(
-            store.list().await.is_empty(),
-            "durable one-shot should be removed after firing, not silently deleted"
+            runner.deferred_until_ms.contains_key("cron_durable_no_traj"),
+            "durable one-shot must be deferred when no trajectory exists"
         );
         let sessions = gcx.chat_sessions.read().await;
-        let session_arc = sessions
-            .get("lazy-durable-chat")
-            .expect("session should have been created for durable task");
-        let session = session_arc.lock().await;
         assert!(
-            session.messages.iter().any(|m| {
-                m.role == EVENT_ROLE && m.extra["event"]["subkind"].as_str() == Some("cron_fire")
-            }),
-            "session should have cron_fire event injected"
+            !sessions.contains_key("missing-traj-chat"),
+            "no empty session should be created for a durable task with no trajectory"
         );
     }
 
     #[tokio::test]
-    async fn durable_recurring_missing_chat_does_not_hot_loop() {
+    async fn durable_recurring_missing_trajectory_does_not_hot_loop() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
-        let mut recurring = due_task("cron_durable_recurring_restore", now);
-        recurring.chat_id = Some("lazy-recurring-chat".to_string());
+        let mut recurring = due_task("cron_durable_recurring_no_traj", now);
+        recurring.chat_id = Some("missing-traj-recurring".to_string());
         recurring.durable = true;
         store.add(recurring).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -982,18 +1006,80 @@ mod tests {
 
         let stored = store.list().await;
         assert_eq!(stored.len(), 1, "recurring task should remain in store");
-        assert_eq!(stored[0].fire_count, 1, "task should have fired once");
+        assert_eq!(stored[0].fire_count, 0, "task must not fire when no trajectory exists");
         assert!(
             runner
                 .deferred_until_ms
-                .get("cron_durable_recurring_restore")
-                .is_none(),
-            "task should not be in deferred map after successful fire"
+                .contains_key("cron_durable_recurring_no_traj"),
+            "task must be deferred when no trajectory exists"
         );
         let sessions = gcx.chat_sessions.read().await;
         assert!(
-            sessions.contains_key("lazy-recurring-chat"),
-            "session should have been created"
+            !sessions.contains_key("missing-traj-recurring"),
+            "no empty session should be created for a durable task with no trajectory"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_one_shot_catch_up_fires_with_missed_when_session_available() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        let mut one_shot = one_shot_task("cron_catch_up_missed", now);
+        one_shot.chat_id = Some("catch-up-chat".to_string());
+        one_shot.durable = true;
+        store.add(one_shot).await.unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut session = crate::chat::types::ChatSession::new("catch-up-chat".to_string());
+        session.set_runtime_state(SessionState::Idle, None);
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("catch-up-chat".to_string(), Arc::new(AMutex::new(session)));
+
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+        runner.catch_up().await;
+
+        assert!(
+            store.list().await.is_empty(),
+            "missed durable one-shot should be removed after catch-up"
+        );
+        let sessions = gcx.chat_sessions.read().await;
+        let session_arc = sessions.get("catch-up-chat").unwrap();
+        let session = session_arc.lock().await;
+        let fire_event = session.messages.iter().find(|m| {
+            m.role == EVENT_ROLE && m.extra["event"]["subkind"].as_str() == Some("cron_fire")
+        });
+        assert!(fire_event.is_some(), "catch-up should inject cron_fire event");
+        assert_eq!(
+            fire_event.unwrap().extra["event"]["payload"]["missed"],
+            json!(true),
+            "catch-up fire must carry missed=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_one_shot_catch_up_skips_when_no_trajectory() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        let mut one_shot = one_shot_task("cron_catch_up_no_traj", now);
+        one_shot.chat_id = Some("no-traj-catch-up-chat".to_string());
+        one_shot.durable = true;
+        store.add(one_shot).await.unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+        runner.catch_up().await;
+
+        assert_eq!(
+            store.list().await.len(),
+            1,
+            "task should remain when no trajectory exists during catch-up"
+        );
+        let sessions = gcx.chat_sessions.read().await;
+        assert!(
+            !sessions.contains_key("no-traj-catch-up-chat"),
+            "no empty session should be created during catch-up when no trajectory exists"
         );
     }
 }
