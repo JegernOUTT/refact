@@ -1568,7 +1568,8 @@ describe("BuddyWorld_dynamic_environment", () => {
 
   it("runtime world can set channel runtime director intent", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2024-01-01T14:00:00Z"));
+    const now = new Date("2024-01-01T14:00:00");
+    vi.setSystemTime(now);
     const runtimeEvent: BuddyRuntimeEvent = {
       id: "rt-director-1",
       signal_type: "indexing",
@@ -1576,7 +1577,7 @@ describe("BuddyWorld_dynamic_environment", () => {
       source: "indexer",
       status: "progress",
       priority: "normal",
-      created_at: "2024-01-01T14:00:00Z",
+      created_at: now.toISOString(),
     };
     try {
       render(
@@ -1597,7 +1598,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           activeQuest={null}
           activeSpeech={null}
           setupNeeded={false}
-          now={new Date("2024-01-01T14:00:00")}
+          now={now}
           onCanvasEvent={vi.fn()}
           onCare={vi.fn()}
           onOpenPage={vi.fn()}
@@ -1843,7 +1844,8 @@ describe("BuddyWorld_dynamic_environment", () => {
 
   it("active speech immediately suppresses a rendered director intent", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2024-01-01T14:00:00Z"));
+    const now = new Date("2024-01-01T14:00:00");
+    vi.setSystemTime(now);
     const runtimeEvent: BuddyRuntimeEvent = {
       id: "rt-director-active-speech",
       signal_type: "indexing",
@@ -1851,7 +1853,7 @@ describe("BuddyWorld_dynamic_environment", () => {
       source: "indexer",
       status: "progress",
       priority: "normal",
-      created_at: "2024-01-01T14:00:00Z",
+      created_at: now.toISOString(),
     };
     const quietPulse = makePulse({
       diagnostics: { last_hour: 0, top_error_types: [] },
@@ -1871,7 +1873,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           activeQuest={null}
           activeSpeech={null}
           setupNeeded={false}
-          now={new Date("2024-01-01T14:00:00")}
+          now={now}
           onCanvasEvent={vi.fn()}
           onCare={vi.fn()}
           onOpenPage={vi.fn()}
@@ -1906,7 +1908,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           activeQuest={null}
           activeSpeech={{ text: "Backend says hello.", controls: [] }}
           setupNeeded={false}
-          now={new Date("2024-01-01T14:00:00")}
+          now={now}
           onCanvasEvent={vi.fn()}
           onCare={vi.fn()}
           onOpenPage={vi.fn()}
@@ -2282,6 +2284,7 @@ describe("buildBuddySceneSpeech", () => {
       description: "LLM error: upstream returned 429",
       status: "failed",
       priority: "high",
+      created_at: new Date().toISOString(),
     });
     const speech = buildBuddySceneSpeech({
       activeSpeech: null,
@@ -2326,6 +2329,7 @@ describe("buildBuddySceneSpeech", () => {
   });
 
   it("prioritizes critical queued failures over low-priority now playing", () => {
+    const freshCreatedAt = new Date().toISOString();
     const speech = buildBuddySceneSpeech({
       activeSpeech: null,
       nowPlaying: makeRuntimeEvent({
@@ -2333,7 +2337,7 @@ describe("buildBuddySceneSpeech", () => {
         title: "Indexing quietly",
         priority: "low",
         status: "progress",
-        created_at: "2024-01-01T10:00:00Z",
+        created_at: freshCreatedAt,
       }),
       runtimeQueue: [
         makeRuntimeEvent({
@@ -2342,7 +2346,7 @@ describe("buildBuddySceneSpeech", () => {
           description: "The default model key was rejected.",
           priority: "critical",
           status: "failed",
-          created_at: "2024-01-01T09:00:00Z",
+          created_at: freshCreatedAt,
         }),
       ],
       activeSuggestion: null,
@@ -2362,6 +2366,7 @@ describe("buildBuddySceneSpeech", () => {
         "LLM error: Your input exceeds the context window of this model. Please adjust your input and try again. LLM error: Your input exceeds the context window of this model.",
       priority: "high",
       status: "failed",
+      created_at: new Date().toISOString(),
     });
     const speech = buildBuddySceneSpeech({
       activeSpeech: null,

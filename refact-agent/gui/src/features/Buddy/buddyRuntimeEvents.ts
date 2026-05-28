@@ -11,6 +11,24 @@ const ERROR_RUNTIME_TOKENS = new Set([
   "model_error",
   "provider_error",
 ]);
+const RUNTIME_EVENT_FRESHNESS_MS = 75_000;
+const RUNTIME_EVENT_FUTURE_SKEW_MS = 30_000;
+const DURABLE_RUNTIME_TOKENS = new Set([
+  "speech_tour",
+  "tour",
+  "speech_milestone",
+  "milestone",
+  "speech_quest_accept",
+  "quest_accept",
+  "speech_quest_complete",
+  "quest_complete",
+  "speech_win",
+  "win",
+  "speech_suggestion",
+  "suggestion",
+  "speech_error_alert",
+  "error_alert",
+]);
 
 function normalizeRuntimeToken(value: string | null | undefined): string {
   return (
@@ -30,6 +48,24 @@ function isErrorRuntimeToken(value: string | null | undefined): boolean {
   );
 }
 
+function isDurableRuntimeToken(value: string | null | undefined): boolean {
+  const token = normalizeRuntimeToken(value);
+  return token ? DURABLE_RUNTIME_TOKENS.has(token) : false;
+}
+
+function isDeliberatelyDurableRuntimeEvent(event: BuddyRuntimeEvent): boolean {
+  return (
+    event.bubble_policy === "durable" ||
+    isDurableRuntimeToken(event.signal_type) ||
+    isDurableRuntimeToken(event.source) ||
+    isDurableRuntimeToken(event.dedupe_key ?? undefined)
+  );
+}
+
+function isNoTtlRuntimeEventFreshnessBounded(event: BuddyRuntimeEvent): boolean {
+  return event.bubble_policy === "event_once" || isErrorRuntimeEvent(event);
+}
+
 export function isBuddyRuntimeEventVisible(
   event: BuddyRuntimeEvent | null | undefined,
   nowMs = Date.now(),
@@ -37,15 +73,20 @@ export function isBuddyRuntimeEventVisible(
   if (event == null) return false;
   if (event.dismissed === true) return false;
   if (event.persistent === true) return true;
-  if (event.ttl_ms == null || !Number.isFinite(event.ttl_ms)) return true;
+  if (isDeliberatelyDurableRuntimeEvent(event)) return true;
   const createdAtMs = Date.parse(event.created_at);
-  if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return true;
+  if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return false;
+  if (createdAtMs > nowMs + RUNTIME_EVENT_FUTURE_SKEW_MS) return false;
+  if (event.ttl_ms == null || !Number.isFinite(event.ttl_ms)) {
+    if (!isNoTtlRuntimeEventFreshnessBounded(event)) return true;
+    return nowMs - createdAtMs <= RUNTIME_EVENT_FRESHNESS_MS;
+  }
   return nowMs <= createdAtMs + event.ttl_ms;
 }
 
 export function isErrorRuntimeEvent(event: BuddyRuntimeEvent): boolean {
   return (
-    event.status === "failed" ||
+    isErrorRuntimeToken(event.status) ||
     isErrorRuntimeToken(event.signal_type) ||
     isErrorRuntimeToken(event.source) ||
     isErrorRuntimeToken(event.dedupe_key ?? undefined)

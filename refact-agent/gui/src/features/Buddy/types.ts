@@ -998,13 +998,7 @@ export interface BuddyRuntimeEvent {
   title: string;
   description?: string | null;
   source: string;
-  status:
-    | "started"
-    | "progress"
-    | "completed"
-    | "failed"
-    | "info"
-    | "streaming";
+  status: string;
   progress?: number | null;
   dedupe_key?: string | null;
   priority: string;

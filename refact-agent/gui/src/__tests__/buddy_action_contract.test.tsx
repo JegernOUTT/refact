@@ -3,7 +3,7 @@ import { Provider } from "react-redux";
 import { Theme } from "@radix-ui/themes";
 import { renderHook } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "../utils/test-utils";
 import { server } from "../utils/mockServer";
 import { setUpStore, type AppStore } from "../app/store";
@@ -156,7 +156,7 @@ function makeRuntimeEvent(
     source: "chat",
     status: "failed",
     priority: "high",
-    created_at: new Date().toISOString(),
+    created_at: "2024-01-01T00:00:00Z",
     chat_id: "chat-a",
     ...overrides,
   };
@@ -244,6 +244,11 @@ function setupCompanionApiHandlers() {
   );
 }
 
+function pinCompanionTime() {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+}
+
 function renderExecutor() {
   const store = setUpStore({ ...CONFIG_STATE });
   const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -264,6 +269,10 @@ describe("buddy action execution contract", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("click_second_action_sends_action_index_1", async () => {
@@ -465,6 +474,7 @@ describe("buddy action execution contract", () => {
 
   it("chat_companion_failed_accept_keeps_notification_visible", async () => {
     setupCompanionRender();
+    pinCompanionTime();
     const opportunity = makeOpportunity({
       id: "opp-companion-accept-fails",
       proposed_actions: [{ kind: "open_page", page: { type: "buddy" } }],
@@ -511,6 +521,7 @@ describe("buddy action execution contract", () => {
 
   it("chat_companion_failed_dismiss_keeps_notification_visible", async () => {
     setupCompanionRender();
+    pinCompanionTime();
     const opportunity = makeOpportunity({
       id: "opp-companion-dismiss-fails",
       proposed_actions: [{ kind: "dismiss" }],
@@ -557,6 +568,7 @@ describe("buddy action execution contract", () => {
   it("runtime_investigation_starts_when_runtime_dismiss_fails", async () => {
     setupCompanionRender();
     setupCompanionApiHandlers();
+    pinCompanionTime();
     let conversationStarted = false;
     server.use(
       http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
@@ -601,6 +613,7 @@ describe("buddy action execution contract", () => {
   it("runtime_dismiss_failure_is_handled", async () => {
     setupCompanionRender();
     setupCompanionApiHandlers();
+    pinCompanionTime();
     server.use(
       http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
         HttpResponse.json({ detail: "offline" }, { status: 503 }),

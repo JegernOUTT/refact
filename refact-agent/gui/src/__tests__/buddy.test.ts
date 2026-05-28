@@ -97,6 +97,10 @@ import {
   formatBuddyRuntimeEventText,
   isBuddySpeechExpired,
 } from "../features/Buddy/buddySceneSpeech";
+import {
+  isBuddyRuntimeEventVisible,
+  isErrorRuntimeEvent,
+} from "../features/Buddy/buddyRuntimeEvents";
 import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
 import { server } from "../utils/mockServer";
 const reducer = buddySlice.reducer;
@@ -2135,6 +2139,65 @@ describe("runtime event new fields", () => {
     };
   }
 
+  test("old non-persistent no-ttl runtime event is not globally visible", () => {
+    const event = makeEvent({
+      signal_type: "status_diagnostic",
+      status: "failed",
+      persistent: false,
+      ttl_ms: undefined,
+      created_at: "2024-01-01T00:00:00Z",
+    });
+
+    expect(
+      isBuddyRuntimeEventVisible(
+        event,
+        new Date("2024-01-01T00:02:00Z").getTime(),
+      ),
+    ).toBe(false);
+  });
+
+  test("persistent no-ttl runtime event remains visible", () => {
+    const event = makeEvent({
+      signal_type: "diagnostic_error",
+      status: "failed",
+      persistent: true,
+      ttl_ms: undefined,
+      created_at: "2024-01-01T00:00:00Z",
+    });
+
+    expect(
+      isBuddyRuntimeEventVisible(
+        event,
+        new Date("2024-01-01T12:00:00Z").getTime(),
+      ),
+    ).toBe(true);
+  });
+
+  test("fresh no-ttl error remains visible and error-like", () => {
+    const event = makeEvent({
+      signal_type: "diagnostic_error",
+      status: "failed",
+      persistent: false,
+      ttl_ms: undefined,
+      created_at: "2024-01-01T00:00:30Z",
+    });
+
+    expect(
+      isBuddyRuntimeEventVisible(
+        event,
+        new Date("2024-01-01T00:01:00Z").getTime(),
+      ),
+    ).toBe(true);
+    expect(isErrorRuntimeEvent(event)).toBe(true);
+  });
+
+  test.each(["error", "failure", "  Failed  ", "tool-failure"])(
+    "status %s is classified as error-like",
+    (status) => {
+      expect(isErrorRuntimeEvent(makeEvent({ status }))).toBe(true);
+    },
+  );
+
   test("runtime event stores speech_text and scene", () => {
     const evt = makeEvent({
       speech_text: "Thinking...",
@@ -2189,6 +2252,7 @@ describe("runtime event new fields", () => {
       title: "Generation failed",
       status: "failed",
       priority: "high",
+      created_at: new Date().toISOString(),
     });
 
     const speech = buildBuddySceneSpeech({
@@ -4203,6 +4267,7 @@ describe("buddy chat reactions settings and bubbles", () => {
         status: "completed",
         priority: "high",
         controls: [],
+        created_at: new Date().toISOString(),
       }),
       runtimeQueue: [],
     });

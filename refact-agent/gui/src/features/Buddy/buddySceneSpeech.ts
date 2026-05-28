@@ -254,6 +254,8 @@ function runtimePriorityScore(event: BuddyRuntimeEvent): number {
         return 150;
       case "completed":
         return 25;
+      default:
+        return isErrorRuntimeEvent(event) ? 500 : 0;
     }
   })();
 
