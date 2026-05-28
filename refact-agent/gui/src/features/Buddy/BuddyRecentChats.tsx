@@ -45,13 +45,8 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
     entry.kind === "chat" ||
     entry.kind === "setup" ||
     entry.kind === "workflow";
-  return (
-    <button
-      type="button"
-      className={styles.entryRow}
-      onClick={clickable ? () => onClick(entry) : undefined}
-      data-clickable={clickable || undefined}
-    >
+  const content = (
+    <>
       <span className={styles.entryIcon}>{entry.icon}</span>
       <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
         <Flex align="center" gap="1" style={{ minWidth: 0 }}>
@@ -78,6 +73,19 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
           )}
         </Flex>
       </Flex>
+    </>
+  );
+  if (!clickable) {
+    return <div className={styles.entryRow}>{content}</div>;
+  }
+  return (
+    <button
+      type="button"
+      className={styles.entryRow}
+      onClick={() => onClick(entry)}
+      data-clickable
+    >
+      {content}
     </button>
   );
 };

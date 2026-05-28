@@ -3468,6 +3468,41 @@ describe("BuddyHome_disabled_state", () => {
 });
 
 describe("BuddyRecentChats_opens_existing_chat", () => {
+  it("system recent rows are not enabled focusable no-op buttons", async () => {
+    let trajectoryCalled = false;
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([
+          makeConversation({
+            id: "system-row",
+            kind: "system",
+            title: "System maintenance note",
+            badge: "System",
+            message_count: 0,
+          }),
+        ]),
+      ),
+      http.get("http://127.0.0.1:8001/v1/trajectories/:id", () => {
+        trajectoryCalled = true;
+        return HttpResponse.json({});
+      }),
+    );
+
+    render(<BuddyRecentChats showFilters={false} compact />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const title = await screen.findByText("System maintenance note");
+    expect(title.closest("button")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /system maintenance note/i }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(title);
+
+    expect(trajectoryCalled).toBe(false);
+  });
+
   it("clicking an existing chat row calls trajectory API and navigates to chat with buddy_meta", async () => {
     let trajectoryCalled = false;
     server.use(

@@ -81,9 +81,13 @@ import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
 import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
 import {
   createChatWithId,
+  markThreadSseError,
   restoreChat,
   restoreChatFromBackend,
   openExistingBuddyChat,
+  setIsWaitingForResponse,
+  setPreventSend,
+  setThreadPauseReasons,
 } from "../features/Chat/Thread/actions";
 import {
   addBuddyCrashBreadcrumb,
@@ -4712,6 +4716,146 @@ describe("buddy chat reactions settings and bubbles", () => {
 });
 
 describe("restoreChat buddy_meta handling", () => {
+  test("restoreChat preserves existing task metadata when payload omits it", () => {
+    const store = setUpStore();
+    store.dispatch(
+      createChatWithId({
+        id: "task-restore-preserve",
+        isTaskChat: true,
+        taskMeta: {
+          task_id: "task-1",
+          role: "agent",
+          agent_id: "agent-1",
+          card_id: "T-41",
+          planner_chat_id: "planner-1",
+        },
+      }),
+    );
+
+    store.dispatch(
+      restoreChat({
+        id: "task-restore-preserve",
+        title: "Restored Task Chat",
+        model: "gpt-test",
+        messages: [],
+        boost_reasoning: false,
+        context_tokens_cap: undefined,
+        include_project_info: true,
+        increase_max_tokens: false,
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-02T00:00:00Z",
+      }),
+    );
+
+    const rt = store.getState().chat.threads["task-restore-preserve"];
+    expect(rt?.thread.is_task_chat).toBe(true);
+    expect(rt?.thread.task_meta).toEqual({
+      task_id: "task-1",
+      role: "agent",
+      agent_id: "agent-1",
+      card_id: "T-41",
+      planner_chat_id: "planner-1",
+    });
+    expect(store.getState().chat.open_thread_ids).not.toContain(
+      "task-restore-preserve",
+    );
+  });
+
+  test("restoreChat preserves worktree and link metadata when payload omits it", () => {
+    const store = setUpStore();
+    const worktree = {
+      id: "worktree-1",
+      kind: "task",
+      root: "/tmp/worktree",
+      source_workspace_root: "/tmp/source",
+      repo_root: "/tmp/source",
+      branch: "feature/buddy",
+      enforce: true,
+    };
+    store.dispatch(
+      createChatWithId({
+        id: "worktree-restore-preserve",
+        worktree,
+        parentId: "parent-chat",
+        linkType: "handoff",
+      }),
+    );
+
+    store.dispatch(
+      restoreChat({
+        id: "worktree-restore-preserve",
+        title: "Restored Worktree Chat",
+        model: "gpt-test",
+        messages: [],
+        boost_reasoning: false,
+        context_tokens_cap: undefined,
+        include_project_info: true,
+        increase_max_tokens: false,
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-02T00:00:00Z",
+      }),
+    );
+
+    const rt = store.getState().chat.threads["worktree-restore-preserve"];
+    expect(rt?.thread.worktree).toEqual(worktree);
+    expect(rt?.thread.parent_id).toBe("parent-chat");
+    expect(rt?.thread.link_type).toBe("handoff");
+  });
+
+  test("restoreChat clears stale runtime flags on existing runtime", () => {
+    const store = setUpStore();
+    store.dispatch(createChatWithId({ id: "stale-runtime-restore" }));
+    store.dispatch(setPreventSend({ id: "stale-runtime-restore" }));
+    store.dispatch(
+      setIsWaitingForResponse({ id: "stale-runtime-restore", value: true }),
+    );
+    store.dispatch(
+      markThreadSseError({
+        id: "stale-runtime-restore",
+        error: "Old placeholder error",
+      }),
+    );
+    store.dispatch(
+      setThreadPauseReasons({
+        id: "stale-runtime-restore",
+        pauseReasons: [
+          {
+            type: "confirmation",
+            tool_name: "shell",
+            command: "echo hi",
+            rule: "confirm shell",
+            tool_call_id: "tool-1",
+            integr_config_path: null,
+          },
+        ],
+      }),
+    );
+
+    store.dispatch(
+      restoreChat({
+        id: "stale-runtime-restore",
+        title: "Clean Restored Chat",
+        model: "gpt-test",
+        messages: [],
+        boost_reasoning: false,
+        context_tokens_cap: undefined,
+        include_project_info: true,
+        increase_max_tokens: false,
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-02T00:00:00Z",
+      }),
+    );
+
+    const rt = store.getState().chat.threads["stale-runtime-restore"];
+    expect(rt?.error).toBeNull();
+    expect(rt?.waiting_for_response).toBe(false);
+    expect(rt?.streaming).toBe(false);
+    expect(rt?.prevent_send).toBe(false);
+    expect(rt?.confirmation.pause).toBe(false);
+    expect(rt?.confirmation.pause_reasons).toEqual([]);
+    expect(rt?.session_state).toBe("idle");
+  });
+
   test("restoreChat refreshes an existing empty buddy runtime with restored messages", () => {
     const store = setUpStore();
     store.dispatch(createChatWithId({ id: "buddy-refresh-1" }));
