@@ -16,6 +16,7 @@ use crate::agents::types::{
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
 use crate::call_validation::{ChatContent, ChatMessage};
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, TaskMeta};
 use crate::global_context::GlobalContext;
 use crate::subchat::{SubchatConfig, SubchatResult, resolve_subchat_config_with_parent};
@@ -368,7 +369,15 @@ async fn build_messages(
     if config_name == "test_spawn" {
         return Ok(vec![
             ChatMessage::new("system".to_string(), "test system".to_string()),
-            ChatMessage::new("user".to_string(), prompt.to_string()),
+            event(
+                EventSubkind::SystemNotice,
+                "agents.spawn",
+                serde_json::json!({
+                    "config_name": config_name,
+                    "test": true,
+                }),
+                prompt.to_string(),
+            ),
         ]);
     }
     let subagent_config = crate::yaml_configs::customization_registry::get_subagent_config(
@@ -390,11 +399,14 @@ async fn build_messages(
             content: ChatContent::SimpleText(system_prompt),
             ..Default::default()
         },
-        ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(prompt.to_string()),
-            ..Default::default()
-        },
+        event(
+            EventSubkind::SystemNotice,
+            "agents.spawn",
+            serde_json::json!({
+                "config_name": config_name,
+            }),
+            prompt.to_string(),
+        ),
     ])
 }
 

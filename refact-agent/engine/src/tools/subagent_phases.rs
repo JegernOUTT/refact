@@ -7,6 +7,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent};
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::files_correction::correct_to_nearest_filename;
 use crate::global_context::GlobalContext;
 use crate::subchat::{run_subchat, run_subchat_once_with_parent, resolve_subchat_config_with_parent};
@@ -213,11 +214,19 @@ pub async fn gather_files_phase(
         }
     }
 
-    messages.push(ChatMessage {
-        role: "user".to_string(),
-        content: ChatContent::SimpleText(params.user_instruction.to_string()),
-        ..Default::default()
-    });
+    messages.push(event(
+        EventSubkind::SystemNotice,
+        "tool.subagent_phases",
+        json!({
+            "phase": "gather_files",
+            "subagent_id": gather_subagent_id,
+            "title": params.title,
+            "max_steps": max_steps,
+            "max_files": max_files,
+            "attempt": "initial",
+        }),
+        params.user_instruction.to_string(),
+    ));
 
     tracing::info!("{}: starting file-gathering subagent", gather_subagent_id);
     let result = run_subchat(gcx.clone(), messages.clone(), subchat_config).await?;
@@ -231,11 +240,19 @@ pub async fn gather_files_phase(
             gather_subagent_id
         );
         let mut retry_messages = result.messages.clone();
-        retry_messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(retry_prompt),
-            ..Default::default()
-        });
+        retry_messages.push(event(
+            EventSubkind::SystemNotice,
+            "tool.subagent_phases",
+            json!({
+                "phase": "gather_files",
+                "subagent_id": gather_subagent_id,
+                "title": params.title,
+                "max_steps": max_steps,
+                "max_files": max_files,
+                "attempt": "retry",
+            }),
+            retry_prompt,
+        ));
 
         let retry_result = run_subchat_once_with_parent(
             gcx.clone(),

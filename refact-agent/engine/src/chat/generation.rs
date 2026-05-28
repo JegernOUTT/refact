@@ -290,7 +290,11 @@ pub async fn prepare_session_preamble_and_knowledge(
 
         let first_conv_idx = messages_with_preamble
             .iter()
-            .position(|m| m.role == "user" || m.role == "assistant")
+            .position(|m| {
+                m.role == "user"
+                    || m.role == "assistant"
+                    || m.role == crate::chat::internal_roles::EVENT_ROLE
+            })
             .unwrap_or(messages_with_preamble.len());
 
         {
@@ -395,11 +399,18 @@ pub async fn prepare_session_preamble_and_knowledge(
         suppress_flag,
     ) = {
         let mut session = session_arc.lock().await;
-        let last_user_idx = session.messages.iter().rposition(|m| m.role == "user");
+        let last_user_idx = session
+            .messages
+            .iter()
+            .rposition(|m| is_prompt_turn_role(&m.role));
         let last_user =
             last_user_idx.is_some() && last_user_idx == session.messages.len().checked_sub(1);
         let auto = session.thread.auto_enrichment_enabled.unwrap_or(false);
-        let count = session.messages.iter().filter(|m| m.role == "user").count();
+        let count = session
+            .messages
+            .iter()
+            .filter(|m| is_prompt_turn_role(&m.role))
+            .count();
         let manual = last_user_idx
             .and_then(|idx| idx.checked_sub(1))
             .and_then(|idx| session.messages.get(idx))
@@ -431,7 +442,10 @@ pub async fn prepare_session_preamble_and_knowledge(
         )
         .await;
         if messages.len() > msg_count_before {
-            let local_last_user_idx = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
+            let local_last_user_idx = messages
+                .iter()
+                .rposition(|m| is_prompt_turn_role(&m.role))
+                .unwrap_or(0);
             if local_last_user_idx > 0 {
                 let enriched_msg = &messages[local_last_user_idx - 1];
                 if enriched_msg.role == "context_file" {
@@ -439,7 +453,7 @@ pub async fn prepare_session_preamble_and_knowledge(
                     let session_last_user_idx = session
                         .messages
                         .iter()
-                        .rposition(|m| m.role == "user")
+                        .rposition(|m| is_prompt_turn_role(&m.role))
                         .unwrap_or(0);
                     session.insert_message(session_last_user_idx, enriched_msg.clone());
                     info!(
@@ -453,7 +467,10 @@ pub async fn prepare_session_preamble_and_knowledge(
 }
 
 pub fn save_rag_results_to_session(session: &mut ChatSession, rag_results: &[serde_json::Value]) {
-    let last_user_idx = session.messages.iter().rposition(|m| m.role == "user");
+    let last_user_idx = session
+        .messages
+        .iter()
+        .rposition(|m| is_prompt_turn_role(&m.role));
     if let Some(insert_idx) = last_user_idx {
         let existing_content: std::collections::HashSet<String> = session
             .messages
@@ -475,6 +492,12 @@ pub fn save_rag_results_to_session(session: &mut ChatSession, rag_results: &[ser
     }
 }
 
+fn is_prompt_turn_role(role: &str) -> bool {
+    role == "user"
+        || role == crate::chat::internal_roles::EVENT_ROLE
+        || role == crate::chat::internal_roles::PLAN_ROLE
+}
+
 fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
     let mut saw_toolish = false;
 
@@ -492,7 +515,7 @@ fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
                 }
                 return tcs.iter().any(|tc| !tc.id.starts_with("srvtoolu_"));
             }
-            "user" => return true,
+            role if is_prompt_turn_role(role) => return true,
             "tool" | "context_file" => saw_toolish = true,
             _ => {}
         }
@@ -1947,6 +1970,15 @@ mod tests {
         }
     }
 
+    fn make_event_msg(content: &str) -> ChatMessage {
+        crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "test.generation",
+            serde_json::json!({}),
+            content.to_string(),
+        )
+    }
+
     fn make_assistant_msg(content: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
@@ -2050,6 +2082,12 @@ mod tests {
     #[test]
     fn test_tail_needs_assistant_ends_with_user() {
         let messages = vec![make_user_msg("hello")];
+        assert!(tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_tail_needs_assistant_ends_with_event() {
+        let messages = vec![make_event_msg("synthetic prompt")];
         assert!(tail_needs_assistant(&messages));
     }
 

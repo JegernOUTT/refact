@@ -59,6 +59,15 @@ mod tests {
         }
     }
 
+    fn event_message(text: &str) -> ChatMessage {
+        crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "test.compress_chat",
+            json!({}),
+            text.to_string(),
+        )
+    }
+
     fn assistant_message(text: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
@@ -98,6 +107,19 @@ mod tests {
         ];
 
         assert_eq!(find_preserve_cutoff(&messages, 1), 2);
+    }
+
+    #[test]
+    fn preserve_cutoff_treats_event_notices_as_non_user_turns() {
+        let messages = vec![
+            event_message("synthetic notice"),
+            assistant_message("two"),
+            user_message("real user"),
+            assistant_message("four"),
+        ];
+
+        assert_eq!(find_preserve_cutoff(&messages, 1), 2);
+        assert_eq!(find_preserve_cutoff(&messages, 2), 0);
     }
 }
 
@@ -777,12 +799,11 @@ impl Tool for ToolCompressChatApply {
         let after_count = head_messages.len();
         let target_met = target_tokens.map_or(true, |t| after_tokens <= t);
 
-        if head_messages.first().map(|m| m.role.as_str()).unwrap_or("") != "system"
-            && head_messages.first().map(|m| m.role.as_str()).unwrap_or("") != "user"
-        {
+        let first_role = head_messages.first().map(|m| m.role.as_str()).unwrap_or("");
+        if !matches!(first_role, "system" | "user" | "event" | "plan") {
             return Err(format!(
-                "ctx_apply would produce an invalid chat history: first message has role '{}', expected 'system' or 'user'. Compression aborted.",
-                head_messages.first().map(|m| m.role.as_str()).unwrap_or("(empty)")
+                "ctx_apply would produce an invalid chat history: first message has role '{}', expected 'system', 'user', 'event', or 'plan'. Compression aborted.",
+                if first_role.is_empty() { "(empty)" } else { first_role }
             ));
         }
 

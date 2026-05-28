@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariantInfo, AbVariants, BoardCard, StatusUpdate};
@@ -269,16 +270,31 @@ async fn create_variant_session(
         dependency_context,
         spec.suggested_steps,
     );
+    let initial_message = event(
+        EventSubkind::SystemNotice,
+        "tool.spawn_ab",
+        json!({
+            "task_id": task_id,
+            "planner_chat_id": planner_chat_id,
+            "card_id": card_id,
+            "card_title": card_title,
+            "agent_id": &variant.agent_id,
+            "agent_chat_id": &variant.chat_id,
+            "model": &variant.model,
+            "suggested_steps": spec.suggested_steps,
+            "has_extra_instructions": spec.extra_instructions.is_some(),
+            "worktree": variant.prepared.worktree_path().to_string_lossy().to_string(),
+            "worktree_name": variant.prepared.worktree_name(),
+            "branch": variant.prepared.branch_name(),
+        }),
+        user_prompt,
+    );
     app.chat
         .facade
         .create_session(CreateSessionRequest {
             chat_id: variant.chat_id.clone(),
             thread,
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText(user_prompt),
-                ..Default::default()
-            }],
+            messages: vec![initial_message],
         })
         .await?;
     app.chat.facade.maybe_save_session(&variant.chat_id).await

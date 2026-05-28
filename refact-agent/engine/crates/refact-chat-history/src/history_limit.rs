@@ -748,19 +748,19 @@ fn validate_chat_history_slice(messages: &[ChatMessage]) -> Result<(), String> {
     if messages.is_empty() {
         return Err("Invalid chat history: no messages present".to_string());
     }
-    let has_system_or_user = messages
+    let has_prompt_anchor = messages
         .iter()
-        .any(|msg| msg.role == "system" || msg.role == "user");
-    if !has_system_or_user {
+        .any(|msg| matches!(msg.role.as_str(), "system" | "user" | "event" | "plan"));
+    if !has_prompt_anchor {
         return Err(
-            "Invalid chat history: must have at least one message of role 'system' or 'user'"
+            "Invalid chat history: must have at least one message of role 'system', 'user', 'event', or 'plan'"
                 .to_string(),
         );
     }
 
-    if messages[0].role != "system" && messages[0].role != "user" {
+    if !matches!(messages[0].role.as_str(), "system" | "user" | "event" | "plan") {
         return Err(format!(
-            "Invalid chat history: first message must be 'system' or 'user', got '{}'",
+            "Invalid chat history: first message must be 'system', 'user', 'event', or 'plan', got '{}'",
             messages[0].role
         ));
     }
@@ -860,6 +860,35 @@ mod tests {
             content: ChatContent::SimpleText(content.to_string()),
             ..Default::default()
         }
+    }
+
+    fn make_event_msg_basic(content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            serde_json::json!({
+                "subkind": "system_notice",
+                "source": "test.history_limit",
+                "payload": {},
+            }),
+        );
+        ChatMessage {
+            role: "event".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_chat_history_allows_event_first_history() {
+        let mut sampling = SamplingParameters::default();
+        let messages = vec![make_event_msg_basic("synthetic prompt")];
+
+        let result = fix_and_limit_messages_history(&messages, &mut sampling).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "event");
     }
 
     #[test]

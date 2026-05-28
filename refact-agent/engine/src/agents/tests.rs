@@ -16,7 +16,7 @@ use crate::agents::types::{
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::chat::types::{ChatCommand, ChatEvent, ChatSession};
+use crate::chat::types::{ChatEvent, ChatSession};
 use crate::subchat::{SubchatConfig, SubchatResult};
 use crate::tools::tools_description::Tool;
 use serial_test::serial;
@@ -878,16 +878,17 @@ async fn push_completion_to_parent_is_idempotent() {
         .expect("second push");
 
     let session = session_arc.lock().await;
-    assert_eq!(session.command_queue.len(), 1);
-    match &session.command_queue.front().unwrap().command {
-        ChatCommand::UserMessage { content, .. } => {
-            assert!(content
-                .as_str()
-                .unwrap()
-                .contains("[background delegate finished]"));
-        }
-        _ => panic!("expected UserMessage"),
-    }
+    assert_eq!(agents_spawn_system_notice_count(&session), 1);
+    let notice = agents_spawn_system_notices(&session).pop().unwrap();
+    assert!(notice
+        .content
+        .content_text_only()
+        .contains("[background delegate finished]"));
+    let event = notice.extra.get("event").unwrap();
+    assert_eq!(event["subkind"], json!("system_notice"));
+    assert_eq!(event["source"], json!("agents.spawn"));
+    assert_eq!(event["payload"]["agent_id"], json!(record.agent_id));
+    assert_eq!(event["payload"]["status"], json!("completed"));
 }
 
 #[tokio::test]
@@ -924,7 +925,8 @@ async fn push_completion_to_parent_marks_pending_when_session_not_loaded_and_flu
         .expect("flush");
 
     assert_eq!(count, 1);
-    assert_eq!(session.lock().await.command_queue.len(), 1);
+    let session_guard = session.lock().await;
+    assert_eq!(agents_spawn_system_notice_count(&session_guard), 1);
     let updated = app
         .agents
         .get("parent-flush", &record.agent_id)
@@ -963,7 +965,7 @@ async fn burst_guard_defers_sixth_background_completion_then_allows_later_flush(
 
     let queued_count = {
         let session = session_arc.lock().await;
-        synthetic_completion_command_count(&session, "[background delegate finished]")
+        agents_spawn_system_notice_count(&session)
     };
     assert_eq!(queued_count, 5);
     let deferred = app
@@ -982,7 +984,7 @@ async fn burst_guard_defers_sixth_background_completion_then_allows_later_flush(
     assert_eq!(pushed, 1);
     let queued_count = {
         let session = session_arc.lock().await;
-        synthetic_completion_command_count(&session, "[background delegate finished]")
+        agents_spawn_system_notice_count(&session)
     };
     assert_eq!(queued_count, 6);
     let updated = app
@@ -1243,17 +1245,30 @@ fn delegate_spawn_request(
     }
 }
 
-fn synthetic_completion_command_count(session: &ChatSession, marker: &str) -> usize {
+fn agents_spawn_system_notices(session: &ChatSession) -> Vec<&ChatMessage> {
     session
-        .command_queue
+        .messages
         .iter()
-        .filter(|request| match &request.command {
-            ChatCommand::UserMessage { content, .. } => {
-                content.as_str().map_or(false, |text| text.contains(marker))
-            }
-            _ => false,
+        .filter(|message| {
+            message.role == "event"
+                && message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("subkind"))
+                    .and_then(|subkind| subkind.as_str())
+                    == Some("system_notice")
+                && message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("source"))
+                    .and_then(|source| source.as_str())
+                    == Some("agents.spawn")
         })
-        .count()
+        .collect()
+}
+
+fn agents_spawn_system_notice_count(session: &ChatSession) -> usize {
+    agents_spawn_system_notices(session).len()
 }
 
 fn install_spawn_runner(abort_seen: Arc<AtomicBool>) -> crate::agents::spawn::TestRunnerGuard {
@@ -1287,7 +1302,7 @@ async fn stub_spawn_runner(
     let target = messages
         .iter()
         .rev()
-        .find(|message| message.role == "user")
+        .find(|message| message.role == "user" || message.role == "event")
         .map(|message| message.content.content_text_only())
         .unwrap_or_else(|| "background work".to_string());
     messages.push(ChatMessage::new(
@@ -1340,10 +1355,7 @@ async fn background_agent_final_integration_spawn_push_list_cancel_and_restart()
 
     {
         let session = session_arc.lock().await;
-        assert_eq!(
-            synthetic_completion_command_count(&session, "[background delegate finished]"),
-            2
-        );
+        assert_eq!(agents_spawn_system_notice_count(&session), 2);
     }
 
     let listed = app
@@ -1411,10 +1423,7 @@ async fn background_agent_final_integration_spawn_push_list_cancel_and_restart()
         .await
         .expect("recovery push");
     let session = session_arc.lock().await;
-    assert_eq!(
-        synthetic_completion_command_count(&session, "[background delegate finished]"),
-        3
-    );
+    assert_eq!(agents_spawn_system_notice_count(&session), 3);
 }
 
 #[tokio::test]

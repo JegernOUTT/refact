@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::agents::types::{BackgroundAgent, BgAgentKind, BgAgentStatus};
 use crate::app_state::AppState;
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::process_command_queue;
 use crate::chat::types::{BurstGuardDecision, ChatCommand, CommandRequest};
 
@@ -29,6 +30,8 @@ pub async fn push_completion_to_parent(
     };
 
     let message_id = Uuid::new_v4().to_string();
+    let mut notice = build_completion_event(record);
+    notice.message_id = message_id.clone();
     let processor_flag = {
         let mut session = session_arc.lock().await;
         if session.closed {
@@ -46,15 +49,11 @@ pub async fn push_completion_to_parent(
                 return Ok(());
             }
         }
+        session.add_message(notice);
         session.command_queue.push_back(CommandRequest {
-            client_request_id: format!("background-agent-finished-{}", message_id),
+            client_request_id: format!("background-agent-finished-{message_id}"),
             priority: true,
-            command: ChatCommand::UserMessage {
-                content: serde_json::Value::String(build_push_message(record)),
-                attachments: vec![],
-                context_files: vec![],
-                suppress_auto_enrichment: false,
-            },
+            command: ChatCommand::Regenerate {},
         });
         session.emit_queue_update();
         session.touch();
@@ -111,6 +110,32 @@ fn already_pushed(record: &BackgroundAgent) -> bool {
         .as_deref()
         .map(|id| id != "pending" && id != "deferred")
         .unwrap_or(false)
+}
+
+fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::ChatMessage {
+    event(
+        EventSubkind::SystemNotice,
+        "agents.spawn",
+        serde_json::json!({
+            "agent_id": record.agent_id,
+            "parent_chat_id": record.parent_chat_id,
+            "parent_root_chat_id": record.parent_root_chat_id,
+            "parent_tool_call_id": record.parent_tool_call_id,
+            "kind": record.kind.as_str(),
+            "status": record.status.as_str(),
+            "title": record.title,
+            "config_name": record.config_name,
+            "target_files": record.target_files,
+            "model": record.model,
+            "child_chat_id": record.child_chat_id,
+            "edited_files": record.edited_files,
+            "diff_summary": record.diff_summary,
+            "conflict_summary": record.conflict_summary,
+            "created_at": record.created_at,
+            "last_update_at": record.last_update_at,
+        }),
+        build_push_message(record),
+    )
 }
 
 fn build_push_message(record: &BackgroundAgent) -> String {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
@@ -902,11 +903,25 @@ impl Tool for ToolTaskSpawnAgent {
             &dependency_context,
             suggested_steps,
         );
-        let user_msg = ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(user_prompt),
-            ..Default::default()
-        };
+        let user_msg = event(
+            EventSubkind::SystemNotice,
+            "tool.task_spawn_agent",
+            json!({
+                "task_id": &task_id,
+                "planner_chat_id": &planner_chat_id,
+                "card_id": card_id,
+                "card_title": &card_title,
+                "agent_id": &agent_id,
+                "agent_chat_id": &agent_chat_id,
+                "model": &model,
+                "suggested_steps": suggested_steps,
+                "files_to_open": &files_to_open,
+                "worktree": prepared_worktree.worktree_path().to_string_lossy().to_string(),
+                "worktree_name": prepared_worktree.worktree_name(),
+                "branch": prepared_worktree.branch_name(),
+            }),
+            user_prompt,
+        );
         let mut messages = vec![user_msg];
 
         if !initial_context_files.is_empty() {

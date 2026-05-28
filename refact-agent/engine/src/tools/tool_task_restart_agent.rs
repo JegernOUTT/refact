@@ -4,12 +4,13 @@ use std::process::Command;
 use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
@@ -623,11 +624,25 @@ impl ToolTaskRestartAgent {
             suggested_steps,
         );
 
-        let user_msg = ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(user_prompt),
-            ..Default::default()
-        };
+        let user_msg = event(
+            EventSubkind::SystemNotice,
+            "tool.task_restart_agent",
+            json!({
+                "task_id": task_id,
+                "planner_chat_id": planner_chat_id,
+                "card_id": card_id,
+                "card_title": card_title,
+                "agent_id": agent_id,
+                "agent_chat_id": agent_chat_id,
+                "model": model,
+                "suggested_steps": suggested_steps,
+                "files_to_open": &files_to_open,
+                "worktree": worktree_meta.root.to_string_lossy().to_string(),
+                "worktree_name": &worktree_meta.id,
+                "branch": worktree_meta.branch.as_deref(),
+            }),
+            user_prompt,
+        );
         let mut messages = vec![user_msg];
 
         if !files_to_open.is_empty() {

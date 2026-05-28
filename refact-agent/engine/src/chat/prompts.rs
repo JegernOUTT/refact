@@ -2055,7 +2055,11 @@ fn insert_task_context_message(
 ) -> usize {
     let insert_pos = messages
         .iter()
-        .position(|m| m.role == "user" || m.role == "assistant")
+        .position(|m| {
+            m.role == "user"
+                || m.role == "assistant"
+                || m.role == crate::chat::internal_roles::EVENT_ROLE
+        })
         .unwrap_or(messages.len());
     stream_back_to_user.push_in_json(serde_json::json!(message));
     messages.insert(insert_pos, message);
@@ -2074,7 +2078,11 @@ async fn gather_and_inject_system_context(
             Ok(instr_msg) => {
                 let insert_pos = messages
                     .iter()
-                    .position(|m| m.role == "user" || m.role == "assistant")
+                    .position(|m| {
+                        m.role == "user"
+                            || m.role == "assistant"
+                            || m.role == crate::chat::internal_roles::EVENT_ROLE
+                    })
                     .unwrap_or(messages.len());
 
                 stream_back_to_user.push_in_json(serde_json::json!(instr_msg));
@@ -2101,7 +2109,11 @@ async fn gather_and_inject_system_context(
         if let Some(memories_msg) = create_memories_message(&context.memories) {
             let insert_pos = messages
                 .iter()
-                .position(|m| m.role == "user" || m.role == "assistant")
+                .position(|m| {
+                    m.role == "user"
+                        || m.role == "assistant"
+                        || m.role == crate::chat::internal_roles::EVENT_ROLE
+                })
                 .unwrap_or(messages.len());
 
             stream_back_to_user.push_in_json(serde_json::json!(memories_msg));
@@ -2122,7 +2134,11 @@ async fn gather_and_inject_system_context(
         if let Some(pulse_msg) = app.buddy_event_sink.build_pulse_message().await {
             let insert_pos = messages
                 .iter()
-                .position(|m| m.role == "user" || m.role == "assistant")
+                .position(|m| {
+                    m.role == "user"
+                        || m.role == "assistant"
+                        || m.role == crate::chat::internal_roles::EVENT_ROLE
+                })
                 .unwrap_or(messages.len());
             stream_back_to_user.push_in_json(serde_json::json!(pulse_msg));
             messages.insert(insert_pos, pulse_msg);
@@ -2149,7 +2165,7 @@ async fn gather_and_inject_system_context(
         let last_user_text = messages
             .iter()
             .rev()
-            .find(|m| m.role == "user")
+            .find(|m| m.role == "user" || m.role == crate::chat::internal_roles::EVENT_ROLE)
             .and_then(|m| match &m.content {
                 crate::call_validation::ChatContent::SimpleText(t) => Some(t.clone()),
                 _ => None,
@@ -2160,7 +2176,11 @@ async fn gather_and_inject_system_context(
         for skills_msg in skills_msgs {
             let insert_pos = messages
                 .iter()
-                .position(|m| m.role == "user" || m.role == "assistant")
+                .position(|m| {
+                    m.role == "user"
+                        || m.role == "assistant"
+                        || m.role == crate::chat::internal_roles::EVENT_ROLE
+                })
                 .unwrap_or(messages.len());
             stream_back_to_user.push_in_json(serde_json::json!(skills_msg));
             messages.insert(insert_pos, skills_msg);

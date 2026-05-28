@@ -9,6 +9,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::actor::redact_sensitive;
 use crate::buddy::types::BuddyThreadMeta;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::internal_roles::{event, EventSubkind};
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -126,11 +127,19 @@ impl Tool for ToolBuddyLaunchInvestigation {
         let chat_id = Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
 
-        let initial_message = ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText(user_text),
-            ..Default::default()
-        };
+        let initial_message = event(
+            EventSubkind::SystemNotice,
+            "tool.buddy_launch_investigation",
+            serde_json::json!({
+                "chat_id": &chat_id,
+                "fact_keys": &fact_keys,
+                "diagnostic_ids": &diagnostic_ids,
+                "has_log_excerpt": !log_excerpt.is_empty(),
+                "has_config_summary": !config_summary.is_empty(),
+                "created_at": &created_at,
+            }),
+            user_text,
+        );
 
         let snapshot = TrajectorySnapshot {
             chat_id: chat_id.clone(),

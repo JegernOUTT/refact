@@ -9,6 +9,7 @@ use crate::tools::tools_description::{
 };
 use serde_json::json;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::subchat::run_subchat;
 use crate::postprocessing::pp_command_output::OutputFilter;
@@ -193,21 +194,34 @@ impl Tool for ToolConfigSubagent {
         }
 
         if let Some(ref user_template) = self.config.messages.user_template {
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText(self.render_template(user_template, args)),
-                ..Default::default()
-            });
+            let content = self.render_template(user_template, args);
+            messages.push(event(
+                EventSubkind::SystemNotice,
+                "tool.config_subagent",
+                json!({
+                    "subagent_id": &self.config.id,
+                    "title": &self.config.title,
+                    "template": "user_template",
+                    "max_steps": max_steps,
+                }),
+                content,
+            ));
         } else {
             let task = args
                 .get("task")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Execute the task");
-            messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText(task.to_string()),
-                ..Default::default()
-            });
+            messages.push(event(
+                EventSubkind::SystemNotice,
+                "tool.config_subagent",
+                json!({
+                    "subagent_id": &self.config.id,
+                    "title": &self.config.title,
+                    "template": "task",
+                    "max_steps": max_steps,
+                }),
+                task.to_string(),
+            ));
         }
 
         for post_msg in &self.config.messages.post_messages {
