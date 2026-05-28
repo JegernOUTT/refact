@@ -25,6 +25,12 @@ pub struct ToolCronCreate {
     pub config_path: String,
 }
 
+impl ToolCronCreate {
+    pub fn new(config_path: String) -> Self {
+        Self { config_path }
+    }
+}
+
 #[derive(Clone)]
 struct CronCreateInput {
     cron: String,

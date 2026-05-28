@@ -8,6 +8,9 @@
 
 use refact_core::chat_types::{ChatContent, ChatMessage};
 
+pub const PLAN_META_KEY: &str = "plan";
+pub const PLAN_INLINED_IN_SYSTEM_PROMPT_KEY: &str = "inlined_in_system_prompt";
+
 /// Returns `true` for message roles that carry supplemental context and must
 /// be rendered into wire messages by each adapter rather than silently dropped.
 pub fn is_context_role(role: &str) -> bool {
@@ -86,6 +89,14 @@ pub fn is_plan_role(role: &str) -> bool {
     role == "plan"
 }
 
+pub fn plan_inlined_in_system_prompt(msg: &ChatMessage) -> bool {
+    msg.extra
+        .get(PLAN_META_KEY)
+        .and_then(|m| m.get(PLAN_INLINED_IN_SYSTEM_PROMPT_KEY))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 pub fn render_event_message(msg: &ChatMessage) -> String {
     let meta = msg.extra.get("event");
     let subkind = meta
@@ -116,20 +127,20 @@ pub fn render_plan_system_blocks(messages: &[ChatMessage]) -> Vec<String> {
         if !is_plan_role(&msg.role) {
             continue;
         }
-        let meta = msg.extra.get("plan");
+        let meta = msg.extra.get(PLAN_META_KEY);
         let mode = meta
             .and_then(|m| m.get("mode"))
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        let version = meta
-            .and_then(|m| m.get("version"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let Some(version) = meta.and_then(|m| m.get("version")).and_then(|v| v.as_u64()) else {
+            continue;
+        };
         plans.push(PlanBlock {
             mode,
             version,
             content: msg.content.content_text_only(),
+            inlined_in_system_prompt: plan_inlined_in_system_prompt(msg),
             position,
         });
     }
@@ -174,12 +185,14 @@ pub fn render_plan_system_blocks(messages: &[ChatMessage]) -> Vec<String> {
         }
     }
 
-    blocks.push(format!(
-        "<plan mode=\"{}\" version=\"{}\">\n{}\n</plan>",
-        escape_xml_attr(&latest.mode),
-        latest.version,
-        render_plan_content(&latest.content)
-    ));
+    if !latest.inlined_in_system_prompt {
+        blocks.push(format!(
+            "<plan mode=\"{}\" version=\"{}\">\n{}\n</plan>",
+            escape_xml_attr(&latest.mode),
+            latest.version,
+            render_plan_content(&latest.content)
+        ));
+    }
     blocks
 }
 
@@ -227,5 +240,6 @@ struct PlanBlock {
     mode: String,
     version: u64,
     content: String,
+    inlined_in_system_prompt: bool,
     position: usize,
 }

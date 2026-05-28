@@ -7,7 +7,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::execute_at::run_at_commands_locally;
-use crate::call_validation::{ChatMessage, ChatMeta, ReasoningEffort, SamplingParameters};
+use crate::call_validation::{ChatContent, ChatMessage, ChatMeta, ReasoningEffort, SamplingParameters};
 use crate::caps::{resolve_chat_model, ChatModelRecord};
 use crate::global_context::GlobalContext;
 use crate::llm::{LlmRequest, CanonicalToolChoice, CommonParams, ReasoningIntent, WireFormat};
@@ -23,6 +23,9 @@ use super::history_limit::fix_and_limit_messages_history;
 use super::linearize::apply_summarization_linearize;
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use super::config::tokens;
+use crate::llm::adapters::render_extra::{
+    PLAN_INLINED_IN_SYSTEM_PROMPT_KEY, PLAN_META_KEY, plan_inlined_in_system_prompt,
+};
 
 fn responses_stateful_tail(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     // For stateful Responses API (previous_response_id), we should send only *new* items.
@@ -47,6 +50,81 @@ fn remove_visualization_only_messages(messages: Vec<ChatMessage>) -> Vec<ChatMes
         .into_iter()
         .filter(|message| message.role != "error")
         .collect()
+}
+
+fn plan_version(message: &ChatMessage) -> Option<u64> {
+    message
+        .extra
+        .get(PLAN_META_KEY)
+        .and_then(|meta| meta.get("version"))
+        .and_then(|version| version.as_u64())
+}
+
+fn current_plan_index(messages: &[ChatMessage]) -> Option<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == crate::chat::internal_roles::PLAN_ROLE)
+        .filter_map(|(index, message)| plan_version(message).map(|version| (index, version)))
+        .max_by_key(|(index, version)| (*version, *index))
+        .map(|(index, _)| index)
+}
+
+fn current_plan_prompt_block(plan: &ChatMessage) -> String {
+    format!(
+        "# Current plan (v{})\n{}\n\n_Use set_plan to update this plan as your understanding evolves._",
+        plan_version(plan).unwrap_or(0),
+        plan.content.content_text_only()
+    )
+}
+
+fn append_plan_to_system_prompt(content: &mut ChatContent, plan_block: &str) {
+    let existing = content.content_text_only();
+    *content = ChatContent::SimpleText(if existing.trim().is_empty() {
+        plan_block.to_string()
+    } else {
+        format!("{}\n\n{}", existing, plan_block)
+    });
+}
+
+fn mark_plan_inlined(message: &mut ChatMessage) {
+    let meta = message
+        .extra
+        .entry(PLAN_META_KEY.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !meta.is_object() {
+        *meta = serde_json::json!({});
+    }
+    if let Some(meta) = meta.as_object_mut() {
+        meta.insert(
+            PLAN_INLINED_IN_SYSTEM_PROMPT_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+}
+
+fn inline_current_plan_in_system_prompt(mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let Some(plan_index) = current_plan_index(&messages) else {
+        return messages;
+    };
+    if plan_inlined_in_system_prompt(&messages[plan_index]) {
+        return messages;
+    }
+
+    let plan_block = current_plan_prompt_block(&messages[plan_index]);
+    if let Some(system_message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.role == "system")
+    {
+        append_plan_to_system_prompt(&mut system_message.content, &plan_block);
+    } else {
+        messages.insert(0, ChatMessage::new("system".to_string(), plan_block));
+    }
+
+    let plan_index = current_plan_index(&messages).expect("plan exists after inline");
+    mark_plan_inlined(&mut messages[plan_index]);
+    messages
 }
 
 pub struct PreparedChat {
@@ -223,6 +301,8 @@ pub async fn prepare_chat_passthrough(
             }
         }
     }
+
+    let messages = inline_current_plan_in_system_prompt(messages);
 
     // 6. Build tools list with alias layer to ensure provider-safe names (≤64 chars)
     let filtered_tools: Vec<ToolDesc> = if options.supports_tools {
@@ -559,7 +639,9 @@ fn strip_thinking_blocks_if_disabled(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_validation::ChatContent;
+    use crate::llm::adapter::{AdapterSettings, LlmWireAdapter};
+    use crate::llm::adapters::openai_chat::OpenAiChatAdapter;
+    use serde_json::json;
 
     fn make_model_record_effort(effort_options: Option<Vec<&str>>) -> ChatModelRecord {
         ChatModelRecord {
@@ -613,6 +695,95 @@ mod tests {
             boost_reasoning: false,
             ..Default::default()
         }
+    }
+
+    fn system_content(messages: &[ChatMessage]) -> String {
+        messages
+            .iter()
+            .find(|message| message.role == "system")
+            .map(|message| message.content.content_text_only())
+            .expect("system message missing")
+    }
+
+    fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
+        crate::chat::internal_roles::plan(mode, version, content, None)
+    }
+
+    fn default_settings() -> AdapterSettings {
+        AdapterSettings {
+            api_key: "test-key".to_string(),
+            auth_token: String::new(),
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            extra_headers: Default::default(),
+            model_name: "gpt-4".to_string(),
+            supports_tools: true,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+            supports_max_completion_tokens: false,
+            eof_is_done: false,
+            supports_web_search: false,
+            supports_cache_control: false,
+        }
+    }
+
+    #[test]
+    fn inlines_plan_into_system_prompt() {
+        let full_plan = format!("{}\nTAIL_MARKER_DO_NOT_TRUNCATE", "plan line\n".repeat(32));
+        let messages = vec![
+            ChatMessage::new("system".to_string(), "Base prompt".to_string()),
+            ChatMessage::new("user".to_string(), "Go".to_string()),
+            plan_message("agent", 7, &full_plan),
+        ];
+
+        let prepared = inline_current_plan_in_system_prompt(messages);
+        let system = system_content(&prepared);
+
+        assert!(system.starts_with("Base prompt\n\n# Current plan (v7)\n"));
+        assert!(system.contains(&full_plan));
+        assert!(
+            system.contains("_Use set_plan to update this plan as your understanding evolves._")
+        );
+        let current_plan = prepared
+            .iter()
+            .find(|message| message.role == "plan")
+            .unwrap();
+        assert!(plan_inlined_in_system_prompt(current_plan));
+    }
+
+    #[test]
+    fn no_double_emit_with_adapter() {
+        let current_plan = "OPENAI_WIRE_CURRENT_PLAN_UNIQUE";
+        let messages = inline_current_plan_in_system_prompt(vec![
+            ChatMessage::new("system".to_string(), "Base prompt".to_string()),
+            plan_message("agent", 1, "older plan details"),
+            plan_message("agent", 2, current_plan),
+            ChatMessage::new("user".to_string(), "Go".to_string()),
+        ]);
+        let req = crate::llm::LlmRequest::new("gpt-4".to_string(), messages);
+
+        let body = OpenAiChatAdapter
+            .build_http(&req, &default_settings())
+            .unwrap()
+            .body;
+        let wire_messages = body["messages"].as_array().unwrap();
+        let expected_system = format!(
+            "Base prompt\n\n# Current plan (v2)\n{}\n\n_Use set_plan to update this plan as your understanding evolves._\n\n<plan-history>\n- v1: older plan details\n</plan-history>",
+            current_plan
+        );
+
+        assert_eq!(
+            wire_messages,
+            &vec![
+                json!({"role": "system", "content": expected_system}),
+                json!({"role": "user", "content": "Go"}),
+            ]
+        );
+        let serialized = body.to_string();
+        assert_eq!(serialized.matches(current_plan).count(), 1);
+        assert_eq!(serialized.matches("<plan mode=").count(), 0);
+        assert_eq!(serialized.matches("<plan-history>").count(), 1);
+        assert!(!serialized.contains("\"role\":\"plan\""));
     }
 
     #[test]

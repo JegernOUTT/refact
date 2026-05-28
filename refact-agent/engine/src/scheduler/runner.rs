@@ -19,7 +19,7 @@ use crate::files_correction::get_active_project_path;
 use crate::global_context::SharedGlobalContext;
 
 use super::jitter::{jittered_next_run_ms, one_shot_jittered_next_run_ms, JitterConfig};
-use super::store::{CronStore, JsonFileCronStore};
+use super::store::{CronStore, InMemoryCronStore, JsonFileCronStore};
 use super::types::ScheduledTask;
 
 const DEFAULT_SLEEP_MS: u64 = 60_000;
@@ -233,6 +233,10 @@ pub fn runner_change_notify() -> Arc<tokio::sync::Notify> {
     RUNNER_CHANGE_NOTIFY
         .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
         .clone()
+}
+
+pub fn notify_runner_change() {
+    runner_change_notify().notify_waiters();
 }
 
 pub fn spawn_if_enabled(
