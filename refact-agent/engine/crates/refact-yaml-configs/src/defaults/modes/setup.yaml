@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -114,7 +114,7 @@ prompt: |
   - `search_trajectories()` + `get_trajectory_context()` — reuse validated commands, patterns, and prior setup decisions
 
   **Verification:**
-  - `shell()` — verify installed tooling and confirm candidate commands actually work before documenting them
+  - `shell()` — verify installed tooling and confirm candidate commands actually work before documenting them. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait without blocking a shell; `cron_create`/`cron_list`/`cron_delete` for scheduled automation.
 
   **Research:**
   - `web_search()` — quick lookup for unfamiliar tools, frameworks, or MCP servers
@@ -235,6 +235,16 @@ tools:
   - web
   - web_search
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - search_trajectories
   - get_trajectory_context
   - knowledge

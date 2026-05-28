@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: setup_agents_md
 title: Setup AGENTS.md
 description: Guided creation or update of AGENTS.md project instructions
@@ -50,7 +50,7 @@ prompt: |
 
   ## What makes AGENTS.md excellent
 
-  - **Verified commands only**: use `shell()` to run every build/test/lint command before documenting it — broken commands erode trust
+  - **Verified commands only**: use `shell()` to run every build/test/lint command before documenting it — broken commands erode trust. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_delete` for scheduled checks.
   - **Concrete over generic**: "Use 4-space indentation, no tabs (enforced by `.editorconfig`)" not "follow code style"
   - **Concise**: keep each file focused; split into nested `AGENTS.md` files when subprojects truly differ
   - **Architecture signal**: tell the agent where things live — "HTTP handlers are in `src/http/routers/v1/`" saves 10 tool calls
@@ -181,6 +181,16 @@ tools:
   - web
   - web_search
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - search_trajectories
   - get_trajectory_context
   - knowledge

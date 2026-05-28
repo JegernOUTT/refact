@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 id: review
 title: Review
 description: Autonomous code review with correctness validation
@@ -24,7 +24,7 @@ prompt: |
   - Use `search_trajectories` to find past changes and decisions
   - Use `knowledge` to check project-specific patterns
   - Use `web_search` to verify external API usage is correct
-  - Use `shell` to run tests and check current state
+  - Use `shell` with a required `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes. `sleep` waits without blocking a shell. `cron_create`/`cron_list`/`cron_delete` for scheduled checks.
 
   ## Delegation with Subagents
   Use `subagent()` to parallelize scope understanding:
@@ -107,6 +107,16 @@ tools:
   - web_search
   - chrome
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - subagent
   - agent_list
   - agent_status

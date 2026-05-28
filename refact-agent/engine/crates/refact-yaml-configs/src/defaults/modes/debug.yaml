@@ -1,4 +1,4 @@
-schema_version: 15
+schema_version: 16
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -73,7 +73,8 @@ prompt: |
 
   ## Rules
   - Do NOT modify files (diagnosis only)
-  - Use `shell` to run tests, check logs, reproduce issues
+  - Use `shell` with a required `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes. Use `tty=true` plus `process_write_stdin` for interactive programs. `sleep` waits without blocking a shell process.
+  - Use `cron_create` to schedule periodic checks; `cron_list`/`cron_delete` to manage them.
   - To apply fixes, suggest switching to Agent mode
 
   %RICH_CONTENT_INSTRUCTIONS%
@@ -107,6 +108,16 @@ tools:
   - web_search
   - chrome
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - subagent
   - agent_list
   - agent_status

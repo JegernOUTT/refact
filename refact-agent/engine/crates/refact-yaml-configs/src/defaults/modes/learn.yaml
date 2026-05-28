@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 id: learn
 title: Learn
 description: Understand code with clear explanations
@@ -70,7 +70,7 @@ prompt: |
   - Adjust depth to user's questions
   - Use code snippets to illustrate points
   - Reference external docs with `web_search` for standard concepts
-  - Use `shell` to demonstrate behavior (run examples, show output)
+  - Use `shell` with a required `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes. `sleep` waits without blocking a shell. `cron_create`/`cron_list`/`cron_delete` for scheduled demos.
   - Explore codebase thoroughly before explaining
 
   %RICH_CONTENT_INSTRUCTIONS%
@@ -102,6 +102,16 @@ tools:
   - web_search
   - chrome
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - subagent
   - agent_list
   - agent_status

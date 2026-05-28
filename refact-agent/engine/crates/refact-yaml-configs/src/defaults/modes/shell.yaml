@@ -1,4 +1,4 @@
-schema_version: 9
+schema_version: 11
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -25,6 +25,14 @@ prompt: |
   - Parse and summarize output clearly
   - Chain commands logically for multi-step tasks
 
+  ## Process Runtime
+
+  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands; track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
+
+  **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. `sleep` waits without holding a shell process.
+
+  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_delete` manage jobs.
+
   ## Safety
   - Avoid destructive commands without confirmation
   - Use dry-run flags when available
@@ -48,6 +56,16 @@ allow_subagents: false
 tools:
   - add_workspace_folder
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
 
 tool_confirm:
   rules:

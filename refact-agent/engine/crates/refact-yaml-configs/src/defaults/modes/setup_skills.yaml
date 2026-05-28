@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: setup_skills
 title: Setup Skills
 description: Guided setup for project-specific skills
@@ -95,7 +95,7 @@ prompt: |
 
   ### 2. Research — understand what good skills look like
   - `web_search()` / `web()` for best practices if the skill involves an unfamiliar framework, external tool, or process
-  - `shell()` to validate concrete commands the skill tells the agent to run, preferring `--help`, `--version`, dry-run, or other read-only checks first
+  - `shell()` to validate concrete commands the skill tells the agent to run, preferring `--help`, `--version`, dry-run, or other read-only checks first. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_delete` for scheduled checks.
   - `knowledge()` to check if any relevant project patterns are already recorded
 
   Before proposing a new skill, check whether the same skill name already exists in project-local or user/global scope.
@@ -179,6 +179,16 @@ tools:
   - web
   - web_search
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - search_trajectories
   - get_trajectory_context
   - knowledge

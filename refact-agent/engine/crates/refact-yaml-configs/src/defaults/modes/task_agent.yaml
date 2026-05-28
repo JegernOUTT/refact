@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 16
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -189,6 +189,16 @@ prompt: |
   ### Refactor for testability when stuck
   If you can't test a function because it has many side effects (dispatch, callbacks, IO), extract the pure decision logic into a separate function and test that. The wrapper that performs side effects becomes a thin switch. This pattern unblocked a previously-failed card after two previous agents failed clicking through React-rendered Markdown.
 
+  ## Runtime & Process Tools
+
+  **Plan**: Use `set_plan` to update your working plan (persists across context compression). Use `get_plan` to read the current plan.
+
+  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
+
+  **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. `sleep` waits without holding a shell process.
+
+  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_delete` manage jobs.
+
   %AGENT_WORKTREE%
 
   %RICH_CONTENT_INSTRUCTIONS%
@@ -223,6 +233,17 @@ tools:
   - doc_list
   - doc_get
   - set_plan
+  - get_plan
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - agent_ask_planner
   - card_comment_add
   - card_comment_list

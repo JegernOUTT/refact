@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -219,6 +219,16 @@ prompt: |
     - %CD_INSTRUCTIONS%
     - %SHELL_INSTRUCTIONS%
 
+  ## Runtime & Process Tools
+
+  **Plan**: Use `set_plan` to update your working plan (persists across context compression). Use `get_plan` to read the current plan. Call `set_plan` when your approach changes significantly.
+
+  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
+
+  **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. Background completions are surfaced in the Event Log.
+
+  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
+
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
@@ -282,6 +292,19 @@ tools:
   - worktree_merge
   - ask_questions
   - set_plan
+  - get_plan
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - process_subscribe
+  - clean_background_processes
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - compress_chat_probe
   - compress_chat_apply
   - handoff_to_mode
@@ -327,4 +350,22 @@ tool_confirm:
     - match: "compress_chat_*"
       action: ask
     - match: "handoff_to_mode"
+      action: auto
+    - match: "set_plan"
+      action: auto
+    - match: "get_plan"
+      action: auto
+    - match: "process_list"
+      action: auto
+    - match: "process_read"
+      action: auto
+    - match: "process_wait"
+      action: auto
+    - match: "process_subscribe"
+      action: auto
+    - match: "process_write_stdin"
+      action: auto
+    - match: "sleep"
+      action: auto
+    - match: "cron_list"
       action: auto

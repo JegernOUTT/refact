@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: setup_commands
 title: Setup Commands
 description: Create project-specific slash commands, toolbox prompts, and cmdline/service configs
@@ -64,7 +64,7 @@ prompt: |
   Prefer updating, refining, or intentionally shadowing an existing command over accidentally creating a duplicate.
 
   Use:
-  - `shell()` to see what tools are installed and which commands actually succeed
+  - `shell()` to see what tools are installed and which commands actually succeed. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_delete` for scheduled automation.
   - `search_trajectories()` and `knowledge()` to find repeated workflows and previously validated command patterns
 
   Look for:
@@ -146,6 +146,16 @@ tools:
   - web
   - web_search
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - search_trajectories
   - get_trajectory_context
   - knowledge

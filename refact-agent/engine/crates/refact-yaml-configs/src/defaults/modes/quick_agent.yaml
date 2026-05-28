@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 18
 id: quick_agent
 title: Quick Agent
 description: Fast autonomous coding with minimal overhead
@@ -43,6 +43,14 @@ prompt: |
   - Run tests after changes
   - Keep changes minimal and focused
   - If a task is too complex, say so and suggest Agent mode
+
+  ## Runtime & Process Tools
+
+  **Plan**: Use `set_plan` to update your working plan (persists across context compression). Use `get_plan` to read the current plan.
+
+  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs. `sleep` waits without holding a shell process.
+
+  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_delete` manage jobs.
 
   %CD_INSTRUCTIONS%
   %SHELL_INSTRUCTIONS%
@@ -99,6 +107,18 @@ tools:
   - task_done
   - worktree_merge
   - ask_questions
+  - set_plan
+  - get_plan
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
 
 tool_confirm:
   rules:

@@ -1,4 +1,4 @@
-schema_version: 17
+schema_version: 18
 id: gemini3_agent
 title: Gemini 3 Agent
 description: Optimized for Gemini 3 and latest Gemini models with function calling, thinking levels, and inherited Agent tools
@@ -181,6 +181,16 @@ override:
       - Clean up after yourself: remove fallback code, unused imports, commented-out code.
       - %CD_INSTRUCTIONS%
       - %SHELL_INSTRUCTIONS%
+
+    ## Runtime & Process Tools
+
+    **Plan**: Use `set_plan` to update your working plan (persists across context compression). Use `get_plan` to read the current plan. Call `set_plan` when your approach changes significantly.
+
+    **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
+
+    **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. Background completions are surfaced in the Event Log.
+
+    **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
 
     %COMPRESS_HANDOFF_INSTRUCTIONS%
 

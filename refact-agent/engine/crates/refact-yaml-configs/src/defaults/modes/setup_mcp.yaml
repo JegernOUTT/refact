@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: setup_mcp
 title: Setup MCP
 description: Discover and configure suitable MCP servers for the project
@@ -74,7 +74,7 @@ prompt: |
   - `web_search()` — search for official or first-party MCP options for the service, preferring HTTP and well-documented stdio offerings over arbitrary package discovery
   - `deep_research()` — when choosing between multiple MCP servers for the same service (e.g., GitHub vs GitLab vs Bitbucket), use deep_research to compare them properly
   - `web()` — fetch the README of a candidate MCP server package to understand its tools, required env vars, and setup instructions
-  - `shell()` — verify runtimes such as `npx`, `node`, `python`, `uvx` are available. Only execute a candidate MCP package after explicit user approval, and prefer pinned official packages over floating versions.
+  - `shell()` — verify runtimes such as `npx`, `node`, `python`, `uvx` are available. Only execute a candidate MCP package after explicit user approval, and prefer pinned official packages over floating versions. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_delete` for scheduled checks.
 
   **Repo analysis:**
   - `cat()` CI files, dependency manifests, infrastructure configs (Dockerfile, docker-compose, k8s manifests, Terraform) to infer what services the project uses
@@ -179,6 +179,16 @@ tools:
   - web
   - web_search
   - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_wait
+  - process_kill
+  - process_write_stdin
+  - sleep
+  - cron_create
+  - cron_list
+  - cron_delete
   - search_trajectories
   - get_trajectory_context
   - knowledge
