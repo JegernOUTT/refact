@@ -14,6 +14,7 @@ use crate::exec::types::{
 
 const REMOVE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_COMPLETION_CHANNEL_CAPACITY: usize = 256;
+const PROCESS_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
 
 pub type ProcessCompletionTx = broadcast::Sender<ProcessCompletionEvent>;
 
@@ -203,14 +204,17 @@ struct ExecRemoveTarget {
 pub struct ExecRegistry {
     records: Arc<Mutex<HashMap<ExecProcessId, ExecProcessRecord>>>,
     completion_tx: ProcessCompletionTx,
+    output_tx: broadcast::Sender<ExecOutputChunk>,
 }
 
 impl Default for ExecRegistry {
     fn default() -> Self {
         let (completion_tx, _) = broadcast::channel(PROCESS_COMPLETION_CHANNEL_CAPACITY);
+        let (output_tx, _) = broadcast::channel(PROCESS_OUTPUT_CHANNEL_CAPACITY);
         Self {
             records: Arc::new(Mutex::new(HashMap::new())),
             completion_tx,
+            output_tx,
         }
     }
 }
@@ -222,6 +226,10 @@ impl ExecRegistry {
 
     pub fn subscribe_completion(&self) -> broadcast::Receiver<ProcessCompletionEvent> {
         self.completion_tx.subscribe()
+    }
+
+    pub fn subscribe_output(&self) -> broadcast::Receiver<ExecOutputChunk> {
+        self.output_tx.subscribe()
     }
 
     pub fn completion_tx(&self) -> ProcessCompletionTx {
@@ -364,14 +372,18 @@ impl ExecRegistry {
         stream: ExecOutputStream,
         text: String,
     ) -> Result<ExecOutputChunk, String> {
-        let mut records = self.records.lock().await;
-        let record = records
-            .get_mut(process_id)
-            .ok_or_else(|| format!("process not found: {process_id}"))?;
-        if let Some(raw_capture) = record.raw_capture.as_mut() {
-            raw_capture.append(&stream, &text);
-        }
-        Ok(record.transcript.append_chunk(stream, text))
+        let chunk = {
+            let mut records = self.records.lock().await;
+            let record = records
+                .get_mut(process_id)
+                .ok_or_else(|| format!("process not found: {process_id}"))?;
+            if let Some(raw_capture) = record.raw_capture.as_mut() {
+                raw_capture.append(&stream, &text);
+            }
+            record.transcript.append_chunk(stream, text)
+        };
+        let _ = self.output_tx.send(chunk.clone());
+        Ok(chunk)
     }
 
     pub async fn read_raw_capture(&self, process_id: &ExecProcessId) -> Option<ExecRawOutput> {
