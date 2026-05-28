@@ -23,8 +23,6 @@ mod tool_card_comment;
 mod tool_cat;
 mod tool_chrome;
 mod tool_clean_background_processes;
-mod tool_process_subscribe;
-mod tool_process_write_stdin;
 #[cfg(test)]
 pub mod tool_cmdline;
 mod tool_code_review;
@@ -41,6 +39,8 @@ mod tool_knowledge;
 mod tool_mcp_search;
 mod tool_mv;
 mod tool_process;
+mod tool_process_subscribe;
+mod tool_process_write_stdin;
 mod tool_regex_search;
 mod tool_rm;
 mod tool_search;

@@ -18,6 +18,7 @@ use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
+use crate::chat::history_limit::CompactAggression;
 use crate::subchat::run_subchat_once;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::worktrees::service::WorktreeService;
@@ -824,6 +825,10 @@ pub async fn load_trajectory_for_chat(
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
 
         auto_compact_enabled: t.get("auto_compact_enabled").and_then(|v| v.as_bool()),
+        reactive_compact_attempts: t
+            .get("reactive_compact_attempts")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).min(CompactAggression::max_reactive_attempts())),
     };
 
     let auto_approve_editing_tools_present = t
@@ -937,6 +942,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         active_skill: None,
         buddy_meta: None,
         auto_compact_enabled: None,
+        reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
@@ -985,6 +991,7 @@ pub async fn save_trajectory_as(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: thread.buddy_meta.clone(),
         auto_compact_enabled: thread.auto_compact_enabled,
+        reactive_compact_attempts: thread.reactive_compact_attempts,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
@@ -1059,6 +1066,9 @@ pub async fn save_trajectory_snapshot(
     }
     if let Some(auto_compact) = snapshot.auto_compact_enabled {
         trajectory["auto_compact_enabled"] = json!(auto_compact);
+    }
+    if let Some(reactive_compact_attempts) = snapshot.reactive_compact_attempts {
+        trajectory["reactive_compact_attempts"] = json!(reactive_compact_attempts);
     }
     if let Some(wake_up_at) = snapshot.wake_up_at {
         trajectory["wake_up_at"] = json!(wake_up_at);
@@ -1746,6 +1756,11 @@ fn count_user_messages(messages: &[serde_json::Value]) -> usize {
 
 fn json_message_is_ui_only(msg: &serde_json::Value) -> bool {
     msg.get("_ui_only").and_then(|v| v.as_bool()) == Some(true)
+        || msg
+            .get("extra")
+            .and_then(|extra| extra.get("_ui_only"))
+            .and_then(|v| v.as_bool())
+            == Some(true)
 }
 
 fn extract_first_user_message(messages: &[serde_json::Value]) -> Option<String> {
@@ -3032,6 +3047,7 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
         }
@@ -3486,6 +3502,22 @@ mod tests {
     }
 
     #[test]
+    fn build_title_generation_context_skips_extra_ui_only_reactive_report() {
+        let messages = vec![
+            json!({
+                "role": "summarization",
+                "content": "Reactive compaction report",
+                "summarization_tier": "tier2_reactive",
+                "extra": {"_ui_only": true}
+            }),
+            json!({"role": "user", "content": "Fix sanitizers"}),
+        ];
+        let context = build_title_generation_context(&messages);
+        assert!(context.contains("Fix sanitizers"));
+        assert!(!context.contains("Reactive compaction report"));
+    }
+
+    #[test]
     fn test_build_title_generation_context_limits_messages() {
         let messages: Vec<_> = (0..10)
             .map(|i| json!({"role": "user", "content": format!("Message {}", i)}))
@@ -3793,6 +3825,7 @@ mod tests {
                 auto_enrichment_enabled: None,
                 buddy_meta: None,
                 auto_compact_enabled: None,
+                reactive_compact_attempts: None,
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: super::super::types::RuntimeState::default(),
@@ -4333,6 +4366,7 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
         };
@@ -4453,6 +4487,46 @@ mod tests {
             .messages
             .iter()
             .all(|message| !is_ui_only_message(message)));
+    }
+
+    #[tokio::test]
+    async fn reactive_compact_attempts_roundtrip_and_clamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let mut snapshot = test_snapshot(
+            "reactive-attempts-roundtrip",
+            "Reactive Attempts",
+            vec![ChatMessage::new("user".to_string(), "visible".to_string())],
+        );
+        snapshot.reactive_compact_attempts = Some(2);
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx.clone(), "reactive-attempts-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(loaded.thread.reactive_compact_attempts, Some(2));
+
+        let traj_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join("reactive-attempts-roundtrip.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&traj_path).await.unwrap()).unwrap();
+        raw["reactive_compact_attempts"] = json!(99);
+        tokio::fs::write(&traj_path, serde_json::to_string(&raw).unwrap())
+            .await
+            .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "reactive-attempts-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.thread.reactive_compact_attempts,
+            Some(CompactAggression::max_reactive_attempts())
+        );
     }
 
     #[tokio::test]

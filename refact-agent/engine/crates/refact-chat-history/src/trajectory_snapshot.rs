@@ -35,6 +35,7 @@ pub struct TrajectorySnapshot {
     pub auto_enrichment_enabled: Option<bool>,
     pub buddy_meta: Option<BuddyThreadMeta>,
     pub auto_compact_enabled: Option<bool>,
+    pub reactive_compact_attempts: Option<usize>,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub waiting_for_card_ids: Vec<String>,
 }
@@ -80,6 +81,7 @@ impl TrajectorySnapshot {
             auto_enrichment_enabled: thread.auto_enrichment_enabled,
             buddy_meta: thread.buddy_meta.clone(),
             auto_compact_enabled: thread.auto_compact_enabled,
+            reactive_compact_attempts: thread.reactive_compact_attempts,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
         }

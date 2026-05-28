@@ -378,6 +378,7 @@ pub async fn handle_handoff_apply(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: None,
         auto_compact_enabled: thread.auto_compact_enabled,
+        reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
@@ -534,6 +535,7 @@ pub async fn handle_mode_transition_apply(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: None,
         auto_compact_enabled: thread.auto_compact_enabled,
+        reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
@@ -668,6 +670,7 @@ pub async fn handle_planner_from_transition(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: None,
         auto_compact_enabled: thread.auto_compact_enabled,
+        reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
@@ -771,6 +774,7 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
         };

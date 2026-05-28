@@ -44,7 +44,7 @@ use crate::chat::history_limit::{tier0_deterministic_compact_with, CompactAggres
 use crate::chat::trajectory_ops::approx_token_count;
 
 const TOKEN_BUDGET_CADENCE: usize = 6;
-const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 3;
+const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = CompactAggression::max_reactive_attempts();
 const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
@@ -654,7 +654,6 @@ pub fn start_generation(
         let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
         let mut retry_status_message_id: Option<String> = None;
-        let mut context_limit_compact_count = 0usize;
         let mut tier1_compact_count = 0usize;
         let mut tier1_disabled_for_session = false;
         loop {
@@ -882,44 +881,48 @@ pub fn start_generation(
                             "Context limit error and auto_compact_enabled=false; surfacing error: {}",
                             error.message
                         );
-                    } else if context_limit_compact_count < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
-                        let original_error = error.message.clone();
-                        context_limit_compact_count += 1;
-                        let aggression = if context_limit_compact_count >= 2 {
-                            CompactAggression::Aggressive
-                        } else {
-                            CompactAggression::Standard
-                        };
-                        warn!(
-                            "Context limit error, applying Tier 0 ({:?}) compact attempt {}/{}: {}",
-                            aggression,
-                            context_limit_compact_count,
-                            MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                            original_error,
-                        );
-                        {
-                            let mut session = session_arc.lock().await;
-                            session.clear_stream_for_retry();
-                            session.add_message(make_ui_only_error_message(&original_error));
-                            let report = tier0_deterministic_compact_with(
-                                &mut session.messages,
-                                2,
-                                aggression,
-                            );
-                            session.add_message(make_ui_only_compaction_report_message(
-                                &report,
-                                context_limit_compact_count,
-                                None,
-                            ));
-                            session.thread.previous_response_id = None;
-                            session.cache_guard_force_next = true;
-                        }
-                        continue;
                     } else {
-                        error.message = format!(
-                            "Context too large after {} compaction attempts. Original error: {}",
-                            context_limit_compact_count, error.message
-                        );
+                        let previous_reactive_attempts = {
+                            let session = session_arc.lock().await;
+                            session.thread.reactive_compact_attempts.unwrap_or(0)
+                        };
+                        if previous_reactive_attempts < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
+                            let original_error = error.message.clone();
+                            let reactive_attempt = previous_reactive_attempts + 1;
+                            let aggression =
+                                CompactAggression::for_reactive_attempt(reactive_attempt);
+                            warn!(
+                                "Context limit error, applying Tier 0 ({:?}) compact attempt {}/{}: {}",
+                                aggression,
+                                reactive_attempt,
+                                MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
+                                original_error,
+                            );
+                            {
+                                let mut session = session_arc.lock().await;
+                                session.clear_stream_for_retry();
+                                session.add_message(make_ui_only_error_message(&original_error));
+                                let report = tier0_deterministic_compact_with(
+                                    &mut session.messages,
+                                    2,
+                                    aggression,
+                                );
+                                session.add_message(make_ui_only_compaction_report_message(
+                                    &report,
+                                    reactive_attempt,
+                                    None,
+                                ));
+                                session.thread.reactive_compact_attempts = Some(reactive_attempt);
+                                session.thread.previous_response_id = None;
+                                session.cache_guard_force_next = true;
+                            }
+                            continue;
+                        } else {
+                            error.message = format!(
+                                "Context too large after {} compaction attempts. Original error: {}",
+                                previous_reactive_attempts, error.message
+                            );
+                        }
                     }
                 }
 
@@ -997,7 +1000,6 @@ pub fn start_generation(
 
             network_retry_attempt = 0;
             retry_status_message_id = None;
-            context_limit_compact_count = 0;
             tier1_compact_count = 0;
 
             if abort_flag.load(Ordering::SeqCst) {
@@ -2465,13 +2467,6 @@ mod tests {
             !(partial_context_error.retry_decision().is_context_limit()
                 && !abort.load(Ordering::SeqCst))
         );
-    }
-
-    #[test]
-    fn test_context_limit_compact_count_resets_on_success() {
-        let (count, network) = (0usize, 0usize);
-        assert_eq!(network, 0);
-        assert_eq!(count, 0);
     }
 
     #[test]

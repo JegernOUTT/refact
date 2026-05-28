@@ -157,6 +157,8 @@ pub struct ThreadParams {
     pub buddy_meta: Option<BuddyThreadMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub reactive_compact_attempts: Option<usize>,
 }
 
 impl refact_core::worktree_meta::WorktreeThread for ThreadParams {
@@ -198,6 +200,7 @@ impl Default for ThreadParams {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            reactive_compact_attempts: None,
         }
     }
 }

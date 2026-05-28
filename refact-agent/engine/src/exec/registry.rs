@@ -1296,7 +1296,10 @@ mod tests {
             )
             .await;
         let process_id = first.meta.process_id.clone();
-        let old_text = format!("old log line\n{}", "x".repeat(DEFAULT_SPILL_THRESHOLD_BYTES));
+        let old_text = format!(
+            "old log line\n{}",
+            "x".repeat(DEFAULT_SPILL_THRESHOLD_BYTES)
+        );
         registry
             .append_output(&process_id, ExecOutputStream::Stdout, old_text)
             .await
@@ -1316,7 +1319,10 @@ mod tests {
             )
             .await;
         assert_eq!(second.meta.process_id, process_id);
-        let new_text = format!("new log line\n{}", "y".repeat(DEFAULT_SPILL_THRESHOLD_BYTES));
+        let new_text = format!(
+            "new log line\n{}",
+            "y".repeat(DEFAULT_SPILL_THRESHOLD_BYTES)
+        );
         registry
             .append_output(&process_id, ExecOutputStream::Stdout, new_text.clone())
             .await
@@ -2261,11 +2267,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let blocker = temp.path().join("not-a-dir");
         let _ = tokio::fs::write(&blocker, "block").await;
-        let target = crate::exec::spill::SpillTarget::with_root(
-            blocker,
-            "chat-slow",
-            &process_id,
-        );
+        let target = crate::exec::spill::SpillTarget::with_root(blocker, "chat-slow", &process_id);
         {
             let mut records = registry.records.lock().await;
             records

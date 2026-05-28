@@ -27,13 +27,27 @@ fn extract_context_files_from_content(content: &ChatContent) -> Vec<ContextFile>
 pub enum CompactAggression {
     Standard,
     Aggressive,
+    Maximum,
 }
 
 impl CompactAggression {
+    pub const fn max_reactive_attempts() -> usize {
+        3
+    }
+
+    pub fn for_reactive_attempt(attempt: usize) -> Self {
+        match attempt.max(1) {
+            1 => CompactAggression::Standard,
+            2 => CompactAggression::Aggressive,
+            _ => CompactAggression::Maximum,
+        }
+    }
+
     fn keep_recent_event_count(self) -> usize {
         match self {
             CompactAggression::Standard => 3,
             CompactAggression::Aggressive => 3,
+            CompactAggression::Maximum => 1,
         }
     }
 }
@@ -265,6 +279,7 @@ pub fn tier0_deterministic_compact_with(
     let (truncate_threshold, tool_preserve_last_n, ctx_file_keep_lines) = match aggression {
         CompactAggression::Standard => (200usize, preserve_last_n, None),
         CompactAggression::Aggressive => (80usize, preserve_last_n.min(2), Some(40usize)),
+        CompactAggression::Maximum => (40usize, preserve_last_n.min(1), Some(20usize)),
     };
 
     let tool_cutoff = cutoff_excluding_never(messages, tool_preserve_last_n);
@@ -330,10 +345,16 @@ pub fn tier0_deterministic_compact_with(
                     + 1;
                 tokens_saved_estimate += original_tokens.saturating_sub(trimmed_tokens);
                 context_files_elided += 1;
+                let compaction_label = match aggression {
+                    CompactAggression::Standard => "standard",
+                    CompactAggression::Aggressive => "aggressive",
+                    CompactAggression::Maximum => "maximum",
+                };
                 cf.file_content = format!(
-                    "{}\n...\n[\u{2702}\u{fe0f} {} lines elided under aggressive compaction]\n...\n{}",
+                    "{}\n...\n[\u{2702}\u{fe0f} {} lines elided under {} compaction]\n...\n{}",
                     head.join("\n"),
                     line_count.saturating_sub(head.len() + tail.len()),
+                    compaction_label,
                     tail.join("\n"),
                 );
                 modified = true;
@@ -1074,6 +1095,47 @@ mod tests {
             .contains("lines elided under aggressive compaction"));
         assert!(files[0].file_content.contains("line 0"));
         assert!(files[0].file_content.contains("line 99"));
+    }
+
+    #[test]
+    fn test_reactive_attempts_escalate_to_maximum() {
+        assert_eq!(
+            CompactAggression::for_reactive_attempt(1),
+            CompactAggression::Standard
+        );
+        assert_eq!(
+            CompactAggression::for_reactive_attempt(0),
+            CompactAggression::Standard
+        );
+        assert_eq!(
+            CompactAggression::for_reactive_attempt(2),
+            CompactAggression::Aggressive
+        );
+        assert_eq!(
+            CompactAggression::for_reactive_attempt(3),
+            CompactAggression::Maximum
+        );
+        assert_eq!(
+            CompactAggression::for_reactive_attempt(99),
+            CompactAggression::Maximum
+        );
+    }
+
+    #[test]
+    fn test_maximum_compaction_elides_more_context_than_aggressive() {
+        let long_context = (0..80)
+            .map(|idx| format!("line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut messages = vec![make_context_file_msg("src/main.rs", &long_context)];
+
+        let report = tier0_deterministic_compact_with(&mut messages, 0, CompactAggression::Maximum);
+
+        assert_eq!(report.context_files_elided, 1);
+        let files = extract_context_files_from_content(&messages[0].content);
+        assert!(files[0]
+            .file_content
+            .contains("60 lines elided under maximum compaction"));
     }
 
     #[test]

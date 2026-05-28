@@ -415,6 +415,7 @@ impl Tool for ToolHandoffToMode {
             auto_enrichment_enabled: thread.auto_enrichment_enabled,
             buddy_meta: None,
             auto_compact_enabled: thread.auto_compact_enabled,
+            reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
         };

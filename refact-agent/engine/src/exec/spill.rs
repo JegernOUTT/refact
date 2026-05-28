@@ -113,7 +113,10 @@ mod tests {
         assert!(!relative.to_string_lossy().contains(".."));
         assert!(!relative.to_string_lossy().contains("escape"));
         assert!(!relative.to_string_lossy().contains("evil"));
-        assert_eq!(tokio::fs::read_to_string(target.path()).await.unwrap(), "safe\n");
+        assert_eq!(
+            tokio::fs::read_to_string(target.path()).await.unwrap(),
+            "safe\n"
+        );
     }
 
     #[tokio::test]
@@ -130,6 +133,9 @@ mod tests {
         second.write_line("new\n").await.unwrap();
         drop(second);
 
-        assert_eq!(tokio::fs::read_to_string(target.path()).await.unwrap(), "new\n");
+        assert_eq!(
+            tokio::fs::read_to_string(target.path()).await.unwrap(),
+            "new\n"
+        );
     }
 }

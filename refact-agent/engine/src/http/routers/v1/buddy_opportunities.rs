@@ -1045,6 +1045,7 @@ async fn create_investigation_chat(
             workflow_id: None,
         }),
         auto_compact_enabled: None,
+        reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };

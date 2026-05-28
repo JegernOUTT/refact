@@ -28,7 +28,7 @@ use crate::chat::diagnostics::{
 use crate::chat::retry_policy::{
     classify_llm_error_for_retry, retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
 };
-use crate::chat::history_limit::tier0_deterministic_compact;
+use crate::chat::history_limit::{CompactAggression, tier0_deterministic_compact_with};
 use crate::chat::tools::{execute_tools, resolve_tool_call_aliases, ExecuteToolsOptions};
 use crate::chat::types::{TaskMeta, ThreadParams};
 use crate::worktrees::types::WorktreeMeta;
@@ -38,9 +38,9 @@ use crate::stats::event::{canonicalize_mode_for_stats, split_model_provider, Llm
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
 
+const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = CompactAggression::max_reactive_attempts();
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
-const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 3;
 
 fn should_compact_context_limit_error(
     error: &str,
@@ -90,7 +90,11 @@ async fn apply_subchat_reactive_compaction(
     } else {
         None
     };
-    let report = tier0_deterministic_compact(messages, 0);
+    let report = tier0_deterministic_compact_with(
+        messages,
+        0,
+        CompactAggression::for_reactive_attempt(attempt),
+    );
     append_ui_only_reactive_compaction_diagnostics(messages, error, &report, attempt);
     if let Some(msg) = last {
         messages.push(msg);
@@ -1132,10 +1136,7 @@ async fn run_subchat_loop(
             )
             .await
             {
-                Ok(r) => {
-                    context_limit_compact_count = 0;
-                    break r;
-                }
+                Ok(r) => break r,
                 Err(ref err)
                     if should_compact_context_limit_error(
                         err,
@@ -1253,10 +1254,7 @@ async fn run_subchat_with_wrap_up(
             )
             .await
             {
-                Ok(r) => {
-                    context_limit_compact_count = 0;
-                    break r;
-                }
+                Ok(r) => break r,
                 Err(ref err)
                     if should_compact_context_limit_error(
                         err,
