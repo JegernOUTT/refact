@@ -10,11 +10,14 @@ use std::process::Command;
 use std::time::Duration;
 
 use chrono::Utc;
+use serde_json::json;
 use tokio::time::sleep;
 
 use crate::app_state::AppState;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
+use crate::call_validation::ChatMessage;
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::retry_policy::{
     RetryDecision, UserErrorCategory, classify_llm_error_for_retry, classify_user_error,
     user_error_info,
@@ -42,6 +45,24 @@ const MAX_STALL_PLANNER_NOTIFICATIONS_PER_CARD: usize = 2;
 const STALL_PLANNER_NOTIFY_GRACE: Duration = Duration::from_secs(60);
 const STALL_PLANNER_NOTIFY_COOLDOWN_SECONDS: i64 = 5 * 60;
 const STALL_PLANNER_NOTIFY_STATUS_PREFIX: &str = "Planner notified about stall:";
+const TASK_AGENT_MONITOR_SOURCE: &str = "chat.task_agent_monitor";
+
+fn task_agent_monitor_notice(payload: serde_json::Value, content: String) -> ChatMessage {
+    event(
+        EventSubkind::SystemNotice,
+        TASK_AGENT_MONITOR_SOURCE,
+        payload,
+        content,
+    )
+}
+
+fn regenerate_request(client_request_prefix: &str) -> CommandRequest {
+    CommandRequest {
+        client_request_id: format!("{}-{}", client_request_prefix, uuid::Uuid::new_v4()),
+        priority: true,
+        command: ChatCommand::Regenerate {},
+    }
+}
 
 fn make_runtime_event(
     signal_type: &str,
@@ -331,6 +352,20 @@ async fn notify_planner_about_stalled_agent(
         kind,
         stalled_for,
     );
+    let notice = task_agent_monitor_notice(
+        json!({
+            "kind": "stalled_agent",
+            "task_id": task_id,
+            "card_id": card_id,
+            "card_title": card.title.as_str(),
+            "agent_chat_id": agent_chat_id,
+            "assignee": card.assignee.as_deref(),
+            "stall_kind": format!("{:?}", kind),
+            "reason": short_reason,
+            "stalled_for_secs": stalled_for.as_secs(),
+        }),
+        message,
+    );
 
     let sessions = app.chat.sessions.clone();
     let planner_session =
@@ -346,19 +381,10 @@ async fn notify_planner_about_stalled_agent(
         }
     }
 
-    let request = CommandRequest {
-        client_request_id: format!("task-agent-stall-{}", uuid::Uuid::new_v4()),
-        priority: true,
-        command: ChatCommand::UserMessage {
-            content: serde_json::Value::String(message),
-            attachments: vec![],
-            context_files: vec![],
-            suppress_auto_enrichment: false,
-        },
-    };
-
     let processor_flag = {
         let mut session = planner_session.lock().await;
+        session.add_message(notice);
+        let request = regenerate_request("task-agent-stall");
         session.command_queue.push_back(request);
         session.emit_queue_update();
         session.queue_notify.notify_one();
@@ -794,6 +820,16 @@ pub(crate) async fn notify_planner_agents_finished(
         },
         footer
     );
+    let notice = task_agent_monitor_notice(
+        json!({
+            "kind": "agents_finished",
+            "task_id": task_id,
+            "all_finished": all_finished,
+            "results": results,
+            "since": since.as_ref().map(|dt| dt.to_rfc3339()),
+        }),
+        planner_message,
+    );
 
     let sessions = app.chat.sessions.clone();
 
@@ -841,19 +877,10 @@ pub(crate) async fn notify_planner_agents_finished(
         }
     }
 
-    let request = CommandRequest {
-        client_request_id: format!("task-agent-finished-{}", uuid::Uuid::new_v4()),
-        priority: true,
-        command: ChatCommand::UserMessage {
-            content: serde_json::Value::String(planner_message),
-            attachments: vec![],
-            context_files: vec![],
-            suppress_auto_enrichment: false,
-        },
-    };
-
     let processor_flag = {
         let mut session = planner_session.lock().await;
+        session.add_message(notice);
+        let request = regenerate_request("task-agent-finished");
         session.command_queue.push_back(request);
         session.emit_queue_update();
         session.queue_notify.notify_one();
@@ -1330,20 +1357,20 @@ async fn sweep_planner_wake_ups(app: AppState) -> Result<(), String> {
                 "[AUTO WAKE] Your requested wait window expired. Current agent status:\n\n{}\n\nDecide whether to continue waiting, merge ready cards, or move on.",
                 status_text
             );
-
-            let request = CommandRequest {
-                client_request_id: format!("planner-wake-up-{}", uuid::Uuid::new_v4()),
-                priority: true,
-                command: ChatCommand::UserMessage {
-                    content: serde_json::Value::String(message),
-                    attachments: vec![],
-                    context_files: vec![],
-                    suppress_auto_enrichment: false,
-                },
-            };
+            let notice = task_agent_monitor_notice(
+                json!({
+                    "kind": "planner_auto_wake",
+                    "task_id": task_id,
+                    "planner_chat_id": chat_id,
+                    "status_text": status_text,
+                }),
+                message,
+            );
 
             let processor_flag = {
                 let mut session = session_arc.lock().await;
+                session.add_message(notice);
+                let request = regenerate_request("planner-wake-up");
                 session.command_queue.push_back(request);
                 session.emit_queue_update();
                 session.queue_notify.notify_one();
@@ -1816,16 +1843,22 @@ mod tests {
         assert_eq!(planner.command_queue.len(), 1);
         let queued = planner.command_queue.front().unwrap();
         assert!(queued.priority);
-        match &queued.command {
-            ChatCommand::UserMessage { content, .. } => {
-                let text = content.as_str().unwrap();
-                assert!(text.contains("appears stalled"));
-                assert!(text.contains("T-1"));
-                assert!(text.contains("restart_agent"));
-                assert!(text.contains(&agent_chat_id));
-            }
-            _ => panic!("expected user message to planner"),
-        }
+        assert!(matches!(&queued.command, ChatCommand::Regenerate {}));
+        let notice = planner.messages.last().unwrap();
+        assert_eq!(notice.role, "event");
+        assert_eq!(
+            notice.extra["event"]["source"],
+            json!(TASK_AGENT_MONITOR_SOURCE)
+        );
+        assert_eq!(
+            notice.extra["event"]["payload"]["kind"],
+            json!("stalled_agent")
+        );
+        let text = notice.content.content_text_only();
+        assert!(text.contains("appears stalled"));
+        assert!(text.contains("T-1"));
+        assert!(text.contains("restart_agent"));
+        assert!(text.contains(&agent_chat_id));
     }
 
     #[tokio::test]
@@ -1915,13 +1948,12 @@ mod tests {
         );
         let planner = planner_arc.lock().await;
         assert_eq!(planner.command_queue.len(), 1);
-        match &planner.command_queue.front().unwrap().command {
-            ChatCommand::UserMessage { content, .. } => {
-                let text = content.as_str().unwrap();
-                assert!(text.contains("Completed state but the card is still in `doing`"));
-            }
-            _ => panic!("expected user message to planner"),
-        }
+        assert!(matches!(
+            &planner.command_queue.front().unwrap().command,
+            ChatCommand::Regenerate {}
+        ));
+        let text = planner.messages.last().unwrap().content.content_text_only();
+        assert!(text.contains("Completed state but the card is still in `doing`"));
     }
 
     #[test]
@@ -2168,14 +2200,13 @@ mod tests {
 
         let planner = planner_arc.lock().await;
         assert_eq!(planner.command_queue.len(), 1, "planner should be notified");
-        match &planner.command_queue.front().unwrap().command {
-            ChatCommand::UserMessage { content, .. } => {
-                let text = content.as_str().unwrap();
-                assert!(text.contains("stream stalled"));
-                assert!(text.contains("Generating"));
-            }
-            _ => panic!("expected user message to planner"),
-        }
+        assert!(matches!(
+            &planner.command_queue.front().unwrap().command,
+            ChatCommand::Regenerate {}
+        ));
+        let text = planner.messages.last().unwrap().content.content_text_only();
+        assert!(text.contains("stream stalled"));
+        assert!(text.contains("Generating"));
     }
 
     #[tokio::test]
@@ -2206,13 +2237,12 @@ mod tests {
         assert!(agent_arc.lock().await.command_queue.is_empty());
         let planner = planner_arc.lock().await;
         assert_eq!(planner.command_queue.len(), 1);
-        match &planner.command_queue.front().unwrap().command {
-            ChatCommand::UserMessage { content, .. } => {
-                let text = content.as_str().unwrap();
-                assert!(text.contains("tool execution stalled"));
-            }
-            _ => panic!("expected user message to planner"),
-        }
+        assert!(matches!(
+            &planner.command_queue.front().unwrap().command,
+            ChatCommand::Regenerate {}
+        ));
+        let text = planner.messages.last().unwrap().content.content_text_only();
+        assert!(text.contains("tool execution stalled"));
     }
 
     #[tokio::test]
@@ -2395,15 +2425,17 @@ mod tests {
         );
         let cmd = session.command_queue.front().unwrap();
         assert!(cmd.priority);
-        match &cmd.command {
-            ChatCommand::UserMessage { content, .. } => {
-                assert!(
-                    content.as_str().unwrap().contains("[AUTO WAKE]"),
-                    "message should contain AUTO WAKE"
-                );
-            }
-            _ => panic!("expected UserMessage"),
-        }
+        assert!(matches!(&cmd.command, ChatCommand::Regenerate {}));
+        assert!(
+            session
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .content_text_only()
+                .contains("[AUTO WAKE]"),
+            "message should contain AUTO WAKE"
+        );
     }
 
     #[tokio::test]
@@ -2448,12 +2480,11 @@ mod tests {
 
         let session = planner_arc.lock().await;
         assert_eq!(session.command_queue.len(), 1);
-        match &session.command_queue.front().unwrap().command {
-            ChatCommand::UserMessage { content, .. } => {
-                let text = content.as_str().unwrap();
-                assert!(text.contains("T-1"), "message should contain card T-1");
-            }
-            _ => panic!("expected UserMessage"),
-        }
+        assert!(matches!(
+            &session.command_queue.front().unwrap().command,
+            ChatCommand::Regenerate {}
+        ));
+        let text = session.messages.last().unwrap().content.content_text_only();
+        assert!(text.contains("T-1"), "message should contain card T-1");
     }
 }

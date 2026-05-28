@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::call_validation::ChatMessage;
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
 use crate::chat::verify_cmd::parse_restricted_argv;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
@@ -18,6 +19,7 @@ use crate::tasks::types::{BoardCard, StatusUpdate, VerificationResult, VerifierR
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_OUTPUT_TAIL_CHARS: usize = 4000;
 const MAX_DIFF_LINES: usize = 200;
+const VERIFIER_SOURCE: &str = "chat.verifier";
 
 #[derive(Clone, Debug)]
 pub struct VerifyCardRequest {
@@ -449,7 +451,12 @@ async fn run_verifier_review(
         subchat_depth: 1,
         buddy_meta: None,
     };
-    let messages = vec![ChatMessage::new("user".to_string(), prompt)];
+    let messages = vec![event(
+        EventSubkind::VerifierReport,
+        VERIFIER_SOURCE,
+        json!({ "kind": "verifier_review_prompt" }),
+        prompt,
+    )];
     let result = crate::subchat::run_subchat(gcx, messages, config).await?;
     let answer = result
         .messages
