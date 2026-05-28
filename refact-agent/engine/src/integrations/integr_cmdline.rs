@@ -312,6 +312,12 @@ fn exec_extra(
     duration: Duration,
 ) -> serde_json::Map<String, Value> {
     let mut extra = serde_json::Map::new();
+    let cwd = snapshot
+        .meta
+        .cwd
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
     extra.insert(
         "exec".to_string(),
         json!({
@@ -320,6 +326,13 @@ fn exec_extra(
             "exit_code": exec_exit_code(&snapshot.status),
             "duration_ms": duration.as_millis() as u64,
             "short_description": snapshot.meta.short_description,
+            "command": snapshot.meta.command,
+            "cwd": cwd,
+            "mode": snapshot.meta.mode.to_string(),
+            "created_at_ms": snapshot.meta.created_at_ms,
+            "started_at_ms": snapshot.meta.started_at_ms,
+            "ended_at_ms": snapshot.meta.ended_at_ms,
+            "service_name": snapshot.meta.owner.service_name,
         }),
     );
     extra
@@ -779,14 +792,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cmdline_extra_exec_has_duration_ms() {
+    async fn cmdline_extra_exec_full_shape() {
+        let command = delayed_success_command();
+        let temp_dir = std::env::temp_dir();
+        let expected_cwd = dunce::simplified(temp_dir.as_path())
+            .to_string_lossy()
+            .to_string();
         let message = run_tool(
             ToolCmdline {
                 name: "cmdline_duration".to_string(),
                 cfg: CmdlineToolConfig {
-                    command: delayed_success_command(),
+                    command: command.clone(),
                     description: "Measure duration".to_string(),
                     parameters: Vec::new(),
+                    command_workdir: expected_cwd.clone(),
                     ..CmdlineToolConfig::default()
                 },
                 ..ToolCmdline::default()
@@ -794,9 +813,51 @@ mod tests {
             args(vec![]),
         )
         .await;
-        let duration_ms = exec(&message)["duration_ms"].as_u64().unwrap();
+        let exec = exec(&message);
+        let object = exec.as_object().unwrap();
+        let keys = [
+            "process_id",
+            "status",
+            "exit_code",
+            "duration_ms",
+            "short_description",
+            "command",
+            "cwd",
+            "mode",
+            "created_at_ms",
+            "started_at_ms",
+            "ended_at_ms",
+            "service_name",
+        ];
 
-        assert!(duration_ms > 0);
+        for key in keys {
+            assert!(object.contains_key(key), "missing exec.{key}");
+        }
+        assert!(exec["process_id"].as_str().unwrap().starts_with("exec_"));
+        assert_eq!(exec["status"], "exited");
+        assert_eq!(exec["exit_code"], 0);
+        assert!(exec["duration_ms"].as_u64().unwrap() > 0);
+        assert_eq!(
+            exec["short_description"],
+            "cmdline_duration: Measure duration"
+        );
+        assert_eq!(exec["command"], command);
+        assert_eq!(exec["cwd"], expected_cwd);
+        assert_eq!(exec["mode"], "foreground");
+        assert!(exec["created_at_ms"].is_u64());
+        assert!(exec["started_at_ms"].is_u64());
+        assert!(exec["ended_at_ms"].is_u64());
+        assert!(exec["service_name"].is_null());
+
+        let pending = ExecProcessSnapshot::new(crate::exec::ExecProcessMeta::new(
+            ExecMode::Foreground,
+            "pending".to_string(),
+        ));
+        let pending_extra = exec_extra(&pending, Duration::from_millis(0));
+        let pending_exec = pending_extra.get("exec").unwrap();
+        assert!(pending_exec["started_at_ms"].is_null());
+        assert!(pending_exec["ended_at_ms"].is_null());
+        assert!(pending_exec["service_name"].is_null());
     }
 
     #[tokio::test]
