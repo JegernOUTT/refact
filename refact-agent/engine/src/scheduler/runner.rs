@@ -453,10 +453,6 @@ fn missed_one_shot_task(task: &ScheduledTask, now: u64) -> bool {
         && next_run_ms(&task.cron, task.created_at_ms, RUNNER_TZ).is_some_and(|next| next < now)
 }
 
-fn task_is_due(task: &ScheduledTask, now: u64, jitter_cfg: &JitterConfig) -> bool {
-    scheduled_fire_at_ms(task, now, jitter_cfg).is_some_and(|fire_at| fire_at <= now)
-}
-
 fn task_final_after_fire(task: &ScheduledTask, now: u64) -> bool {
     task.recurring
         && task.auto_expire_after_ms > 0

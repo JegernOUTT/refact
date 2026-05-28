@@ -19,8 +19,6 @@ use super::tool_config_subagent::ToolConfigSubagent;
 /// The tool list is FIXED for the entire session (cache-safe).
 const MCP_LAZY_THRESHOLD: usize = 15;
 
-const GLOBAL_READ_ONLY_TOOLS: &[&str] = &["get_plan"];
-
 /// Result of applying MCP lazy-loading logic on a tool list.
 pub struct ToolsForMode {
     /// Tool list to send to the LLM as schemas. Fixed for the session lifetime.

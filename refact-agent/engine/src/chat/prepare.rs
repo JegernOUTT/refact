@@ -7,7 +7,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::execute_at::run_at_commands_locally;
-use crate::call_validation::{ChatContent, ChatMessage, ChatMeta, ReasoningEffort, SamplingParameters};
+use crate::call_validation::{ChatMessage, ChatMeta, ReasoningEffort, SamplingParameters};
 use crate::caps::{resolve_chat_model, ChatModelRecord};
 use crate::global_context::GlobalContext;
 use crate::llm::{LlmRequest, CanonicalToolChoice, CommonParams, ReasoningIntent, WireFormat};
@@ -559,6 +559,7 @@ fn strip_thinking_blocks_if_disabled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call_validation::ChatContent;
     use crate::llm::adapter::{AdapterSettings, LlmWireAdapter};
     use crate::llm::adapters::openai_chat::OpenAiChatAdapter;
     use serde_json::json;

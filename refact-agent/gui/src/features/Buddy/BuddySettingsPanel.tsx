@@ -149,8 +149,8 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             <Text size="2">Live chat reactions</Text>
             <small className={styles.settingDescription}>
               Pixel reacts to your messages with short comments, insights, or
-              bug-candidate flags. Redacted input is used transiently and not
-              stored.
+              bug-candidate flags. Uses redacted input transiently and does not
+              store it.
             </small>
           </span>
           <Switch

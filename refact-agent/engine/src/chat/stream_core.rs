@@ -1719,7 +1719,7 @@ async fn refresh_openai_codex_after_websocket_auth_rejection(
 async fn run_llm_websocket_request_with_retry(
     wire_format: WireFormat,
     websocket_endpoint: String,
-    mut http_parts: HttpParts,
+    http_parts: HttpParts,
     auth_token: String,
     abort_flag: Option<Arc<AtomicBool>>,
     abort_notify: Option<Arc<tokio::sync::Notify>>,
