@@ -746,9 +746,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
 
   builder.addCase(restoreChat, (state, action) => {
+    const isBuddyChat = Boolean(action.payload.buddy_meta?.is_buddy_chat);
     const existingRt = getRuntime(state, action.payload.id);
     if (existingRt) {
-      if (!state.open_thread_ids.includes(action.payload.id)) {
+      if (!isBuddyChat && !state.open_thread_ids.includes(action.payload.id)) {
         state.open_thread_ids.push(action.payload.id);
       }
       state.current_thread_id = action.payload.id;
@@ -765,6 +766,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         title: action.payload.title,
         tool_use: action.payload.tool_use ?? state.tool_use,
         mode,
+        buddy_meta: action.payload.buddy_meta,
         new_chat_suggested: { wasSuggested: false },
         auto_enrichment_enabled: false,
       },
@@ -793,7 +795,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     };
 
     state.threads[action.payload.id] = newRuntime;
-    if (!state.open_thread_ids.includes(action.payload.id)) {
+    if (!isBuddyChat && !state.open_thread_ids.includes(action.payload.id)) {
       state.open_thread_ids.push(action.payload.id);
     }
     state.current_thread_id = action.payload.id;

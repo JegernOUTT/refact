@@ -34,6 +34,7 @@ import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
 import { BuddyHome } from "../features/Buddy/BuddyHome";
 import { BuddyWorld } from "../features/Buddy/BuddyWorld";
 import { AutonomousChats } from "../features/Buddy/AutonomousChats";
+import { BuddyRecentChats } from "../features/Buddy/BuddyRecentChats";
 import { UserActivityCard } from "../features/Buddy/UserActivityCard";
 import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
 import { BuddySpeechCloud } from "../features/Buddy/BuddySpeechCloud";
@@ -2990,5 +2991,95 @@ describe("BuddyOpportunitiesFeed_suggestions", () => {
     await waitFor(() => {
       expect(screen.getByText("Warm up this workspace")).toBeInTheDocument();
     });
+  });
+});
+
+describe("BuddyRecentChats_opens_existing_chat", () => {
+  it("clicking an existing chat row calls trajectory API and navigates to chat with buddy_meta", async () => {
+    let trajectoryCalled = false;
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([
+          makeConversation({
+            id: "existing-buddy-chat",
+            kind: "chat",
+            title: "My Buddy Chat",
+            message_count: 5,
+          }),
+        ]),
+      ),
+      http.get(
+        "http://127.0.0.1:8001/v1/trajectories/existing-buddy-chat",
+        () => {
+          trajectoryCalled = true;
+          return HttpResponse.json({
+            id: "existing-buddy-chat",
+            title: "My Buddy Chat",
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-02T00:00:00Z",
+            model: "",
+            mode: "buddy",
+            tool_use: "agent",
+            messages: [],
+          });
+        },
+      ),
+    );
+
+    const store = setUpStore({ ...CONFIG_STATE });
+    const { user } = render(<BuddyRecentChats showFilters={false} />, {
+      store,
+    });
+
+    const chatRow = await screen.findByText("My Buddy Chat");
+    await user.click(chatRow);
+
+    await waitFor(() => {
+      expect(trajectoryCalled).toBe(true);
+    });
+
+    const pages = store.getState().pages;
+    expect(pages[pages.length - 1].name).toBe("chat");
+
+    const rt = store.getState().chat.threads["existing-buddy-chat"];
+    expect(rt?.thread.buddy_meta?.is_buddy_chat).toBe(true);
+    expect(store.getState().chat.open_thread_ids).not.toContain(
+      "existing-buddy-chat",
+    );
+  });
+
+  it("New Chat button still creates a new conversation without trajectory fetch", async () => {
+    let createConversationCalled = false;
+    let trajectoryCalled = false;
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([]),
+      ),
+      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () => {
+        createConversationCalled = true;
+        return HttpResponse.json({
+          chat_id: "buddy-new-chat",
+          title: "New Chat",
+          created_at: "2024-01-01T00:00:00Z",
+          last_message_at: null,
+          message_count: 0,
+        });
+      }),
+      http.get("http://127.0.0.1:8001/v1/trajectories/:id", () => {
+        trajectoryCalled = true;
+        return HttpResponse.json({});
+      }),
+    );
+
+    const store = setUpStore({ ...CONFIG_STATE });
+    const { user } = render(<BuddyRecentChats compact={false} />, { store });
+
+    const newChatBtn = await screen.findByRole("button", { name: /new chat/i });
+    await user.click(newChatBtn);
+
+    await waitFor(() => {
+      expect(createConversationCalled).toBe(true);
+    });
+    expect(trajectoryCalled).toBe(false);
   });
 });

@@ -2,8 +2,7 @@ import React, { useCallback, useMemo } from "react";
 import { Card, Flex, Spinner, Text } from "@radix-ui/themes";
 import { ChatBubbleIcon } from "@radix-ui/react-icons";
 import { useAppDispatch } from "../../hooks";
-import { push } from "../Pages/pagesSlice";
-import { openBuddyChat } from "../Chat/Thread";
+import { openExistingBuddyChat } from "../Chat/Thread";
 import { useGetBuddyConversationsQuery } from "../../services/refact/buddy";
 import type { BuddyConversationEntry } from "./types";
 import styles from "./AutonomousChats.module.css";
@@ -71,8 +70,7 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
 
   const handleOpen = useCallback(
     (entry: BuddyConversationEntry) => {
-      dispatch(openBuddyChat({ chat_id: entry.id, title: entry.title }));
-      dispatch(push({ name: "chat" }));
+      void dispatch(openExistingBuddyChat(entry));
     },
     [dispatch],
   );

@@ -3,7 +3,7 @@ import { Flex, Text, Spinner } from "@radix-ui/themes";
 import { ChatBubbleIcon, PlusIcon } from "@radix-ui/react-icons";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
-import { openBuddyChat, newBuddyChatAction } from "../Chat/Thread";
+import { openBuddyChat, newBuddyChatAction, openExistingBuddyChat } from "../Chat/Thread";
 import {
   useGetBuddyConversationsQuery,
   useCreateBuddyConversationMutation,
@@ -117,8 +117,7 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
 
   const handleOpen = useCallback(
     (entry: BuddyConversationEntry) => {
-      dispatch(openBuddyChat({ chat_id: entry.id, title: entry.title }));
-      dispatch(push({ name: "chat" }));
+      void dispatch(openExistingBuddyChat(entry));
     },
     [dispatch],
   );

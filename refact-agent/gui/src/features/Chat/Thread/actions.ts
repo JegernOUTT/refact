@@ -33,7 +33,7 @@ import {
 import { selectLspPort, selectApiKey } from "../../Config/configSlice";
 import { selectCurrentThreadId, selectMessagesById } from "./selectors";
 import { push } from "../../Pages/pagesSlice";
-import type { DiagnosticContext } from "../../Buddy/types";
+import type { DiagnosticContext, BuddyConversationEntry } from "../../Buddy/types";
 import {
   buildBuddyInvestigationPrompt,
   buildBuddyInvestigationTitle,
@@ -586,6 +586,62 @@ export const openBuddyChat = createAction<{ chat_id: string; title?: string }>(
 export const newBuddyChatAction = createAction<{ chat_id: string }>(
   "chat/newBuddyChat",
 );
+
+export const openExistingBuddyChat = createAsyncThunk<
+  undefined,
+  BuddyConversationEntry,
+  { dispatch: AppDispatch; state: RootState }
+>("chat/openExistingBuddyChat", async (entry, thunkApi) => {
+  const buddyMeta = {
+    is_buddy_chat: true as const,
+    buddy_chat_kind: entry.kind,
+    workflow_id: entry.workflow_id ?? null,
+  };
+
+  const fallback: ChatHistoryItem = {
+    id: entry.id,
+    title: entry.title || "Untitled",
+    model: "",
+    tool_use: "agent",
+    messages: [],
+    boost_reasoning: false,
+    context_tokens_cap: undefined,
+    include_project_info: true,
+    increase_max_tokens: false,
+    last_user_message_id: "",
+    buddy_meta: buddyMeta,
+    createdAt: entry.created_at,
+    updatedAt: entry.updated_at,
+  };
+
+  try {
+    const result = await thunkApi
+      .dispatch(
+        trajectoriesApi.endpoints.getTrajectory.initiate(entry.id, {
+          forceRefetch: true,
+        }),
+      )
+      .unwrap();
+
+    const thread = trajectoryDataToChatThread(result);
+    const historyItem: ChatHistoryItem = {
+      ...thread,
+      createdAt: result.created_at,
+      updatedAt: result.updated_at,
+      title: result.title,
+      isTitleGenerated: result.isTitleGenerated,
+      buddy_meta: buddyMeta,
+    };
+    thunkApi.dispatch(restoreChat(historyItem));
+  } catch {
+    thunkApi.dispatch(restoreChat(fallback));
+  }
+
+  thunkApi.dispatch(requestSseRefresh({ chatId: entry.id }));
+  thunkApi.dispatch(push({ name: "chat" }));
+
+  return undefined;
+});
 
 export const startBuddyInvestigation = createAsyncThunk<
   { chat_id: string; title: string } | undefined,

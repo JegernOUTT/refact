@@ -77,7 +77,7 @@ import type {
 } from "../features/Buddy/types";
 import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
 import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
-import { createChatWithId } from "../features/Chat/Thread/actions";
+import { createChatWithId, restoreChat } from "../features/Chat/Thread/actions";
 import {
   addBuddyCrashBreadcrumb,
   beginBuddyCrashSession,
@@ -4642,6 +4642,88 @@ describe("buddy chat reactions settings and bubbles", () => {
       }
     },
   );
+});
+
+describe("restoreChat buddy_meta handling", () => {
+  test("restoreChat with buddy_meta preserves it in thread and skips open_thread_ids", () => {
+    const store = setUpStore();
+    store.dispatch(
+      restoreChat({
+        id: "buddy-restore-1",
+        title: "Buddy Chat",
+        model: "",
+        messages: [],
+        boost_reasoning: false,
+        context_tokens_cap: undefined,
+        include_project_info: true,
+        increase_max_tokens: false,
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-01T00:00:00Z",
+        buddy_meta: {
+          is_buddy_chat: true,
+          buddy_chat_kind: "chat",
+          workflow_id: null,
+        },
+      }),
+    );
+
+    const state = store.getState();
+    const rt = state.chat.threads["buddy-restore-1"];
+    expect(rt?.thread.buddy_meta?.is_buddy_chat).toBe(true);
+    expect(rt?.thread.buddy_meta?.buddy_chat_kind).toBe("chat");
+    expect(state.chat.open_thread_ids).not.toContain("buddy-restore-1");
+    expect(state.chat.current_thread_id).toBe("buddy-restore-1");
+  });
+
+  test("restoreChat without buddy_meta adds to open_thread_ids normally", () => {
+    const store = setUpStore();
+    store.dispatch(
+      restoreChat({
+        id: "regular-restore-1",
+        title: "Regular Chat",
+        model: "",
+        messages: [],
+        boost_reasoning: false,
+        context_tokens_cap: undefined,
+        include_project_info: true,
+        increase_max_tokens: false,
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-01T00:00:00Z",
+      }),
+    );
+
+    const state = store.getState();
+    expect(state.chat.open_thread_ids).toContain("regular-restore-1");
+    expect(state.chat.current_thread_id).toBe("regular-restore-1");
+  });
+
+  test("restoreChat with buddy_meta workflow kind preserves workflow_id", () => {
+    const store = setUpStore();
+    store.dispatch(
+      restoreChat({
+        id: "buddy-workflow-1",
+        title: "Workflow Chat",
+        model: "",
+        messages: [],
+        boost_reasoning: false,
+        context_tokens_cap: undefined,
+        include_project_info: true,
+        increase_max_tokens: false,
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-01T00:00:00Z",
+        buddy_meta: {
+          is_buddy_chat: true,
+          buddy_chat_kind: "workflow",
+          workflow_id: "refact_self_critic",
+        },
+      }),
+    );
+
+    const state = store.getState();
+    const rt = state.chat.threads["buddy-workflow-1"];
+    expect(rt?.thread.buddy_meta?.workflow_id).toBe("refact_self_critic");
+    expect(state.chat.open_thread_ids).not.toContain("buddy-workflow-1");
+  });
 });
 
 describe("installBuddyErrorReporter and BuddyErrorBoundary integration", () => {
