@@ -3897,6 +3897,60 @@ describe("buddy chat reactions settings and bubbles", () => {
     }
   });
 
+  test("persisted chat_reactions runtime fields drive matching chat bubble", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const reaction = makeChatRuntimeEvent({
+        id: "runtime-jsonl-chat-reaction",
+        signal_type: "speech_humor",
+        title: "Chat: humor",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        chat_id: "chat-a",
+        speech_text: "Pixel gremlin put a tiny hat on this iteration.",
+        ttl_ms: 90_000,
+        bubble_policy: "ambient",
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      expect(reaction.source).toBe("chat_reactions");
+      expect(reaction.chat_id).toBe("chat-a");
+      expect(reaction.speech_text).toContain("gremlin");
+      expect(reaction.ttl_ms).toBe(90_000);
+      expect(reaction.bubble_policy).toBe("ambient");
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [reaction] })),
+      );
+
+      const { container: matchingChat } = renderBuddyChatCompanion(
+        store,
+        "chat-a",
+      );
+      const { container: otherChat } = renderBuddyChatCompanion(
+        store,
+        "chat-b",
+      );
+
+      await expectCompanionNotificationText(
+        matchingChat,
+        "runtime:runtime-jsonl-chat-reaction",
+        "Pixel gremlin put a tiny hat on this iteration.",
+      );
+      await expectNoCompanionNotification(
+        otherChat,
+        "runtime:runtime-jsonl-chat-reaction",
+      );
+      expect(
+        screen.queryByRole("button", { name: "Investigate" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test.each<[string, string, string]>([
     [
       "speech_insight",

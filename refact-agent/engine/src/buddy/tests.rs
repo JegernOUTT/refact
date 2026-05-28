@@ -7817,6 +7817,14 @@ fn investigation_opportunity_carries_real_diagnostic_ids() {
     }
 }
 
+// Manual verification checklist for Buddy chat reaction bubbles:
+// 1. Send a normal message such as "please design a new caching architecture for services".
+// 2. Send an iterative interaction such as "can you tweak that and make it simpler?".
+// 3. Inspect `.refact/buddy/runtime_queue.jsonl` and count `source=chat_reactions`,
+//    `signal_type=speech_insight`, `signal_type=speech_humor`, and `signal_type=chat_bug_candidate`.
+// 4. Confirm a fresh JSONL event contains `chat_id`, `speech_text`, `ttl_ms`, and `bubble_policy`,
+//    then confirm the matching chat shows a visible Buddy bubble without a live LLM call.
+
 #[tokio::test]
 async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {
     use super::chat_reactions::{AcceptedUserMessage, INSIGHT_LINES, maybe_enqueue_chat_reaction};
@@ -7854,6 +7862,66 @@ async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {
     );
     assert!(ev.ttl_ms.is_some(), "ttl_ms must be set");
     assert!(ev.ttl_ms.unwrap() > 0, "ttl_ms must be positive");
+}
+
+#[tokio::test]
+async fn chat_reaction_runtime_queue_jsonl_round_trips_frontend_fields() {
+    use super::chat_reactions::{build_reaction_event, ChatReaction, ChatReactionKind};
+    use super::storage::{append_runtime_record, load_runtime_queue, RuntimeQueueRecord};
+    use crate::buddy::types::BuddyBubblePolicy;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let reaction = ChatReaction {
+        kind: ChatReactionKind::Humor,
+        text: "Pixel gremlin put a tiny hat on this iteration.".to_string(),
+    };
+    let event = build_reaction_event(
+        "chat-jsonl-reaction",
+        "can you tweak that and make it simpler without quoting raw text",
+        &reaction,
+    );
+
+    append_runtime_record(
+        root,
+        &RuntimeQueueRecord::Event {
+            event: event.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let raw = tokio::fs::read_to_string(root.join(".refact/buddy/runtime_queue.jsonl"))
+        .await
+        .unwrap();
+    let line: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+    let json_event = &line["event"];
+    assert_eq!(line["kind"].as_str(), Some("event"));
+    assert_eq!(json_event["source"].as_str(), Some("chat_reactions"));
+    assert_eq!(json_event["chat_id"].as_str(), Some("chat-jsonl-reaction"));
+    assert_eq!(json_event["signal_type"].as_str(), Some("speech_humor"));
+    assert_eq!(
+        json_event["speech_text"].as_str(),
+        Some(reaction.text.as_str())
+    );
+    assert_eq!(json_event["ttl_ms"].as_u64(), Some(90_000));
+    assert_eq!(json_event["bubble_policy"].as_str(), Some("ambient"));
+
+    let queue = load_runtime_queue(root).await;
+    let restored = queue
+        .items
+        .front()
+        .expect("chat reaction event must replay");
+    assert_eq!(restored.id, event.id);
+    assert_eq!(restored.source, "chat_reactions");
+    assert_eq!(restored.chat_id.as_deref(), Some("chat-jsonl-reaction"));
+    assert_eq!(
+        restored.speech_text.as_deref(),
+        Some(reaction.text.as_str())
+    );
+    assert_eq!(restored.ttl_ms, Some(90_000));
+    assert_eq!(restored.bubble_policy, Some(BuddyBubblePolicy::Ambient));
+    assert!(restored.controls.is_empty());
 }
 
 #[tokio::test]
