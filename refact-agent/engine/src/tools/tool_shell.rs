@@ -315,7 +315,7 @@ impl Tool for ToolShell {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths with visible warnings; the shell command text itself is not OS-sandboxed. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
+            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use process_wait or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths with visible warnings; the shell command text itself is not OS-sandboxed. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
             input_schema: shell_input_schema(),
             output_schema: None,
             annotations: None,
@@ -353,12 +353,18 @@ fn shell_input_schema() -> Value {
             ("command", "string", "shell command to execute"),
             ("description", "string", "Required. A single concise active-voice sentence describing what the command does. Short for simple commands: 'List files in current directory'. More descriptive for piped/obscure commands: 'Find and delete all .tmp files recursively'. Never use words like 'complex' or 'risk'."),
             ("workdir", "string", "workdir for the command"),
-            ("timeout", "string", "Optional. Timeout in seconds for the command (default: 10). Use higher values for long-running commands."),
             ("output_filter", "string", "Optional regex pattern to filter output lines. Only lines matching this pattern (and context) will be shown. Use to find specific errors or content in large outputs."),
             ("output_limit", "string", "Optional. Max lines to show (default: 40). Use higher values like '200' or 'all' to see more output."),
         ],
         &["command", "description"],
     );
+    schema["properties"]["timeout"] = json!({
+        "oneOf": [
+            {"type": "integer"},
+            {"type": "string"}
+        ],
+        "description": "Optional. Timeout in seconds for the command (default: 10). Use higher values for long-running commands. Only applies to foreground commands; rejected when run_in_background=true.",
+    });
     schema["properties"]["tty"] = json!({
         "type": "boolean",
         "default": false,
@@ -686,6 +692,13 @@ async fn parse_args_with_filter(
         }
         None => false,
     };
+
+    if run_in_background && timeout.is_some() {
+        return Err(
+            "timeout is not supported with run_in_background=true; use process_kill or process_wait instead"
+                .to_string(),
+        );
+    }
 
     Ok(ParsedShellArgs {
         command,
@@ -1335,6 +1348,36 @@ mod tests {
         .await;
 
         assert_eq!(exec(&message)["timeout_secs"], 60);
+    }
+
+    #[test]
+    fn shell_schema_timeout_accepts_integer_or_string() {
+        let tool = ToolShell::default();
+        let desc = tool.tool_description();
+        let timeout_schema = &desc.input_schema["properties"]["timeout"];
+        let one_of = timeout_schema["oneOf"].as_array().unwrap();
+        let types: Vec<&str> = one_of
+            .iter()
+            .map(|v| v["type"].as_str().unwrap())
+            .collect();
+        assert!(types.contains(&"integer"), "expected integer in oneOf: {types:?}");
+        assert!(types.contains(&"string"), "expected string in oneOf: {types:?}");
+    }
+
+    #[tokio::test]
+    async fn background_shell_rejects_timeout() {
+        let err = shell_error(args(vec![
+            ("command", json!(background_sleep_command())),
+            ("description", json!("Background with timeout should fail")),
+            ("run_in_background", json!(true)),
+            ("timeout", json!(10)),
+        ]))
+        .await;
+
+        assert_eq!(
+            err,
+            "timeout is not supported with run_in_background=true; use process_kill or process_wait instead"
+        );
     }
 
     #[tokio::test]
