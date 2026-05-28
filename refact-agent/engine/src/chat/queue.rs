@@ -1303,16 +1303,7 @@ pub async fn process_command_queue(
                 tool_failed,
             } => {
                 let mut session = session_arc.lock().await;
-                let tool_message = ChatMessage {
-                    message_id: Uuid::new_v4().to_string(),
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(content),
-                    tool_call_id,
-                    tool_failed: Some(tool_failed),
-                    ..Default::default()
-                };
-                session.add_message(tool_message);
-                session.set_runtime_state(SessionState::Idle, None);
+                session.record_ide_tool_result(tool_call_id, content, tool_failed);
                 drop(session);
                 if aborted_before_start_generation(&session_arc).await {
                     continue;

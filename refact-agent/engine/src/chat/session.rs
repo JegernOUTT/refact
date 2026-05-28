@@ -365,6 +365,30 @@ impl ChatSession {
         self.touch();
     }
 
+    pub fn record_ide_tool_result(
+        &mut self,
+        tool_call_id: String,
+        content: String,
+        tool_failed: bool,
+    ) {
+        let ok = !tool_failed;
+        self.add_message(ChatMessage {
+            message_id: Uuid::new_v4().to_string(),
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(content.clone()),
+            tool_call_id: tool_call_id.clone(),
+            tool_failed: Some(tool_failed),
+            ..Default::default()
+        });
+        self.add_message(crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::IdeCallback,
+            "ide.bridge",
+            json!({"tool_call_id": tool_call_id, "ok": ok, "summary": content}),
+            content,
+        ));
+        self.set_runtime_state(SessionState::Idle, None);
+    }
+
     pub fn install_plan(
         &mut self,
         mode: &str,
@@ -1981,6 +2005,68 @@ mod tests {
         assert_eq!(outcome.accepted_ids, vec!["tc1"]);
         assert_eq!(session.runtime.pause_reasons.len(), 1);
         assert_eq!(session.runtime.state, SessionState::Paused);
+    }
+
+    #[test]
+    fn ide_tool_result_emits_event_not_user_message() {
+        let mut session = make_session();
+        session.runtime.state = SessionState::WaitingIde;
+        let mut rx = session.subscribe();
+
+        session.record_ide_tool_result(
+            "call_ide_1".to_string(),
+            "The user accepted the changes.".to_string(),
+            false,
+        );
+
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, "tool");
+        assert_eq!(session.messages[0].tool_call_id, "call_ide_1");
+        assert_eq!(session.messages[0].tool_failed, Some(false));
+        assert_eq!(
+            session.messages[1].role,
+            crate::chat::internal_roles::EVENT_ROLE
+        );
+        assert!(!session.messages.iter().any(|message| {
+            message.role == "user"
+                && message
+                    .content
+                    .content_text_only()
+                    .contains("accepted the changes")
+        }));
+        assert_eq!(
+            session.messages[1].extra["event"]["subkind"],
+            json!("ide_callback")
+        );
+        assert_eq!(
+            session.messages[1].extra["event"]["source"],
+            json!("ide.bridge")
+        );
+        assert_eq!(
+            session.messages[1].extra["event"]["payload"],
+            json!({
+                "tool_call_id": "call_ide_1",
+                "ok": true,
+                "summary": "The user accepted the changes."
+            })
+        );
+        assert_eq!(
+            session.messages[1].content.content_text_only(),
+            "The user accepted the changes."
+        );
+        assert_eq!(session.runtime.state, SessionState::Idle);
+
+        let mut event_roles = Vec::new();
+        while let Ok(json) = rx.try_recv() {
+            let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let ChatEvent::MessageAdded { message, .. } = envelope.event {
+                event_roles.push(message.role);
+            }
+        }
+        assert_eq!(
+            event_roles,
+            vec!["tool", crate::chat::internal_roles::EVENT_ROLE]
+        );
     }
 
     #[test]
