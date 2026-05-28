@@ -152,6 +152,23 @@ function readGuiSource(path: string): Promise<string> {
   return readFile(resolve(process.cwd(), "src", path), "utf8");
 }
 
+function readCssBlock(source: string, selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(source);
+  if (!match || match.index === undefined) {
+    throw new Error(`Missing CSS block for ${selector}`);
+  }
+  const open = source.indexOf("{", match.index);
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+    if (depth === 0) return source.slice(open + 1, i);
+  }
+  throw new Error(`Unclosed CSS block for ${selector}`);
+}
+
 function makeConversation(
   overrides?: Partial<BuddyConversationEntry>,
 ): BuddyConversationEntry {
@@ -2648,34 +2665,37 @@ describe("BuddySettingsPanel_autosave", () => {
     });
   });
 
-  it("daily digest invalid value does not save or clobber usable state", async () => {
-    const capturedBodies: unknown[] = [];
-    server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBodies.push(await request.json());
-          return HttpResponse.json(makeSnapshot().settings);
-        },
-      ),
-    );
+  it.each(["1e2", "7.5", "24", "-1"])(
+    "daily digest invalid value %s does not save or clobber usable state",
+    (invalidValue) => {
+      const capturedBodies: unknown[] = [];
+      server.use(
+        http.post(
+          "http://127.0.0.1:8001/v1/buddy/settings",
+          async ({ request }) => {
+            capturedBodies.push(await request.json());
+            return HttpResponse.json(makeSnapshot().settings);
+          },
+        ),
+      );
 
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot()));
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
 
-    render(<BuddySettingsPanel />, { store });
+      render(<BuddySettingsPanel />, { store });
 
-    const digestInput = screen.getByRole("spinbutton", {
-      name: /daily digest hour/i,
-    });
-    fireEvent.change(digestInput, { target: { value: "25" } });
+      const digestInput = screen.getByRole("spinbutton", {
+        name: /daily digest hour/i,
+      });
+      fireEvent.change(digestInput, { target: { value: invalidValue } });
 
-    expect(capturedBodies).toEqual([]);
-    expect(store.getState().buddy.snapshot?.settings.daily_digest_hour).toBe(
-      18,
-    );
-    expect(digestInput).toHaveValue(18);
-  });
+      expect(capturedBodies).toEqual([]);
+      expect(store.getState().buddy.snapshot?.settings.daily_digest_hour).toBe(
+        18,
+      );
+      expect(digestInput).toHaveValue(18);
+    },
+  );
 
   it("mutation success updates Redux settings via onQueryStarted", async () => {
     const updatedSettings = {
@@ -3622,18 +3642,43 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     expect(panel.className).toContain("panelScroll");
   });
 
-  it("BuddyHome CSS uses grid-template-rows on rowFlexBottom and omits max-height media query", async () => {
+  it("rowFlexBottom block bounds bottom row sizing", async () => {
     const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
-    expect(css).toContain("grid-template-rows");
-    expect(css).toContain("rowFlexBottom");
+    const block = readCssBlock(css, ".rowFlexBottom");
+
+    expect(block).toContain("grid-template-rows: clamp(180px, 30vh, 360px)");
+    expect(block).toContain("min-height: 0");
     expect(css).not.toContain("max-height: 860px");
   });
 
-  it("BuddyRecentChats entriesScroll class keeps overflow-y: auto for scrollable list", async () => {
+  it("panelScroll default block clips panel overflow", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+    const block = readCssBlock(css, ".panelScroll");
+
+    expect(block).toContain("overflow: hidden");
+  });
+
+  it("scrollList default block keeps vertical internal scrolling", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+    const block = readCssBlock(css, ".scrollList");
+
+    expect(block).toContain("flex: 1");
+    expect(block).toContain("min-height: 0");
+    expect(block).toContain("overflow-y: auto");
+    expect(block).toContain("overflow-x: hidden");
+  });
+
+  it("BuddyRecentChats entriesScroll keeps internal scrolling at common IDE sizes", async () => {
     const css = await readGuiSource(
       "features/Buddy/BuddyRecentChats.module.css",
     );
-    expect(css).toContain("entriesScroll");
-    expect(css).toContain("overflow-y: auto");
+    const block = readCssBlock(css, ".entriesScroll");
+
+    expect(block).toContain("flex: 1");
+    expect(block).toContain("min-height: 0");
+    expect(block).toContain("overflow-y: auto");
+    expect(block).toContain("overflow-x: hidden");
+    expect(css).not.toContain("@media (max-width: 720px)");
+    expect(css).toContain("@media (max-width: 520px)");
   });
 });

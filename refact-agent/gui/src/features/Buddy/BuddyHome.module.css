@@ -382,6 +382,9 @@
   .row3 {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+@media (max-width: 520px) {
   .rowFlexBottom {
     grid-template-rows: auto;
     min-height: 0;

@@ -140,13 +140,14 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
     void savePromptValue("");
   };
 
-  const handleDigestHourChange = (raw: string) => {
+  const handleDigestHourChange = (raw: string, badInput: boolean) => {
     if (raw === "") {
-      void autoSave({ daily_digest_hour: null });
+      if (!badInput) void autoSave({ daily_digest_hour: null });
       return;
     }
-    const n = parseInt(raw, 10);
-    if (!Number.isNaN(n) && n >= 0 && n <= 23) {
+    if (!/^\d{1,2}$/.test(raw)) return;
+    const n = Number(raw);
+    if (n >= 0 && n <= 23) {
       void autoSave({ daily_digest_hour: n });
     }
   };
@@ -390,7 +391,9 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             max={23}
             className={styles.digestInput}
             value={liveSettings.daily_digest_hour ?? ""}
-            onChange={(e) => handleDigestHourChange(e.target.value)}
+            onChange={(e) =>
+              handleDigestHourChange(e.target.value, e.target.validity.badInput)
+            }
             aria-label="daily digest hour"
             placeholder="off"
             data-testid="buddy-digest-hour"
