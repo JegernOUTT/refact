@@ -1,5 +1,12 @@
 import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
-import { Flex, Skeleton, Spinner, Text, TextField } from "@radix-ui/themes";
+import {
+  Button,
+  Flex,
+  Skeleton,
+  Spinner,
+  Text,
+  TextField,
+} from "@radix-ui/themes";
 import {
   MagnifyingGlassIcon,
   ChevronDownIcon,
@@ -179,7 +186,7 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
     dispatch(push({ name: "chat" }));
   }, [dispatch]);
 
-  const handleEndReached = useCallback(() => {
+  const handleLoadMore = useCallback(() => {
     if (hasMore && !isLoadingMore) {
       void loadMoreAsync();
     }
@@ -274,7 +281,6 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
           ) : (
             <Virtuoso
               data={flatItems}
-              endReached={handleEndReached}
               overscan={200}
               className={styles.virtuosoList}
               itemContent={(_index, item) => {
@@ -308,9 +314,16 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
               components={{
                 Footer: () => (
                   <>
-                    {isLoadingMore && (
+                    {hasMore && !loadMoreError && (
                       <Flex justify="center" py="2">
-                        <Spinner size="2" />
+                        <Button
+                          size="1"
+                          variant="soft"
+                          onClick={handleLoadMore}
+                          disabled={isLoadingMore}
+                        >
+                          {isLoadingMore ? <Spinner size="1" /> : "Load more"}
+                        </Button>
                       </Flex>
                     )}
                     {loadMoreError && (
@@ -321,7 +334,7 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
                           style={{ cursor: "pointer" }}
                           onClick={retryLoadMore}
                         >
-                          Load failed — click to retry
+                          Load failed — retry
                         </Text>
                       </Flex>
                     )}
