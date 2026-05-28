@@ -304,7 +304,11 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
         </div>
         <div className={styles.row}>
           <Text size="2">Humor level</Text>
-          <div className={styles.radioGroup} role="group" aria-label="humor level">
+          <div
+            className={styles.radioGroup}
+            role="group"
+            aria-label="humor level"
+          >
             {(["off", "light", "normal"] as HumorLevel[]).map((lvl) => (
               <button
                 key={lvl}
@@ -322,7 +326,11 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
         </div>
         <div className={styles.row}>
           <Text size="2">Autonomy</Text>
-          <div className={styles.radioGroup} role="group" aria-label="autonomy level">
+          <div
+            className={styles.radioGroup}
+            role="group"
+            aria-label="autonomy level"
+          >
             {(["read_only", "suggest", "safe_auto"] as AutonomyLevel[]).map(
               (lvl) => (
                 <button

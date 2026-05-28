@@ -1698,11 +1698,17 @@ describe("buddySlice reducers", () => {
     const snap = makeSnapshot();
     const initial = reducer(undefined, setBuddySnapshot(snap));
 
-    const disabled: BuddySettings = { ...defaultBuddySettings(), enabled: false };
+    const disabled: BuddySettings = {
+      ...defaultBuddySettings(),
+      enabled: false,
+    };
     const s1 = reducer(initial, updateBuddySettings(disabled));
     expect(s1.snapshot?.enabled).toBe(false);
 
-    const reenabled: BuddySettings = { ...defaultBuddySettings(), enabled: true };
+    const reenabled: BuddySettings = {
+      ...defaultBuddySettings(),
+      enabled: true,
+    };
     const s2 = reducer(s1, updateBuddySettings(reenabled));
     expect(s2.snapshot?.enabled).toBe(true);
   });
