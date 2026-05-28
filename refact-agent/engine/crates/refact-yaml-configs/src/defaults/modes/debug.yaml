@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -128,5 +128,11 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "cron_create"
+      action: ask
+    - match: "process_start"
+      action: ask
+    - match: "process_kill"
+      action: ask
     - match: "*"
       action: auto

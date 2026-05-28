@@ -1,4 +1,4 @@
-schema_version: 15
+schema_version: 16
 id: learn
 title: Learn
 description: Understand code with clear explanations
@@ -46,14 +46,6 @@ prompt: |
   ```
 
   **Related**: [what to explore next]
-
-  ## Delegation with Subagents
-  Use `subagent()` to gather comprehensive context before explaining:
-  - "Understand module" → `subagent(task="Analyze the structure of module X", expected_result="Component breakdown with relationships", tools="tree,cat,search_symbol_definition")`
-  - "Find usage examples" → `subagent(task="Find examples of how X is used", expected_result="Code examples with context", tools="search_pattern,cat")`
-  - "Gather documentation" → `subagent(task="Find documentation about X concept", expected_result="Summary with links", tools="web_search,web")`
-
-  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -112,15 +104,15 @@ tools:
   - cron_create
   - cron_list
   - cron_delete
-  - subagent
-  - agent_list
-  - agent_status
-  - agent_wait
-  - agent_result
-  - agent_cancel
   - ask_questions
 
 tool_confirm:
   rules:
+    - match: "cron_create"
+      action: ask
+    - match: "process_start"
+      action: ask
+    - match: "process_kill"
+      action: ask
     - match: "*"
       action: auto

@@ -1,4 +1,4 @@
-schema_version: 15
+schema_version: 16
 id: review
 title: Review
 description: Autonomous code review with correctness validation
@@ -128,5 +128,11 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "cron_create"
+      action: ask
+    - match: "process_start"
+      action: ask
+    - match: "process_kill"
+      action: ask
     - match: "*"
       action: auto

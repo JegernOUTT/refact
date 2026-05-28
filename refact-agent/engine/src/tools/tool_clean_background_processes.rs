@@ -97,7 +97,7 @@ impl Tool for ToolCleanBackgroundProcesses {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Kill and reap all non-terminal background processes owned by the current chat. Use to clean up after experiments. `scope=chat` (default) is available in normal chats. `scope=all` and `include_services=true` require planner/admin context and cannot be used by normal agents even after confirmation.".to_string(),
+            description: "Kill and reap all non-terminal background processes owned by the current chat. Use to clean up after experiments. `scope=chat` (default) is available in normal chats. `scope=workspace` kills all workspace processes and requires confirmation. `scope=all` and `include_services=true` require planner/admin context and cannot be used by normal agents even after confirmation.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -105,7 +105,7 @@ impl Tool for ToolCleanBackgroundProcesses {
                         "type": "string",
                         "enum": ["chat", "owner", "workspace", "all"],
                         "default": "chat",
-                        "description": "Which set of processes to target. `chat` (default) kills processes owned by the current chat — available in normal chats. `owner` is a compatibility alias for `chat`. `workspace` kills processes in the active workspace. `all` kills every process globally and requires planner/admin context."
+                        "description": "Which set of processes to target. `chat` (default) kills processes owned by the current chat — available in normal chats. `owner` is a compatibility alias for `chat`. `workspace` kills processes in the active workspace and requires confirmation. `all` kills every process globally and requires planner/admin context."
                     },
                     "include_services": {
                         "type": "boolean",
@@ -136,6 +136,8 @@ impl Tool for ToolCleanBackgroundProcesses {
                 scope.as_str(),
                 include_services
             ))
+        } else if scope == CleanScope::Workspace {
+            Ok("clean_background_processes scope=workspace".to_string())
         } else {
             Ok(String::new())
         }
@@ -523,6 +525,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_scope_requires_confirmation() {
+        let (_gcx, ccx) = test_ccx("chat").await;
+        let tool = ToolCleanBackgroundProcesses {
+            config_path: String::new(),
+        };
+
+        let workspace_result = tool
+            .match_against_confirm_deny(ccx.clone(), &args(vec![("scope", json!("workspace"))]))
+            .await
+            .unwrap();
+        let chat_result = tool
+            .match_against_confirm_deny(ccx, &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(workspace_result.result, MatchConfirmDenyResult::CONFIRMATION);
+        assert_eq!(chat_result.result, MatchConfirmDenyResult::PASS);
+    }
+
+    #[tokio::test]
     async fn global_and_service_cleanup_require_confirmation() {
         let (_gcx, ccx) = test_ccx("chat").await;
         let tool = ToolCleanBackgroundProcesses {
@@ -613,12 +635,21 @@ mod tests {
             "tool description must mention planner restriction: {}",
             desc.description
         );
+        assert!(
+            desc.description.contains("confirmation") || desc.description.contains("confirm"),
+            "tool description must mention workspace confirmation: {}",
+            desc.description
+        );
         let scope_desc = desc.input_schema["properties"]["scope"]["description"]
             .as_str()
             .unwrap();
         assert!(
             scope_desc.contains("planner"),
             "scope description must mention planner restriction: {scope_desc}"
+        );
+        assert!(
+            scope_desc.contains("confirmation") || scope_desc.contains("confirm"),
+            "scope description must mention workspace confirmation: {scope_desc}"
         );
         let include_services_desc = desc.input_schema["properties"]["include_services"]["description"]
             .as_str()
