@@ -11,6 +11,7 @@ import {
   ChatMessages,
   DiffMessage,
   EventMessage,
+  getPlanMetadata,
   PlanMessage,
   ToolResult,
   ToolMessage,
@@ -214,11 +215,24 @@ export const selectPlanHistory = (
   state: RootState,
   threadId: string,
 ): PlanMessage[] => {
-  const planMessages = selectMessagesById(state, threadId).filter(
-    isPlanMessage,
-  );
+  const planMessages = selectMessagesById(state, threadId)
+    .map((message, index) => ({ message, index }))
+    .filter((entry): entry is { message: PlanMessage; index: number } =>
+      isPlanMessage(entry.message),
+    );
   if (planMessages.length === 0) return EMPTY_PLAN_MESSAGES;
-  return [...planMessages].sort((a, b) => b.version - a.version);
+  return [...planMessages]
+    .sort((a, b) => {
+      const leftVersion = getPlanMetadata(a.message).version;
+      const rightVersion = getPlanMetadata(b.message).version;
+      if (leftVersion !== undefined && rightVersion !== undefined) {
+        return rightVersion - leftVersion || b.index - a.index;
+      }
+      if (leftVersion !== undefined) return -1;
+      if (rightVersion !== undefined) return 1;
+      return b.index - a.index;
+    })
+    .map((entry) => entry.message);
 };
 
 export const selectCurrentPlan = (

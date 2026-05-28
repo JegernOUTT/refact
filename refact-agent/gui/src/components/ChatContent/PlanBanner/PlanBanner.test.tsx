@@ -19,9 +19,13 @@ function makePlan(
     role: "plan",
     message_id: `plan-${version}`,
     content: `## Plan ${version}\n\n- item ${version}`,
-    mode: "agent",
-    version,
-    created_at_ms: nowMs - 2 * 60_000,
+    extra: {
+      plan: {
+        mode: "agent",
+        version,
+        created_at_ms: nowMs - 2 * 60_000,
+      },
+    },
     ...overrides,
   };
 }
@@ -107,6 +111,19 @@ describe("PlanBanner", () => {
     expect(screen.getByText("📋 Plan — agent · v1 · 2m ago")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Plan 1" })).toBeTruthy();
     expect(screen.getByText("item 1")).toBeTruthy();
+  });
+
+  it("renders graceful fallbacks when plan metadata fields are missing", () => {
+    renderPlanBanner([
+      makePlan(1, {
+        extra: { plan: {} },
+      }),
+    ]);
+
+    const header = screen.getByText("📋 Plan — Mode unknown · v? · recently");
+    expect(header.textContent).not.toContain("undefined");
+    expect(header.textContent).not.toContain("vundefined");
+    expect(header.textContent).not.toContain("NaN");
   });
 
   it("toggle collapse hides body, persists in localStorage, and restores on remount", () => {

@@ -1,6 +1,9 @@
 import React from "react";
 import { Box, Button, Dialog, Flex, Text } from "@radix-ui/themes";
-import type { PlanMessage } from "../../../services/refact/types";
+import {
+  getPlanMetadata,
+  type PlanMessage,
+} from "../../../services/refact/types";
 import { Markdown } from "../../Markdown";
 import styles from "./PlanBanner.module.css";
 
@@ -15,6 +18,14 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
   onOpenChange,
   plans,
 }) => {
+  const planTitle = (plan: PlanMessage): string => {
+    const metadata = getPlanMetadata(plan);
+    const mode = metadata.mode ?? "Mode unknown";
+    const version =
+      metadata.version !== undefined ? `v${metadata.version}` : "v?";
+    return `📋 Plan — ${mode} · ${version}`;
+  };
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content className={styles.modalContent}>
@@ -24,9 +35,9 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
         </Dialog.Description>
 
         <Flex direction="column" gap="3" mt="3" className={styles.historyList}>
-          {plans.map((plan) => (
+          {plans.map((plan, index) => (
             <Box
-              key={plan.message_id ?? `${plan.version}-${plan.created_at_ms}`}
+              key={plan.message_id ?? `${index}-${plan.content}`}
               className={styles.historyItem}
             >
               <Text
@@ -35,7 +46,7 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
                 weight="bold"
                 className={styles.historyTitle}
               >
-                📋 Plan — {plan.mode} · v{plan.version}
+                {planTitle(plan)}
               </Text>
               <Box className={styles.historyBody}>
                 <Markdown>{plan.content}</Markdown>

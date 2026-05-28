@@ -91,9 +91,13 @@ function makePlanMessage(
   return {
     role: "plan",
     content: `plan ${version}`,
-    mode: "agent",
-    version,
-    created_at_ms: version * 1000,
+    extra: {
+      plan: {
+        mode: "agent",
+        version,
+        created_at_ms: version * 1000,
+      },
+    },
     ...overrides,
   };
 }

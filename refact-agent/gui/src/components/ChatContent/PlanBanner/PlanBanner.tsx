@@ -10,6 +10,7 @@ import { Markdown } from "../../Markdown";
 import { PlanEditor } from "./PlanEditor";
 import { PlanHistoryModal } from "./PlanHistoryModal";
 import styles from "./PlanBanner.module.css";
+import { getPlanMetadata } from "../../../services/refact/types";
 
 type PlanBannerProps = {
   threadId: string;
@@ -19,8 +20,13 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-function humanizedAgeFrom(createdAtMs: number, nowMs: number): string {
+function humanizedAgeFrom(
+  createdAtMs: number | undefined,
+  nowMs: number,
+): string {
+  if (createdAtMs === undefined) return "recently";
   const ageMs = Math.max(0, nowMs - createdAtMs);
+  if (!Number.isFinite(ageMs)) return "recently";
   if (ageMs < MINUTE_MS) return "just now";
   if (ageMs < HOUR_MS) return `${Math.floor(ageMs / MINUTE_MS)}m ago`;
   if (ageMs < DAY_MS) return `${Math.floor(ageMs / HOUR_MS)}h ago`;
@@ -60,6 +66,10 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
   const [editorOpen, setEditorOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const metadata = useMemo(
+    () => (plan ? getPlanMetadata(plan) : undefined),
+    [plan],
+  );
 
   useEffect(() => {
     setCollapsed(readCollapsed(threadId));
@@ -67,15 +77,18 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
 
   useEffect(() => {
     setNowMs(Date.now());
-  }, [plan?.created_at_ms]);
+  }, [metadata?.created_at_ms]);
 
   const header = useMemo(() => {
     if (!plan) return "";
-    return `📋 Plan — ${plan.mode} · v${plan.version} · ${humanizedAgeFrom(
-      plan.created_at_ms,
+    const mode = metadata?.mode ?? "Mode unknown";
+    const version =
+      metadata?.version !== undefined ? `v${metadata.version}` : "v?";
+    return `📋 Plan — ${mode} · ${version} · ${humanizedAgeFrom(
+      metadata?.created_at_ms,
       nowMs,
     )}`;
-  }, [nowMs, plan]);
+  }, [metadata, nowMs, plan]);
 
   if (!plan) return null;
 

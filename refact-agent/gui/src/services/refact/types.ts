@@ -487,14 +487,41 @@ export type EventMessage = MessageEnvelope & {
   payload?: unknown;
 };
 
-export type PlanMessage = MessageEnvelope & {
+export type PlanMetadata = {
+  mode?: string;
+  version?: number;
+  created_at_ms?: number;
+  supersedes?: string | null;
+};
+
+export type PlanMessage = Omit<MessageEnvelope, "extra"> & {
   role: "plan";
   content: string;
-  mode: string;
-  version: number;
-  created_at_ms: number;
-  supersedes?: string;
+  extra?: Record<string, unknown> & { plan?: unknown };
 };
+
+export function getPlanMetadata(message: PlanMessage): PlanMetadata {
+  const rawPlan = message.extra?.plan;
+  if (!isRecord(rawPlan)) return {};
+
+  const metadata: PlanMetadata = {};
+  if (typeof rawPlan.mode === "string" && rawPlan.mode.length > 0) {
+    metadata.mode = rawPlan.mode;
+  }
+  if (typeof rawPlan.version === "number" && Number.isFinite(rawPlan.version)) {
+    metadata.version = rawPlan.version;
+  }
+  if (
+    typeof rawPlan.created_at_ms === "number" &&
+    Number.isFinite(rawPlan.created_at_ms)
+  ) {
+    metadata.created_at_ms = rawPlan.created_at_ms;
+  }
+  if (typeof rawPlan.supersedes === "string" || rawPlan.supersedes === null) {
+    metadata.supersedes = rawPlan.supersedes;
+  }
+  return metadata;
+}
 
 export function isSummarizationMessage(
   message: ChatMessage,
