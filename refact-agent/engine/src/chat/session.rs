@@ -1535,24 +1535,102 @@ async fn cleanup_idle_session(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
     super::trajectories::maybe_save_trajectory(app, session_arc.clone()).await;
+    remove_idle_session_if_safe(sessions, chat_id, session_arc).await
+}
 
-    let should_remove = {
-        let mut session = session_arc.lock().await;
-        close_idle_session_for_cleanup(&mut session)
-    };
+async fn remove_idle_session_if_safe(
+    sessions: &SessionsMap,
+    chat_id: &str,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> bool {
+    const MAX_REMOVAL_STRONG_REFS: usize = 3;
 
-    if !should_remove {
+    let mut sessions_write = sessions.write().await;
+    let current_matches = sessions_write
+        .get(chat_id)
+        .map_or(false, |current| Arc::ptr_eq(current, &session_arc));
+    if !current_matches {
         return false;
     }
 
-    let mut sessions_write = sessions.write().await;
-    if let Some(current) = sessions_write.get(chat_id) {
-        if Arc::ptr_eq(current, &session_arc) {
-            sessions_write.remove(chat_id);
-            return true;
+    let removal_snapshot = {
+        let Ok(mut session) = session_arc.try_lock() else {
+            return false;
+        };
+        let max_refs = MAX_REMOVAL_STRONG_REFS
+            + usize::from(session.queue_processor_running.load(Ordering::SeqCst));
+        if Arc::strong_count(&session_arc) > max_refs {
+            return false;
         }
+        if !close_idle_session_for_cleanup(&mut session) {
+            return false;
+        }
+        CleanupRemovalSnapshot::capture(&session)
+    };
+
+    let safe_to_remove = {
+        let Ok(session) = session_arc.try_lock() else {
+            return false;
+        };
+        removal_snapshot.still_matches(&session)
+    };
+    if safe_to_remove {
+        sessions_write.remove(chat_id);
+        return true;
     }
     false
+}
+
+struct CleanupRemovalSnapshot {
+    runtime_state: SessionState,
+    runtime_paused: bool,
+    runtime_error: Option<String>,
+    pause_reasons_len: usize,
+    messages_len: usize,
+    command_queue_len: usize,
+    event_seq: u64,
+    trajectory_version: u64,
+    last_activity: Instant,
+    draft_message_present: bool,
+    pending_browser_message_present: bool,
+    post_tool_side_effects_len: usize,
+}
+
+impl CleanupRemovalSnapshot {
+    fn capture(session: &ChatSession) -> Self {
+        Self {
+            runtime_state: session.runtime.state,
+            runtime_paused: session.runtime.paused,
+            runtime_error: session.runtime.error.clone(),
+            pause_reasons_len: session.runtime.pause_reasons.len(),
+            messages_len: session.messages.len(),
+            command_queue_len: session.command_queue.len(),
+            event_seq: session.event_seq,
+            trajectory_version: session.trajectory_version,
+            last_activity: session.last_activity,
+            draft_message_present: session.draft_message.is_some(),
+            pending_browser_message_present: session.pending_browser_message.is_some(),
+            post_tool_side_effects_len: session.post_tool_side_effects.len(),
+        }
+    }
+
+    fn still_matches(&self, session: &ChatSession) -> bool {
+        session.closed
+            && session.closed_flag.load(Ordering::Relaxed)
+            && session.is_idle_for_cleanup()
+            && session.runtime.state == self.runtime_state
+            && session.runtime.paused == self.runtime_paused
+            && session.runtime.error == self.runtime_error
+            && session.runtime.pause_reasons.len() == self.pause_reasons_len
+            && session.messages.len() == self.messages_len
+            && session.command_queue.len() == self.command_queue_len
+            && session.event_seq == self.event_seq
+            && session.trajectory_version == self.trajectory_version
+            && session.last_activity == self.last_activity
+            && session.draft_message.is_some() == self.draft_message_present
+            && session.pending_browser_message.is_some() == self.pending_browser_message_present
+            && session.post_tool_side_effects.len() == self.post_tool_side_effects_len
+    }
 }
 
 fn close_idle_session_for_cleanup(session: &mut ChatSession) -> bool {
@@ -2674,6 +2752,90 @@ mod tests {
         touched.last_activity = Instant::now();
         assert!(!close_idle_session_for_cleanup(&mut touched));
         assert!(!touched.closed);
+    }
+
+    #[tokio::test]
+    async fn cleanup_final_removal_recheck_keeps_queued_command() {
+        let sessions = create_sessions_map();
+        let chat_id = "cleanup-final-recheck-queued";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "hello".to_string()));
+            session.last_activity =
+                Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
+        }
+        sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        {
+            let mut session = session_arc.lock().await;
+            session.enqueue_priority_command(CommandRequest {
+                client_request_id: "queued-before-removal".to_string(),
+                priority: false,
+                command: ChatCommand::Regenerate {},
+            });
+        }
+
+        assert!(
+            !remove_idle_session_if_safe(
+                &sessions,
+                chat_id,
+                session_arc.clone(),
+            )
+            .await
+        );
+        assert!(sessions.read().await.get(chat_id).is_some());
+        let session = session_arc.lock().await;
+        assert!(session
+            .command_queue
+            .iter()
+            .any(|request| request.client_request_id == "queued-before-removal"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_final_removal_recheck_keeps_outstanding_session_ref() {
+        let sessions = create_sessions_map();
+        let chat_id = "cleanup-final-recheck-ref";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "hello".to_string()));
+            session.last_activity =
+                Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
+        }
+        sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+        let delayed_enqueue_ref = session_arc.clone();
+
+        assert!(
+            !remove_idle_session_if_safe(
+                &sessions,
+                chat_id,
+                session_arc.clone(),
+            )
+            .await
+        );
+
+        {
+            let mut session = delayed_enqueue_ref.lock().await;
+            session.enqueue_priority_command(CommandRequest {
+                client_request_id: "queued-from-outstanding-ref".to_string(),
+                priority: false,
+                command: ChatCommand::Regenerate {},
+            });
+        }
+
+        let session = sessions.read().await.get(chat_id).cloned().unwrap();
+        let session = session.lock().await;
+        assert!(session
+            .command_queue
+            .iter()
+            .any(|request| request.client_request_id == "queued-from-outstanding-ref"));
     }
 
     #[test]
