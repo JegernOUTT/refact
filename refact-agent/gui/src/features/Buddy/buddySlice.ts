@@ -303,6 +303,31 @@ export function normalizeBuddySettings(
   };
 }
 
+export type BuddySettingsPatch = Partial<BuddySettings> & {
+  clear_personality_prompt?: boolean;
+};
+
+function applyBuddySettingsPatch(
+  current: BuddySettings,
+  patch: BuddySettingsPatch,
+): BuddySettings {
+  const { clear_personality_prompt, observers, ...settingsPatch } = patch;
+  const next: Partial<BuddySettings> = {
+    ...current,
+    ...settingsPatch,
+  };
+  if (clear_personality_prompt) {
+    next.personality_prompt = null;
+  }
+  if (observers) {
+    next.observers = {
+      ...current.observers,
+      ...observers,
+    };
+  }
+  return normalizeBuddySettings(next);
+}
+
 export function defaultBuddyPulse(): BuddyPulse {
   return {
     generated_at: null,
@@ -570,6 +595,16 @@ export const buddySlice = createSlice({
       // If snapshot is null but buddy is being re-enabled, wait for the next
       // StateUpdated event which will bootstrap the full snapshot via updateBuddyState.
     },
+    patchBuddySettings: (state, action: PayloadAction<BuddySettingsPatch>) => {
+      if (state.snapshot) {
+        const normalized = applyBuddySettingsPatch(
+          state.snapshot.settings,
+          action.payload,
+        );
+        state.snapshot.settings = normalized;
+        state.snapshot.enabled = normalized.enabled;
+      }
+    },
     setBuddyConversations: (
       state,
       action: PayloadAction<BuddyConversationEntry[]>,
@@ -826,6 +861,7 @@ export const {
   addBuddySuggestion,
   dismissBuddySuggestion,
   updateBuddySettings,
+  patchBuddySettings,
   setBuddyConversations,
   addBuddyDiagnostic,
   enqueueRuntimeEvent,

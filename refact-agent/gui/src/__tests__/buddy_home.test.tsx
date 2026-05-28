@@ -2513,9 +2513,63 @@ describe("BuddySettingsPanel_autosave", () => {
     });
     await user.click(quietSwitch);
 
+    expect(quietSwitch).toBeChecked();
     await waitFor(() => {
-      expect(capturedBody).toMatchObject({ quiet_mode: true });
+      expect(capturedBody).toEqual({ quiet_mode: true });
     });
+  });
+
+  it("rapid switch toggles keep the last value after out-of-order responses", async () => {
+    const capturedBodies: unknown[] = [];
+    const responseResolvers: ((settings: BuddySnapshot["settings"]) => void)[] =
+      [];
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        async ({ request }) => {
+          capturedBodies.push(await request.json());
+          const settings = await new Promise<BuddySnapshot["settings"]>(
+            (resolve) => responseResolvers.push(resolve),
+          );
+          return HttpResponse.json(settings);
+        },
+      ),
+    );
+
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    const { user } = render(<BuddySettingsPanel />, { store });
+
+    const quietSwitch = await screen.findByRole("switch", {
+      name: /quiet mode/i,
+    });
+    await user.click(quietSwitch);
+    await waitFor(() => {
+      expect(capturedBodies).toHaveLength(1);
+    });
+    expect(quietSwitch).toBeChecked();
+
+    await user.click(quietSwitch);
+    await waitFor(() => {
+      expect(capturedBodies).toHaveLength(2);
+    });
+    expect(quietSwitch).not.toBeChecked();
+    expect(capturedBodies).toEqual([
+      { quiet_mode: true },
+      { quiet_mode: false },
+    ]);
+
+    responseResolvers[1]?.({ ...makeSnapshot().settings, quiet_mode: false });
+    await waitFor(() => {
+      expect(store.getState().buddy.snapshot?.settings.quiet_mode).toBe(false);
+    });
+
+    responseResolvers[0]?.({ ...makeSnapshot().settings, quiet_mode: true });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(store.getState().buddy.snapshot?.settings.quiet_mode).toBe(false);
+    expect(quietSwitch).not.toBeChecked();
   });
 
   it("clicking a segmented enum button immediately sends partial patch", async () => {
@@ -2538,11 +2592,89 @@ describe("BuddySettingsPanel_autosave", () => {
 
     const { user } = render(<BuddySettingsPanel />, { store });
 
-    await user.click(screen.getByRole("button", { name: "normal" }));
+    const normalButton = screen.getByRole("button", { name: "normal" });
+    await user.click(normalButton);
 
+    expect(normalButton).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => {
-      expect(capturedBody).toMatchObject({ humor_level: "normal" });
+      expect(capturedBody).toEqual({ humor_level: "normal" });
     });
+  });
+
+  it("daily digest saves valid and empty partial patches", async () => {
+    const capturedBodies: unknown[] = [];
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        async ({ request }) => {
+          const body = await request.json();
+          capturedBodies.push(body);
+          return HttpResponse.json({
+            ...makeSnapshot().settings,
+            daily_digest_hour:
+              typeof body === "object" &&
+              body !== null &&
+              "daily_digest_hour" in body
+                ? body.daily_digest_hour
+                : makeSnapshot().settings.daily_digest_hour,
+          });
+        },
+      ),
+    );
+
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    render(<BuddySettingsPanel />, { store });
+
+    const digestInput = screen.getByRole("spinbutton", {
+      name: /daily digest hour/i,
+    });
+    fireEvent.change(digestInput, { target: { value: "7" } });
+
+    expect(digestInput).toHaveValue(7);
+    await waitFor(() => {
+      expect(capturedBodies).toEqual([{ daily_digest_hour: 7 }]);
+    });
+
+    fireEvent.change(digestInput, { target: { value: "" } });
+
+    expect(digestInput).toHaveValue(null);
+    await waitFor(() => {
+      expect(capturedBodies).toEqual([
+        { daily_digest_hour: 7 },
+        { daily_digest_hour: null },
+      ]);
+    });
+  });
+
+  it("daily digest invalid value does not save or clobber usable state", async () => {
+    const capturedBodies: unknown[] = [];
+    server.use(
+      http.post(
+        "http://127.0.0.1:8001/v1/buddy/settings",
+        async ({ request }) => {
+          capturedBodies.push(await request.json());
+          return HttpResponse.json(makeSnapshot().settings);
+        },
+      ),
+    );
+
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    render(<BuddySettingsPanel />, { store });
+
+    const digestInput = screen.getByRole("spinbutton", {
+      name: /daily digest hour/i,
+    });
+    fireEvent.change(digestInput, { target: { value: "25" } });
+
+    expect(capturedBodies).toEqual([]);
+    expect(store.getState().buddy.snapshot?.settings.daily_digest_hour).toBe(
+      18,
+    );
+    expect(digestInput).toHaveValue(18);
   });
 
   it("mutation success updates Redux settings via onQueryStarted", async () => {
@@ -2599,7 +2731,7 @@ describe("BuddySettingsPanel_autosave", () => {
       await vi.advanceTimersByTimeAsync(750);
 
       await waitFor(() => {
-        expect(capturedBody).toMatchObject({
+        expect(capturedBody).toEqual({
           personality_prompt: "Be more chaotic",
         });
       });
@@ -2632,7 +2764,7 @@ describe("BuddySettingsPanel_autosave", () => {
     fireEvent.blur(textarea);
 
     await waitFor(() => {
-      expect(capturedBody).toMatchObject({ personality_prompt: "Be calm" });
+      expect(capturedBody).toEqual({ personality_prompt: "Be calm" });
     });
   });
 
@@ -2821,7 +2953,7 @@ describe("BuddySettingsPanel_autosave", () => {
     await user.click(clearBtn);
 
     await waitFor(() => {
-      expect(capturedBody).toMatchObject({ clear_personality_prompt: true });
+      expect(capturedBody).toEqual({ clear_personality_prompt: true });
     });
   });
 
@@ -2921,9 +3053,7 @@ describe("BuddySettingsPanel_renders_all_settings", () => {
     expect(
       screen.getByRole("button", { name: "read_only" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "suggest" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "suggest" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "safe_auto" }),
     ).toBeInTheDocument();
@@ -3177,7 +3307,9 @@ describe("BuddyHome_disabled_state", () => {
 
     const { user } = render(<BuddyHome />, { store });
 
-    const settingsBtn = await screen.findByRole("button", { name: /settings/i });
+    const settingsBtn = await screen.findByRole("button", {
+      name: /settings/i,
+    });
     expect(settingsBtn).toBeInTheDocument();
 
     await user.click(settingsBtn);
@@ -3325,9 +3457,7 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
   });
 
   it("BuddyHome CSS uses grid-template-rows on rowFlexBottom and omits max-height media query", async () => {
-    const css = await readGuiSource(
-      "features/Buddy/BuddyHome.module.css",
-    );
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
     expect(css).toContain("grid-template-rows");
     expect(css).toContain("rowFlexBottom");
     expect(css).not.toContain("max-height: 860px");

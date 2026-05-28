@@ -17,6 +17,7 @@ import type {
 } from "../../features/Buddy/types";
 import {
   addDraft,
+  patchBuddySettings,
   removeDraft,
   replaceOpportunities,
   updateBuddySettings as updateBuddySettingsAction,
@@ -32,6 +33,88 @@ type BuddyApiState = {
 type BuddySettingsUpdateRequest = Partial<BuddySettings> & {
   clear_personality_prompt?: boolean;
 };
+
+const BUDDY_SETTINGS_PATCH_KEYS = [
+  "enabled",
+  "auto_diagnostics",
+  "auto_issue_creation",
+  "personality_prompt",
+  "autonomous_chats_enabled",
+  "proactive_enabled",
+  "message_observation_enabled",
+  "chat_reactions_enabled",
+  "housekeeping_enabled",
+  "humor_enabled",
+  "humor_level",
+  "autonomy_level",
+  "quiet_mode",
+  "daily_digest_hour",
+  "observers",
+  "clear_personality_prompt",
+] as const satisfies readonly (keyof BuddySettingsUpdateRequest)[];
+
+const buddySettingsRequestSeqByKey = new Map<
+  keyof BuddySettingsUpdateRequest,
+  number
+>();
+const buddySettingsPatchByKey = new Map<
+  keyof BuddySettingsUpdateRequest,
+  BuddySettingsUpdateRequest
+>();
+let buddySettingsRequestSeq = 0;
+
+function getBuddySettingsPatchKeys(
+  settings: BuddySettingsUpdateRequest,
+): (keyof BuddySettingsUpdateRequest)[] {
+  const keys = BUDDY_SETTINGS_PATCH_KEYS.filter(
+    (key) =>
+      key !== "clear_personality_prompt" &&
+      Object.prototype.hasOwnProperty.call(settings, key),
+  );
+  if (
+    Object.prototype.hasOwnProperty.call(settings, "clear_personality_prompt")
+  ) {
+    keys.push("personality_prompt");
+  }
+  return keys;
+}
+
+function mergeBuddySettingsPatch(
+  left: BuddySettingsUpdateRequest,
+  right: BuddySettingsUpdateRequest,
+): BuddySettingsUpdateRequest {
+  const next: BuddySettingsUpdateRequest = { ...left, ...right };
+  if (right.observers) {
+    next.observers = { ...left.observers, ...right.observers };
+  }
+  if (Object.prototype.hasOwnProperty.call(right, "clear_personality_prompt")) {
+    delete next.personality_prompt;
+  }
+  if (Object.prototype.hasOwnProperty.call(right, "personality_prompt")) {
+    delete next.clear_personality_prompt;
+  }
+  return next;
+}
+
+function getNewerBuddySettingsPatch(
+  requestSeq: number,
+): BuddySettingsUpdateRequest | null {
+  const newerPatches = [...buddySettingsRequestSeqByKey.entries()]
+    .filter(([, seq]) => seq > requestSeq)
+    .sort((left, right) => left[1] - right[1])
+    .flatMap(([key, seq]) => {
+      const patch = buddySettingsPatchByKey.get(key);
+      return patch ? [{ key, seq, patch }] : [];
+    });
+  const seenSeqs = new Set<number>();
+  let merged: BuddySettingsUpdateRequest | null = null;
+  for (const { seq, patch } of newerPatches) {
+    if (seenSeqs.has(seq)) continue;
+    seenSeqs.add(seq);
+    merged = mergeBuddySettingsPatch(merged ?? {}, patch);
+  }
+  return merged;
+}
 
 export type BuddyConversationCreateRequest = {
   title?: string;
@@ -293,10 +376,27 @@ export const buddyApi = createApi({
         return { data: result.data as BuddySettings };
       },
       invalidatesTags: ["BuddySnapshot"],
-      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+      async onQueryStarted(arg, { dispatch, queryFulfilled }) {
+        const patchKeys = getBuddySettingsPatchKeys(arg);
+        const requestSeq = buddySettingsRequestSeq + 1;
+        buddySettingsRequestSeq = requestSeq;
+        for (const key of patchKeys) {
+          buddySettingsRequestSeqByKey.set(key, requestSeq);
+          buddySettingsPatchByKey.set(key, arg);
+        }
+        dispatch(patchBuddySettings(arg));
         try {
           const { data } = await queryFulfilled;
+          if (
+            patchKeys.some(
+              (key) => buddySettingsRequestSeqByKey.get(key) !== requestSeq,
+            )
+          ) {
+            return;
+          }
           dispatch(updateBuddySettingsAction(data));
+          const newerPatch = getNewerBuddySettingsPatch(requestSeq);
+          if (newerPatch) dispatch(patchBuddySettings(newerPatch));
         } catch {
           return;
         }
