@@ -20,6 +20,8 @@ import {
   patchBuddySettings,
   removeDraft,
   replaceOpportunities,
+  selectBuddySettings,
+  type BuddySliceState,
   updateBuddySettings as updateBuddySettingsAction,
 } from "../../features/Buddy/buddySlice";
 
@@ -114,6 +116,50 @@ function getNewerBuddySettingsPatch(
     merged = mergeBuddySettingsPatch(merged ?? {}, patch);
   }
   return merged;
+}
+
+function getBuddySettingsRollbackPatch(
+  settings: BuddySettings,
+  keys: (keyof BuddySettingsUpdateRequest)[],
+): BuddySettingsUpdateRequest {
+  const patch: BuddySettingsUpdateRequest = {};
+  if (keys.includes("enabled")) patch.enabled = settings.enabled;
+  if (keys.includes("auto_diagnostics")) {
+    patch.auto_diagnostics = settings.auto_diagnostics;
+  }
+  if (keys.includes("auto_issue_creation")) {
+    patch.auto_issue_creation = settings.auto_issue_creation;
+  }
+  if (keys.includes("personality_prompt")) {
+    patch.personality_prompt = settings.personality_prompt;
+  }
+  if (keys.includes("autonomous_chats_enabled")) {
+    patch.autonomous_chats_enabled = settings.autonomous_chats_enabled;
+  }
+  if (keys.includes("proactive_enabled")) {
+    patch.proactive_enabled = settings.proactive_enabled;
+  }
+  if (keys.includes("message_observation_enabled")) {
+    patch.message_observation_enabled = settings.message_observation_enabled;
+  }
+  if (keys.includes("chat_reactions_enabled")) {
+    patch.chat_reactions_enabled = settings.chat_reactions_enabled;
+  }
+  if (keys.includes("housekeeping_enabled")) {
+    patch.housekeeping_enabled = settings.housekeeping_enabled;
+  }
+  if (keys.includes("humor_enabled"))
+    patch.humor_enabled = settings.humor_enabled;
+  if (keys.includes("humor_level")) patch.humor_level = settings.humor_level;
+  if (keys.includes("autonomy_level")) {
+    patch.autonomy_level = settings.autonomy_level;
+  }
+  if (keys.includes("quiet_mode")) patch.quiet_mode = settings.quiet_mode;
+  if (keys.includes("daily_digest_hour")) {
+    patch.daily_digest_hour = settings.daily_digest_hour;
+  }
+  if (keys.includes("observers")) patch.observers = { ...settings.observers };
+  return patch;
 }
 
 export type BuddyConversationCreateRequest = {
@@ -376,7 +422,10 @@ export const buddyApi = createApi({
         return { data: result.data as BuddySettings };
       },
       invalidatesTags: ["BuddySnapshot"],
-      async onQueryStarted(arg, { dispatch, queryFulfilled }) {
+      async onQueryStarted(arg, { dispatch, getState, queryFulfilled }) {
+        const previousSettings = selectBuddySettings(
+          getState() as unknown as { buddy: BuddySliceState },
+        );
         const patchKeys = getBuddySettingsPatchKeys(arg);
         const requestSeq = buddySettingsRequestSeq + 1;
         buddySettingsRequestSeq = requestSeq;
@@ -398,7 +447,18 @@ export const buddyApi = createApi({
           const newerPatch = getNewerBuddySettingsPatch(requestSeq);
           if (newerPatch) dispatch(patchBuddySettings(newerPatch));
         } catch {
-          return;
+          if (
+            previousSettings &&
+            patchKeys.every(
+              (key) => buddySettingsRequestSeqByKey.get(key) === requestSeq,
+            )
+          ) {
+            dispatch(
+              patchBuddySettings(
+                getBuddySettingsRollbackPatch(previousSettings, patchKeys),
+              ),
+            );
+          }
         }
       },
     }),

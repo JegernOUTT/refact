@@ -3006,6 +3006,71 @@ describe("BuddySettingsPanel_autosave", () => {
       window.removeEventListener("unhandledrejection", unhandled);
     }
   });
+
+  it("failed switch autosave rolls back the optimistic Redux and control state", async () => {
+    server.use(
+      http.post("http://127.0.0.1:8001/v1/buddy/settings", () =>
+        HttpResponse.json({ error: "nope" }, { status: 500 }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    const { user } = render(<BuddySettingsPanel />, { store });
+
+    const housekeepingSwitch = screen.getByRole("switch", {
+      name: /housekeeping enabled/i,
+    });
+    await user.click(housekeepingSwitch);
+
+    await waitFor(() => {
+      expect(
+        store.getState().buddy.snapshot?.settings.housekeeping_enabled,
+      ).toBe(true);
+    });
+    expect(housekeepingSwitch).toBeChecked();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed");
+  });
+
+  it("failed enabled autosave restores Buddy Home instead of trapping disabled UI", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([]),
+      ),
+      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+      http.post("http://127.0.0.1:8001/v1/buddy/settings", () =>
+        HttpResponse.json({ error: "nope" }, { status: 500 }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    await user.click(screen.getByRole("button", { name: /settings/i }));
+    await user.click(screen.getByRole("switch", { name: /buddy enabled/i }));
+
+    await waitFor(() => {
+      expect(store.getState().buddy.snapshot?.settings.enabled).toBe(true);
+    });
+    expect(store.getState().buddy.snapshot?.enabled).toBe(true);
+    expect(screen.getByTestId("buddy-home-content")).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-home-disabled")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: /buddy enabled/i }),
+    ).toBeChecked();
+  });
 });
 
 describe("BuddySettingsPanel_renders_all_settings", () => {
@@ -3325,6 +3390,43 @@ describe("BuddyHome_disabled_state", () => {
     );
     expect(settingsSection).toBeInTheDocument();
     expect(settingsSection).not.toHaveAttribute("style");
+  });
+
+  it("settings.enabled false shows disabled UI when top-level enabled is stale", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(undefined, {
+          enabled: true,
+          settings: { ...makeSnapshot().settings, enabled: false },
+        }),
+      ),
+    );
+
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+
+    expect(
+      await screen.findByTestId("buddy-home-disabled"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-home-content")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /settings/i }));
+
+    const enabledSwitch = await screen.findByRole("switch", {
+      name: /buddy enabled/i,
+    });
+    expect(enabledSwitch).not.toBeChecked();
   });
 });
 

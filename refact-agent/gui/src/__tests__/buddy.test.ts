@@ -1713,6 +1713,23 @@ describe("buddySlice reducers", () => {
     expect(s2.snapshot?.enabled).toBe(true);
   });
 
+  test("setBuddySnapshot treats settings.enabled false as disabled when top-level enabled is stale", () => {
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(
+        makeSnapshot({
+          enabled: true,
+          settings: { ...defaultBuddySettings(), enabled: false },
+        }),
+      ),
+    );
+    const rootState = { buddy: state };
+
+    expect(state.snapshot?.enabled).toBe(false);
+    expect(state.snapshot?.settings.enabled).toBe(false);
+    expect(selectIsBuddyEnabled(rootState)).toBe(false);
+  });
+
   test("normalize_settings_deep_merges_observers", () => {
     const snap: BuddySnapshot = {
       state: makeState(),

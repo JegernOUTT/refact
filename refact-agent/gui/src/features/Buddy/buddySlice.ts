@@ -417,9 +417,13 @@ function normalizeBuddySnapshot(snapshot: BuddySnapshot): BuddySnapshot {
   const normalizedState = normalizeBuddyState(snapshot.state);
   const opportunities = snapshot.opportunities ?? normalizedState.opportunities;
   normalizedState.opportunities = opportunities;
+  const normalizedSettings = normalizeBuddySettings(snapshot.settings);
+  const enabled = snapshot.enabled !== false && normalizedSettings.enabled;
+  if (!enabled) normalizedSettings.enabled = false;
   return {
     ...snapshot,
-    settings: normalizeBuddySettings(snapshot.settings),
+    enabled,
+    settings: normalizedSettings,
     state: normalizedState,
     recent_diagnostics: snapshot.recent_diagnostics ?? [],
     runtime_queue: snapshot.runtime_queue ?? [],
@@ -836,7 +840,8 @@ export const buddySlice = createSlice({
     selectBuddySuggestions: (state) =>
       state.snapshot?.state.suggestion_state ?? EMPTY_BUDDY_SUGGESTIONS,
     selectBuddyConversations: (state) => state.conversations,
-    selectIsBuddyEnabled: (state) => state.snapshot?.enabled ?? false,
+    selectIsBuddyEnabled: (state) =>
+      state.snapshot?.enabled === true && state.snapshot.settings.enabled,
     selectBuddyDiagnostics: (state) => state.recentDiagnostics,
 
     selectRuntimeQueue: (state) => state.runtimeQueue,
