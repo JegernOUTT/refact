@@ -13,6 +13,7 @@ export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
       toolCall={toolCall}
       icon={<MagnifyingGlassIcon />}
       defaultSummary="Review code"
+      unboundedContent
     />
   );
 };

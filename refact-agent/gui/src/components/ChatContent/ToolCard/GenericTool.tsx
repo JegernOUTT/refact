@@ -1,6 +1,5 @@
 import React, { useMemo } from "react";
 import { GearIcon } from "@radix-ui/react-icons";
-import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
@@ -10,8 +9,6 @@ import {
   selectIsWaiting,
 } from "../../../features/Chat/Thread/selectors";
 import type { ToolCall } from "../../../services/refact/types";
-import { ShikiCodeBlock } from "../../Markdown";
-import { Markdown } from "../../Markdown";
 import { formatToolDisplayName } from "../../../utils/toolNameAliases";
 import styles from "./GenericTool.module.css";
 
@@ -33,18 +30,6 @@ function formatArgs(argsStr: string): string {
   } catch {
     return argsStr;
   }
-}
-
-function looksLikeMarkdown(text: string): boolean {
-  if (text.includes("```")) return true;
-  if (/\[[^\]]+\]\([^)]+\)/.test(text)) return true;
-  if (/^#{1,6}\s+\S/m.test(text)) return true;
-  if (/^\s*([-*+])\s+\S/m.test(text)) return true;
-  if (/^\s*\d+\.\s+\S/m.test(text)) return true;
-  const hasTableHeader = /^\s*\|.+\|\s*$/m.test(text);
-  const hasTableSep = /^\s*\|[\s:|-]+\|\s*$/m.test(text);
-  if (hasTableHeader && hasTableSep) return true;
-  return false;
 }
 
 export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
@@ -70,11 +55,6 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
     return "success";
   }, [maybeResult, isStreaming, isWaiting]);
 
-  const content =
-    maybeResult && typeof maybeResult.content === "string"
-      ? maybeResult.content
-      : null;
-
   const toolName = toolCall.function.name ?? "tool";
   const argsPreview = formatArgs(toolCall.function.arguments);
 
@@ -90,9 +70,6 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
     return displayName;
   }, [toolName, argsPreview]);
 
-  const shouldRenderMarkdown =
-    content && content.length <= 50000 && looksLikeMarkdown(content);
-
   return (
     <>
       <span data-testid="generic-tool" hidden />
@@ -103,19 +80,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
-      >
-        {content && (
-          <Box className={styles.resultContent}>
-            {shouldRenderMarkdown ? (
-              <Box className={styles.markdownContent}>
-                <Markdown>{content}</Markdown>
-              </Box>
-            ) : (
-              <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-            )}
-          </Box>
-        )}
-      </ToolCard>
+      />
     </>
   );
 };

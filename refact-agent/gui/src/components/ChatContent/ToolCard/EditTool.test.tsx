@@ -92,7 +92,7 @@ describe("EditTool", () => {
     expect(lineNumbers).toEqual(["19", "20", "20", "21"]);
   });
 
-  it("opens multi-file edit chunks by default and supports keyboard collapse", async () => {
+  it("renders multi-file edit chunks inline", () => {
     const diffs: DiffChunk[] = [
       {
         file_name: "src/one.ts",
@@ -112,7 +112,7 @@ describe("EditTool", () => {
       },
     ];
 
-    const { user } = render(
+    render(
       <EditTool
         toolCall={makeToolCall("edit-multi")}
         diffs={diffs}
@@ -120,17 +120,42 @@ describe("EditTool", () => {
       />,
     );
 
+    expect(screen.getByRole("button", { name: "one.ts" })).toBeInTheDocument();
     expect(screen.getByText("old-one")).toBeInTheDocument();
     expect(screen.getByText("old-two")).toBeInTheDocument();
+  });
 
-    const firstHeader = screen.getAllByRole("button", { name: /one\.ts/ })[0];
-    await user.click(firstHeader);
-    expect(screen.queryByText("old-one")).not.toBeInTheDocument();
-    expect(screen.getByText("old-two")).toBeInTheDocument();
+  it("keeps actions available for multi-file edit chunks", () => {
+    const diffs: DiffChunk[] = [
+      {
+        file_name: "src/one.ts",
+        file_action: "edit",
+        line1: 1,
+        line2: 1,
+        lines_remove: "old-one\n",
+        lines_add: "new-one\n",
+      },
+      {
+        file_name: "src/two.ts",
+        file_action: "edit",
+        line1: 1,
+        line2: 1,
+        lines_remove: "old-two\n",
+        lines_add: "new-two\n",
+      },
+    ];
 
-    firstHeader.focus();
-    await user.keyboard("{Enter}");
-    expect(screen.getByText("old-one")).toBeInTheDocument();
+    render(
+      <EditTool
+        toolCall={makeToolCall("edit-multi-actions")}
+        diffs={diffs}
+        isActiveTool={false}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: "Apply diff" })).toHaveLength(
+      2,
+    );
   });
 
   it("caps very large edit hunks behind a show-more control", async () => {
@@ -140,7 +165,7 @@ describe("EditTool", () => {
       line1: 1,
       line2: 1,
       lines_remove: "",
-      lines_add: Array.from({ length: 85 }, (_, i) => `new-${i + 1}`).join(
+      lines_add: Array.from({ length: 245 }, (_, i) => `new-${i + 1}`).join(
         "\n",
       ),
     };
@@ -153,14 +178,14 @@ describe("EditTool", () => {
       />,
     );
 
-    expect(screen.getByText("new-80")).toBeInTheDocument();
-    expect(screen.queryByText("new-85")).not.toBeInTheDocument();
+    expect(screen.getByText("new-240")).toBeInTheDocument();
+    expect(screen.queryByText("new-245")).not.toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Show 5 more diff lines" }),
     );
 
-    expect(screen.getByText("new-85")).toBeInTheDocument();
+    expect(screen.getByText("new-245")).toBeInTheDocument();
   });
 
   it("does not show a large-diff cap at the visible-line boundary", () => {
@@ -170,7 +195,7 @@ describe("EditTool", () => {
       line1: 1,
       line2: 1,
       lines_remove: "",
-      lines_add: Array.from({ length: 80 }, (_, i) => `new-${i + 1}`).join(
+      lines_add: Array.from({ length: 240 }, (_, i) => `new-${i + 1}`).join(
         "\n",
       ),
     };
@@ -183,7 +208,7 @@ describe("EditTool", () => {
       />,
     );
 
-    expect(screen.getByText("new-80")).toBeInTheDocument();
+    expect(screen.getByText("new-240")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /more diff lines/i }),
     ).toBeNull();

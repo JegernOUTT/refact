@@ -262,6 +262,7 @@ pub struct ExecSpawnRequest {
     pub output_limits: ExecOutputLimits,
     pub short_description: Option<String>,
     pub abort_flag: Option<Arc<AtomicBool>>,
+    pub output_progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ExecOutputChunk>>,
 }
 
 impl ExecSpawnRequest {
@@ -279,6 +280,7 @@ impl ExecSpawnRequest {
             output_limits: ExecOutputLimits::default(),
             short_description: None,
             abort_flag: None,
+            output_progress_tx: None,
         }
     }
 
@@ -355,6 +357,14 @@ impl ExecSpawnRequest {
 
     pub fn with_abort_flag(mut self, abort_flag: Arc<AtomicBool>) -> Self {
         self.abort_flag = Some(abort_flag);
+        self
+    }
+
+    pub fn with_output_progress_tx(
+        mut self,
+        output_progress_tx: tokio::sync::mpsc::UnboundedSender<ExecOutputChunk>,
+    ) -> Self {
+        self.output_progress_tx = Some(output_progress_tx);
         self
     }
 }

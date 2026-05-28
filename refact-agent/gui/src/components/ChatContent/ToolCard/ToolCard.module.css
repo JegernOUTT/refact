@@ -1,5 +1,5 @@
 .card {
-  overflow: hidden;
+  overflow: visible;
 }
 
 .header {
@@ -68,7 +68,7 @@
 }
 
 .contentInner {
-  overflow: hidden;
+  overflow: visible;
 }
 
 .content {

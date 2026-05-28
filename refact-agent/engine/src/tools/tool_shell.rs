@@ -7,15 +7,15 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::sync::Mutex as AMutex;
+use tokio::sync::{mpsc, Mutex as AMutex};
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::at_commands::at_file::return_one_candidate_or_a_good_error;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::exec::types::normalize_workspace_path;
 use crate::exec::{
-    sanitize_short_description, ExecOutputStream, ExecOwnerMeta, ExecProcessSnapshot,
-    ExecRawOutput, ExecReadResult, ExecSpawnRequest, ExecStatus,
+    sanitize_short_description, ExecOutputChunk, ExecOutputStream, ExecOwnerMeta,
+    ExecProcessSnapshot, ExecRawOutput, ExecReadResult, ExecSpawnRequest, ExecStatus,
 };
 use crate::files_correction::canonical_path;
 use crate::files_correction::canonicalize_normalized_path;
@@ -115,6 +115,8 @@ const MAX_SHELL_TIMEOUT_SECS: u64 = 3600;
 const SHELL_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
 const RUN_IN_BACKGROUND_DESCRIPTION: &str = "Set to true to run this command in the background. Returns immediately with a process_id. Use process_read or process_wait to retrieve output later. You will receive a process_completed event when the process exits. Do not use '&' at the end of the command.";
+const SHELL_PROGRESS_MAX_CHARS_PER_STREAM: usize = 4 * 1024;
+const SHELL_PROGRESS_MIN_INTERVAL_MS: u64 = 250;
 
 struct ParsedShellArgs {
     command: String,
@@ -182,6 +184,23 @@ impl Tool for ToolShell {
             workspace,
         };
         let tty = parsed.tty.unwrap_or(false);
+        let (progress_tx, progress_task) = if parsed.run_in_background {
+            (None, None)
+        } else {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let subchat_tx = {
+                let ccx_lock = ccx.lock().await;
+                ccx_lock.subchat_tx.clone()
+            };
+            (
+                Some(tx),
+                Some(tokio::spawn(emit_shell_progress(
+                    subchat_tx,
+                    tool_call_id.clone(),
+                    rx,
+                ))),
+            )
+        };
         let mut request = (if parsed.run_in_background {
             ExecSpawnRequest::background(parsed.command.clone())
         } else {
@@ -197,9 +216,23 @@ impl Tool for ToolShell {
         if let Some(cwd) = cwd {
             request = request.with_cwd(cwd);
         }
+        if let Some(progress_tx) = progress_tx {
+            request = request.with_output_progress_tx(progress_tx);
+        }
 
         let started = tokio::time::Instant::now();
-        let result = exec_registry.spawn(request).await?;
+        let result = match exec_registry.spawn(request).await {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(progress_task) = progress_task {
+                    let _ = progress_task.await;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(progress_task) = progress_task {
+            let _ = progress_task.await;
+        }
         let duration = started.elapsed();
         let read = exec_registry
             .read(&result.snapshot.meta.process_id, 0, None)
@@ -337,6 +370,82 @@ fn shell_input_schema() -> Value {
         "description": RUN_IN_BACKGROUND_DESCRIPTION,
     });
     schema
+}
+
+fn push_tail(buf: &mut String, text: &str) {
+    buf.push_str(text);
+    if buf.len() <= SHELL_PROGRESS_MAX_CHARS_PER_STREAM {
+        return;
+    }
+    let keep_from = buf
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .find(|idx| buf.len() - idx <= SHELL_PROGRESS_MAX_CHARS_PER_STREAM)
+        .unwrap_or(buf.len());
+    buf.drain(..keep_from);
+}
+
+fn shell_progress_text(stdout: &str, stderr: &str, combined: &str) -> String {
+    let mut parts = Vec::new();
+    if !combined.is_empty() {
+        parts.push(format!("output:\n{combined}"));
+    }
+    if !stdout.is_empty() {
+        parts.push(format!("stdout:\n{stdout}"));
+    }
+    if !stderr.is_empty() {
+        parts.push(format!("stderr:\n{stderr}"));
+    }
+    parts.join("\n")
+}
+
+async fn send_shell_progress(
+    subchat_tx: &Arc<AMutex<mpsc::UnboundedSender<Value>>>,
+    tool_call_id: &str,
+    stdout: &str,
+    stderr: &str,
+    combined: &str,
+) {
+    let progress = shell_progress_text(stdout, stderr, combined);
+    if progress.is_empty() {
+        return;
+    }
+    let msg = json!({
+        "tool_call_id": tool_call_id,
+        "subchat_id": progress,
+    });
+    let _ = subchat_tx.lock().await.send(msg);
+}
+
+async fn emit_shell_progress(
+    subchat_tx: Arc<AMutex<mpsc::UnboundedSender<Value>>>,
+    tool_call_id: String,
+    mut rx: mpsc::UnboundedReceiver<ExecOutputChunk>,
+) {
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut combined = String::new();
+    let mut last_sent_at: Option<tokio::time::Instant> = None;
+    let min_interval = Duration::from_millis(SHELL_PROGRESS_MIN_INTERVAL_MS);
+
+    while let Some(chunk) = rx.recv().await {
+        match chunk.stream {
+            ExecOutputStream::Stdout => push_tail(&mut stdout, &chunk.text),
+            ExecOutputStream::Stderr => push_tail(&mut stderr, &chunk.text),
+            ExecOutputStream::Combined => push_tail(&mut combined, &chunk.text),
+        }
+
+        let now = tokio::time::Instant::now();
+        if last_sent_at
+            .map(|last| now.duration_since(last) >= min_interval)
+            .unwrap_or(true)
+        {
+            send_shell_progress(&subchat_tx, &tool_call_id, &stdout, &stderr, &combined).await;
+            last_sent_at = Some(now);
+        }
+    }
+
+    send_shell_progress(&subchat_tx, &tool_call_id, &stdout, &stderr, &combined).await;
 }
 
 fn collect_exec_output(read: &ExecReadResult) -> (String, String) {

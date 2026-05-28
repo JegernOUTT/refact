@@ -1,10 +1,4 @@
-import React, {
-  forwardRef,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-} from "react";
+import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { Container, Flex, Text, Box, Spinner } from "@radix-ui/themes";
 import {
@@ -18,11 +12,9 @@ import {
   ToolResult,
   ToolUsage,
 } from "../../services/refact";
-import styles from "./ChatContent.module.css";
 import { CommandMarkdown } from "../Command";
 import { Chevron } from "../Collapsible";
-import { Reveal } from "../Reveal";
-import { useAppDispatch, useAppSelector, useHideScroll } from "../../hooks";
+import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectChatId,
   selectIsStreaming,
@@ -46,9 +38,6 @@ import {
   formatToolDisplayName,
 } from "../../utils/toolNameAliases";
 import { useCollapsibleStore, useStoredOpen } from "./useStoredOpen";
-import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
-import { Markdown } from "../Markdown";
-import classNames from "classnames";
 import {
   CheckCircledIcon,
   CrossCircledIcon,
@@ -163,64 +152,6 @@ function parseProgressEntry(entry: string): { step?: string; text: string } {
   const [, step, text] = m;
   return { step, text };
 }
-
-type ResultProps = {
-  children: string;
-  isInsideScrollArea?: boolean;
-  onClose?: () => void;
-  storeKey?: string;
-};
-
-function looksLikeMarkdown(text: string): boolean {
-  // Strong signals to avoid false positives on logs/stack traces
-  if (text.includes("```")) return true; // fenced code blocks
-  if (/\[[^\]]+\]\([^)]+\)/.test(text)) return true; // [text](url)
-  if (/^#{1,6}\s+\S/m.test(text)) return true; // headings
-  if (/^\s*([-*+])\s+\S/m.test(text)) return true; // unordered lists
-  if (/^\s*\d+\.\s+\S/m.test(text)) return true; // ordered lists
-
-  // Table detection: header row + separator row
-  const hasTableHeader = /^\s*\|.+\|\s*$/m.test(text);
-  const hasTableSep = /^\s*\|[\s:|-]+\|\s*$/m.test(text);
-  if (hasTableHeader && hasTableSep) return true;
-
-  return false;
-}
-
-const MAX_MD_RENDER_CHARS = 50_000;
-
-const Result: React.FC<ResultProps> = ({ children, onClose, storeKey }) => {
-  const lines = children.split("\n");
-
-  const shouldRenderMarkdown =
-    children.length <= MAX_MD_RENDER_CHARS && looksLikeMarkdown(children);
-
-  return (
-    <Reveal
-      defaultOpen={lines.length < 9}
-      isRevealingCode
-      onClose={onClose}
-      storeKey={storeKey}
-    >
-      {shouldRenderMarkdown ? (
-        <Text size="2">
-          <Box
-            className={classNames(
-              styles.tool_result,
-              styles.tool_result_markdown,
-            )}
-          >
-            <Markdown>{children}</Markdown>
-          </Box>
-        </Text>
-      ) : (
-        <ShikiCodeBlock className={classNames(styles.tool_result)}>
-          {children}
-        </ShikiCodeBlock>
-      )}
-    </Reveal>
-  );
-};
 
 function toolCallArgsToString(toolCallArgs: string) {
   try {
@@ -443,8 +374,7 @@ function decorateBackgroundAgentTool(
 // TODO: Sort of duplicated
 const ToolMessage: React.FC<{
   toolCall: ToolCall;
-  onClose: () => void;
-}> = ({ toolCall, onClose }) => {
+}> = ({ toolCall }) => {
   const name = normalizeToolName(toolCall.function.name) ?? "";
   const maybeResult = useAppSelector((state) =>
     selectToolResultById(state, toolCall.id),
@@ -468,15 +398,6 @@ const ToolMessage: React.FC<{
           <CommandMarkdown isInsideScrollArea>{functionCalled}</CommandMarkdown>
         </Box>
       </ScrollArea>
-      {maybeResult?.content && (
-        <Result
-          isInsideScrollArea
-          onClose={onClose}
-          storeKey={toolCall.id ? `rv:${toolCall.id}` : undefined}
-        >
-          {maybeResult.content}
-        </Result>
-      )}
     </Flex>
   );
 };
@@ -497,8 +418,6 @@ const ToolUsageDisplay: React.FC<{
 export const SingleModelToolContent: React.FC<{
   toolCalls: ToolCall[];
 }> = ({ toolCalls }) => {
-  const ref = useRef<HTMLDivElement>(null);
-  const handleHide = useHideScroll(ref);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const store = useCollapsibleStore();
@@ -554,11 +473,6 @@ export const SingleModelToolContent: React.FC<{
     return isStreaming || isWaiting;
   }, [allResolved, isStreaming, isWaiting]);
 
-  const handleClose = useCallback(() => {
-    handleHide();
-    setOpen(false);
-  }, [handleHide]);
-
   if (toolCalls.length === 0) return null;
 
   const toolNames = toolCalls.reduce<string[]>((acc, toolCall) => {
@@ -600,7 +514,6 @@ export const SingleModelToolContent: React.FC<{
       <Collapsible.Root open={open} onOpenChange={setOpen}>
         <Collapsible.Trigger asChild>
           <ToolUsageSummary
-            ref={ref}
             toolUsageAmount={toolUsageAmount}
             hiddenFiles={hiddenFiles}
             shownAttachedFiles={shownAttachedFiles}
@@ -622,7 +535,7 @@ export const SingleModelToolContent: React.FC<{
             const key = `${toolCall.id}-${toolCall.index}`;
             return (
               <Box key={key} py="2">
-                <ToolMessage toolCall={toolCall} onClose={handleClose} />
+                <ToolMessage toolCall={toolCall} />
               </Box>
             );
           })}
@@ -1660,8 +1573,6 @@ const MultiModalToolContent: React.FC<{
   toolCalls: ToolCall[];
   toolResults: MultiModalToolResult[];
 }> = ({ toolCalls, toolResults }) => {
-  const ref = useRef<HTMLDivElement>(null);
-  const handleHide = useHideScroll(ref);
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const store = useCollapsibleStore();
@@ -1692,11 +1603,6 @@ const MultiModalToolContent: React.FC<{
     [idsKey],
   );
   const diffs = useAppSelector(selectDiffs);
-
-  const handleClose = useCallback(() => {
-    handleHide();
-    setOpen(false);
-  }, [handleHide]);
 
   const hasImages = toolResults.some((toolResult) =>
     toolResult.content.some((content) => content.m_type.startsWith("image/")),
@@ -1740,12 +1646,10 @@ const MultiModalToolContent: React.FC<{
             toolUsageAmount={toolUsageAmount}
             open={open}
             onClick={() => setOpen((prev) => !prev)}
-            ref={ref}
             waiting={busy}
           />
         </Collapsible.Trigger>
         <Collapsible.Content>
-          {/** TODO: tool call name and text result */}
           <Box py="2">
             {toolCalls.map((toolCall, i) => {
               const result = toolResults.find(
@@ -1753,20 +1657,13 @@ const MultiModalToolContent: React.FC<{
               );
               if (!result) return null;
 
-              const texts = result.content
-                .filter((content) => content.m_type === "text")
-                .map((result) => result.m_content)
-                .join("\n");
-
               const name = normalizeToolName(toolCall.function.name) ?? "";
               const argsString = toolCallArgsToString(
                 toolCall.function.arguments,
               );
-
               const functionCalled =
                 "```python\n" + name + "(" + argsString + ")\n```";
 
-              // TODO: sort of duplicated
               return (
                 <Flex
                   direction="column"
@@ -1780,9 +1677,6 @@ const MultiModalToolContent: React.FC<{
                       </CommandMarkdown>
                     </Box>
                   </ScrollArea>
-                  <Box>
-                    <Result onClose={handleClose}>{texts}</Result>
-                  </Box>
                 </Flex>
               );
             })}

@@ -154,11 +154,6 @@
   cursor: pointer;
 }
 
-.outputToggle {
-  margin-bottom: var(--space-2);
-  cursor: pointer;
-}
-
 .copyButton {
   cursor: pointer;
 }

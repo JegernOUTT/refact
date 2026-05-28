@@ -1,19 +1,52 @@
-.filename {
+.diffContent {
+  overflow-x: visible;
+  padding-left: var(--space-2);
   font-family: var(--code-font-family);
-  font-size: inherit;
-  color: var(--accent-11);
-  cursor: pointer;
-  vertical-align: baseline;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
-.filename:hover {
+.diffBlock {
+  --edit-diff-add-line-bg: var(--diffBlob-additionLine-bgColor, #2ea04326);
+  --edit-diff-add-num-bg: var(--diffBlob-additionNum-bgColor, #3fb9504d);
+  --edit-diff-remove-line-bg: var(--diffBlob-deletionLine-bgColor, #f851491a);
+  --edit-diff-remove-num-bg: var(--diffBlob-deletionNum-bgColor, #f851494d);
+  padding: 0 0 var(--space-1);
+}
+
+.diffBlock:last-child {
+  border-bottom: 0;
+}
+
+.hunkHeader {
+  min-width: 0;
+  padding: 2px 0;
+  white-space: pre-wrap;
+  user-select: none;
+}
+
+.hunkFileButton {
+  all: unset;
+  cursor: pointer;
+  color: var(--accent-11);
+  font-family: var(--code-font-family);
+}
+
+.hunkFileButton:hover {
   text-decoration: underline;
+}
+
+.hunkTitle {
+  color: inherit;
+  font-family: var(--code-font-family);
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .statsInline {
   font-family: var(--code-font-family);
   font-size: 12px;
-  vertical-align: baseline;
+  flex: 1 1 auto;
 }
 
 .added {
@@ -25,139 +58,93 @@
   margin-left: 4px;
 }
 
-.errorContent {
-  padding: var(--space-2);
-  background: var(--red-a2);
-  border-radius: var(--radius-2);
-  margin-bottom: var(--space-2);
+.hunkActions {
+  margin-left: auto;
 }
 
-.resultContent {
-  padding: var(--space-2);
-  background: var(--gray-a2);
-  border-radius: var(--radius-2);
-  margin-bottom: var(--space-2);
-}
-
-.actionBar {
-  padding-bottom: var(--space-2);
-}
-
-.diffContent {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 520px;
-  overflow-y: auto;
-  overflow-x: auto;
-  background-color: var(--gray-1);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-3);
-  font-family: var(--code-font-family);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.diffBlock {
-  padding: 0 0 var(--space-1);
-  border-bottom: 1px solid var(--gray-a4);
-}
-
-.diffBlock:last-child {
-  border-bottom: 0;
-}
-
-.hunkHeader {
-  min-width: min-content;
-  padding: 2px var(--space-2);
-  color: var(--purple-11);
-  background-color: var(--purple-a3);
-  border-top: 1px solid var(--purple-a4);
-  border-bottom: 1px solid var(--purple-a4);
-  white-space: pre;
-  user-select: none;
+.hunkActionButton {
+  cursor: pointer;
 }
 
 .diffLine {
-  min-width: min-content;
   display: flex;
+  min-width: 0;
 }
 
 .lineNumber {
-  width: 52px;
-  min-width: 52px;
-  text-align: right;
-  padding-right: var(--space-2);
-  color: var(--gray-9);
+  width: 40px;
+  min-width: 40px;
+  text-align: center;
+  padding: 0 var(--space-1);
+  color: var(--gray-12);
   border-right: 1px solid var(--gray-a4);
   user-select: none;
   flex-shrink: 0;
 }
 
+.remove .lineNumber {
+  background-color: var(--edit-diff-remove-num-bg);
+}
+
+.add .lineNumber {
+  background-color: var(--edit-diff-add-num-bg);
+}
+
 .sign {
-  width: 20px;
-  min-width: 20px;
+  width: 16px;
+  min-width: 16px;
   text-align: center;
   flex-shrink: 0;
+  font-family: var(--default-font-family);
   font-weight: 600;
 }
 
 .lineContent {
-  white-space: pre;
-  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+  min-width: 0;
   padding-right: var(--space-2);
+  color: color-mix(in oklab, var(--gray-12) 90%, white 10%);
+  background: transparent;
+  font-family: var(--code-font-family);
+  font-size: inherit;
+  line-height: inherit;
+  filter: brightness(1.18) saturate(1.04);
 }
 
 .context {
-  color: var(--gray-11);
-  background-color: var(--gray-a2);
+  color: var(--gray-12);
 }
 
 .context .sign {
-  color: var(--gray-9);
+  color: var(--gray-12);
 }
 
 .remove {
-  background-color: rgba(255, 100, 100, 0.15);
-}
-
-.remove .lineNumber {
-  background-color: rgba(255, 100, 100, 0.2);
+  background-color: var(--edit-diff-remove-line-bg);
 }
 
 .remove .sign {
-  color: var(--red-11);
-  background-color: rgba(255, 100, 100, 0.2);
-}
-
-.remove .lineContent {
-  color: var(--red-11);
+  color: var(--diffBlob-deletionLine-fgColor, var(--gray-12));
 }
 
 .add {
-  background-color: rgba(100, 255, 100, 0.1);
-}
-
-.add .lineNumber {
-  background-color: rgba(100, 255, 100, 0.15);
+  background-color: var(--edit-diff-add-line-bg);
 }
 
 .add .sign {
-  color: var(--green-11);
-  background-color: rgba(100, 255, 100, 0.15);
-}
-
-.add .lineContent {
-  color: var(--green-11);
+  color: var(--diffBlob-additionLine-fgColor, var(--gray-12));
 }
 
 .showMoreButton {
   display: block;
   width: 100%;
-  min-width: min-content;
-  padding: var(--space-1) var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) 0;
   color: var(--accent-11);
-  background: var(--accent-a2);
+  background: transparent;
   border: 0;
-  border-top: 1px solid var(--accent-a4);
   font-family: var(--code-font-family);
   font-size: 12px;
   text-align: left;
@@ -165,7 +152,7 @@
 }
 
 .showMoreButton:hover {
-  background: var(--accent-a3);
+  text-decoration: underline;
 }
 
 .fileList {
@@ -173,24 +160,5 @@
 }
 
 .fileItem {
-  overflow: hidden;
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  background-color: var(--gray-a2);
-}
-
-.fileHeader {
-  cursor: pointer;
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--gray-a4);
-  transition: filter 0.15s ease;
-}
-
-.fileHeader:hover {
-  filter: brightness(1.2);
-}
-
-.stats {
-  font-family: var(--code-font-family);
-  font-size: 12px;
+  overflow: visible;
 }

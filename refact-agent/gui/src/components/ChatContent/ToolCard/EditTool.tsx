@@ -1,16 +1,23 @@
-import React, { useMemo, useState, useCallback } from "react";
-import { Pencil1Icon, PlusIcon } from "@radix-ui/react-icons";
-import { Flex, Text, Box, Spinner, Button } from "@radix-ui/themes";
-import { ToolCard, ToolStatus } from "./ToolCard";
-import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { CheckCircledIcon, ResetIcon } from "@radix-ui/react-icons";
+import { Flex, Text, Box, Spinner, IconButton } from "@radix-ui/themes";
+import {
+  useAppSelector,
+  useAppearance,
+  useEventsBusForIDE,
+  useShiki,
+} from "../../../hooks";
 import {
   selectManyDiffMessageByIds,
   selectIsStreaming,
   selectIsWaiting,
   selectToolResultById,
 } from "../../../features/Chat/Thread/selectors";
-import { selectChatId, selectCanPaste } from "../../../features/Chat";
+import {
+  selectChatId,
+  selectCanPaste,
+  selectSelectedSnippet,
+} from "../../../features/Chat";
 import { ToolCall, DiffChunk } from "../../../services/refact/types";
 import { toolsApi } from "../../../services/refact";
 import {
@@ -21,12 +28,25 @@ import {
   isUpdateTextDocByLinesToolCall,
 } from "../../Tools/types";
 import { basename } from "./utils";
+import { extractCodeLines } from "./editToolHighlight";
 import styles from "./EditTool.module.css";
 
 interface EditToolProps {
   toolCall: ToolCall;
   diffs?: DiffChunk[];
   isActiveTool?: boolean;
+}
+
+function getFilePath(toolCall: ToolCall): string | null {
+  try {
+    const args = JSON.parse(toolCall.function.arguments) as Record<
+      string,
+      unknown
+    >;
+    return typeof args.path === "string" ? args.path : null;
+  } catch {
+    return null;
+  }
 }
 
 function countNonEmptyLines(text: string): number {
@@ -55,34 +75,48 @@ function getDiffStats(diffs: DiffChunk[]): { added: number; removed: number } {
   return { added, removed };
 }
 
-function getFilePath(toolCall: ToolCall): string | null {
-  try {
-    const args = JSON.parse(toolCall.function.arguments) as Record<
-      string,
-      unknown
-    >;
-    return typeof args.path === "string" ? args.path : null;
-  } catch {
-    return null;
-  }
-}
+const EXTENSION_LANGUAGE_MAP: Partial<Record<string, string>> = {
+  js: "javascript",
+  jsx: "jsx",
+  ts: "typescript",
+  tsx: "tsx",
+  py: "python",
+  rs: "rust",
+  go: "go",
+  java: "java",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cc: "cpp",
+  cxx: "cpp",
+  hpp: "cpp",
+  cs: "csharp",
+  html: "html",
+  css: "css",
+  json: "json",
+  yaml: "yaml",
+  yml: "yaml",
+  md: "markdown",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  sql: "sql",
+  dockerfile: "dockerfile",
+};
 
-function isCreateTool(name: string | undefined): boolean {
-  return name === "create_textdoc";
-}
-
-function handleKeyboardClick(
-  event: React.KeyboardEvent,
-  action: () => void,
-): void {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  event.preventDefault();
-  event.stopPropagation();
-  action();
+function languageForFile(fileName: string | undefined): string {
+  if (!fileName) return "text";
+  const lowerFileName = fileName.toLowerCase();
+  if (lowerFileName.endsWith("dockerfile")) return "dockerfile";
+  const parts = lowerFileName.split(".");
+  const extension = parts[parts.length - 1];
+  if (!extension) return "text";
+  return EXTENSION_LANGUAGE_MAP[extension] ?? "text";
 }
 
 const CONTEXT_LINES = 1;
-const MAX_VISIBLE_DIFF_LINES = 80;
+const MAX_VISIBLE_DIFF_LINES = 240;
+const MAX_HIGHLIGHT_CHARS = 50_000;
 
 type DiffLineKind = "context" | "remove" | "add";
 
@@ -99,6 +133,100 @@ type RenderedDiffHunk = {
   lines: RenderedDiffLine[];
 };
 
+type DiffHeaderAction = {
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+};
+
+type HighlightedLine = {
+  html: string;
+  text: string;
+};
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function useHighlightedLines(
+  lines: RenderedDiffLine[],
+  language: string,
+): HighlightedLine[] {
+  const { highlight, isReady } = useShiki();
+  const { appearance } = useAppearance();
+  const [highlightedLines, setHighlightedLines] = useState<
+    HighlightedLine[] | null
+  >(null);
+  const shouldHighlight =
+    lines.reduce((total, line) => total + line.line.length, 0) <=
+    MAX_HIGHLIGHT_CHARS;
+  const highlightKey = useMemo(
+    () => lines.map((line) => `${line.kind}:${line.line}`).join("\n\u0000\n"),
+    [lines],
+  );
+  useEffect(() => {
+    if (!isReady || !shouldHighlight || lines.length === 0) {
+      setHighlightedLines(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      Promise.all(
+        lines.map((line) =>
+          highlight(line.line, language, appearance === "dark"),
+        ),
+      )
+        .then((results) => {
+          if (cancelled) return;
+          const next = lines.map((line) => ({
+            text: line.line,
+            html: escapeHtml(line.line),
+          }));
+          results.forEach((result, index) => {
+            const line = lines[index];
+            const htmlLines = extractCodeLines(result.html);
+            next[index] = {
+              text: line.line,
+              html: htmlLines[0] ?? escapeHtml(line.line),
+            };
+          });
+          setHighlightedLines(next);
+        })
+        .catch(() => {
+          if (!cancelled) setHighlightedLines(null);
+        });
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    appearance,
+    highlight,
+    highlightKey,
+    isReady,
+    language,
+    lines,
+    shouldHighlight,
+  ]);
+
+  return (
+    highlightedLines ??
+    lines.map((line) => ({
+      text: line.line,
+      html: escapeHtml(line.line),
+    }))
+  );
+}
+
 function displayLineNumber(line: RenderedDiffLine): number | undefined {
   if (line.kind === "add") return line.newLineNumber;
   if (line.kind === "context") {
@@ -109,8 +237,10 @@ function displayLineNumber(line: RenderedDiffLine): number | undefined {
   return line.oldLineNumber;
 }
 
-const DiffLine: React.FC<RenderedDiffLine> = (line) => {
-  const { kind, sign } = line;
+const DiffLine: React.FC<
+  RenderedDiffLine & { highlighted: HighlightedLine }
+> = (line) => {
+  const { kind, sign, highlighted } = line;
   const rowClass =
     kind === "remove"
       ? styles.remove
@@ -121,7 +251,10 @@ const DiffLine: React.FC<RenderedDiffLine> = (line) => {
     <div className={`${styles.diffLine} ${rowClass}`}>
       <span className={styles.lineNumber}>{displayLineNumber(line) ?? ""}</span>
       <span className={styles.sign}>{sign}</span>
-      <span className={styles.lineContent}>{line.line}</span>
+      <code
+        className={styles.lineContent}
+        dangerouslySetInnerHTML={{ __html: highlighted.html }}
+      />
     </div>
   );
 };
@@ -272,24 +405,83 @@ function buildRenderedHunk(diff: DiffChunk): RenderedDiffHunk {
   };
 }
 
-const DiffBlock: React.FC<{ diff: DiffChunk }> = ({ diff }) => {
+const DiffBlock: React.FC<{
+  diff: DiffChunk;
+  fileName?: string;
+  onOpenFile?: () => void;
+  actions?: DiffHeaderAction[];
+}> = ({ diff, fileName, onOpenFile, actions = [] }) => {
   const [showAll, setShowAll] = useState(false);
   const hunk = useMemo(() => buildRenderedHunk(diff), [diff]);
+  const stats = useMemo(() => getDiffStats([diff]), [diff]);
   const isLarge = hunk.lines.length > MAX_VISIBLE_DIFF_LINES;
-  const visibleLines = showAll
-    ? hunk.lines
-    : hunk.lines.slice(0, MAX_VISIBLE_DIFF_LINES);
+  const visibleLines = useMemo(
+    () => (showAll ? hunk.lines : hunk.lines.slice(0, MAX_VISIBLE_DIFF_LINES)),
+    [hunk.lines, showAll],
+  );
+  const highlightedLines = useHighlightedLines(
+    visibleLines,
+    languageForFile(fileName ?? diff.file_name),
+  );
   const hiddenLineCount = Math.max(0, hunk.lines.length - visibleLines.length);
 
   return (
     <Box className={styles.diffBlock}>
-      <div className={styles.hunkHeader}>{hunk.header}</div>
+      <Flex className={styles.hunkHeader} align="center" gap="2">
+        {fileName && (
+          <button
+            type="button"
+            className={styles.hunkFileButton}
+            onClick={onOpenFile}
+            title={fileName}
+          >
+            {basename(fileName)}
+          </button>
+        )}
+        <Text size="1" className={styles.hunkTitle}>
+          {hunk.header}
+        </Text>
+        <Text size="1" className={styles.statsInline}>
+          {stats.added > 0 && (
+            <span className={styles.added}>+{stats.added}</span>
+          )}
+          {stats.removed > 0 && (
+            <span className={styles.removed}>−{stats.removed}</span>
+          )}
+        </Text>
+        {actions.length > 0 && (
+          <Flex gap="1" className={styles.hunkActions}>
+            {actions.map((action) => (
+              <IconButton
+                key={action.label}
+                type="button"
+                size="1"
+                variant="ghost"
+                color="gray"
+                className={styles.hunkActionButton}
+                onClick={action.onClick}
+                disabled={action.disabled}
+                title={action.label}
+                aria-label={action.label}
+              >
+                {action.icon}
+              </IconButton>
+            ))}
+          </Flex>
+        )}
+      </Flex>
       {visibleLines.map((line, i) => (
         <DiffLine
           key={`${line.kind}-${line.oldLineNumber ?? ""}-${
             line.newLineNumber ?? ""
           }-${i}`}
           {...line}
+          highlighted={
+            highlightedLines[i] ?? {
+              text: line.line,
+              html: escapeHtml(line.line),
+            }
+          }
         />
       ))}
       {isLarge && (
@@ -310,68 +502,29 @@ const DiffBlock: React.FC<{ diff: DiffChunk }> = ({ diff }) => {
 interface FileEditItemProps {
   fileName: string;
   diffs: DiffChunk[];
-  onOpenFile: () => void;
+  onOpenFile: (fileName: string) => void;
+  actions?: DiffHeaderAction[];
 }
 
 const FileEditItem: React.FC<FileEditItemProps> = ({
   fileName,
   diffs,
   onOpenFile,
+  actions = [],
 }) => {
-  const [isOpen, setIsOpen] = useState(true);
-  const stats = useMemo(() => getDiffStats(diffs), [diffs]);
-
-  const handleToggle = useCallback(() => {
-    setIsOpen((prev) => !prev);
-  }, []);
-
-  const handleOpenClick = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      onOpenFile();
-    },
-    [onOpenFile],
-  );
-
-  const handleHeaderKeyDown = useCallback(
-    (event: React.KeyboardEvent) => {
-      handleKeyboardClick(event, handleToggle);
-    },
-    [handleToggle],
-  );
-
   return (
     <div className={styles.fileItem}>
-      <Flex
-        className={styles.fileHeader}
-        align="center"
-        gap="2"
-        onClick={handleToggle}
-        onKeyDown={handleHeaderKeyDown}
-        role="button"
-        tabIndex={0}
-        aria-expanded={isOpen}
-      >
-        <Text size="1" className={styles.filename} onClick={handleOpenClick}>
-          {basename(fileName)}
-        </Text>
-        <Text size="1" className={styles.stats}>
-          {stats.added > 0 && (
-            <span className={styles.added}>+{stats.added}</span>
-          )}
-          {stats.removed > 0 && (
-            <span className={styles.removed}>−{stats.removed}</span>
-          )}
-        </Text>
-      </Flex>
-
-      {isOpen && (
-        <Box className={styles.diffContent}>
-          {diffs.map((diff, i) => (
-            <DiffBlock key={i} diff={diff} />
-          ))}
-        </Box>
-      )}
+      <Box className={styles.diffContent}>
+        {diffs.map((diff, i) => (
+          <DiffBlock
+            key={i}
+            diff={diff}
+            fileName={fileName}
+            onOpenFile={() => onOpenFile(fileName)}
+            actions={actions}
+          />
+        ))}
+      </Box>
     </div>
   );
 };
@@ -381,18 +534,17 @@ export const EditTool: React.FC<EditToolProps> = ({
   diffs = [],
   isActiveTool = true,
 }) => {
-  const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
   const { queryPathThenOpenFile, diffPasteBack, sendToolCallToIde } =
     useEventsBusForIDE();
   const [requestDryRun, dryRunResult] = toolsApi.useDryRunForEditToolMutation();
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const canPaste = useAppSelector(selectCanPaste);
+  const selectedSnippet = useAppSelector(selectSelectedSnippet);
   const chatId = useAppSelector(selectChatId);
 
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
+  const hasResult = useAppSelector(
+    (state) => selectToolResultById(state, toolCall.id) !== undefined,
   );
 
   const diffIds = useMemo(
@@ -405,10 +557,10 @@ export const EditTool: React.FC<EditToolProps> = ({
   );
   const toolDiffs = useAppSelector(selectDiffs);
 
-  const hasResult = maybeResult !== undefined;
   const hasDiffs = diffs.length > 0 || toolDiffs.length > 0;
   const isToolBusy = isActiveTool && !hasResult && (isStreaming || isWaiting);
   const shouldRenderDiffs = hasDiffs && !isToolBusy;
+  const hasSelection = selectedSnippet.code.trim().length > 0;
 
   const allDiffs = useMemo(() => {
     if (!shouldRenderDiffs) return [];
@@ -465,184 +617,85 @@ export const EditTool: React.FC<EditToolProps> = ({
     if (allDiffs.length > 0) return allDiffs[0].file_name;
     return null;
   }, [toolCall, allDiffs]);
-  const isCreate = isCreateTool(toolCall.function.name);
-  const stats = useMemo(() => getDiffStats(allDiffs), [allDiffs]);
 
   const filesByName = useMemo(() => {
-    const grouped: Record<string, DiffChunk[]> = {};
+    const grouped: Partial<Record<string, DiffChunk[]>> = {};
     for (const diff of allDiffs) {
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      grouped[diff.file_name] = (grouped[diff.file_name] || []).concat(diff);
+      const fileDiffs = grouped[diff.file_name] ?? [];
+      grouped[diff.file_name] = fileDiffs.concat(diff);
     }
     return grouped;
   }, [allDiffs]);
 
-  const fileNames = Object.keys(filesByName);
+  const fileNames = Object.keys(filesByName).filter(
+    (fileName): fileName is string => filesByName[fileName] !== undefined,
+  );
   const isSingleFile = fileNames.length <= 1;
 
-  const handleFileClick = useCallback(
-    (e: React.MouseEvent, path: string) => {
-      e.stopPropagation();
-      void queryPathThenOpenFile({ file_path: path });
-    },
-    [queryPathThenOpenFile],
-  );
+  const diffActions = useMemo(() => {
+    const actions: DiffHeaderAction[] = [
+      {
+        label: "Apply diff",
+        icon: dryRunResult.isLoading ? (
+          <Spinner size="1" />
+        ) : (
+          <CheckCircledIcon />
+        ),
+        onClick: handleApplyDiff,
+        disabled: dryRunResult.isLoading || !parsedToolCall,
+      },
+    ];
 
-  const handleFileKeyDown = useCallback(
-    (event: React.KeyboardEvent, path: string) => {
-      handleKeyboardClick(event, () => {
-        void queryPathThenOpenFile({ file_path: path });
+    if (replaceContent !== null && hasSelection) {
+      actions.push({
+        label: "Replace selection",
+        icon: <ResetIcon />,
+        onClick: handleReplace,
+        disabled: !canPaste,
       });
-    },
-    [queryPathThenOpenFile],
-  );
-
-  const status: ToolStatus = useMemo(() => {
-    if (
-      maybeResult &&
-      typeof maybeResult === "object" &&
-      "tool_failed" in maybeResult &&
-      maybeResult.tool_failed
-    ) {
-      return "error";
     }
-    if (isToolBusy) return "running";
-    if (hasResult || hasDiffs) return "success";
-    return "running";
-  }, [hasDiffs, hasResult, isToolBusy, maybeResult]);
 
-  const summary = useMemo(() => {
-    const statsEl =
-      stats.added > 0 || stats.removed > 0 ? (
-        <span className={styles.statsInline}>
-          {stats.added > 0 && (
-            <span className={styles.added}>+{stats.added}</span>
-          )}
-          {stats.removed > 0 && (
-            <span className={styles.removed}>−{stats.removed}</span>
-          )}
-        </span>
-      ) : null;
-
-    const verb = isCreate ? "Create" : "Edit";
-    if (isSingleFile && filePath) {
-      return (
-        <>
-          {verb}{" "}
-          <span
-            className={styles.filename}
-            onClick={(e) => handleFileClick(e, filePath)}
-            onKeyDown={(event) => handleFileKeyDown(event, filePath)}
-            role="button"
-            tabIndex={0}
-            aria-label={`Open ${filePath}`}
-          >
-            {basename(filePath)}
-          </span>
-          {statsEl && <> {statsEl}</>}
-        </>
-      );
-    }
-    if (fileNames.length > 1) {
-      return (
-        <>
-          {verb} {fileNames.length} files {statsEl}
-        </>
-      );
-    }
-    return (
-      <>
-        {verb} file {statsEl}
-      </>
-    );
+    return actions;
   }, [
-    isCreate,
-    isSingleFile,
-    filePath,
-    fileNames.length,
-    handleFileClick,
-    handleFileKeyDown,
-    stats.added,
-    stats.removed,
+    canPaste,
+    dryRunResult.isLoading,
+    handleApplyDiff,
+    handleReplace,
+    hasSelection,
+    parsedToolCall,
+    replaceContent,
   ]);
 
-  const icon = isCreate ? <PlusIcon /> : <Pencil1Icon />;
+  if (!shouldRenderDiffs) return null;
 
-  return (
-    <ToolCard
-      icon={icon}
-      summary={summary}
-      status={status}
-      isOpen={isOpen}
-      onToggle={handleToggle}
-      toolCall={toolCall}
-    >
-      {maybeResult?.content && typeof maybeResult.content === "string" && (
-        <Box
-          className={
-            status === "error" ? styles.errorContent : styles.resultContent
+  return isSingleFile ? (
+    <Box className={styles.diffContent}>
+      {allDiffs.map((diff, i) => (
+        <DiffBlock
+          key={i}
+          diff={diff}
+          fileName={filePath ?? diff.file_name}
+          onOpenFile={() =>
+            void queryPathThenOpenFile({
+              file_path: filePath ?? diff.file_name,
+            })
           }
-        >
-          <Text size="1" color={status === "error" ? "red" : undefined}>
-            {maybeResult.content}
-          </Text>
-        </Box>
-      )}
-      {shouldRenderDiffs && (
-        <>
-          <Flex gap="2" className={styles.actionBar}>
-            <Button
-              size="1"
-              variant="soft"
-              onClick={handleApplyDiff}
-              disabled={dryRunResult.isLoading || !parsedToolCall}
-            >
-              {dryRunResult.isLoading ? (
-                <Spinner size="1" />
-              ) : (
-                <Flex as="span" align="center" gap="1">
-                  <PlusIcon />
-                  Diff
-                </Flex>
-              )}
-            </Button>
-            {replaceContent !== null && (
-              <Button
-                size="1"
-                variant="soft"
-                onClick={handleReplace}
-                disabled={!canPaste}
-              >
-                <Flex as="span" align="center" gap="1">
-                  <PlusIcon />
-                  Replace
-                </Flex>
-              </Button>
-            )}
-          </Flex>
-          {isSingleFile ? (
-            <Box className={styles.diffContent}>
-              {allDiffs.map((diff, i) => (
-                <DiffBlock key={i} diff={diff} />
-              ))}
-            </Box>
-          ) : (
-            <Flex direction="column" gap="1" className={styles.fileList}>
-              {fileNames.map((fileName) => (
-                <FileEditItem
-                  key={fileName}
-                  fileName={fileName}
-                  diffs={filesByName[fileName]}
-                  onOpenFile={() =>
-                    void queryPathThenOpenFile({ file_path: fileName })
-                  }
-                />
-              ))}
-            </Flex>
-          )}
-        </>
-      )}
-    </ToolCard>
+          actions={diffActions}
+        />
+      ))}
+    </Box>
+  ) : (
+    <Flex direction="column" gap="1" className={styles.fileList}>
+      {fileNames.map((fileName) => (
+        <FileEditItem
+          key={fileName}
+          fileName={fileName}
+          diffs={filesByName[fileName] ?? []}
+          onOpenFile={(path) => void queryPathThenOpenFile({ file_path: path })}
+          actions={diffActions}
+        />
+      ))}
+    </Flex>
   );
 };
 

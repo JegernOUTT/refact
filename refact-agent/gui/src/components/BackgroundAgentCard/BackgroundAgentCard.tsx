@@ -1,4 +1,4 @@
-import { Box, Card, Flex, Text, Badge, Link, Code } from "@radix-ui/themes";
+import { Box, Flex, Text, Badge, Link, Code } from "@radix-ui/themes";
 import styles from "./BackgroundAgentCard.module.css";
 import type { BackgroundAgentSummary } from "../../services/refact/types";
 
@@ -12,7 +12,7 @@ export const BackgroundAgentCard = ({
   onOpenTrajectory,
 }: BackgroundAgentCardProps) => {
   return (
-    <Card className={styles.card} data-testid="background-agent-card">
+    <Box className={styles.card} data-testid="background-agent-card">
       <Flex justify="between" align="center" gap="2" wrap="wrap">
         <Flex align="center" gap="2" wrap="wrap">
           <Badge color={statusColor(agent.status)} variant="soft">
@@ -107,7 +107,7 @@ export const BackgroundAgentCard = ({
           </Link>
         </Box>
       )}
-    </Card>
+    </Box>
   );
 };
 

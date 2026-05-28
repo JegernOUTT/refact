@@ -43,18 +43,23 @@ function toolMessage(tty: boolean): ToolMessage {
   };
 }
 
-function renderStdinCard(tty: boolean) {
+async function renderExpandedStdinCard(tty: boolean) {
   const chat = createDefaultChatState();
   const currentThread = chat.threads[chat.current_thread_id];
   currentThread.thread.messages = [toolMessage(tty)];
-  return render(<ExecToolCard toolCall={toolCall()} toolName="shell" />, {
-    preloadedState: { chat },
-  });
+  const result = render(
+    <ExecToolCard toolCall={toolCall()} toolName="shell" />,
+    {
+      preloadedState: { chat },
+    },
+  );
+  await result.user.click(screen.getByText("python"));
+  return result;
 }
 
 describe("ProcessStdinInput", () => {
-  test("renders when tty is true", () => {
-    renderStdinCard(true);
+  test("renders when tty is true", async () => {
+    await renderExpandedStdinCard(true);
 
     expect(screen.getByText("Send Ctrl+C")).toBeInTheDocument();
     expect(
@@ -62,8 +67,8 @@ describe("ProcessStdinInput", () => {
     ).toBeInTheDocument();
   });
 
-  test("hides when tty is false", () => {
-    renderStdinCard(false);
+  test("hides when tty is false", async () => {
+    await renderExpandedStdinCard(false);
 
     expect(screen.queryByText("Send Ctrl+C")).toBeNull();
     expect(
@@ -91,7 +96,7 @@ describe("ProcessStdinInput", () => {
       ),
     );
 
-    renderStdinCard(true);
+    await renderExpandedStdinCard(true);
 
     const input = screen.getByLabelText<HTMLInputElement>("Process stdin");
     fireEvent.change(input, { target: { value: "hello" } });

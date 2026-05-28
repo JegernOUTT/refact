@@ -1,10 +1,4 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Box, Button, Flex, Spinner, Text } from "@radix-ui/themes";
 import { CodeIcon, LapTimerIcon, RowsIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
@@ -29,8 +23,8 @@ import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
 import { useStoredOpen } from "../useStoredOpen";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
-import { ProcessOutputView } from "./ProcessOutputView";
 import { ProcessControls } from "./ProcessControls";
+import { ProcessOutputView } from "./ProcessOutputView";
 import { ProcessStdinInput } from "./ProcessStdinInput";
 import styles from "./ExecToolCard.module.css";
 
@@ -246,18 +240,6 @@ function isTerminalStatus(status: ExecProcessStatus): boolean {
   return !isBusyStatus(status);
 }
 
-function shouldDefaultExpand(
-  status: ExecProcessStatus,
-  exitCode: number | null | undefined,
-  toolFailed: boolean | undefined,
-): boolean {
-  if (toolFailed) return true;
-  if (status === "failed" || status === "killed" || status === "timed_out") {
-    return true;
-  }
-  return typeof exitCode === "number" && exitCode !== 0;
-}
-
 function chunkPreviewText(chunk: ExecOutputChunkMetadata): string | null {
   if (typeof chunk.text !== "string") return null;
   const text = chunk.text.replace(/\s+/gu, " ").trim();
@@ -312,6 +294,7 @@ function contentPreviewText(content: string | null): string | null {
 function latestChunkPreview(
   metadata: ExecToolMetadata | null,
   content: string | null,
+  toolCall: ToolCall,
 ): string | null {
   const chunks = metadata?.transcript?.chunks;
   if (Array.isArray(chunks)) {
@@ -319,6 +302,10 @@ function latestChunkPreview(
       const text = chunkPreviewText(chunk);
       if (text) return text;
     }
+  }
+  const subchatLog = toolCall.subchat_log;
+  if (subchatLog && subchatLog.length > 0) {
+    return contentPreviewText(subchatLog[subchatLog.length - 1] ?? "");
   }
   return contentPreviewText(content);
 }
@@ -377,7 +364,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const host = useAppSelector(selectHost);
   const postMessage = usePostMessage();
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const maybeResult = useAppSelector((state) =>
     selectToolResultById(state, toolCall.id),
   );
@@ -406,14 +393,9 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     status,
     fallbackSummary,
   );
-  const defaultOutputOpen = shouldDefaultExpand(
-    status,
-    process.exitCode,
-    maybeResult?.tool_failed,
-  );
   const copyableOutput = useMemo(() => copyableOutputText(content), [content]);
   const isBusy = isBusyStatus(status);
-  const livePreview = latestChunkPreview(metadata, content);
+  const livePreview = latestChunkPreview(metadata, content, toolCall);
   const nowMs = useRunningNowMs(isBusy);
   const duration = durationLabel(process, nowMs);
   const logPath = persistedOutputPath(metadata);
@@ -429,32 +411,11 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     0,
     (metadata?.processes?.length ?? 0) - listedProcesses.length,
   );
-  const outputStoreKey = process.processId
-    ? `exec-output:${process.processId}`
-    : toolCall.id
-      ? `exec-output:${toolCall.id}`
-      : undefined;
-  const [isOutputOpen, toggleOutputOpen, setOutputOpen] = useStoredOpen(
-    outputStoreKey,
-    defaultOutputOpen,
-  );
-  const defaultExpandedKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!defaultOutputOpen) return;
-    const key = outputStoreKey ?? "exec-output";
-    if (defaultExpandedKeyRef.current === key) return;
-    defaultExpandedKeyRef.current = key;
-    setOutputOpen(true);
-  }, [defaultOutputOpen, outputStoreKey, setOutputOpen]);
   const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
     isOpen,
     200,
     true,
   );
-  const {
-    shouldRender: shouldRenderOutput,
-    isAnimatingOpen: isOutputAnimatingOpen,
-  } = useDelayedUnmount(isOutputOpen, 200, true);
   const details = detailRows(process);
   const showStdinInput = Boolean(
     process.processId && metadata?.tty === true && !isTerminalStatus(status),
@@ -594,6 +555,11 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
                 </Flex>
               )}
 
+              <ProcessOutputView
+                content={content}
+                transcript={metadata?.transcript}
+              />
+
               {listedProcesses.length > 0 && (
                 <Box
                   className={styles.processList}
@@ -632,34 +598,6 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
                     </Text>
                   )}
                 </Box>
-              )}
-
-              <Button
-                type="button"
-                size="1"
-                variant="soft"
-                color="gray"
-                className={styles.outputToggle}
-                onClick={toggleOutputOpen}
-                aria-expanded={isOutputOpen}
-              >
-                {isOutputOpen ? "Hide output" : "Show output"}
-              </Button>
-
-              {shouldRenderOutput && (
-                <div
-                  className={classNames(
-                    styles.contentWrapper,
-                    isOutputAnimatingOpen && styles.contentWrapperOpen,
-                  )}
-                >
-                  <div className={styles.contentInner}>
-                    <ProcessOutputView
-                      content={content}
-                      transcript={metadata?.transcript}
-                    />
-                  </div>
-                </div>
               )}
 
               {!metadata && (

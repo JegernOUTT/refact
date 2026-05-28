@@ -189,6 +189,7 @@ fn pump_output(
     process_id: crate::exec::types::ExecProcessId,
     stream: ExecOutputStream,
     mut pipe: impl AsyncRead + Unpin + Send + 'static,
+    progress_tx: Option<mpsc::UnboundedSender<crate::exec::types::ExecOutputChunk>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buffer = [0; PIPE_READ_BYTES];
@@ -198,9 +199,14 @@ fn pump_output(
                 Ok(bytes_read) => {
                     let text = output_to_text(&buffer[..bytes_read]);
                     if !text.is_empty() {
-                        let _ = registry
+                        if let Ok(chunk) = registry
                             .append_output(&process_id, stream.clone(), text)
-                            .await;
+                            .await
+                        {
+                            if let Some(progress_tx) = progress_tx.as_ref() {
+                                let _ = progress_tx.send(chunk);
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -217,6 +223,7 @@ fn pump_blocking_output(
     process_id: crate::exec::types::ExecProcessId,
     stream: ExecOutputStream,
     mut reader: Box<dyn Read + Send>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::exec::types::ExecOutputChunk>>,
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         let mut buffer = [0; PIPE_READ_BYTES];
@@ -226,11 +233,15 @@ fn pump_blocking_output(
                 Ok(bytes_read) => {
                     let text = output_to_text(&buffer[..bytes_read]);
                     if !text.is_empty() {
-                        let _ = futures::executor::block_on(registry.append_output(
+                        if let Ok(chunk) = futures::executor::block_on(registry.append_output(
                             &process_id,
                             stream.clone(),
                             text,
-                        ));
+                        )) {
+                            if let Some(progress_tx) = progress_tx.as_ref() {
+                                let _ = progress_tx.send(chunk);
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -552,12 +563,14 @@ impl ExecRegistry {
             process_id.clone(),
             ExecOutputStream::Stdout,
             stdout,
+            request.output_progress_tx.clone(),
         );
         let stderr_task = pump_output(
             self.clone(),
             process_id.clone(),
             ExecOutputStream::Stderr,
             stderr,
+            request.output_progress_tx.clone(),
         );
         tokio::spawn(monitor_process(
             self.clone(),
@@ -640,6 +653,7 @@ impl ExecRegistry {
             process_id.clone(),
             ExecOutputStream::Combined,
             pty_handle.reader,
+            request.output_progress_tx.clone(),
         );
         let stderr_task = tokio::spawn(async {});
         tokio::spawn(monitor_process(

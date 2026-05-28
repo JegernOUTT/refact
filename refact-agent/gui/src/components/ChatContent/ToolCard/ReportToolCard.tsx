@@ -64,6 +64,7 @@ interface ReportToolCardProps {
   meta?: string | null;
   extractReport?: (content: string) => ReportData | null;
   defaultOpen?: boolean;
+  unboundedContent?: boolean;
 }
 
 export const ReportToolCard: React.FC<ReportToolCardProps> = ({
@@ -74,6 +75,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   meta,
   extractReport,
   defaultOpen = true,
+  unboundedContent = false,
 }) => {
   const copyToClipboard = useCopyToClipboard();
   const { newFile, queryPathThenOpenFile } = useEventsBusForIDE();
@@ -161,6 +163,10 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   );
 
   useEffect(() => {
+    if (variant !== "taskDone") {
+      setBodyReady(true);
+      return;
+    }
     if (bodyReady) return;
     if (!reportData?.markdown) return;
     let cancelled = false;
@@ -191,7 +197,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
         clearTimeout(timeoutId);
       }
     };
-  }, [bodyReady, reportData?.markdown]);
+  }, [bodyReady, reportData?.markdown, variant]);
 
   const entertainmentRef = useRef<HTMLDivElement | null>(null);
   const userScrolledRef = useRef(false);
@@ -343,7 +349,12 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           )}
         >
           <div className={styles.contentInner}>
-            <Box className={styles.content}>
+            <Box
+              className={classNames(
+                styles.content,
+                unboundedContent && styles.contentUnbounded,
+              )}
+            >
               {deferredReportMarkdown.length <= MAX_MD_RENDER_CHARS &&
               looksLikeMarkdown(deferredReportMarkdown) ? (
                 <Text size="2">

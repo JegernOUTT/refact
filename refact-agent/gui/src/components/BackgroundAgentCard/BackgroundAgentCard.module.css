@@ -1,5 +1,6 @@
 .card {
   margin-top: var(--space-2);
+  padding-left: var(--space-4);
 }
 
 .fileList {

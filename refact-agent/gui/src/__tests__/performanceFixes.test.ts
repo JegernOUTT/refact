@@ -241,7 +241,7 @@ describe("selectToolResultById optimization", () => {
     );
 
     await waitFor(() => {
-      expect(container.textContent).toContain("Edit both.ts");
+      expect(container.textContent).toContain("both.ts");
       expect(container.textContent).toContain("+1");
       expect(container.textContent).toContain("−1");
     });
@@ -593,9 +593,9 @@ describe("chat rendering regressions", () => {
     );
 
     await waitFor(() => {
-      expect(container.textContent).toContain("Edit generated.ts");
-      expect(container.textContent).not.toContain("+2000");
-      expect(container.textContent).not.toContain("−2000");
+      expect(container.textContent).toContain("generated.ts");
+      expect(container.textContent).toContain("+2000");
+      expect(container.textContent).toContain("−2000");
     });
 
     store.dispatch(
@@ -691,10 +691,10 @@ describe("chat rendering regressions", () => {
     );
 
     await waitFor(() => {
-      expect(container.textContent).toContain("Edit completed.ts");
+      expect(container.textContent).toContain("completed.ts");
       expect(container.textContent).toContain("+3");
       expect(container.textContent).toContain("−3");
-      expect(container.textContent).toContain("Edit active.ts");
+      expect(container.textContent).not.toContain("active.ts");
       expect(container.textContent).not.toContain("+2000");
       expect(container.textContent).not.toContain("−2000");
     });
