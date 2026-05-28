@@ -114,9 +114,7 @@ pub async fn start_background_tasks(
             }
         }),
     ]);
-    if let Some(task) = crate::scheduler::runner::spawn_from_active_project(gcx.clone()).await {
-        bg.push_back(task);
-    }
+    bg.extend(crate::scheduler::runner::spawn_from_active_project(gcx.clone()).await);
     let ast = gcx.clone().ast_service.lock().unwrap().clone();
     if let Some(ast_service) = ast {
         bg.extend(
