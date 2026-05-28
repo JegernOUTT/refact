@@ -231,6 +231,8 @@ export function useSidebarSubscription() {
     null,
   );
   const generationRef = useRef(0);
+  const taskListRef = useRef<TaskMeta[]>([]);
+  const taskListFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   const connectRef = useRef<() => void>(() => {});
 
@@ -420,15 +422,72 @@ export function useSidebarSubscription() {
     [dispatch],
   );
 
+  const flushTaskList = useCallback(() => {
+    if (taskListFlushRef.current) {
+      clearTimeout(taskListFlushRef.current);
+      taskListFlushRef.current = null;
+    }
+    void dispatch(
+      tasksApi.util.upsertQueryData(
+        "listTasks",
+        undefined,
+        taskListRef.current,
+      ),
+    );
+  }, [dispatch]);
+
+  const scheduleTaskListFlush = useCallback(() => {
+    if (taskListFlushRef.current) return;
+    taskListFlushRef.current = setTimeout(() => {
+      flushTaskList();
+    }, 0);
+  }, [flushTaskList]);
+
+  const replaceTaskList = useCallback(
+    (tasks: TaskMeta[]) => {
+      taskListRef.current = tasks;
+      scheduleTaskListFlush();
+    },
+    [scheduleTaskListFlush],
+  );
+
+  const upsertTaskInList = useCallback(
+    (task: TaskMeta) => {
+      const filtered = taskListRef.current.filter((item) => item.id !== task.id);
+      taskListRef.current = [task, ...filtered].sort((a, b) =>
+        b.updated_at.localeCompare(a.updated_at),
+      );
+      scheduleTaskListFlush();
+    },
+    [scheduleTaskListFlush],
+  );
+
+  const deleteTaskFromList = useCallback(
+    (taskId: string) => {
+      taskListRef.current = taskListRef.current.filter(
+        (item) => item.id !== taskId,
+      );
+      scheduleTaskListFlush();
+    },
+    [scheduleTaskListFlush],
+  );
+
   const processTaskEvent = useCallback(
     (event: Extract<SidebarSectionUpdate, { type: string }>) => {
+      if (event.type === "snapshot") {
+        replaceTaskList(event.tasks);
+      } else if (event.type === "task_created" || event.type === "task_updated") {
+        upsertTaskInList(event.meta);
+      } else if (event.type === "task_deleted") {
+        deleteTaskFromList(event.task_id);
+      }
       dispatch(
         taskSseEventReceived(
           event as Parameters<typeof taskSseEventReceived>[0],
         ),
       );
     },
-    [dispatch],
+    [deleteTaskFromList, dispatch, replaceTaskList, upsertTaskInList],
   );
 
   const processWorkspaceSnapshot = useCallback(
@@ -468,11 +527,9 @@ export function useSidebarSubscription() {
 
   const processTasksSnapshot = useCallback(
     (tasks: TaskMeta[]) => {
-      void dispatch(
-        tasksApi.util.upsertQueryData("listTasks", undefined, tasks),
-      );
+      processTaskEvent({ type: "snapshot", tasks });
     },
-    [dispatch],
+    [processTaskEvent],
   );
 
   const processBuddySnapshot = useCallback(
@@ -567,9 +624,8 @@ export function useSidebarSubscription() {
         if (workspaceChanged) {
           dispatch(sidebarWorkspaceChanged({ subscriptionId }));
           dispatch(replaceSnapshotHistory([]));
-          void dispatch(
-            tasksApi.util.upsertQueryData("listTasks", undefined, []),
-          );
+          taskListRef.current = [];
+          flushTaskList();
           dispatch(setHistoryLoading(true));
         }
         if (status === "ready") {
@@ -585,6 +641,7 @@ export function useSidebarSubscription() {
     },
     [
       dispatch,
+      flushTaskList,
       markSectionSnapshotReceived,
       processSectionSnapshotData,
       processWorkspaceSnapshot,
@@ -850,6 +907,10 @@ export function useSidebarSubscription() {
       activePortRef.current = null;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (taskListFlushRef.current) {
+        clearTimeout(taskListFlushRef.current);
+        taskListFlushRef.current = null;
       }
     };
   }, [connect]);

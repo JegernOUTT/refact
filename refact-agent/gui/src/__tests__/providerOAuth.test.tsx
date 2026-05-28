@@ -1,8 +1,10 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { render, screen, waitFor } from "../utils/test-utils";
 import { server } from "../utils/mockServer";
 import { ProviderOAuth } from "../features/Providers/ProviderForm/ProviderOAuth";
+
+const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
 
 const PRELOADED_STATE = {
   config: {
@@ -34,6 +36,15 @@ function mockProviderOauthStart(providerName: string, body: object) {
 }
 
 describe("ProviderOAuth", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    openSpy.mockImplementation(() => null);
+  });
+
+  afterEach(() => {
+    openSpy.mockImplementation(() => null);
+  });
+
   test("renders GitHub Copilot login label", () => {
     renderProviderOAuth("github_copilot");
 

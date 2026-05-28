@@ -160,10 +160,9 @@ function hasProviderProblemCue(event: BuddyRuntimeEvent): boolean {
 function hasProviderSignal(event: BuddyRuntimeEvent | null): boolean {
   if (!event || !hasProviderTopic(event)) return false;
   const hasProblemCue = hasProviderProblemCue(event);
-  if (event.status === "failed") return true;
-  if (event.priority === "critical") return hasProblemCue;
-  if (event.priority === "high") return hasProblemCue;
-  return hasProblemCue;
+  if (!hasProblemCue) return false;
+  if (event.status === "completed") return event.priority !== "critical";
+  return true;
 }
 
 function hasProviderPulseIssue(pulse: BuddyPulse | null | undefined): boolean {
@@ -198,8 +197,10 @@ function kindForRuntime(
   event: BuddyRuntimeEvent | null,
   nowMs: number,
 ): BuddyShowcaseKind | null {
-  if (!isBuddyRuntimeEventVisible(event, nowMs)) return null;
-  const providerKind = hasProviderSignal(event)
+  if (event === null) return null;
+  const providerSignal = event.dismissed === true ? false : hasProviderSignal(event);
+  if (!isBuddyRuntimeEventVisible(event, nowMs) && !providerSignal) return null;
+  const providerKind = providerSignal
     ? "stargazing_constellation"
     : null;
   if (providerKind && event.status === "failed") return providerKind;

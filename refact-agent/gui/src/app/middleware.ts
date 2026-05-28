@@ -1353,17 +1353,23 @@ startListening({
           tasksApi.util.upsertQueryData("listTasks", undefined, event.tasks),
         );
         break;
-      case "task_created":
-        void listenerApi.dispatch(
+      case "task_created": {
+        const result = listenerApi.dispatch(
           tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {
             if (!draft.some((t) => t.id === event.task_id)) {
               draft.unshift(event.meta);
             }
           }),
         );
+        if (result.patches.length === 0) {
+          void listenerApi.dispatch(
+            tasksApi.util.upsertQueryData("listTasks", undefined, [event.meta]),
+          );
+        }
         break;
-      case "task_updated":
-        void listenerApi.dispatch(
+      }
+      case "task_updated": {
+        const result = listenerApi.dispatch(
           tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {
             const index = draft.findIndex((t) => t.id === event.task_id);
             if (index >= 0) {
@@ -1380,6 +1386,11 @@ startListening({
             draft.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
           }),
         );
+        if (result.patches.length === 0) {
+          void listenerApi.dispatch(
+            tasksApi.util.upsertQueryData("listTasks", undefined, [event.meta]),
+          );
+        }
         void listenerApi.dispatch(
           tasksApi.util.updateQueryData(
             "getTask",
@@ -1393,6 +1404,7 @@ startListening({
           ),
         );
         break;
+      }
       case "task_deleted":
         void listenerApi.dispatch(
           tasksApi.util.updateQueryData("listTasks", undefined, (draft) => {

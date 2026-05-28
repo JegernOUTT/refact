@@ -295,17 +295,17 @@ function pickNotificationCandidate(
   const eligible = candidates.filter(isCandidateFresh);
   if (eligible.length === 0) return null;
   const sorted = [...eligible].sort((left, right) => left.rank - right.rank);
-  const top = sorted[0] ?? null;
+  const top = sorted[0];
   const ambient = sorted.find((candidate) => candidate.kind === "ambient");
   const urgent = sorted.find(
     (candidate) => candidate.preventsAmbientOverride === true,
   );
-  if (top && top.rank < 20 && ambient?.rank !== top.rank) return top;
+  if (top.rank < 20 && ambient?.rank !== top.rank) return top;
   if (ambient && ambientRatio(impressions) < AMBIENT_RATIO_TARGET) {
     if (urgent) return urgent;
     return ambient;
   }
-  if (ambient && top && top.kind !== "ambient" && top.rank > 20 && !urgent) {
+  if (ambient && top.kind !== "ambient" && top.rank > 20 && !urgent) {
     return ambient;
   }
   return top;

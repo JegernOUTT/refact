@@ -13,6 +13,7 @@ const ERROR_RUNTIME_TOKENS = new Set([
 ]);
 const RUNTIME_EVENT_FRESHNESS_MS = 75_000;
 const RUNTIME_EVENT_FUTURE_SKEW_MS = 30_000;
+const MIN_EPOCH_MS = 946_684_800_000;
 const DURABLE_RUNTIME_TOKENS = new Set([
   "speech_tour",
   "tour",
@@ -62,12 +63,6 @@ function isDeliberatelyDurableRuntimeEvent(event: BuddyRuntimeEvent): boolean {
   );
 }
 
-function isNoTtlRuntimeEventFreshnessBounded(
-  event: BuddyRuntimeEvent,
-): boolean {
-  return event.bubble_policy === "event_once" || isErrorRuntimeEvent(event);
-}
-
 export function isBuddyRuntimeEventVisible(
   event: BuddyRuntimeEvent | null | undefined,
   nowMs = Date.now(),
@@ -77,12 +72,16 @@ export function isBuddyRuntimeEventVisible(
   if (event.persistent === true) return true;
   if (isDeliberatelyDurableRuntimeEvent(event)) return true;
   const createdAtMs = Date.parse(event.created_at);
-  if (!Number.isFinite(createdAtMs) || !Number.isFinite(nowMs)) return false;
+  if (!Number.isFinite(createdAtMs)) return true;
+  if (!Number.isFinite(nowMs)) return false;
+  if (nowMs < MIN_EPOCH_MS) return true;
   if (createdAtMs > nowMs + RUNTIME_EVENT_FUTURE_SKEW_MS) return false;
   if (event.ttl_ms == null || !Number.isFinite(event.ttl_ms)) {
-    if (!isNoTtlRuntimeEventFreshnessBounded(event)) return true;
+    if (!isErrorRuntimeEvent(event)) return true;
+    if (createdAtMs < MIN_EPOCH_MS) return true;
     return nowMs - createdAtMs <= RUNTIME_EVENT_FRESHNESS_MS;
   }
+  if (createdAtMs < MIN_EPOCH_MS) return true;
   return nowMs <= createdAtMs + event.ttl_ms;
 }
 

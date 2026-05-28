@@ -1,8 +1,10 @@
-import { describe, expect, test, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { render, screen, waitFor, fireEvent } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
 import { MCPOAuth } from "../components/IntegrationsView/MCPServerView/MCPOAuth";
+
+const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
 
 const CONFIG_PATH =
   "/home/user/.config/refact/integrations.d/mcp_http_myserver.yaml";
@@ -27,6 +29,11 @@ function mockStatus(body: object) {
 describe("MCPOAuth", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    openSpy.mockImplementation(() => null);
+  });
+
+  afterEach(() => {
+    openSpy.mockImplementation(() => null);
   });
 
   test("renders nothing when auth_type is not oauth2_pkce", async () => {

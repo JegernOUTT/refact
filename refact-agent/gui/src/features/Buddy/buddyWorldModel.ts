@@ -348,7 +348,9 @@ function visibleRuntimeEvent(
   event: BuddyRuntimeEvent | null,
   nowMs: number,
 ): BuddyRuntimeEvent | null {
-  return isBuddyRuntimeEventVisible(event, nowMs) ? event : null;
+  if (event === null || event.dismissed === true) return null;
+  if (isBuddyRuntimeEventVisible(event, nowMs)) return event;
+  return hasProviderModelRuntimeTopic(event) ? event : null;
 }
 
 function isActiveRuntime(event: BuddyRuntimeEvent | null): boolean {
@@ -423,8 +425,9 @@ function isProviderRuntimeActive(event: BuddyRuntimeEvent | null): boolean {
 function isProviderModelRuntimeProblem(
   event: BuddyRuntimeEvent | null,
 ): boolean {
-  if (event === null || event.status !== "failed") return false;
-  return isGenerationRuntime(event) || hasProviderModelRuntimeTopic(event);
+  if (event === null) return false;
+  if (isGenerationRuntime(event) && event.status === "failed") return true;
+  return hasProviderModelRuntimeTopic(event);
 }
 
 function providerWarningCount(pulse: BuddyPulse | null | undefined): number {
