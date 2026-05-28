@@ -83,7 +83,7 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 | `stream_started`                | AI response beginning             |
 | `stream_delta`                  | Incremental content (DeltaOp[])   |
 | `stream_finished`               | Complete with usage stats         |
-| `message_added/updated/removed` | Message CRUD                      |
+| `message_added/updated/removed` | Message CRUD, including hidden `event`/`plan` messages |
 | `messages_truncated`            | Messages trimmed                  |
 | `thread_updated`                | Thread metadata changed           |
 | `runtime_updated`               | Runtime flags changed             |
@@ -135,6 +135,15 @@ Whitelist: `["tour", "userSurvey"]` (NOT chat/history — those are ephemeral)
 
 Always use selectors. Never access `state.chat.threads[id]` directly in components.
 
+Hidden-role selector convention:
+
+- `selectVisibleMessages(state, threadId)` excludes `event` and `plan`; use this for normal transcript rendering.
+- `selectEventLog(state, threadId)` returns normalized `EventMessage[]` for EventLog surfaces.
+- `selectCurrentPlan(state, threadId)` returns the latest `PlanMessage` by version/index for PlanBanner.
+- `selectPlanHistory(state, threadId)` returns all plan versions for history/diff UI.
+
+If a new component needs hidden-role data, add or reuse a selector first instead of filtering `thread.messages` inside the component.
+
 ### RTK Query APIs
 
 All generate hooks (`useGetCapsQuery`, etc.). Dynamic base URL from Redux state. Auto-injects auth.
@@ -182,6 +191,29 @@ Dispatches messages to specialized renderers. Iterative processing (not recursiv
 | `tool`         | (inline in AssistantInput) | Skipped in top-level render                                          |
 | `diff`         | DiffContent                | Grouped by tool_call_id, apply/reject UI                             |
 | `context_file` | ContextFiles               | Memory/knowledge attachments 🗃️                                      |
+| `event`        | EventLog                   | Hidden from normal transcript; grouped under nearby assistant turns   |
+| `plan`         | PlanBanner                 | Hidden from normal transcript; latest version pinned above chat       |
+
+### EventLog component pattern (src/components/ChatContent/EventLog/)
+
+EventLog renders hidden `event` messages without polluting the main transcript.
+
+- Feed it selector-normalized `EventMessage[]`; do not pass raw backend messages with only `extra.event`.
+- Keep it collapsed by default and persist collapse/filter state per thread in localStorage.
+- Show subkind icon/chip, source, one-line `content`, and expandable JSON payload.
+- Use `EventLogEntry` for row-level behavior and `eventSubkind.ts` for the single source of icon mapping.
+- Click behavior stays subkind-specific and explicit: `process_completed` scrolls to matching `[data-exec-process-id]`; `cron_fire` opens the scheduler page via `openScheduler`.
+- Tests belong next to the component and should cover collapsed/expanded state, filters, localStorage persistence, and any subkind click behavior.
+
+### PlanBanner component pattern (src/components/ChatContent/PlanBanner/)
+
+PlanBanner renders the latest hidden `plan` role message as sticky context above the virtualized transcript.
+
+- Read plan data with `selectCurrentPlan` and `selectPlanHistory`; do not scan messages directly.
+- Header format: `📋 Plan — {mode} · v{version} · {humanizedAge}`.
+- Body uses existing Markdown rendering and a persisted collapse toggle. Keep v1 expanded by default unless the user toggles.
+- History modal lists all plan versions in chronological order and should use `supersedes` metadata when implementing diffs.
+- Keep sticky styles in `PlanBanner.module.css`; avoid inline styles.
 
 ### ToolsContent (src/components/ChatContent/ToolsContent.tsx)
 
@@ -212,7 +244,37 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 
 Threads continue processing even without open tabs. `closeThread` preserves busy runtimes (streaming, waiting, paused). Background thread needs confirmation → auto-switches user to that tab.
 
-**Two SSE systems**: Chat subscription (per-thread, real-time state) + Trajectories subscription (global, metadata sync only).
+**Two SSE systems**: Chat subscription (per-thread, real-time state) + Trajectories subscription (global, metadata sync only). Sidebar v2 also carries section snapshots/updates plus notification envelopes for cross-thread prompts.
+
+### Scheduler feature
+
+The scheduler UI is opened by the `scheduler` page (`openScheduler({ taskId? })`) and by EventLog clicks on `cron_fire` events. Keep the GUI model aligned with backend cron tools:
+
+- `cron_create`: 5-field cron, prompt, description, recurring flag, durable flag.
+- `cron_list`: scope filter (`session`, `durable`, `all`), list rows with human schedule, next fire, fire count, and scope chips.
+- `cron_delete`: remove by id and update the visible list.
+
+Scheduler state should live in a feature slice or RTK Query service, not in ChatContent. Cron fire visibility comes from hidden `event(cron_fire)` messages and should route through EventLog first. Durable jobs are project-scoped; session jobs are engine-memory-scoped, so UI copy must make that distinction clear.
+
+### Notifications + toast pattern
+
+Notification events must stay semantically separate from task events. Sidebar SSE envelopes use:
+
+```typescript
+{ type: "notification", notification: NotificationEvent }
+```
+
+Current notification payloads are `task_done` and `ask_questions`; the parser validates them in `services/refact/sidebarSubscription.ts` and `useSidebarSubscription` routes them to IDE/window notifications instead of task reducers. Chat hidden events such as `event(process_completed)` appear through `message_added` and should be surfaced by EventLog or feature-specific toast middleware.
+
+If adding a new toast source:
+
+1. Define the envelope or hidden-event payload type in `services/refact/types.ts` or `sidebarSubscription.ts`.
+2. Validate it at the parser boundary.
+3. Dispatch a typed action from middleware/hook code.
+4. Render with Radix + CSS modules, `role="status"`/`aria-live="polite"`, stable IDs for dismiss/dedupe, and click handlers that navigate or scroll to the relevant chat/process/card.
+5. Add tests for parsing, dedupe, dismiss, and click behavior.
+
+Dedicated `ProcessCompleted` chat envelopes are not active in this tree; process completion is currently `message_added` with `event(process_completed)`. If the dedicated envelope returns, GUI AGENTS and `EventEnvelope`/reducer tests must document it before use.
 
 ### State Machine (per thread)
 
@@ -229,6 +291,7 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 ## Special Features
 
 - **Checkpoints**: Workspace rollback via git commits. Preview → Restore. Per-message reset button.
+- **Hidden Roles**: `event` messages feed EventLog; `plan` messages feed PlanBanner. Both stay out of `selectVisibleMessages`.
 - **Thinking Blocks**: `thinking_blocks: [{thinking, signature}]` on assistant messages. Collapsible UI. Signatures are opaque — never mutate.
 - **Reasoning Content**: Separate `reasoning_content` field. Collapsible.
 - **Knowledge/Memory**: `remember_how_to_use_tools` → vecdb → `context_file` messages. Knowledge graph view.

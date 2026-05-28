@@ -140,6 +140,27 @@ export default defineConfig({
               },
             },
             {
+              label: 'Hidden Roles',
+              link: '/roles/',
+              attrs: {
+                'aria-label': 'Understand hidden roles and plans',
+              },
+            },
+            {
+              label: 'Scheduler',
+              link: '/scheduler/',
+              attrs: {
+                'aria-label': 'Schedule agent prompts with cron',
+              },
+            },
+            {
+              label: 'Processes and PTY',
+              link: '/processes/',
+              attrs: {
+                'aria-label': 'Manage background processes and PTY sessions',
+              },
+            },
+            {
               label: 'Context',
               link: '/features/context/',
               attrs: {
