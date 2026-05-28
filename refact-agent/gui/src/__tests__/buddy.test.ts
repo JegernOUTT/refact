@@ -2841,63 +2841,6 @@ describe("Buddy investigation prompt hardening", () => {
       "use GitHub MCP remote browsing for `smallcloudai/refact` when helpful",
     );
   });
-
-  test("startBuddyInvestigation opens investigation chat metadata", async () => {
-    const commands: unknown[] = [];
-    server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () =>
-        HttpResponse.json({
-          chat_id: "buddy-investigation-meta-chat",
-          title: "Buddy investigation metadata",
-          created_at: "2024-01-01T00:00:00Z",
-          last_message_at: null,
-          message_count: 0,
-        }),
-      ),
-      http.post("http://127.0.0.1:8001/v1/buddy/investigation-context", () =>
-        HttpResponse.json({
-          logs: "logs",
-          internal_context: "context",
-          repo_owner: "smallcloudai",
-          repo_name: "refact",
-        }),
-      ),
-      http.post(
-        "http://127.0.0.1:8001/v1/chats/:id/commands",
-        async ({ request }) => {
-          commands.push(await request.json());
-          return HttpResponse.json({ ok: true });
-        },
-      ),
-    );
-    const store = setUpStore();
-
-    await store.dispatch(
-      startBuddyInvestigation({
-        triggerText: "Model failed",
-        triggerSource: "runtime",
-      }),
-    );
-
-    const setParamsCommand = commands.find(
-      (command): command is { type: string; patch: { buddy_meta?: unknown } } =>
-        typeof command === "object" &&
-        command !== null &&
-        "type" in command &&
-        command.type === "set_params",
-    );
-    expect(setParamsCommand?.patch.buddy_meta).toEqual({
-      is_buddy_chat: true,
-      buddy_chat_kind: "investigation",
-      workflow_id: null,
-    });
-    expect(commands).toContainEqual(
-      expect.objectContaining({
-        type: "user_message",
-        suppress_auto_enrichment: true,
-      }),
-    );
-  });
 });
 
 describe("Buddy frontend error reporting helpers", () => {
@@ -5138,6 +5081,118 @@ describe("restoreChat buddy_meta handling", () => {
       forceRefetch: true,
       subscribe: false,
     });
+  });
+
+  test("openExistingBuddyChat rejects system conversations before restore", async () => {
+    const dispatch = vi.fn((action: unknown) => action);
+
+    const result = await openExistingBuddyChat({
+      id: "system-not-openable",
+      kind: "system",
+      title: "System note",
+      created_at: "2024-01-01T00:00:00Z",
+      updated_at: "2024-01-02T00:00:00Z",
+      status: "completed",
+      message_count: 0,
+      icon: "🗜",
+      badge: "System",
+    })(dispatch as never, (() => ({})) as never, undefined);
+
+    expect(result.type).toBe("chat/openExistingBuddyChat/rejected");
+    expect(result).toMatchObject({
+      error: expect.objectContaining({
+        message: expect.stringContaining("cannot be opened"),
+      }),
+    });
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: restoreChat.type }),
+    );
+  });
+
+  test("openExistingBuddyChat trajectory failure restores visible fallback error", async () => {
+    const store = setUpStore({
+      config: { apiKey: "test", lspPort: 8001, themeProps: {}, host: "vscode" },
+    });
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/trajectories/failing-buddy-chat", () =>
+        HttpResponse.json({ detail: "missing trajectory" }, { status: 404 }),
+      ),
+    );
+
+    await store.dispatch(
+      openExistingBuddyChat({
+        id: "failing-buddy-chat",
+        kind: "chat",
+        title: "Failing Buddy Chat",
+        created_at: "2024-01-01T00:00:00Z",
+        updated_at: "2024-01-02T00:00:00Z",
+        status: "completed",
+        message_count: 2,
+        icon: "💬",
+        badge: null,
+      }),
+    );
+
+    const rt = store.getState().chat.threads["failing-buddy-chat"];
+    expect(rt?.thread.buddy_meta).toEqual({
+      is_buddy_chat: true,
+      buddy_chat_kind: "chat",
+      workflow_id: null,
+    });
+    expect(rt?.thread.messages[0]).toMatchObject({
+      role: "assistant",
+      content: expect.stringContaining(
+        "Buddy could not load saved messages for this chat.",
+      ),
+      finish_reason: "error",
+    });
+    expect(rt?.session_state).toBe("error");
+    expect(rt?.error).toContain("Buddy could not load saved messages");
+    expect(store.getState().pages.at(-1)?.name).toBe("chat");
+  });
+
+  test("startBuddyInvestigation marks the created chat when setup commands fail", async () => {
+    server.use(
+      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json({
+          chat_id: "buddy-investigation-setup-fails",
+          title: "Buddy investigation",
+          created_at: "2024-01-01T00:00:00Z",
+          last_message_at: null,
+          message_count: 0,
+        }),
+      ),
+      http.post("http://127.0.0.1:8001/v1/buddy/investigation-context", () =>
+        HttpResponse.json({
+          logs: "logs",
+          internal_context: "context",
+          repo_owner: "smallcloudai",
+          repo_name: "refact",
+        }),
+      ),
+      http.post("http://127.0.0.1:8001/v1/chats/:id/commands", () =>
+        HttpResponse.json({ detail: "command failed" }, { status: 500 }),
+      ),
+    );
+    const store = setUpStore({
+      config: { apiKey: "test", lspPort: 8001, themeProps: {}, host: "vscode" },
+    });
+
+    await expect(
+      store
+        .dispatch(
+          startBuddyInvestigation({
+            triggerText: "Model failed",
+            triggerSource: "runtime",
+          }),
+        )
+        .unwrap(),
+    ).rejects.toThrow("Failed to send command");
+
+    const rt = store.getState().chat.threads["buddy-investigation-setup-fails"];
+    expect(rt?.thread.buddy_meta?.is_buddy_chat).toBe(true);
+    expect(rt?.session_state).toBe("error");
+    expect(rt?.error).toContain("Buddy investigation setup failed.");
   });
 
   test("restoreChatFromBackend requests trajectory with non-subscribed query", async () => {

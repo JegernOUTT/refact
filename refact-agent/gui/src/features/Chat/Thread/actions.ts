@@ -37,6 +37,7 @@ import { push } from "../../Pages/pagesSlice";
 import type {
   DiagnosticContext,
   BuddyConversationEntry,
+  BuddyThreadMeta,
 } from "../../Buddy/types";
 import {
   buildBuddyInvestigationPrompt,
@@ -590,21 +591,41 @@ export const newBuddyChatAction = createAction<{ chat_id: string }>(
   "chat/newBuddyChat",
 );
 
+type OpenableBuddyChatKind = "chat" | "setup" | "workflow";
+
+function normalizeOpenableBuddyChatKind(
+  kind: BuddyConversationEntry["kind"],
+): OpenableBuddyChatKind | null {
+  if (kind === "chat" || kind === "setup" || kind === "workflow") return kind;
+  return null;
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return "Unknown error";
+}
+
 export const openExistingBuddyChat = createAsyncThunk<
   undefined,
   BuddyConversationEntry,
   { dispatch: AppDispatch; state: RootState }
 >("chat/openExistingBuddyChat", async (entry, thunkApi) => {
-  const buddyMeta = {
-    is_buddy_chat: true as const,
-    buddy_chat_kind: entry.kind,
-    workflow_id: entry.workflow_id ?? null,
+  const openableKind = normalizeOpenableBuddyChatKind(entry.kind);
+  if (!openableKind) {
+    throw new Error(`Buddy conversation kind ${entry.kind} cannot be opened`);
+  }
+
+  const buddyMeta: BuddyThreadMeta = {
+    is_buddy_chat: true,
+    buddy_chat_kind: openableKind,
+    workflow_id: openableKind === "workflow" ? entry.workflow_id ?? null : null,
   };
 
   const fallback: ChatHistoryItem = {
     id: entry.id,
     title: entry.title || "Untitled",
     model: "",
+    mode: "buddy",
     tool_use: "agent",
     messages: [],
     boost_reasoning: false,
@@ -616,6 +637,7 @@ export const openExistingBuddyChat = createAsyncThunk<
     createdAt: entry.created_at,
     updatedAt: entry.updated_at,
   };
+  let hydrated = false;
 
   try {
     const result = await thunkApi
@@ -637,11 +659,37 @@ export const openExistingBuddyChat = createAsyncThunk<
       buddy_meta: buddyMeta,
     };
     thunkApi.dispatch(restoreChat(historyItem));
-  } catch {
-    thunkApi.dispatch(restoreChat(fallback));
+    hydrated = true;
+  } catch (error) {
+    const message = `Buddy could not load saved messages for this chat. ${describeError(
+      error,
+    )}`;
+    thunkApi.dispatch(
+      restoreChat({
+        ...fallback,
+        messages: [
+          {
+            role: "assistant",
+            content: message,
+            message_id: `buddy-hydration-failed-${entry.id}`,
+            finish_reason: "error",
+          },
+        ],
+        session_state: "error",
+      }),
+    );
+    thunkApi.dispatch(
+      updateChatRuntimeFromSessionState({
+        id: entry.id,
+        session_state: "error",
+        error: message,
+      }),
+    );
   }
 
-  thunkApi.dispatch(requestSseRefresh({ chatId: entry.id }));
+  if (hydrated) {
+    thunkApi.dispatch(requestSseRefresh({ chatId: entry.id }));
+  }
   thunkApi.dispatch(push({ name: "chat" }));
 
   return undefined;
@@ -690,43 +738,54 @@ export const startBuddyInvestigation = createAsyncThunk<
     api.dispatch(openBuddyChat({ chat_id: meta.chat_id, title: meta.title }));
     api.dispatch(push({ name: "chat" }));
 
-    await updateChatParams(
-      meta.chat_id,
-      {
-        title: meta.title,
-        mode: "buddy",
-        buddy_meta: {
-          is_buddy_chat: true,
-          buddy_chat_kind: "investigation",
-          workflow_id: null,
+    try {
+      await updateChatParams(
+        meta.chat_id,
+        {
+          title: meta.title,
+          mode: "buddy",
+          buddy_meta: {
+            is_buddy_chat: true,
+            buddy_chat_kind: "investigation",
+            workflow_id: null,
+          },
+          include_project_info: true,
         },
-        include_project_info: true,
-      },
-      port,
-      apiKey,
-    );
+        port,
+        apiKey,
+      );
 
-    const prompt = buildBuddyInvestigationPrompt({
-      triggerSource,
-      triggerText,
-      sourceChatId,
-      messages,
-      diagnostic,
-      logs: context.logs,
-      internalContext: context.internal_context,
-      repoOwner: context.repo_owner,
-      repoName: context.repo_name,
-    });
+      const prompt = buildBuddyInvestigationPrompt({
+        triggerSource,
+        triggerText,
+        sourceChatId,
+        messages,
+        diagnostic,
+        logs: context.logs,
+        internalContext: context.internal_context,
+        repoOwner: context.repo_owner,
+        repoName: context.repo_name,
+      });
 
-    await sendUserMessage(
-      meta.chat_id,
-      prompt,
-      port,
-      apiKey,
-      undefined,
-      undefined,
-      true,
-    );
+      await sendUserMessage(
+        meta.chat_id,
+        prompt,
+        port,
+        apiKey,
+        undefined,
+        undefined,
+        true,
+      );
+    } catch (error) {
+      api.dispatch(
+        updateChatRuntimeFromSessionState({
+          id: meta.chat_id,
+          session_state: "error",
+          error: `Buddy investigation setup failed. ${describeError(error)}`,
+        }),
+      );
+      throw error;
+    }
 
     return { chat_id: meta.chat_id, title: meta.title };
   },
