@@ -136,9 +136,8 @@ impl Tool for ToolCronList {
             },
             experimental: false,
             allow_parallel: true,
-            description:
-                "List scheduled tasks, optionally filtering by session-only or durable scope."
-                    .to_string(),
+            description: "List scheduled tasks with target chat and mode, optionally filtering by session-only or durable scope."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -187,6 +186,8 @@ fn task_value(task: &ScheduledTask, now_ms: u64, tz: chrono_tz::Tz) -> Value {
         "human_schedule": human_schedule(&task.cron),
         "description": task.description,
         "prompt": first_chars(&task.prompt, 200),
+        "chat_id": task.chat_id,
+        "mode": task.mode,
         "recurring": task.recurring,
         "durable": task.durable,
         "next_fire_at_ms": next_run_ms(&task.cron, now_ms, tz).unwrap_or(0),
@@ -203,7 +204,9 @@ fn first_chars(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::app_state::AppState;
-    use crate::scheduler::{InMemoryCronStore, JsonFileCronStore, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS};
+    use crate::scheduler::{
+        InMemoryCronStore, JsonFileCronStore, DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+    };
 
     fn session_task(id: &str) -> ScheduledTask {
         ScheduledTask {
@@ -321,11 +324,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut tool = ToolCronList::with_stores(
-            String::new(),
-            session_store,
-            Some(durable_store),
-        );
+        let mut tool = ToolCronList::with_stores(String::new(), session_store, Some(durable_store));
         let ccx = test_ccx().await;
 
         let all = run_tool(&mut tool, ccx.clone(), None).await;
@@ -341,6 +340,22 @@ mod tests {
         let durable_only = run_tool(&mut tool, ccx, Some("durable")).await;
         assert_eq!(durable_only.len(), 1);
         assert_eq!(durable_only[0]["id"], json!("cron_list_all_dur"));
+    }
+
+    #[tokio::test]
+    async fn cron_list_includes_target_chat_and_mode() {
+        let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        session_store
+            .add(session_task("cron_list_target_fields"))
+            .await
+            .unwrap();
+        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let ccx = test_ccx().await;
+
+        let items = run_tool(&mut tool, ccx, Some("session")).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["chat_id"], json!("chat"));
+        assert_eq!(items[0]["mode"], json!("agent"));
     }
 
     #[tokio::test]
