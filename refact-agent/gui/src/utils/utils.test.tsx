@@ -5,7 +5,7 @@ import {
   filename,
   parseOrElse,
   takeFromEndWhile,
-  scanFoDuplicatesWith,
+  scanForDuplicatesWith,
   partition,
   fenceBackTicks,
 } from ".";
@@ -119,7 +119,7 @@ describe("scanForDuplicates", () => {
   ];
 
   test.each(tests)("when given %s it should return %b", (input, expected) => {
-    const result = scanFoDuplicatesWith(input, (a, b) => a === b);
+    const result = scanForDuplicatesWith(input, (a, b) => a === b);
     expect(result).toEqual(expected);
   });
 });

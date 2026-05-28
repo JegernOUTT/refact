@@ -1,4 +1,4 @@
-export function scanFoDuplicatesWith<T>(
+export function scanForDuplicatesWith<T>(
   arr: T[],
   predicate: (a: T, b: T) => boolean,
 ): boolean {
@@ -7,5 +7,5 @@ export function scanFoDuplicatesWith<T>(
   const [head, ...tail] = arr;
   const hasDuplicate = tail.some((item) => predicate(head, item));
   if (hasDuplicate) return true;
-  return scanFoDuplicatesWith(tail, predicate);
+  return scanForDuplicatesWith(tail, predicate);
 }
