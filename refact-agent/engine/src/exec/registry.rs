@@ -370,6 +370,12 @@ impl ExecRegistry {
             {
                 let snapshot = existing.snapshot.clone();
                 drop(records);
+                #[cfg(unix)]
+                {
+                    if let Some(pid) = child.id() {
+                        let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    }
+                }
                 let _ = child.start_kill();
                 tokio::spawn(async move {
                     let _ = child.wait().await;
@@ -2717,5 +2723,48 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!process_exists(child_pid));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn register_with_child_duplicate_kills_process_group_descendants() {
+        let registry = ExecRegistry::new();
+        let first = registry
+            .register(
+                meta("exec_child_pgroup_desc", ExecMode::Background, "sleep 1")
+                    .with_chat_id("chat-a"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let process_id = first.meta.process_id.clone();
+        registry.mark_started(&process_id).await.unwrap();
+
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg("sleep 100 & wait");
+        unsafe {
+            command.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let child = command.spawn().expect("spawn child");
+        let child_pid = child.id().expect("child pid");
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(process_exists(child_pid));
+
+        registry
+            .register_with_child(
+                meta("exec_child_pgroup_desc", ExecMode::Background, "echo dup")
+                    .with_chat_id("chat-b"),
+                DEFAULT_MAX_BYTES,
+                child,
+            )
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let group_alive = unsafe { libc::kill(-(child_pid as i32), 0) == 0 };
+        assert!(!group_alive, "process group should be fully killed including descendants");
     }
 }

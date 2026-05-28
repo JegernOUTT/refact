@@ -25,18 +25,26 @@ pub fn spawn_pty(
     let pair = pty_system
         .openpty(size)
         .map_err(|error| format!("failed to open pty: {error}"))?;
-    let child: Box<dyn Child + Send> = pair
+    let mut child: Box<dyn Child + Send> = pair
         .slave
         .spawn_command(cmd)
         .map_err(|error| format!("failed to spawn pty command: {error}"))?;
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| format!("failed to clone pty reader: {error}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| format!("failed to take pty writer: {error}"))?;
+    let reader = match pair.master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to clone pty reader: {error}"));
+        }
+    };
+    let writer = match pair.master.take_writer() {
+        Ok(writer) => writer,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to take pty writer: {error}"));
+        }
+    };
     Ok((
         PtyHandle {
             writer,
@@ -55,6 +63,29 @@ mod tests {
 
     use crate::exec::types::{ExecOutputStream, ExecSpawnRequest, ExecStatus};
     use crate::exec::ExecRegistry;
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_post_spawn_cleanup_kills_child() {
+        use super::{default_pty_size, native_pty_system, CommandBuilder};
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(default_pty_size()).unwrap();
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 30");
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        let pid = child.process_id().expect("child has pid");
+
+        assert!(unsafe { libc::kill(pid as i32, 0) == 0 }, "child should be alive before cleanup");
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            unsafe { libc::kill(pid as i32, 0) != 0 },
+            "child should be killed after cleanup"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]
