@@ -447,6 +447,7 @@ async fn run_verification_argv_impl(
     let status = match tokio::time::timeout(timeout, Box::into_pin(child.wait())).await {
         Ok(Ok(status)) => status,
         Ok(Err(error)) => {
+            let _ = child.start_kill();
             stdout_task.abort();
             stderr_task.abort();
             return VerificationResult {
@@ -480,8 +481,8 @@ async fn run_verification_argv_impl(
         (stdout, stderr)
     })
     .await;
-    let (stdout_bytes, stderr_bytes, drain_suffix) = match drain_result {
-        Ok((stdout, stderr)) => (stdout, stderr, String::new()),
+    let (stdout_bytes, stderr_bytes, drain_suffix, drain_timed_out) = match drain_result {
+        Ok((stdout, stderr)) => (stdout, stderr, String::new(), false),
         Err(_) => {
             stdout_abort.abort();
             stderr_abort.abort();
@@ -493,6 +494,7 @@ async fn run_verification_argv_impl(
                     "\noutput drain timed out after {} seconds; descendant process may have inherited stdout/stderr",
                     drain_timeout.as_secs()
                 ),
+                true,
             )
         }
     };
@@ -505,7 +507,7 @@ async fn run_verification_argv_impl(
     VerificationResult {
         command: command.to_string(),
         exit_code: status.code(),
-        passed: status.success(),
+        passed: status.success() && !drain_timed_out,
         output_tail: tail_chars(&output, MAX_OUTPUT_TAIL_CHARS),
     }
 }
@@ -909,5 +911,6 @@ mod tests {
         .expect("verifier must not hang when descendant holds pipe open");
 
         assert!(result.output_tail.contains("drain timed out"));
+        assert!(!result.passed);
     }
 }
