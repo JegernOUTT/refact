@@ -1146,7 +1146,9 @@ describe("Buddy chat notification freshness", () => {
       const store = setUpStore();
       const actionableRuntime = makeChatRuntimeEvent({
         id: "runtime-actionable-ratio",
+        signal_type: "ordinary_status",
         title: "Actionable runtime",
+        source: "buddy",
         status: "info",
         priority: "normal",
         controls: [
@@ -1209,7 +1211,9 @@ describe("Buddy chat notification freshness", () => {
         const store = setUpStore();
         const actionableRuntime = makeChatRuntimeEvent({
           id: `runtime-actionable-${speechId}`,
+          signal_type: "ordinary_status",
           title: "Actionable runtime",
+          source: "buddy",
           status: "info",
           priority: "normal",
           controls: [
@@ -1422,7 +1426,9 @@ describe("Buddy chat notification freshness", () => {
       const store = setUpStore();
       const actionableRuntime = makeChatRuntimeEvent({
         id: "runtime-explicit-actionable",
+        signal_type: "ordinary_status",
         title: "Actionable runtime",
+        source: "buddy",
         status: "info",
         priority: "normal",
         controls: [
@@ -4001,13 +4007,17 @@ describe("buddy chat reactions settings and bubbles", () => {
     },
   );
 
-  test.each<[
-    string,
-    Partial<BuddyRuntimeEvent>,
-    string,
-  ]>([
-    ["high-priority", { status: "info", priority: "high" }, "high"],
-    ["critical", { status: "info", priority: "critical" }, "critical"],
+  test.each<[string, Partial<BuddyRuntimeEvent>, string]>([
+    [
+      "high-priority actual error",
+      { signal_type: "provider_error", status: "info", priority: "high" },
+      "high-error",
+    ],
+    [
+      "critical actual error",
+      { signal_type: "chat_error", status: "info", priority: "critical" },
+      "critical-error",
+    ],
     ["failed", { status: "failed", priority: "normal" }, "failed"],
   ])(
     "%s runtime event beats live ambient chat reaction",
@@ -4108,8 +4118,14 @@ describe("buddy chat reactions settings and bubbles", () => {
 
   test.each<[string, Partial<BuddyRuntimeEvent>]>([
     ["failed", { status: "failed", priority: "normal" }],
-    ["high", { status: "info", priority: "high" }],
-    ["critical", { status: "info", priority: "critical" }],
+    [
+      "high-error-signal",
+      { signal_type: "provider_error", status: "info", priority: "high" },
+    ],
+    [
+      "critical-error-signal",
+      { signal_type: "chat_error", status: "info", priority: "critical" },
+    ],
   ])(
     "%s runtime event still receives error controls",
     async (_label, overrides) => {
@@ -4142,6 +4158,182 @@ describe("buddy chat reactions settings and bubbles", () => {
       }
     },
   );
+
+  test("high-priority completed task event has no default investigate controls", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const runtime = makeChatRuntimeEvent({
+        id: "runtime-task-completed-high",
+        signal_type: "task_completed",
+        title: "Task completed",
+        source: "tasks",
+        status: "completed",
+        priority: "high",
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [runtime] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(
+        container,
+        "runtime:runtime-task-completed-high",
+      );
+      expect(
+        screen.queryByRole("button", { name: "Investigate" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("scene speech gives no default controls to high-priority completed task event", () => {
+    const speech = buildBuddySceneSpeech({
+      activeSpeech: null,
+      nowPlaying: makeChatRuntimeEvent({
+        id: "scene-task-completed-high",
+        signal_type: "task_completed",
+        title: "Task completed",
+        source: "tasks",
+        status: "completed",
+        priority: "high",
+        controls: [],
+      }),
+      runtimeQueue: [],
+    });
+
+    expect(speech?.runtimeEventId).toBe("scene-task-completed-high");
+    expect(speech?.controls).toEqual([]);
+  });
+
+  test("old high failed diagnostic without ttl does not beat fresh chat reaction", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+    try {
+      const store = setUpStore();
+      const oldDiagnosticRuntime = makeChatRuntimeEvent({
+        id: "old-high-diagnostic-error",
+        signal_type: "diagnostic_error",
+        title: "Old diagnostic error",
+        source: "diagnostics",
+        status: "failed",
+        priority: "high",
+        controls: [],
+        ttl_ms: undefined,
+        persistent: false,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const reaction = makeChatRuntimeEvent({
+        id: "fresh-reaction-over-old-diagnostic",
+        signal_type: "speech_humor",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Tiny fresh gremlin reaction.",
+        controls: [],
+        created_at: "2024-01-01T00:02:00Z",
+      });
+      store.dispatch(
+        recordChatBubbleImpression({
+          id: "prior-actionable-old-diagnostic",
+          kind: "actionable",
+        }),
+      );
+      store.dispatch(
+        setBuddySnapshot({
+          ...makeSnapshot({
+            runtime_queue: [oldDiagnosticRuntime, reaction],
+          }),
+          recent_diagnostics: [
+            makeDiagnostic({
+              chat_id: "chat-a",
+              error_message: "Old diagnostic error",
+              collected_at: "2024-01-01T00:00:00Z",
+              severity: "high",
+            }),
+          ],
+        }),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(
+        container,
+        "runtime:fresh-reaction-over-old-diagnostic",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:old-high-diagnostic-error",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "diagnostic:chat-a:2024-01-01T00:00:00Z",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("persistent stale failed diagnostic can still beat fresh chat reaction", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+    try {
+      const store = setUpStore();
+      const persistentRuntime = makeChatRuntimeEvent({
+        id: "persistent-old-diagnostic-error",
+        signal_type: "diagnostic_error",
+        title: "Persistent diagnostic error",
+        source: "diagnostics",
+        status: "failed",
+        priority: "high",
+        controls: [],
+        ttl_ms: undefined,
+        persistent: true,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const reaction = makeChatRuntimeEvent({
+        id: "reaction-under-persistent-diagnostic",
+        signal_type: "speech_insight",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Tiny fresh gremlin reaction.",
+        controls: [],
+        created_at: "2024-01-01T00:02:00Z",
+      });
+      store.dispatch(
+        recordChatBubbleImpression({
+          id: "prior-actionable-persistent-diagnostic",
+          kind: "actionable",
+        }),
+      );
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot({ runtime_queue: [persistentRuntime, reaction] }),
+        ),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(
+        container,
+        "runtime:persistent-old-diagnostic-error",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:reaction-under-persistent-diagnostic",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   test("live chat reaction beats stale thread error but critical runtime error wins", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

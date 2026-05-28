@@ -55,7 +55,10 @@ import {
   opportunityActionControls,
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
-import { isBuddyRuntimeEventVisible } from "./buddyRuntimeEvents";
+import {
+  isBuddyRuntimeEventVisible,
+  isErrorRuntimeEvent,
+} from "./buddyRuntimeEvents";
 import {
   compareBuddyRuntimeEvents,
   formatBuddyRuntimeEventText,
@@ -159,14 +162,6 @@ function isLiveChatReactionEvent(event: BuddyRuntimeEvent): boolean {
   );
 }
 
-function isErrorRuntimeEvent(event: BuddyRuntimeEvent): boolean {
-  return (
-    event.status === "failed" ||
-    event.priority === "critical" ||
-    event.priority === "high"
-  );
-}
-
 function isDurableSpeechToken(value: string | null | undefined): boolean {
   const token = normalizedPolicyToken(value);
   return token ? DURABLE_SPEECH_INTENTS.has(token) : false;
@@ -259,11 +254,12 @@ function classifyRuntimeEvent(event: BuddyRuntimeEvent): BuddyChatBubbleClass {
   ) {
     return "actionable";
   }
-  if (
-    isErrorRuntimeEvent(event) ||
-    (event.controls?.length ?? 0) > 0 ||
-    event.persistent === true
-  ) {
+  if (isErrorRuntimeEvent(event)) {
+    return event.priority === "critical" || event.persistent === true
+      ? "actionable"
+      : "event_once";
+  }
+  if ((event.controls?.length ?? 0) > 0 || event.persistent === true) {
     return "actionable";
   }
   return "event_once";
@@ -301,12 +297,15 @@ function pickNotificationCandidate(
   const sorted = [...eligible].sort((left, right) => left.rank - right.rank);
   const top = sorted[0] ?? null;
   const ambient = sorted.find((candidate) => candidate.kind === "ambient");
+  const urgent = sorted.find(
+    (candidate) => candidate.preventsAmbientOverride === true,
+  );
   if (top && top.rank < 20 && ambient?.rank !== top.rank) return top;
   if (ambient && ambientRatio(impressions) < AMBIENT_RATIO_TARGET) {
-    const urgent = sorted.find(
-      (candidate) => candidate.preventsAmbientOverride === true,
-    );
     if (urgent) return urgent;
+    return ambient;
+  }
+  if (ambient && top && top.kind !== "ambient" && top.rank > 20 && !urgent) {
     return ambient;
   }
   return top;
@@ -369,10 +368,16 @@ function runtimeEventControls(
 }
 
 function runtimeEventRank(event: BuddyRuntimeEvent, index: number): number {
-  if (event.priority === "critical") return 10 + index;
-  if (event.priority === "high") return 20 + index;
+  if (event.priority === "critical" && isErrorRuntimeEvent(event)) {
+    return 10 + index;
+  }
+  if (event.priority === "high" && isErrorRuntimeEvent(event)) {
+    return 20 + index;
+  }
   if (isLiveChatReactionEvent(event)) return 30 + index;
   if (isErrorRuntimeEvent(event)) return 40 + index;
+  if (event.priority === "critical") return 45 + index;
+  if (event.priority === "high") return 48 + index;
   return 50 + index;
 }
 

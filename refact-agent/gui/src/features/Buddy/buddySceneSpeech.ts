@@ -9,7 +9,10 @@ import {
   opportunityActionControls,
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
-import { isBuddyRuntimeEventVisible } from "./buddyRuntimeEvents";
+import {
+  isBuddyRuntimeEventVisible,
+  isErrorRuntimeEvent,
+} from "./buddyRuntimeEvents";
 
 export type BuddySceneSpeechSource =
   | "speech"
@@ -30,6 +33,16 @@ export interface BuddySceneSpeech {
 }
 
 const SPEECH_SILENCE_CHANCE = 0.35;
+const RUNTIME_EVENT_FRESHNESS_MS = 75_000;
+const LIVE_CHAT_REACTION_SIGNALS = new Set([
+  "speech_humor",
+  "speech_insight",
+  "chat_bug_candidate",
+  "chat_interaction",
+  "chat_interaction_comment",
+  "interaction_comment",
+  "live_interaction_reaction",
+]);
 
 function normalizeRuntimeText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -74,13 +87,7 @@ export function formatBuddyRuntimeEventText(event: BuddyRuntimeEvent): string {
 }
 
 function defaultRuntimeControls(event: BuddyRuntimeEvent): BuddyControl[] {
-  if (
-    event.status !== "failed" &&
-    event.priority !== "critical" &&
-    event.priority !== "high"
-  ) {
-    return [];
-  }
+  if (!isErrorRuntimeEvent(event)) return [];
 
   return [
     {
@@ -184,7 +191,42 @@ function runtimeCandidatesFromQueue(
   return candidates.sort(compareBuddyRuntimeEvents).slice(0, 4);
 }
 
+function normalizedRuntimeToken(value: string | null | undefined): string {
+  return (
+    value
+      ?.trim()
+      .toLowerCase()
+      .replace(/[:\s-]+/g, "_") ?? ""
+  );
+}
+
+function isLiveChatReactionEvent(event: BuddyRuntimeEvent): boolean {
+  return (
+    event.source === "chat_reactions" ||
+    LIVE_CHAT_REACTION_SIGNALS.has(normalizedRuntimeToken(event.signal_type)) ||
+    LIVE_CHAT_REACTION_SIGNALS.has(normalizedRuntimeToken(event.source)) ||
+    LIVE_CHAT_REACTION_SIGNALS.has(
+      normalizedRuntimeToken(event.dedupe_key ?? undefined),
+    )
+  );
+}
+
+function isFreshRuntimeEvent(event: BuddyRuntimeEvent, nowMs = Date.now()) {
+  if (event.persistent === true) return true;
+  const createdAtMs = runtimeCreatedAtMs(event);
+  if (createdAtMs <= 0 || !Number.isFinite(nowMs)) return false;
+  if (createdAtMs > nowMs + 30_000) return false;
+  const freshnessMs =
+    event.ttl_ms != null && Number.isFinite(event.ttl_ms) && event.ttl_ms > 0
+      ? Math.min(RUNTIME_EVENT_FRESHNESS_MS, event.ttl_ms)
+      : RUNTIME_EVENT_FRESHNESS_MS;
+  return nowMs - createdAtMs <= freshnessMs;
+}
+
 function runtimePriorityScore(event: BuddyRuntimeEvent): number {
+  if (isErrorRuntimeEvent(event) && event.persistent === true) return 875;
+  if (isLiveChatReactionEvent(event) && isFreshRuntimeEvent(event)) return 850;
+
   const priorityScore = (() => {
     switch (event.priority) {
       case "critical":
