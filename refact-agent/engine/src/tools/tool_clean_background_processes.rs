@@ -48,7 +48,7 @@ impl Tool for ToolCleanBackgroundProcesses {
                 ccx.task_meta.as_ref().map(|meta| meta.role.clone()),
             )
         };
-        reject_unconfirmed_sensitive_cleanup(scope, include_services, task_role.as_deref())?;
+        reject_unauthorized_sensitive_cleanup(scope, include_services, task_role.as_deref())?;
         let workspace = if scope == CleanScope::Workspace {
             Some(current_workspace(gcx, execution_scope.as_ref()).await?)
         } else {
@@ -97,7 +97,7 @@ impl Tool for ToolCleanBackgroundProcesses {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Kill and reap all non-terminal background processes owned by the current chat. Use to clean up after experiments. `scope=chat` (default) is available in normal chats. `scope=workspace` kills all workspace processes and requires confirmation. `scope=all` and `include_services=true` require planner/admin context and cannot be used by normal agents even after confirmation.".to_string(),
+            description: "Kill and reap all non-terminal background processes owned by the current chat. Use to clean up after experiments. `scope=chat` (default) is available in normal chats. `scope=workspace`, `scope=all`, and `include_services=true` can execute only from planner/admin context and cannot be used by normal agents.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -105,12 +105,12 @@ impl Tool for ToolCleanBackgroundProcesses {
                         "type": "string",
                         "enum": ["chat", "owner", "workspace", "all"],
                         "default": "chat",
-                        "description": "Which set of processes to target. `chat` (default) kills processes owned by the current chat — available in normal chats. `owner` is a compatibility alias for `chat`. `workspace` kills processes in the active workspace and requires confirmation. `all` kills every process globally and requires planner/admin context."
+                        "description": "Which set of processes to target. `chat` (default) kills processes owned by the current chat — available in normal chats. `owner` is a compatibility alias for `chat`. `workspace` kills processes in the active workspace and can execute only from planner/admin context. `all` kills every process globally and can execute only from planner/admin context."
                     },
                     "include_services": {
                         "type": "boolean",
                         "default": false,
-                        "description": "Also kill Service-mode processes. Requires planner/admin context; normal agents must leave this false."
+                        "description": "Also kill Service-mode processes. Can execute only from planner/admin context; normal agents must leave this false."
                     }
                 }
             }),
@@ -223,18 +223,26 @@ impl CleanScope {
     }
 }
 
-fn reject_unconfirmed_sensitive_cleanup(
+fn reject_unauthorized_sensitive_cleanup(
     scope: CleanScope,
     include_services: bool,
     task_role: Option<&str>,
 ) -> Result<(), String> {
-    if (scope == CleanScope::All || include_services) && task_role != Some("planner") {
+    if is_sensitive_cleanup(scope, include_services) && !is_cleanup_admin_role(task_role) {
         return Err(
-            "Global cleanup and service cleanup require explicit confirmation in planner/admin context"
+            "Workspace cleanup, global cleanup, and service cleanup require planner/admin context"
                 .to_string(),
         );
     }
     Ok(())
+}
+
+fn is_sensitive_cleanup(scope: CleanScope, include_services: bool) -> bool {
+    scope == CleanScope::Workspace || scope == CleanScope::All || include_services
+}
+
+fn is_cleanup_admin_role(task_role: Option<&str>) -> bool {
+    matches!(task_role, Some("planner") | Some("admin"))
 }
 
 fn target_modes(include_services: bool) -> Vec<ExecMode> {
@@ -321,6 +329,36 @@ mod tests {
                     .with_owner(ExecOwnerMeta {
                         chat_id: Some(chat_id.to_string()),
                         tool_call_id: Some("owner-call".to_string()),
+                        ..ExecOwnerMeta::default()
+                    })
+                    .with_short_description(short_description.to_string()),
+                DEFAULT_EXEC_OUTPUT_LIMIT_BYTES,
+            )
+            .await;
+        gcx.exec_registry
+            .mark_started(&snapshot.meta.process_id)
+            .await
+            .unwrap();
+        snapshot.meta.process_id
+    }
+
+    async fn register_running_in_workspace(
+        gcx: &crate::global_context::GlobalContext,
+        process_id: &str,
+        mode: ExecMode,
+        chat_id: &str,
+        workspace: &std::path::Path,
+        short_description: &str,
+    ) -> ExecProcessId {
+        let snapshot = gcx
+            .exec_registry
+            .register(
+                ExecProcessMeta::new(mode, "test command".to_string())
+                    .with_process_id(ExecProcessId(process_id.to_string()))
+                    .with_owner(ExecOwnerMeta {
+                        chat_id: Some(chat_id.to_string()),
+                        tool_call_id: Some("owner-call".to_string()),
+                        workspace: Some(workspace.to_path_buf()),
                         ..ExecOwnerMeta::default()
                     })
                     .with_short_description(short_description.to_string()),
@@ -482,7 +520,7 @@ mod tests {
     #[tokio::test]
     async fn shell_background_workspace_cleanup_kills_process() {
         let workspace = tempfile::tempdir().unwrap();
-        let (gcx, ccx) = test_ccx("chat").await;
+        let (gcx, ccx) = test_ccx_with_task_role("chat", Some("planner")).await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];
         let mut shell = ToolShell::default();
@@ -583,8 +621,64 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(include_services_err.contains("require explicit confirmation"));
-        assert!(all_scope_err.contains("require explicit confirmation"));
+        assert!(include_services_err.contains("planner/admin context"));
+        assert!(all_scope_err.contains("planner/admin context"));
+    }
+
+    #[tokio::test]
+    async fn workspace_cleanup_rejected_without_planner_context() {
+        let (_gcx, ccx) = test_ccx("chat").await;
+        let err = run_tool(ccx, args(vec![("scope", json!("workspace"))]))
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("planner/admin context"));
+    }
+
+    #[tokio::test]
+    async fn chat_cleanup_allowed_without_planner_context() {
+        let (gcx, ccx) = test_ccx("chat-normal").await;
+        let killed = register_running(
+            &gcx,
+            "exec_chat_cleanup_allowed",
+            ExecMode::Background,
+            "chat-normal",
+            "normal chat process",
+        )
+        .await;
+
+        let message = run_tool(ccx, HashMap::new()).await.unwrap();
+        let body = body(&message);
+
+        assert_eq!(body["killed_count"], json!(1));
+        assert_eq!(killed_ids(&body), vec![killed.as_str().to_string()]);
+        assert!(gcx.exec_registry.get(&killed).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn planner_workspace_cleanup_allowed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, ccx) = test_ccx_with_task_role("planner-chat", Some("planner")).await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let killed = register_running_in_workspace(
+            &gcx,
+            "exec_planner_workspace_cleanup_allowed",
+            ExecMode::Background,
+            "other-chat",
+            workspace.path(),
+            "other chat process",
+        )
+        .await;
+
+        let message = run_tool(ccx, args(vec![("scope", json!("workspace"))]))
+            .await
+            .unwrap();
+        let body = body(&message);
+
+        assert_eq!(body["killed_count"], json!(1));
+        assert_eq!(killed_ids(&body), vec![killed.as_str().to_string()]);
+        assert!(gcx.exec_registry.get(&killed).await.is_none());
     }
 
     #[tokio::test]
@@ -631,32 +725,25 @@ mod tests {
         };
         let desc = tool.tool_description();
         assert!(
-            desc.description.contains("planner"),
-            "tool description must mention planner restriction: {}",
+            desc.description.contains("planner/admin"),
+            "tool description must mention planner/admin restriction: {}",
             desc.description
         );
-        assert!(
-            desc.description.contains("confirmation") || desc.description.contains("confirm"),
-            "tool description must mention workspace confirmation: {}",
-            desc.description
-        );
+        assert!(!desc.description.contains("confirmation"));
         let scope_desc = desc.input_schema["properties"]["scope"]["description"]
             .as_str()
             .unwrap();
         assert!(
-            scope_desc.contains("planner"),
-            "scope description must mention planner restriction: {scope_desc}"
+            scope_desc.contains("planner/admin"),
+            "scope description must mention planner/admin restriction: {scope_desc}"
         );
-        assert!(
-            scope_desc.contains("confirmation") || scope_desc.contains("confirm"),
-            "scope description must mention workspace confirmation: {scope_desc}"
-        );
+        assert!(!scope_desc.contains("confirmation"));
         let include_services_desc = desc.input_schema["properties"]["include_services"]["description"]
             .as_str()
             .unwrap();
         assert!(
-            include_services_desc.contains("planner"),
-            "include_services description must mention planner restriction: {include_services_desc}"
+            include_services_desc.contains("planner/admin"),
+            "include_services description must mention planner/admin restriction: {include_services_desc}"
         );
     }
 
