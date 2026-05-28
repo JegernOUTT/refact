@@ -516,7 +516,6 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
                 transcript={metadata?.transcript}
               />
 
-
               {!metadata && (
                 <Flex align="center" gap="1" mt="2">
                   <LapTimerIcon />

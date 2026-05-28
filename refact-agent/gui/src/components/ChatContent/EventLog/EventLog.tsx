@@ -40,8 +40,7 @@ function filterStorageKey(threadId: string): string {
 
 function isEventSubkind(value: unknown): value is EventSubkind {
   return (
-    typeof value === "string" &&
-    EVENT_SUBKINDS.includes(value as EventSubkind)
+    typeof value === "string" && EVENT_SUBKINDS.includes(value as EventSubkind)
   );
 }
 

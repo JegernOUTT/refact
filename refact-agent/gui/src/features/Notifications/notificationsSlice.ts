@@ -90,10 +90,7 @@ export const notificationsSlice = createSlice({
   initialState,
   reducers: {
     notificationAdded: {
-      reducer: (
-        state,
-        action: PayloadAction<ProcessCompletedNotification>,
-      ) => {
+      reducer: (state, action: PayloadAction<ProcessCompletedNotification>) => {
         const notification = action.payload;
         const lastSeen = state.lastSeenByThread[notification.threadId] ?? 0;
         if (notification.receivedAt <= lastSeen) return;
@@ -144,11 +141,8 @@ export const notificationsSlice = createSlice({
   },
 });
 
-export const {
-  notificationAdded,
-  notificationSeen,
-  clearProcessCompletions,
-} = notificationsSlice.actions;
+export const { notificationAdded, notificationSeen, clearProcessCompletions } =
+  notificationsSlice.actions;
 export const processCompleted = notificationAdded;
 
 export const selectPendingNotificationsByThread = (state: {
@@ -174,4 +168,3 @@ export const selectUnreadNotificationCountByThread = (
   state: { notifications: NotificationsState },
   threadId: string,
 ) => state.notifications.pendingByThread[threadId]?.length ?? 0;
-

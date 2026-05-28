@@ -208,7 +208,9 @@ async function parseSnapshot(
   return onEvent.mock.calls[0][0];
 }
 
-async function reduceParsedSnapshot(backgroundAgents: unknown[]): Promise<Chat> {
+async function reduceParsedSnapshot(
+  backgroundAgents: unknown[],
+): Promise<Chat> {
   const event = await parseSnapshot(backgroundAgents);
   return chatReducer(makeState(), applyChatEvent(event));
 }

@@ -200,8 +200,8 @@ describe("ExecToolCard", () => {
     const createObjectURL = vi.fn(() => "blob:exec-log");
     const revokeObjectURL = vi.fn();
     const previousFetch = globalThis.fetch;
-    const previousCreateObjectURL = URL.createObjectURL;
-    const previousRevokeObjectURL = URL.revokeObjectURL;
+    const previousCreateObjectURL = URL.createObjectURL.bind(URL);
+    const previousRevokeObjectURL = URL.revokeObjectURL.bind(URL);
     Object.defineProperty(globalThis, "fetch", {
       configurable: true,
       value: fetchMock,

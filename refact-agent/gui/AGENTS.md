@@ -77,21 +77,21 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 
 ### SSE Event Types
 
-| Event                           | Purpose                           |
-| ------------------------------- | --------------------------------- |
-| `snapshot`                      | Full state sync (resets seq to 0) |
-| `stream_started`                | AI response beginning             |
-| `stream_delta`                  | Incremental content (DeltaOp[])   |
-| `stream_finished`               | Complete with usage stats         |
+| Event                           | Purpose                                                |
+| ------------------------------- | ------------------------------------------------------ |
+| `snapshot`                      | Full state sync (resets seq to 0)                      |
+| `stream_started`                | AI response beginning                                  |
+| `stream_delta`                  | Incremental content (DeltaOp[])                        |
+| `stream_finished`               | Complete with usage stats                              |
 | `message_added/updated/removed` | Message CRUD, including hidden `event`/`plan` messages |
-| `messages_truncated`            | Messages trimmed                  |
-| `thread_updated`                | Thread metadata changed           |
-| `runtime_updated`               | Runtime flags changed             |
-| `pause_required/cleared`        | Tool confirmation                 |
-| `ide_tool_required`             | IDE tool execution needed         |
-| `subchat_update`                | Nested chat update                |
-| `queue_updated`                 | Command queue changed             |
-| `ack`                           | Command acknowledgment            |
+| `messages_truncated`            | Messages trimmed                                       |
+| `thread_updated`                | Thread metadata changed                                |
+| `runtime_updated`               | Runtime flags changed                                  |
+| `pause_required/cleared`        | Tool confirmation                                      |
+| `ide_tool_required`             | IDE tool execution needed                              |
+| `subchat_update`                | Nested chat update                                     |
+| `queue_updated`                 | Command queue changed                                  |
+| `ack`                           | Command acknowledgment                                 |
 
 ### Delta Operations
 
@@ -191,8 +191,8 @@ Dispatches messages to specialized renderers. Iterative processing (not recursiv
 | `tool`         | (inline in AssistantInput) | Skipped in top-level render                                          |
 | `diff`         | DiffContent                | Grouped by tool_call_id, apply/reject UI                             |
 | `context_file` | ContextFiles               | Memory/knowledge attachments 🗃️                                      |
-| `event`        | EventLog                   | Hidden from normal transcript; grouped under nearby assistant turns   |
-| `plan`         | PlanBanner                 | Hidden from normal transcript; latest version pinned above chat       |
+| `event`        | EventLog                   | Hidden from normal transcript; grouped under nearby assistant turns  |
+| `plan`         | PlanBanner                 | Hidden from normal transcript; latest version pinned above chat      |
 
 ### EventLog component pattern (src/components/ChatContent/EventLog/)
 

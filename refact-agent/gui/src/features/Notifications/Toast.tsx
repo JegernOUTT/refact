@@ -92,7 +92,11 @@ const ProcessCompletedToast: React.FC<ProcessCompletedToastProps> = ({
             {notification.processId}
           </Text>
           <Flex gap="2" align="center">
-            <Button size="1" variant="soft" onClick={() => onView(notification)}>
+            <Button
+              size="1"
+              variant="soft"
+              onClick={() => onView(notification)}
+            >
               View
             </Button>
             <Button

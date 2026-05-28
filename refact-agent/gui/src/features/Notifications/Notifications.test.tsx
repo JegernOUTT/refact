@@ -56,7 +56,10 @@ describe("ProcessCompleted notifications", () => {
       ),
     ).toBe(1);
 
-    state = notificationsSlice.reducer(state, switchToThread({ id: "thread-1" }));
+    state = notificationsSlice.reducer(
+      state,
+      switchToThread({ id: "thread-1" }),
+    );
 
     expect(
       selectUnreadNotificationCountByThread(

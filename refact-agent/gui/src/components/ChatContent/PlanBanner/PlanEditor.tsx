@@ -52,7 +52,12 @@ export const PlanEditor: React.FC<PlanEditorProps> = ({
         </Dialog.Description>
 
         <Flex direction="column" gap="2" mt="3">
-          <Text as="label" size="2" weight="medium" htmlFor="plan-editor-content">
+          <Text
+            as="label"
+            size="2"
+            weight="medium"
+            htmlFor="plan-editor-content"
+          >
             Plan content
           </Text>
           <TextArea

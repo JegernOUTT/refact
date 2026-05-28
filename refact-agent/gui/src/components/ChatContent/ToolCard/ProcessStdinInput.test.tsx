@@ -93,7 +93,7 @@ describe("ProcessStdinInput", () => {
 
     renderStdinCard(true);
 
-    const input = screen.getByLabelText("Process stdin") as HTMLInputElement;
+    const input = screen.getByLabelText<HTMLInputElement>("Process stdin");
     fireEvent.change(input, { target: { value: "hello" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
