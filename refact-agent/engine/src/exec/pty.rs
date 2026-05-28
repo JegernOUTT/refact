@@ -17,6 +17,12 @@ pub fn default_pty_size() -> PtySize {
     }
 }
 
+// PTY cleanup limitation: `portable_pty` creates a new session (setsid) on Unix, which also
+// creates a new process group for the direct child. Cleanup via `child.kill()` terminates the
+// direct child only. Descendants that create their own subprocess groups (e.g., background jobs
+// inside the PTY shell) will NOT be cleaned up. This is a known limitation and would require
+// a session-level cleanup mechanism (e.g., `kill(-sid, SIGKILL)` using the session id) to
+// address fully, which is not currently implemented.
 pub fn spawn_pty(
     cmd: CommandBuilder,
     size: PtySize,
