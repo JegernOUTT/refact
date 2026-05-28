@@ -130,7 +130,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const activeTabRef = useRef<HTMLDivElement | null>(null);
   const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
-  const { host } = useConfig();
+  const { host, lspPort, lspUrl } = useConfig();
   const openUrl = useOpenUrl();
 
   const tabs = useAppSelector(selectTabsDisplayData);
@@ -141,7 +141,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const { data: modesData } = useGetChatModesQuery(undefined);
   const { data: tasksList = [] } = useListTasksQuery(undefined);
 
-  const { openSettings, openHotKeys, openChatInBrowser } = useEventsBusForIDE();
+  const { openSettings, openHotKeys } = useEventsBusForIDE();
   const [createTask] = useCreateTaskMutation();
 
   const [renameState, setRenameState] = useState<{
@@ -218,12 +218,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   }, [createTask, dispatch]);
 
   const onOpenChatInBrowser = useCallback(() => {
-    if (host !== "web") {
-      openChatInBrowser();
-      return;
-    }
-    openUrl(window.location.origin);
-  }, [host, openChatInBrowser, openUrl]);
+    openUrl(lspUrl || `http://127.0.0.1:${lspPort}`);
+  }, [lspPort, lspUrl, openUrl]);
 
   const goToTab = useCallback(
     (tab: Tab) => {
