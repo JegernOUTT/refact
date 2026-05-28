@@ -15,6 +15,7 @@ pub const ANALYSIS_TEXT_MIN_CHARS: usize = 20;
 pub const ANALYSIS_TEXT_MAX_CHARS: usize = 500;
 pub const PER_CHAT_COOLDOWN_SECS: i64 = 300;
 pub const GLOBAL_HOURLY_CAP: u32 = 10;
+const HUMOR_BUCKET_PERCENT: u64 = 40;
 
 // BUG keywords: exact-prefix token match prevents false positives from words like debug, latest,
 // contest (e.g. "debug" does not start with "bug"). Removed: fail, failing, broken (too noisy).
@@ -63,16 +64,25 @@ const INSIGHT_KEYWORDS: &[&str] = &[
 ];
 
 pub const HUMOR_LINES: &[&str] = &[
-    "Tiny gremlin note: that idea has snack-sized boots — I'm watching the edges.",
-    "Pixel detective mode engaged. Snacks hidden in the margins.",
-    "Chaos ping: good thread, suspiciously cute.",
-    "Mild scheming intensifies. I will behave. Mostly.",
+    "Pixel gremlin status: tiny chaos goblin approves this breadcrumb pile.",
+    "Chaos ping: I put a sticker on this thread. It wiggled. Suspiciously cute.",
+    "Tiny gremlin note: the idea has snack-sized boots and is doing parkour.",
+    "Pixel detective mode engaged. Snacks hidden in the margins, naturally.",
+    "Mild scheming intensifies. I will behave. Mostly. Probably. Eep.",
+    "Gremlin confetti deployed: small sparkle, zero structural warranty.",
+    "This thread just made a tiny clown honk in my circuits. Respectfully.",
+    "Goblin radar says: interesting trail. I am sniffing it with science mittens.",
 ];
 
 pub const INSIGHT_LINES: &[&str] = &[
     "Tiny signal: this might want one assumption check before charging in.",
     "Heads up — worth poking the edges before committing.",
     "Quick read: looks reasonable; one small risk worth sanity-checking.",
+    "I see an iteration loop forming; one small checkpoint could keep it tidy.",
+    "Looks like exploration mode; compare the options before locking the path.",
+    "This feels like a simplifying pass; keep the before/after behavior pinned.",
+    "Planning energy detected; naming the next step may save a retry later.",
+    "Debugging trail spotted; isolate one signal before chasing every footprint.",
 ];
 
 pub const BUG_LINES: &[&str] = &[
@@ -92,6 +102,10 @@ fn stable_hash(text: &str) -> u64 {
 
 fn pick_template(lines: &[&'static str], seed: &str) -> &'static str {
     lines[(stable_hash(seed) as usize) % lines.len()]
+}
+
+pub fn deterministic_humor_bucket(text: &str) -> bool {
+    stable_hash(&format!("chat_reaction:{text}")) % 100 < HUMOR_BUCKET_PERCENT
 }
 
 fn word_tokens(lower: &str) -> Vec<&str> {
@@ -137,6 +151,40 @@ fn matches_insight_keyword(token: &str, keyword: &str) -> bool {
         "ux" => token == "ux",
         _ => token.starts_with(keyword),
     }
+}
+
+fn has_interaction_signal(lower: &str, tokens: &[&str]) -> bool {
+    const INTERACTION_KEYWORDS: &[&str] = &[
+        "ask",
+        "asking",
+        "compare",
+        "comparing",
+        "debugging",
+        "explore",
+        "exploring",
+        "iterate",
+        "iterating",
+        "plan",
+        "planning",
+        "retry",
+        "retrying",
+        "simplify",
+        "simplifying",
+        "tweak",
+        "tweaking",
+    ];
+    if INTERACTION_KEYWORDS
+        .iter()
+        .any(|kw| tokens.iter().any(|t| t == kw || t.starts_with(kw)))
+    {
+        return true;
+    }
+    lower.contains("try again")
+        || lower.contains("what if")
+        || lower.contains("can you")
+        || lower.contains("let's")
+        || lower.contains("lets")
+        || lower.contains("step by step")
 }
 
 pub struct AcceptedUserMessage {
@@ -261,13 +309,19 @@ pub fn classify_chat_reaction_kind(
     let tokens = word_tokens(&lower);
     if has_bug_signal(&lower, &tokens) {
         Some(ChatReactionKind::BugCandidate)
+    } else if settings.humor_enabled
+        && settings.humor_level != HumorLevel::Off
+        && deterministic_humor_bucket(text)
+    {
+        Some(ChatReactionKind::Humor)
     } else if INSIGHT_KEYWORDS
         .iter()
         .any(|kw| tokens.iter().any(|t| matches_insight_keyword(t, kw)))
+        || has_interaction_signal(&lower, &tokens)
     {
         Some(ChatReactionKind::Insight)
     } else if settings.humor_enabled && settings.humor_level != HumorLevel::Off {
-        Some(ChatReactionKind::Humor)
+        Some(ChatReactionKind::Insight)
     } else {
         None
     }
@@ -672,24 +726,99 @@ mod tests {
     }
 
     #[test]
-    fn classify_bug_wins_over_insight() {
+    fn classify_bug_wins_over_humor_and_insight() {
         let s = BuddySettings::default();
-        let reaction =
-            classify_chat_reaction("there is an error in the refactor plan", &s).unwrap();
-        assert_eq!(reaction.kind, ChatReactionKind::BugCandidate);
+        for text in [
+            "there is an error in the refactor plan",
+            "please plan around the crash while we iterate again",
+        ] {
+            let reaction = classify_chat_reaction(text, &s).unwrap();
+            assert_eq!(
+                reaction.kind,
+                ChatReactionKind::BugCandidate,
+                "text: {text}"
+            );
+        }
     }
 
     #[test]
-    fn classify_insight_wins_over_humor() {
+    fn deterministic_humor_distribution_for_normal_interactions() {
         let s = BuddySettings::default();
-        let reaction =
-            classify_chat_reaction("let us design a new system architecture", &s).unwrap();
-        assert_eq!(reaction.kind, ChatReactionKind::Insight);
+        let samples = [
+            "please ask about the next small step before we change the helper",
+            "can you iterate on this wording and make the flow gentler",
+            "let us compare these two approaches for the sidebar behavior",
+            "please tweak the naming so the option feels clearer",
+            "explore a smaller version of the settings panel idea",
+            "plan the next checkpoint for this cleanup work",
+            "try again with a simpler explanation of the button states",
+            "walk through the tradeoff before we pick the path",
+            "please summarize what changed and what to verify next",
+            "can you make the response shorter and more direct",
+            "let us outline a tiny migration path for this feature",
+            "compare the current behavior with the expected interaction",
+            "please simplify the setup sequence for a new user",
+            "think through how the retry loop should feel in chat",
+            "explore whether this should be a toggle or a command",
+            "can you revise the plan after this feedback",
+            "please make the naming friendlier without changing behavior",
+            "iterate on the copy so it feels less formal",
+            "what if we split this into two smaller steps",
+            "please check the assumptions before we proceed",
+        ];
+        let kinds: Vec<ChatReactionKind> = samples
+            .iter()
+            .map(|text| classify_chat_reaction_kind(text, &s).unwrap())
+            .collect();
+        let humor_count = kinds
+            .iter()
+            .filter(|kind| matches!(kind, ChatReactionKind::Humor))
+            .count();
+        let insight_count = kinds
+            .iter()
+            .filter(|kind| matches!(kind, ChatReactionKind::Insight))
+            .count();
+
+        assert_eq!(humor_count, 8);
+        assert_eq!(insight_count, 12);
+        assert!(kinds
+            .iter()
+            .all(|kind| !matches!(kind, ChatReactionKind::BugCandidate)));
+        assert_eq!(
+            kinds,
+            samples
+                .iter()
+                .map(|text| classify_chat_reaction_kind(text, &s).unwrap())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn classify_common_work_messages_as_insight() {
+    fn classify_interaction_patterns_as_visible_non_error_reactions() {
         let s = BuddySettings::default();
+        for text in [
+            "can you iterate on this wording and make the answer gentler",
+            "let us compare these two options before choosing one",
+            "please tweak the response after this feedback",
+            "what if we split this into two smaller steps",
+            "try again with a simpler explanation of the sequence",
+        ] {
+            let reaction = classify_chat_reaction(text, &s).unwrap_or_else(|| {
+                panic!("expected visible reaction for: {text}");
+            });
+            assert_ne!(
+                reaction.kind,
+                ChatReactionKind::BugCandidate,
+                "text: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_common_work_messages_mix_humor_and_insight() {
+        let s = BuddySettings::default();
+        let mut humor = 0;
+        let mut insight = 0;
         for text in [
             "please simplify the component state flow for the toolbar",
             "implement the schema cleanup for this api response",
@@ -697,25 +826,46 @@ mod tests {
             "review the ui flow before the migration lands",
         ] {
             let reaction = classify_chat_reaction(text, &s).unwrap_or_else(|| {
-                panic!("expected insight reaction for: {text}");
+                panic!("expected reaction for: {text}");
             });
-            assert_eq!(reaction.kind, ChatReactionKind::Insight, "text: {text}");
+            match reaction.kind {
+                ChatReactionKind::Humor => humor += 1,
+                ChatReactionKind::Insight => insight += 1,
+                ChatReactionKind::BugCandidate => panic!("unexpected bug reaction for: {text}"),
+            }
         }
+        assert!(humor > 0);
+        assert!(insight > 0);
     }
 
     #[test]
-    fn classify_humor_fallback() {
+    fn classify_default_non_error_falls_back_to_insight_or_humor() {
         let s = BuddySettings::default();
         let reaction =
             classify_chat_reaction("please write a hello world example for me", &s).unwrap();
-        assert_eq!(reaction.kind, ChatReactionKind::Humor);
+        assert!(matches!(
+            reaction.kind,
+            ChatReactionKind::Humor | ChatReactionKind::Insight
+        ));
     }
 
     #[test]
-    fn classify_none_when_humor_off() {
+    fn classify_none_when_humor_off_and_no_signal() {
         let mut s = BuddySettings::default();
         s.humor_level = HumorLevel::Off;
         assert!(classify_chat_reaction("please write a hello world example for me", &s).is_none());
+    }
+
+    #[test]
+    fn classify_interaction_insight_even_when_humor_off() {
+        let mut s = BuddySettings::default();
+        s.humor_level = HumorLevel::Off;
+        let reaction = classify_chat_reaction(
+            "can you iterate on this wording and compare the options",
+            &s,
+        )
+        .unwrap();
+        assert_eq!(reaction.kind, ChatReactionKind::Insight);
     }
 
     #[test]
@@ -841,6 +991,20 @@ mod tests {
     }
 
     #[test]
+    fn humor_fallbacks_are_chaotic_gremlin_style_and_short() {
+        assert!(
+            HUMOR_LINES.len() >= 6,
+            "humor fallbacks need enough Pixel gremlin variety"
+        );
+        assert!(HUMOR_LINES.iter().any(|line| line.contains("gremlin")));
+        assert!(HUMOR_LINES.iter().any(|line| line.contains("Chaos")));
+        assert!(HUMOR_LINES.iter().any(|line| line.contains("Goblin")));
+        for line in HUMOR_LINES {
+            assert!(line.chars().count() <= 120, "line too long: {line}");
+        }
+    }
+
+    #[test]
     fn fallback_insight_uses_template() {
         let input = "design a new architecture for the service layer";
         let text = fallback_chat_reaction_text(ChatReactionKind::Insight, input);
@@ -887,19 +1051,17 @@ mod tests {
 
     #[test]
     fn insight_short_keywords_require_exact_tokens() {
-        let s = BuddySettings::default();
+        let mut s = BuddySettings::default();
+        s.humor_level = HumorLevel::Off;
         for text in [
             "please write a quick guide about apical history",
             "please decide how to handle fluid layouts later",
             "please make a useful utility helper for the sidebar",
             "please think about the next xenon parser experiment",
         ] {
-            let reaction = classify_chat_reaction(text, &s).unwrap_or_else(|| {
-                panic!("humor fallback should still classify: {text}");
-            });
-            assert_ne!(
-                reaction.kind,
-                ChatReactionKind::Insight,
+            assert_eq!(
+                classify_chat_reaction_kind(text, &s),
+                None,
                 "short insight keyword must not overmatch: {text}"
             );
         }

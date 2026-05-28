@@ -7836,7 +7836,7 @@ async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {
             chat_id: chat_id.clone(),
             thread: ThreadParams::default(),
             content: ChatContent::SimpleText(
-                "please design a new caching architecture".to_string(),
+                "please design a new caching architecture carefully".to_string(),
             ),
         },
     )
@@ -7854,6 +7854,39 @@ async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {
     );
     assert!(ev.ttl_ms.is_some(), "ttl_ms must be set");
     assert!(ev.ttl_ms.unwrap() > 0, "ttl_ms must be positive");
+}
+
+#[tokio::test]
+async fn maybe_enqueue_chat_reaction_emits_humor_for_bucketed_interaction() {
+    use super::chat_reactions::{AcceptedUserMessage, HUMOR_LINES, maybe_enqueue_chat_reaction};
+    use crate::call_validation::ChatContent;
+    use crate::chat::types::ThreadParams;
+
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![None]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app = make_gcx_with_buddy().await;
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id: "humor-reaction-chat".to_string(),
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(
+                "please ask about the next small step before we change the helper".to_string(),
+            ),
+        },
+    )
+    .await;
+
+    let ev = wait_for_runtime_event(&app, "speech_humor").await;
+    assert_eq!(ev.signal_type, "speech_humor");
+    let speech = ev.speech_text.as_deref().unwrap_or_default();
+    assert!(
+        HUMOR_LINES.contains(&speech),
+        "unexpected humor line: {speech}"
+    );
+    assert!(!speech.contains("next small step"));
 }
 
 async fn wait_for_runtime_event(
@@ -7934,7 +7967,7 @@ async fn chat_reaction_empty_voice_response_falls_back_to_template() {
         AcceptedUserMessage {
             chat_id: "fallback-reaction-chat".to_string(),
             thread: ThreadParams::default(),
-            content: ChatContent::SimpleText("design a new architecture for services".to_string()),
+            content: ChatContent::SimpleText("outline a new architecture for services".to_string()),
         },
     )
     .await;
@@ -7965,7 +7998,9 @@ async fn chat_reaction_generated_text_is_redacted_before_storage() {
         AcceptedUserMessage {
             chat_id: "redacted-reaction-chat".to_string(),
             thread: ThreadParams::default(),
-            content: ChatContent::SimpleText("design a security architecture review".to_string()),
+            content: ChatContent::SimpleText(
+                "design a security architecture review today".to_string(),
+            ),
         },
     )
     .await;
@@ -8651,7 +8686,7 @@ async fn bug_reaction_not_blocked_by_humor_cooldown() {
             chat_id: "chat-bug-humor".to_string(),
             thread: ThreadParams::default(),
             content: ChatContent::SimpleText(
-                "make this nicer please give it a better look".to_string(),
+                "can you iterate on this wording and make the flow gentler".to_string(),
             ),
         },
     )
