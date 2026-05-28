@@ -25,6 +25,10 @@ use crate::integrations::process_io_utils::is_someone_listening_on_that_tcp_port
 const PIPE_READ_BYTES: usize = 8192;
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const KILL_PUMP_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(not(test))]
+const EXIT_PUMP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const EXIT_PUMP_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const ABORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const READINESS_PORT_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
@@ -253,25 +257,28 @@ fn pump_blocking_output(
     })
 }
 
-async fn await_pump(handle: JoinHandle<()>) {
-    let _ = handle.await;
-}
-
-async fn finish_pumps(stdout_task: JoinHandle<()>, stderr_task: JoinHandle<()>) {
-    let _ = tokio::join!(await_pump(stdout_task), await_pump(stderr_task));
-}
-
 async fn finish_pumps_with_timeout(
     mut stdout_task: JoinHandle<()>,
     mut stderr_task: JoinHandle<()>,
     timeout: Duration,
-) {
+) -> bool {
     let wait = async {
         let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
     };
-    if tokio::time::timeout(timeout, wait).await.is_err() {
-        stdout_task.abort();
-        stderr_task.abort();
+    if tokio::time::timeout(timeout, wait).await.is_ok() {
+        return true;
+    }
+    stdout_task.abort();
+    stderr_task.abort();
+    false
+}
+
+fn pump_drain_timeout_status(timeout: Duration) -> ExecStatus {
+    ExecStatus::Failed {
+        message: format!(
+            "output drain timed out after {:.3}s; descendant process may have inherited stdout/stderr",
+            timeout.as_secs_f64()
+        ),
     }
 }
 
@@ -280,7 +287,7 @@ async fn kill_and_reap(child: &Arc<Mutex<RuntimeChild>>) -> Result<(), String> {
         let mut child = child.lock().await;
         child.start_kill()
     };
-    let wait_result = tokio::time::timeout(KILL_REAP_TIMEOUT, wait_child_by_polling(child)).await;
+    let wait_result = tokio::time::timeout(KILL_REAP_TIMEOUT, reap_child_after_kill(child)).await;
     kill_reap_result(kill_result, wait_result)
 }
 
@@ -291,6 +298,25 @@ async fn wait_child_by_polling(child: &Arc<Mutex<RuntimeChild>>) -> Result<Optio
             None => tokio::time::sleep(ABORT_POLL_INTERVAL).await,
         }
     }
+}
+
+async fn reap_child_after_kill(child: &Arc<Mutex<RuntimeChild>>) -> Result<Option<i32>, String> {
+    let is_pty = {
+        let child = child.lock().await;
+        child.is_pty()
+    };
+    if is_pty {
+        return wait_child_by_polling(child).await;
+    }
+
+    let mut child = child.lock().await;
+    let RuntimeChild::Tokio(child) = &mut *child else {
+        unreachable!();
+    };
+    let status = Box::into_pin(child.wait())
+        .await
+        .map_err(|error| format!("failed to wait for process: {error}"))?;
+    Ok(status.code())
 }
 
 fn kill_reap_result(
@@ -329,7 +355,9 @@ async fn wait_child(child: &Arc<Mutex<RuntimeChild>>) -> Result<Option<i32>, Str
     let RuntimeChild::Tokio(child) = &mut *child else {
         unreachable!();
     };
-    let status = Box::into_pin(child.wait())
+    let status = child
+        .inner_mut()
+        .wait()
         .await
         .map_err(|error| format!("failed to wait for process: {error}"))?;
     Ok(status.code())
@@ -449,22 +477,26 @@ async fn monitor_process(
         }
     };
 
-    match terminal_status {
+    let terminal_status = match terminal_status {
         ExecStatus::Failed { .. } | ExecStatus::TimedOut | ExecStatus::Killed => {
             if let Err(error) = kill_and_reap(&child).await {
                 tracing::warn!("exec kill/reap failed for {process_id}: {error}");
             }
-        }
-        ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => {}
-    }
-    match terminal_status {
-        ExecStatus::Failed { .. } | ExecStatus::TimedOut | ExecStatus::Killed => {
             finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT).await;
+            terminal_status
         }
-        ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => {
-            finish_pumps(stdout_task, stderr_task).await;
+        ExecStatus::Exited { .. } => {
+            if finish_pumps_with_timeout(stdout_task, stderr_task, EXIT_PUMP_DRAIN_TIMEOUT).await {
+                terminal_status
+            } else {
+                if let Err(error) = kill_and_reap(&child).await {
+                    tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
+                }
+                pump_drain_timeout_status(EXIT_PUMP_DRAIN_TIMEOUT)
+            }
         }
-    }
+        ExecStatus::Starting | ExecStatus::Running => terminal_status,
+    };
     let final_snapshot = registry.complete_status(&process_id, terminal_status).await;
     if let Some(response) = finish_response {
         let _ = response.send(final_snapshot);
@@ -721,6 +753,11 @@ mod tests {
         script.to_string()
     }
 
+    #[cfg(unix)]
+    fn inherited_pipe_command() -> String {
+        shell_script("sleep 60 & printf 'parent-done'; exit 0")
+    }
+
     async fn assert_process_missing(process_id: u32) {
         for _ in 0..20 {
             if !process_exists(process_id) {
@@ -967,6 +1004,70 @@ mod tests {
             .read(&result.snapshot.meta.process_id, 0, None)
             .await;
         assert!(read.chunks.iter().any(|chunk| chunk.text.contains("start")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_fails_promptly_when_descendant_keeps_pipe_open() {
+        let registry = ExecRegistry::new();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.spawn(ExecSpawnRequest::foreground(inherited_pipe_command())),
+        )
+        .await
+        .expect("foreground spawn must not hang when descendant holds pipe open")
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        match &result.snapshot.status {
+            ExecStatus::Failed { message } => {
+                assert!(message.contains("output drain timed out"));
+                assert!(message.contains("stdout/stderr"));
+            }
+            status => panic!("expected drain timeout failure, got {status:?}"),
+        }
+        let read = registry
+            .read(&result.snapshot.meta.process_id, 0, None)
+            .await;
+        assert!(read
+            .chunks
+            .iter()
+            .any(|chunk| chunk.text.contains("parent-done")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_fails_when_descendant_keeps_pipe_open() {
+        let registry = ExecRegistry::new();
+        let result = registry
+            .spawn(ExecSpawnRequest::background(inherited_pipe_command()))
+            .await
+            .unwrap();
+        assert_eq!(result.snapshot.status, ExecStatus::Running);
+
+        let snapshot = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.wait(&result.snapshot.meta.process_id),
+        )
+        .await
+        .expect("background process must become terminal when descendant holds pipe open")
+        .unwrap();
+
+        match &snapshot.status {
+            ExecStatus::Failed { message } => {
+                assert!(message.contains("output drain timed out"));
+                assert!(message.contains("stdout/stderr"));
+            }
+            status => panic!("expected drain timeout failure, got {status:?}"),
+        }
+        let listed = registry
+            .list(ExecProcessFilter {
+                status: Some(ExecStatusKind::Running),
+                ..ExecProcessFilter::default()
+            })
+            .await;
+        assert!(listed.is_empty());
     }
 
     #[tokio::test]
