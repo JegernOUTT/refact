@@ -113,6 +113,7 @@ const DENY_DEFAULT: &[&str] = &["sudo*"];
 const MAX_SHELL_TIMEOUT_SECS: u64 = 3600;
 const SHELL_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
+const RUN_IN_BACKGROUND_DESCRIPTION: &str = "Set to true to run this command in the background. Returns immediately with a process_id. Use process_read or process_wait to retrieve output later. You will receive a process_completed event when the process exits. Do not use '&' at the end of the command.";
 
 struct ParsedShellArgs {
     command: String,
@@ -121,6 +122,7 @@ struct ParsedShellArgs {
     timeout: Option<u64>,
     description: Option<String>,
     tty: Option<bool>,
+    run_in_background: bool,
     scope_warnings: Vec<String>,
 }
 
@@ -178,14 +180,18 @@ impl Tool for ToolShell {
                 .map(|scope| scope.effective_root().to_path_buf()),
         };
         let tty = parsed.tty.unwrap_or(false);
-        let mut request = ExecSpawnRequest::foreground(parsed.command.clone())
-            .with_timeout(Duration::from_secs(timeout))
-            .with_env_map(env_variables)
-            .with_owner(owner)
-            .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES)
-            .with_short_description(short_description)
-            .with_abort_flag(abort_flag)
-            .with_tty(tty);
+        let mut request = (if parsed.run_in_background {
+            ExecSpawnRequest::background(parsed.command.clone())
+        } else {
+            ExecSpawnRequest::foreground(parsed.command.clone())
+                .with_timeout(Duration::from_secs(timeout))
+                .with_abort_flag(abort_flag)
+        })
+        .with_env_map(env_variables)
+        .with_owner(owner)
+        .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES)
+        .with_short_description(short_description)
+        .with_tty(tty);
         if let Some(cwd) = cwd {
             request = request.with_cwd(cwd);
         }
@@ -196,6 +202,23 @@ impl Tool for ToolShell {
         let read = exec_registry
             .read(&result.snapshot.meta.process_id, 0, None)
             .await;
+        if parsed.run_in_background {
+            let mut out = background_started_output(&result.snapshot);
+            if !parsed.scope_warnings.is_empty() {
+                out = format!("{}\n{}", parsed.scope_warnings.join("\n"), out);
+            }
+            let msg = vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(out),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                tool_failed: tool_failed_for_status(&result.snapshot.status),
+                output_filter: Some(OutputFilter::no_limits()),
+                extra: exec_extra(&result.snapshot, &read, duration, None, tty),
+                ..Default::default()
+            })];
+            return Ok((false, msg));
+        }
         let raw_output = exec_registry
             .read_raw_capture(&result.snapshot.meta.process_id)
             .await;
@@ -236,7 +259,7 @@ impl Tool for ToolShell {
             tool_call_id: tool_call_id.clone(),
             tool_failed: tool_failed_for_status(&result.snapshot.status),
             output_filter: Some(OutputFilter::no_limits()),
-            extra: exec_extra(&result.snapshot, &read, duration, timeout, tty),
+            extra: exec_extra(&result.snapshot, &read, duration, Some(timeout), tty),
             ..Default::default()
         })];
 
@@ -257,7 +280,7 @@ impl Tool for ToolShell {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths with visible warnings; the shell command text itself is not OS-sandboxed. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
+            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths with visible warnings; the shell command text itself is not OS-sandboxed. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
             input_schema: shell_input_schema(),
             output_schema: None,
             annotations: None,
@@ -305,6 +328,11 @@ fn shell_input_schema() -> Value {
         "type": "boolean",
         "default": false,
         "description": TTY_DESCRIPTION,
+    });
+    schema["properties"]["run_in_background"] = json!({
+        "type": "boolean",
+        "default": false,
+        "description": RUN_IN_BACKGROUND_DESCRIPTION,
     });
     schema
 }
@@ -385,6 +413,16 @@ fn append_status_line(
     }
 }
 
+fn background_started_output(snapshot: &ExecProcessSnapshot) -> String {
+    format!(
+        "Process started in background\nprocess_id: {}\nshort_description: {}\nstatus: {}\nmode: {}\nUse process_read or process_wait to retrieve output later.\n",
+        snapshot.meta.process_id,
+        snapshot.meta.short_description,
+        exec_status_label(&snapshot.status),
+        snapshot.meta.mode
+    )
+}
+
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
         ExecStatus::Failed { .. } | ExecStatus::Killed | ExecStatus::TimedOut => Some(true),
@@ -396,7 +434,7 @@ fn exec_extra(
     snapshot: &ExecProcessSnapshot,
     read: &ExecReadResult,
     duration: Duration,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     tty: bool,
 ) -> serde_json::Map<String, Value> {
     let mut extra = serde_json::Map::new();
@@ -406,36 +444,36 @@ fn exec_extra(
         .as_ref()
         .map(|path| path.to_string_lossy().to_string());
     let status_detail = serde_json::to_value(&snapshot.status).unwrap_or(Value::Null);
-    extra.insert(
-        "exec".to_string(),
-        json!({
-            "process_id": snapshot.meta.process_id.as_str(),
-            "status": exec_status_label(&snapshot.status),
-            "status_detail": status_detail,
-            "exit_code": exec_exit_code(&snapshot.status),
-            "short_description": snapshot.meta.short_description,
-            "command": snapshot.meta.command,
-            "cwd": cwd,
-            "mode": snapshot.meta.mode.to_string(),
-            "tty": tty,
-            "duration_ms": duration.as_millis() as u64,
-            "timeout_secs": timeout_secs,
-            "created_at_ms": snapshot.meta.created_at_ms,
-            "started_at_ms": snapshot.meta.started_at_ms,
-            "ended_at_ms": snapshot.meta.ended_at_ms,
-            "transcript": {
-                "total_bytes_appended": read.total_bytes_appended,
-                "total_lines_appended": read.total_lines_appended,
-                "dropped_chunks": read.dropped_chunks,
-                "dropped_bytes": read.dropped_bytes,
-                "truncated_chunks": read.truncated_chunks,
-                "current_bytes": read.current_bytes,
-                "max_bytes": read.max_bytes,
-                "chunk_count": read.chunk_count,
-                "is_truncated": read.is_truncated,
-            }
-        }),
-    );
+    let mut exec = json!({
+        "process_id": snapshot.meta.process_id.as_str(),
+        "status": exec_status_label(&snapshot.status),
+        "status_detail": status_detail,
+        "exit_code": exec_exit_code(&snapshot.status),
+        "short_description": snapshot.meta.short_description,
+        "command": snapshot.meta.command,
+        "cwd": cwd,
+        "mode": snapshot.meta.mode.to_string(),
+        "tty": tty,
+        "duration_ms": duration.as_millis() as u64,
+        "created_at_ms": snapshot.meta.created_at_ms,
+        "started_at_ms": snapshot.meta.started_at_ms,
+        "ended_at_ms": snapshot.meta.ended_at_ms,
+        "transcript": {
+            "total_bytes_appended": read.total_bytes_appended,
+            "total_lines_appended": read.total_lines_appended,
+            "dropped_chunks": read.dropped_chunks,
+            "dropped_bytes": read.dropped_bytes,
+            "truncated_chunks": read.truncated_chunks,
+            "current_bytes": read.current_bytes,
+            "max_bytes": read.max_bytes,
+            "chunk_count": read.chunk_count,
+            "is_truncated": read.is_truncated,
+        }
+    });
+    if let Some(timeout_secs) = timeout_secs {
+        exec["timeout_secs"] = json!(timeout_secs);
+    }
+    extra.insert("exec".to_string(), exec);
     extra
 }
 
@@ -521,6 +559,15 @@ async fn parse_args_with_filter(
         Some(v) => return Err(format!("argument `tty` is not a boolean: {v:?}")),
         None => Some(false),
     };
+    let run_in_background = match args.get("run_in_background") {
+        Some(Value::Bool(value)) => *value,
+        Some(v) => {
+            return Err(format!(
+                "argument `run_in_background` is not a boolean: {v:?}"
+            ))
+        }
+        None => false,
+    };
 
     Ok(ParsedShellArgs {
         command,
@@ -529,6 +576,7 @@ async fn parse_args_with_filter(
         timeout,
         description,
         tty,
+        run_in_background,
         scope_warnings,
     })
 }
@@ -624,6 +672,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::app_state::AppState;
+    use crate::exec::ExecProcessId;
     use crate::tools::tools_description::Tool;
 
     use super::*;
@@ -635,11 +684,13 @@ mod tests {
             .collect()
     }
 
-    async fn ccx_with_abort(abort_flag: Option<Arc<AtomicBool>>) -> Arc<AMutex<AtCommandsContext>> {
+    async fn ccx_with_gcx_and_abort(
+        abort_flag: Option<Arc<AtomicBool>>,
+    ) -> (Arc<GlobalContext>, Arc<AMutex<AtCommandsContext>>) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        Arc::new(AMutex::new(
+        let ccx = Arc::new(AMutex::new(
             AtCommandsContext::new_with_abort(
-                AppState::from_gcx(gcx).await,
+                AppState::from_gcx(gcx.clone()).await,
                 4096,
                 20,
                 false,
@@ -652,7 +703,12 @@ mod tests {
                 abort_flag,
             )
             .await,
-        ))
+        ));
+        (gcx, ccx)
+    }
+
+    async fn ccx_with_abort(abort_flag: Option<Arc<AtomicBool>>) -> Arc<AMutex<AtCommandsContext>> {
+        ccx_with_gcx_and_abort(abort_flag).await.1
     }
 
     async fn run_shell(args: HashMap<String, Value>) -> ChatMessage {
@@ -690,6 +746,10 @@ mod tests {
 
     fn exec(message: &ChatMessage) -> &Value {
         message.extra.get("exec").unwrap()
+    }
+
+    fn process_id(message: &ChatMessage) -> ExecProcessId {
+        ExecProcessId(exec(message)["process_id"].as_str().unwrap().to_string())
     }
 
     fn success_command() -> String {
@@ -732,6 +792,22 @@ mod tests {
         }
     }
 
+    fn background_sleep_command() -> String {
+        if cfg!(target_os = "windows") {
+            "Start-Sleep -Seconds 30".to_string()
+        } else {
+            "sleep 30".to_string()
+        }
+    }
+
+    fn background_readable_command() -> String {
+        if cfg!(target_os = "windows") {
+            "[Console]::Out.Write('background-ready'); Start-Sleep -Seconds 30".to_string()
+        } else {
+            "printf background-ready; sleep 30".to_string()
+        }
+    }
+
     fn multiline_command() -> String {
         if cfg!(target_os = "windows") {
             "[Console]::Out.Write(\"line1`nline2`nline3`nline4`nline5`n\")".to_string()
@@ -760,6 +836,17 @@ mod tests {
         }
     }
 
+    async fn wait_for_output(gcx: Arc<GlobalContext>, process_id: &ExecProcessId, needle: &str) {
+        for _ in 0..40 {
+            let read = gcx.exec_registry.read(process_id, 0, None).await;
+            if read.chunks.iter().any(|chunk| chunk.text.contains(needle)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("output did not contain {needle}");
+    }
+
     #[test]
     fn shell_tool_workdir_is_optional_in_schema() {
         let tool = ToolShell::default();
@@ -781,7 +868,20 @@ mod tests {
             desc.input_schema["properties"]["tty"]["description"],
             TTY_DESCRIPTION
         );
+        assert_eq!(
+            desc.input_schema["properties"]["run_in_background"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            desc.input_schema["properties"]["run_in_background"]["default"],
+            false
+        );
+        assert_eq!(
+            desc.input_schema["properties"]["run_in_background"]["description"],
+            RUN_IN_BACKGROUND_DESCRIPTION
+        );
         assert!(desc.description.contains("merges stdout and stderr"));
+        assert!(desc.description.contains("run_in_background=true"));
     }
 
     #[tokio::test]
@@ -814,6 +914,83 @@ mod tests {
         let duration_ms = exec(&message)["duration_ms"].as_u64().unwrap();
 
         assert!(duration_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn run_in_background_true_returns_immediately() {
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        let mut shell = ToolShell::default();
+        let started = tokio::time::Instant::now();
+        let (_, messages) = shell
+            .tool_execute(
+                ccx,
+                &"shell".to_string(),
+                &args(vec![
+                    ("command", json!(background_sleep_command())),
+                    ("description", json!("Run background sleep test")),
+                    ("run_in_background", json!(true)),
+                ]),
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        let message = only_chat_message(messages);
+        let process_id = process_id(&message);
+
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "background shell returned after {elapsed:?}"
+        );
+        assert!(text(&message).contains(process_id.as_str()));
+        assert_eq!(exec(&message)["process_id"], process_id.as_str());
+        assert_eq!(
+            exec(&message)["short_description"],
+            "Run background sleep test"
+        );
+        assert_eq!(exec(&message)["mode"], "background");
+        assert_eq!(exec(&message)["status"], "running");
+        assert!(exec(&message)["timeout_secs"].is_null());
+
+        gcx.exec_registry.kill(&process_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_in_background_process_is_readable_via_process_read() {
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        let mut shell = ToolShell::default();
+        let (_, messages) = shell
+            .tool_execute(
+                ccx.clone(),
+                &"shell".to_string(),
+                &args(vec![
+                    ("command", json!(background_readable_command())),
+                    ("description", json!("Run readable background test")),
+                    ("run_in_background", json!(true)),
+                ]),
+            )
+            .await
+            .unwrap();
+        let message = only_chat_message(messages);
+        let process_id = process_id(&message);
+        wait_for_output(gcx.clone(), &process_id, "background-ready").await;
+
+        let mut read_tool = crate::tools::tool_process::ToolProcessRead {
+            config_path: String::new(),
+        };
+        let (_, read_messages) = read_tool
+            .tool_execute(
+                ccx,
+                &"process_read".to_string(),
+                &args(vec![("process_id", json!(process_id.as_str()))]),
+            )
+            .await
+            .unwrap();
+        let read_message = only_chat_message(read_messages);
+
+        assert!(text(&read_message).contains("background-ready"));
+        assert_eq!(exec(&read_message)["process_id"], process_id.as_str());
+
+        gcx.exec_registry.kill(&process_id).await.unwrap();
     }
 
     #[tokio::test]
