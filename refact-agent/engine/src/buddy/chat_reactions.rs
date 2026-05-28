@@ -21,7 +21,7 @@ const CHAT_REACTION_ECHO_NGRAM_WORDS: usize = 3;
 const CHAT_REACTION_ECHO_NGRAM_MIN_CHARS: usize = 18;
 const CHAT_REACTION_ECHO_LONG_TOKEN_MIN_CHARS: usize = 12;
 const CHAT_REACTION_ECHO_SHORT_PHRASE_WORDS: usize = 2;
-const CHAT_REACTION_ECHO_SHORT_PHRASE_MIN_CHARS: usize = 10;
+const CHAT_REACTION_ECHO_SHORT_PHRASE_MIN_CHARS: usize = 7;
 
 const CHAT_REACTION_ECHO_IDENTIFYING_WORDS: &[&str] = &[
     "account",
@@ -426,28 +426,38 @@ fn normalize_chat_reaction_speech(raw: &str) -> String {
         .to_string()
 }
 
-fn echo_word_tokens(lower: &str) -> Vec<&str> {
+#[derive(Debug, Clone)]
+struct EchoAnalysisToken {
+    text: String,
+    identifying: bool,
+}
+
+fn echo_raw_tokens(raw: &str) -> Vec<String> {
     let mut result = Vec::new();
-    let mut start: Option<usize> = None;
-    for (i, ch) in lower.char_indices() {
-        let is_token = ch.is_alphanumeric() || ch == '_';
-        match (is_token, start) {
-            (true, None) => start = Some(i),
-            (false, Some(s)) => {
-                result.push(&lower[s..i]);
-                start = None;
-            }
-            _ => {}
+    let mut current = String::new();
+    for ch in raw.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            result.push(std::mem::take(&mut current));
         }
     }
-    if let Some(s) = start {
-        result.push(&lower[s..]);
+    if !current.is_empty() {
+        result.push(current);
     }
     result
 }
 
+fn normalize_echo_token(token: &str) -> String {
+    token.chars().flat_map(char::to_lowercase).collect()
+}
+
 fn is_redacted_echo_token(token: &str) -> bool {
     token == "redacted"
+}
+
+fn is_possessive_echo_token(token: &str) -> bool {
+    token == "s"
 }
 
 fn is_generic_echo_token(token: &str) -> bool {
@@ -461,29 +471,84 @@ fn is_identifying_echo_token(token: &str) -> bool {
     token.chars().any(|ch| !ch.is_ascii()) || token.chars().count() >= 6
 }
 
-fn is_identifying_echo_phrase(tokens: &[&str]) -> bool {
-    tokens.iter().any(|token| is_identifying_echo_token(token))
-        && !tokens.iter().all(|token| is_generic_echo_token(token))
+fn is_private_code_echo_token(token: &str) -> bool {
+    token.chars().any(|ch| ch.is_ascii_digit()) && token.chars().count() >= 2
 }
 
-fn generated_contains_echo_phrase(generated_tokens: &[&str], phrase_tokens: &[&str]) -> bool {
-    generated_tokens
-        .windows(phrase_tokens.len())
-        .any(|window| window == phrase_tokens)
+fn is_proper_echo_token(raw_token: &str, normalized: &str) -> bool {
+    !is_generic_echo_token(normalized)
+        && raw_token.chars().next().is_some_and(|ch| ch.is_uppercase())
+}
+
+fn echo_word_tokens(raw: &str) -> Vec<String> {
+    echo_raw_tokens(raw)
+        .into_iter()
+        .map(|token| normalize_echo_token(&token))
+        .filter(|token| !is_redacted_echo_token(token) && !is_possessive_echo_token(token))
+        .collect()
+}
+
+fn echo_analysis_tokens(raw: &str) -> Vec<EchoAnalysisToken> {
+    echo_raw_tokens(raw)
+        .into_iter()
+        .filter_map(|raw_token| {
+            let normalized = normalize_echo_token(&raw_token);
+            if is_redacted_echo_token(&normalized) || is_possessive_echo_token(&normalized) {
+                return None;
+            }
+            let identifying = is_identifying_echo_token(&normalized)
+                || is_private_code_echo_token(&normalized)
+                || is_proper_echo_token(&raw_token, &normalized);
+            Some(EchoAnalysisToken {
+                text: normalized,
+                identifying,
+            })
+        })
+        .collect()
+}
+
+fn is_identifying_echo_phrase(tokens: &[EchoAnalysisToken]) -> bool {
+    tokens.iter().any(|token| token.identifying)
+        && !tokens
+            .iter()
+            .all(|token| is_generic_echo_token(&token.text))
+}
+
+fn echo_phrase_chars(tokens: &[EchoAnalysisToken]) -> usize {
+    tokens
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .count()
+}
+
+fn generated_contains_echo_phrase(
+    generated_tokens: &[String],
+    phrase_tokens: &[EchoAnalysisToken],
+) -> bool {
+    generated_tokens.windows(phrase_tokens.len()).any(|window| {
+        window
+            .iter()
+            .zip(phrase_tokens)
+            .all(|(left, right)| left == &right.text)
+    })
+}
+
+fn contains_redaction_marker(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("[redacted") || lower.contains("<redacted") || lower.contains("&lt;redacted")
 }
 
 fn contains_analysis_echo(generated: &str, analysis_text: &str) -> bool {
-    let generated_lower = generated.to_lowercase();
-    let generated_tokens = echo_word_tokens(&generated_lower);
-    let analysis_lower = analysis_text.to_lowercase();
-    let tokens: Vec<&str> = echo_word_tokens(&analysis_lower)
-        .into_iter()
-        .filter(|token| !is_redacted_echo_token(token))
-        .collect();
+    let generated_tokens = echo_word_tokens(generated);
+    let tokens = echo_analysis_tokens(analysis_text);
 
     for token in &tokens {
-        if token.chars().count() >= CHAT_REACTION_ECHO_LONG_TOKEN_MIN_CHARS
-            && generated_tokens.contains(token)
+        if (token.text.chars().count() >= CHAT_REACTION_ECHO_LONG_TOKEN_MIN_CHARS
+            || (token.identifying && token.text.chars().any(|ch| !ch.is_ascii())))
+            && generated_tokens.contains(&token.text)
         {
             return true;
         }
@@ -494,7 +559,7 @@ fn contains_analysis_echo(generated: &str, analysis_text: &str) -> bool {
             .windows(CHAT_REACTION_ECHO_SHORT_PHRASE_WORDS)
             .any(|window| {
                 is_identifying_echo_phrase(window)
-                    && window.join(" ").chars().count() >= CHAT_REACTION_ECHO_SHORT_PHRASE_MIN_CHARS
+                    && echo_phrase_chars(window) >= CHAT_REACTION_ECHO_SHORT_PHRASE_MIN_CHARS
                     && generated_contains_echo_phrase(&generated_tokens, window)
             })
     {
@@ -507,7 +572,7 @@ fn contains_analysis_echo(generated: &str, analysis_text: &str) -> bool {
     tokens
         .windows(CHAT_REACTION_ECHO_NGRAM_WORDS)
         .any(|window| {
-            window.join(" ").chars().count() >= CHAT_REACTION_ECHO_NGRAM_MIN_CHARS
+            echo_phrase_chars(window) >= CHAT_REACTION_ECHO_NGRAM_MIN_CHARS
                 && generated_contains_echo_phrase(&generated_tokens, window)
         })
 }
@@ -516,7 +581,7 @@ pub fn sanitize_chat_reaction_speech_text(generated: &str, analysis_text: &str) 
     let redacted = refact_core::string_utils::redact_sensitive(generated);
     let normalized = normalize_chat_reaction_speech(&redacted);
     if normalized.is_empty()
-        || normalized.contains("[REDACTED")
+        || contains_redaction_marker(&normalized)
         || contains_analysis_echo(&normalized, analysis_text)
     {
         return None;
@@ -1260,6 +1325,26 @@ mod tests {
                 "acme roadmap",
             ),
             (
+                "please keep the Acme beta details private while planning",
+                "Acme beta needs tiny gremlin gloves.",
+                "acme beta",
+            ),
+            (
+                "please keep the Acme Q4 details private while planning",
+                "Acme Q4 needs tiny gremlin gloves.",
+                "acme q4",
+            ),
+            (
+                "please keep the Nova plan details private while planning",
+                "Nova plan deserves a checkpoint.",
+                "nova plan",
+            ),
+            (
+                "please keep Acme’s roadmap details private while planning",
+                "Acme roadmap deserves a checkpoint.",
+                "acme roadmap",
+            ),
+            (
                 "review the Northwind accounts import without leaking names",
                 "Northwind accounts look like they need tiny gremlin gloves.",
                 "northwind accounts",
@@ -1284,13 +1369,28 @@ mod tests {
 
     #[test]
     fn generated_speech_echoing_non_ascii_private_phrase_falls_back() {
-        let analysis = "please summarize the 東京 roadmap without repeating private names";
-        let generated = "Tiny signal: 東京 roadmap needs snack-sized caution.";
-        let text = safe_chat_reaction_speech_text(ChatReactionKind::Insight, analysis, generated);
+        for (analysis, generated, echoed) in [
+            (
+                "please summarize the 東京 roadmap without repeating private names",
+                "Tiny signal: 東京 roadmap needs snack-sized caution.",
+                "東京 roadmap",
+            ),
+            (
+                "please keep 山田 private while planning the helper response",
+                "Tiny signal: 山田 needs snack-sized caution.",
+                "山田",
+            ),
+        ] {
+            let text =
+                safe_chat_reaction_speech_text(ChatReactionKind::Insight, analysis, generated);
 
-        assert!(INSIGHT_LINES.contains(&text.as_str()));
-        assert!(!text.to_lowercase().contains("東京 roadmap"));
-        assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+            assert!(
+                INSIGHT_LINES.contains(&text.as_str()),
+                "expected fallback for {echoed}, got: {text}"
+            );
+            assert!(!text.to_lowercase().contains(echoed));
+            assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+        }
     }
 
     #[test]
@@ -1344,13 +1444,23 @@ mod tests {
     #[test]
     fn generated_speech_with_redacted_marker_falls_back() {
         let analysis = "please debug auth flow without storing secret material";
-        let generated = "Tiny alarm: token=[REDACTED] is doing suspicious parkour.";
-        let text =
-            safe_chat_reaction_speech_text(ChatReactionKind::BugCandidate, analysis, generated);
+        for generated in [
+            "Tiny alarm: token=[REDACTED] is doing suspicious parkour.",
+            "Tiny alarm: token=[redacted] is doing suspicious parkour.",
+            "Tiny alarm: token=[Redacted] is doing suspicious parkour.",
+            "Tiny alarm: token=<redacted> is doing suspicious parkour.",
+            "Tiny alarm: token=&lt;redacted&gt; is doing suspicious parkour.",
+        ] {
+            let text =
+                safe_chat_reaction_speech_text(ChatReactionKind::BugCandidate, analysis, generated);
 
-        assert!(BUG_LINES.contains(&text.as_str()));
-        assert!(!text.contains("[REDACTED"));
-        assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+            assert!(
+                BUG_LINES.contains(&text.as_str()),
+                "expected fallback for {generated}, got: {text}"
+            );
+            assert!(!text.to_lowercase().contains("redacted"));
+            assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+        }
     }
 
     #[test]

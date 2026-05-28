@@ -2279,24 +2279,30 @@ describe("buildBuddySceneSpeech", () => {
   });
 
   it("strips noisy runtime prefixes consistently", () => {
-    const runtime = makeRuntimeEvent({
-      title: "generic: LLM error",
-      description: "LLM error: upstream returned 429",
-      status: "failed",
-      priority: "high",
-      created_at: new Date().toISOString(),
-    });
-    const speech = buildBuddySceneSpeech({
-      activeSpeech: null,
-      nowPlaying: runtime,
-      runtimeQueue: [],
-      activeSuggestion: null,
-    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T00:00:01Z"));
+    try {
+      const runtime = makeRuntimeEvent({
+        title: "generic: LLM error",
+        description: "LLM error: upstream returned 429",
+        status: "failed",
+        priority: "high",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const speech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: runtime,
+        runtimeQueue: [],
+        activeSuggestion: null,
+      });
 
-    expect(formatBuddyRuntimeEventText(runtime)).toBe(
-      "I hit an LLM snag: upstream returned 429",
-    );
-    expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
+      expect(formatBuddyRuntimeEventText(runtime)).toBe(
+        "I hit an LLM snag: upstream returned 429",
+      );
+      expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores expired active speech before choosing home speech", () => {
@@ -2329,61 +2335,73 @@ describe("buildBuddySceneSpeech", () => {
   });
 
   it("prioritizes critical queued failures over low-priority now playing", () => {
-    const freshCreatedAt = new Date().toISOString();
-    const speech = buildBuddySceneSpeech({
-      activeSpeech: null,
-      nowPlaying: makeRuntimeEvent({
-        id: "now-playing",
-        title: "Indexing quietly",
-        priority: "low",
-        status: "progress",
-        created_at: freshCreatedAt,
-      }),
-      runtimeQueue: [
-        makeRuntimeEvent({
-          id: "critical-error",
-          title: "Provider failed",
-          description: "The default model key was rejected.",
-          priority: "critical",
-          status: "failed",
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T00:00:01Z"));
+    try {
+      const freshCreatedAt = "2024-01-01T00:00:00Z";
+      const speech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: makeRuntimeEvent({
+          id: "now-playing",
+          title: "Indexing quietly",
+          priority: "low",
+          status: "progress",
           created_at: freshCreatedAt,
         }),
-      ],
-      activeSuggestion: null,
-    });
+        runtimeQueue: [
+          makeRuntimeEvent({
+            id: "critical-error",
+            title: "Provider failed",
+            description: "The default model key was rejected.",
+            priority: "critical",
+            status: "failed",
+            created_at: freshCreatedAt,
+          }),
+        ],
+        activeSuggestion: null,
+      });
 
-    expect(speech?.runtimeEventId).toBe("critical-error");
-    expect(speech?.text).toBe(
-      "Provider failed: The default model key was rejected.",
-    );
+      expect(speech?.runtimeEventId).toBe("critical-error");
+      expect(speech?.text).toBe(
+        "Provider failed: The default model key was rejected.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("turns repeated context-window errors into Buddy language", () => {
-    const runtime = makeRuntimeEvent({
-      id: "context-error",
-      title: "generic: LLM error",
-      description:
-        "LLM error: Your input exceeds the context window of this model. Please adjust your input and try again. LLM error: Your input exceeds the context window of this model.",
-      priority: "high",
-      status: "failed",
-      created_at: new Date().toISOString(),
-    });
-    const speech = buildBuddySceneSpeech({
-      activeSpeech: null,
-      nowPlaying: runtime,
-      runtimeQueue: [],
-      activeSuggestion: null,
-    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-01-01T00:00:01Z"));
+    try {
+      const runtime = makeRuntimeEvent({
+        id: "context-error",
+        title: "generic: LLM error",
+        description:
+          "LLM error: Your input exceeds the context window of this model. Please adjust your input and try again. LLM error: Your input exceeds the context window of this model.",
+        priority: "high",
+        status: "failed",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const speech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: runtime,
+        runtimeQueue: [],
+        activeSuggestion: null,
+      });
 
-    expect(formatBuddyRuntimeEventText(runtime)).toBe(
-      "I ran out of context room. Want me to compress this and try again?",
-    );
-    expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
-    expect(speech?.controls.map((control) => control.action)).toEqual([
-      "investigate_error",
-      "dismiss_runtime_event",
-    ]);
-    expect(speech?.controls[1]?.action_param).toBe("context-error");
+      expect(formatBuddyRuntimeEventText(runtime)).toBe(
+        "I ran out of context room. Want me to compress this and try again?",
+      );
+      expect(speech?.text).toBe(formatBuddyRuntimeEventText(runtime));
+      expect(speech?.controls.map((control) => control.action)).toEqual([
+        "investigate_error",
+        "dismiss_runtime_event",
+      ]);
+      expect(speech?.controls[1]?.action_param).toBe("context-error");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("converts suggestion dismiss controls into dismiss_suggestion actions", () => {

@@ -62,7 +62,9 @@ function isDeliberatelyDurableRuntimeEvent(event: BuddyRuntimeEvent): boolean {
   );
 }
 
-function isNoTtlRuntimeEventFreshnessBounded(event: BuddyRuntimeEvent): boolean {
+function isNoTtlRuntimeEventFreshnessBounded(
+  event: BuddyRuntimeEvent,
+): boolean {
   return event.bubble_policy === "event_once" || isErrorRuntimeEvent(event);
 }
 
