@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "../../../utils/test-utils";
+import { fireEvent, render, screen } from "../../../utils/test-utils";
 import type { RootState } from "../../../app/store";
 import type {
   Chat,
@@ -129,7 +129,7 @@ describe("PlanBanner", () => {
   it("toggle collapse hides body, persists in localStorage, and restores on remount", () => {
     const { unmount } = renderPlanBanner([makePlan(1)]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    fireEvent.click(screen.getByTestId("plan-banner-header"));
 
     expect(screen.queryByTestId("plan-banner-body")).toBeNull();
     expect(localStorage.getItem(`plan-banner-collapsed-${threadId}`)).toBe(
@@ -140,40 +140,7 @@ describe("PlanBanner", () => {
     renderPlanBanner([makePlan(1)]);
 
     expect(screen.queryByTestId("plan-banner-body")).toBeNull();
-    expect(screen.getByRole("button", { name: "Expand" })).toBeTruthy();
-  });
-
-  it("History button opens modal listing all plan versions", () => {
-    renderPlanBanner([
-      makePlan(1),
-      makePlan(3, { content: "plan three" }),
-      makePlan(2, { content: "plan two" }),
-    ]);
-
-    fireEvent.click(screen.getByRole("button", { name: "History" }));
-
-    const dialog = screen.getByRole("dialog", { name: "Plan history" });
-    expect(within(dialog).getByText("📋 Plan — agent · v3")).toBeTruthy();
-    expect(within(dialog).getByText("📋 Plan — agent · v2")).toBeTruthy();
-    expect(within(dialog).getByText("📋 Plan — agent · v1")).toBeTruthy();
-
-    const headers = within(dialog).getAllByText(/📋 Plan — agent · v/u);
-    expect(headers.map((header) => header.textContent)).toEqual([
-      "📋 Plan — agent · v3",
-      "📋 Plan — agent · v2",
-      "📋 Plan — agent · v1",
-    ]);
-  });
-
-  it("modal close button works", () => {
-    renderPlanBanner([makePlan(1)]);
-
-    fireEvent.click(screen.getByRole("button", { name: "History" }));
-    expect(screen.getByRole("dialog", { name: "Plan history" })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-
-    expect(screen.queryByRole("dialog", { name: "Plan history" })).toBeNull();
+    expect(screen.getByTestId("plan-banner-header")).toBeTruthy();
   });
 
   it("compact plan classes are applied", () => {
