@@ -156,7 +156,7 @@ function makeRuntimeEvent(
     source: "chat",
     status: "failed",
     priority: "high",
-    created_at: "2024-01-01T00:00:00Z",
+    created_at: new Date().toISOString(),
     chat_id: "chat-a",
     ...overrides,
   };
