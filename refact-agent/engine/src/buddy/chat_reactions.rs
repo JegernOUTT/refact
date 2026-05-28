@@ -13,9 +13,13 @@ use super::voice_service::{voice_service, ChatReactionSpeechIntent, VoiceCtx};
 
 pub const ANALYSIS_TEXT_MIN_CHARS: usize = 20;
 pub const ANALYSIS_TEXT_MAX_CHARS: usize = 500;
+pub const CHAT_REACTION_SPEECH_MAX_CHARS: usize = 140;
 pub const PER_CHAT_COOLDOWN_SECS: i64 = 300;
 pub const GLOBAL_HOURLY_CAP: u32 = 10;
 const HUMOR_BUCKET_PERCENT: u64 = 40;
+const CHAT_REACTION_ECHO_NGRAM_WORDS: usize = 3;
+const CHAT_REACTION_ECHO_NGRAM_MIN_CHARS: usize = 18;
+const CHAT_REACTION_ECHO_LONG_TOKEN_MIN_CHARS: usize = 12;
 
 // BUG keywords: exact-prefix token match prevents false positives from words like debug, latest,
 // contest (e.g. "debug" does not start with "bug"). Removed: fail, failing, broken (too noisy).
@@ -335,6 +339,73 @@ pub fn fallback_chat_reaction_text(kind: ChatReactionKind, seed: &str) -> String
     }
 }
 
+fn normalize_chat_reaction_speech(raw: &str) -> String {
+    let stripped = raw
+        .replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    stripped
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .trim()
+        .to_string()
+}
+
+fn contains_analysis_echo(generated: &str, analysis_text: &str) -> bool {
+    let generated_lower = generated.to_lowercase();
+    let analysis_lower = analysis_text.to_lowercase();
+    let tokens: Vec<&str> = word_tokens(&analysis_lower)
+        .into_iter()
+        .filter(|token| token.chars().count() >= 4 && *token != "redacted")
+        .collect();
+
+    for token in &tokens {
+        if token.chars().count() >= CHAT_REACTION_ECHO_LONG_TOKEN_MIN_CHARS
+            && generated_lower.contains(token)
+        {
+            return true;
+        }
+    }
+
+    if tokens.len() < CHAT_REACTION_ECHO_NGRAM_WORDS {
+        return false;
+    }
+    tokens
+        .windows(CHAT_REACTION_ECHO_NGRAM_WORDS)
+        .map(|window| window.join(" "))
+        .any(|phrase| {
+            phrase.chars().count() >= CHAT_REACTION_ECHO_NGRAM_MIN_CHARS
+                && generated_lower.contains(&phrase)
+        })
+}
+
+pub fn sanitize_chat_reaction_speech_text(generated: &str, analysis_text: &str) -> Option<String> {
+    let redacted = refact_core::string_utils::redact_sensitive(generated);
+    let normalized = normalize_chat_reaction_speech(&redacted);
+    if normalized.is_empty()
+        || normalized.contains("[REDACTED")
+        || contains_analysis_echo(&normalized, analysis_text)
+    {
+        return None;
+    }
+    Some(
+        normalized
+            .chars()
+            .take(CHAT_REACTION_SPEECH_MAX_CHARS)
+            .collect(),
+    )
+}
+
+pub fn safe_chat_reaction_speech_text(
+    kind: ChatReactionKind,
+    analysis_text: &str,
+    generated: &str,
+) -> String {
+    sanitize_chat_reaction_speech_text(generated, analysis_text)
+        .unwrap_or_else(|| fallback_chat_reaction_text(kind, analysis_text))
+}
+
 /// Produces a dedupe fingerprint for a chat reaction event.
 ///
 /// The `text` argument must already be redacted via
@@ -368,6 +439,11 @@ pub fn build_reaction_event(
         "chat_reaction:{chat_id}:{kind_str}:{}",
         message_hash(analysis_text)
     );
+    let speech_text = safe_chat_reaction_speech_text(
+        reaction.kind.clone(),
+        analysis_text,
+        reaction.text.as_str(),
+    );
     BuddyRuntimeEvent {
         id: Uuid::new_v4().to_string(),
         signal_type: signal_type.to_string(),
@@ -381,7 +457,7 @@ pub fn build_reaction_event(
         created_at: Utc::now().to_rfc3339(),
         ttl_ms: Some(ttl_ms),
         bubble_policy: Some(bubble_policy),
-        speech_text: Some(reaction.text.clone()),
+        speech_text: Some(speech_text),
         scene: None,
         duration_hint: None,
         persistent: false,
@@ -414,12 +490,7 @@ async fn render_chat_reaction_text(
         .await
         .render_chat_reaction(app.clone(), ctx, intent)
         .await;
-    let redacted = refact_core::string_utils::redact_sensitive(&rendered);
-    if redacted.trim().is_empty() || redacted.contains("[REDACTED") {
-        fallback
-    } else {
-        redacted
-    }
+    sanitize_chat_reaction_speech_text(&rendered, analysis_text).unwrap_or(fallback)
 }
 
 pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMessage) {
@@ -1035,6 +1106,88 @@ mod tests {
     }
 
     #[test]
+    fn generated_speech_echoing_long_user_phrase_falls_back() {
+        let analysis =
+            "please refactor the private customer import pipeline for northwind accounts";
+        let generated = "Tiny note: private customer import pipeline may need one checkpoint.";
+        let text = safe_chat_reaction_speech_text(ChatReactionKind::Insight, analysis, generated);
+
+        assert!(INSIGHT_LINES.contains(&text.as_str()));
+        assert!(!text
+            .to_lowercase()
+            .contains("private customer import pipeline"));
+        assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+    }
+
+    #[test]
+    fn generated_speech_is_capped() {
+        let analysis = "please compare the options and keep the next step tidy";
+        let generated = "a".repeat(CHAT_REACTION_SPEECH_MAX_CHARS + 80);
+        let text = sanitize_chat_reaction_speech_text(&generated, analysis).unwrap();
+
+        assert_eq!(text.chars().count(), CHAT_REACTION_SPEECH_MAX_CHARS);
+        assert!(!text.contains('\n'));
+        assert!(!text.contains('\r'));
+    }
+
+    #[test]
+    fn generated_speech_multiline_becomes_one_line() {
+        let analysis = "please iterate on the sidebar interaction and compare the choices";
+        let text = sanitize_chat_reaction_speech_text(
+            "Tiny signal:\ncompare gently\r\nthen pick one step.",
+            analysis,
+        )
+        .unwrap();
+
+        assert_eq!(text, "Tiny signal: compare gently then pick one step.");
+        assert!(!text.contains('\n'));
+        assert!(!text.contains('\r'));
+        assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+    }
+
+    #[test]
+    fn generated_speech_with_redacted_marker_falls_back() {
+        let analysis = "please debug auth flow without storing secret material";
+        let generated = "Tiny alarm: token=[REDACTED] is doing suspicious parkour.";
+        let text =
+            safe_chat_reaction_speech_text(ChatReactionKind::BugCandidate, analysis, generated);
+
+        assert!(BUG_LINES.contains(&text.as_str()));
+        assert!(!text.contains("[REDACTED"));
+        assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+    }
+
+    #[test]
+    fn generated_speech_with_secret_redaction_falls_back() {
+        let analysis = "please debug auth flow without storing secret material";
+        let generated = "Tiny alarm: Bearer sk-VERYSECRET1234567890 is wobbling.";
+        let text =
+            safe_chat_reaction_speech_text(ChatReactionKind::BugCandidate, analysis, generated);
+
+        assert!(BUG_LINES.contains(&text.as_str()));
+        assert!(!text.contains("VERYSECRET"));
+        assert!(!text.contains("[REDACTED"));
+        assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+    }
+
+    #[test]
+    fn fallback_text_under_max_and_does_not_echo_input() {
+        let input = "customer acme roadmap migration plan should stay private";
+        for kind in [
+            ChatReactionKind::Humor,
+            ChatReactionKind::Insight,
+            ChatReactionKind::BugCandidate,
+        ] {
+            let text = fallback_chat_reaction_text(kind, input);
+            assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+            assert!(!text.to_lowercase().contains("customer acme"));
+            assert!(!text.to_lowercase().contains("roadmap migration"));
+            assert!(!text.contains('\n'));
+            assert!(!text.contains('\r'));
+        }
+    }
+
+    #[test]
     fn keywords_avoid_false_positive_debug_latest_contest() {
         let s = BuddySettings::default();
         let reaction = classify_chat_reaction(
@@ -1099,5 +1252,22 @@ mod tests {
             speech, reaction.text,
             "speech_text must equal reaction.text"
         );
+    }
+
+    #[test]
+    fn reaction_event_sanitizes_unsafe_speech_text() {
+        let analysis = "please refactor private customer import pipeline for northwind accounts";
+        let reaction = ChatReaction {
+            kind: ChatReactionKind::Insight,
+            text: "private customer import pipeline needs a checkpoint".to_string(),
+        };
+        let ev = build_reaction_event("chat-safe", analysis, &reaction);
+        let speech = ev.speech_text.expect("speech_text must be set");
+
+        assert!(INSIGHT_LINES.contains(&speech.as_str()));
+        assert!(!speech.to_lowercase().contains("private customer"));
+        assert_eq!(ev.source, "chat_reactions");
+        assert_eq!(ev.chat_id.as_deref(), Some("chat-safe"));
+        assert!(ev.bubble_policy.is_some());
     }
 }
