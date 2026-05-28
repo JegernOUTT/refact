@@ -1147,6 +1147,17 @@ describe("Buddy chat notification freshness", () => {
       const actionableRuntime = makeChatRuntimeEvent({
         id: "runtime-actionable-ratio",
         title: "Actionable runtime",
+        status: "info",
+        priority: "normal",
+        controls: [
+          {
+            id: "dismiss-actionable-ratio",
+            label: "Dismiss",
+            action: "dismiss_runtime_event",
+            action_param: "runtime-actionable-ratio",
+            style: "ghost",
+          },
+        ],
         created_at: "2024-01-01T00:00:00Z",
       });
       const ambientSpeech = makeChatSpeech({
@@ -1199,6 +1210,17 @@ describe("Buddy chat notification freshness", () => {
         const actionableRuntime = makeChatRuntimeEvent({
           id: `runtime-actionable-${speechId}`,
           title: "Actionable runtime",
+          status: "info",
+          priority: "normal",
+          controls: [
+            {
+              id: `dismiss-runtime-actionable-${speechId}`,
+              label: "Dismiss",
+              action: "dismiss_runtime_event",
+              action_param: `runtime-actionable-${speechId}`,
+              style: "ghost",
+            },
+          ],
           created_at: "2024-01-01T00:00:00Z",
         });
         const ambientSpeech = makeChatSpeech({
@@ -1401,6 +1423,17 @@ describe("Buddy chat notification freshness", () => {
       const actionableRuntime = makeChatRuntimeEvent({
         id: "runtime-explicit-actionable",
         title: "Actionable runtime",
+        status: "info",
+        priority: "normal",
+        controls: [
+          {
+            id: "dismiss-explicit-actionable",
+            label: "Dismiss",
+            action: "dismiss_runtime_event",
+            action_param: "runtime-explicit-actionable",
+            style: "ghost",
+          },
+        ],
         created_at: "2024-01-01T00:00:00Z",
       });
       const ambientRuntime = makeChatRuntimeEvent({
@@ -3908,6 +3941,70 @@ describe("buddy chat reactions settings and bubbles", () => {
         expect(
           screen.queryByRole("button", { name: "Investigate" }),
         ).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test.each<[
+    string,
+    Partial<BuddyRuntimeEvent>,
+    string,
+  ]>([
+    ["high-priority", { status: "info", priority: "high" }, "high"],
+    ["critical", { status: "info", priority: "critical" }, "critical"],
+    ["failed", { status: "failed", priority: "normal" }, "failed"],
+  ])(
+    "%s runtime event beats live ambient chat reaction",
+    async (_label, overrides, eventId) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+      try {
+        const store = setUpStore();
+        const urgentRuntime = makeChatRuntimeEvent({
+          id: `urgent-runtime-${eventId}`,
+          title: "Runtime needs attention",
+          controls: [],
+          created_at: "2024-01-01T00:00:00Z",
+          ...overrides,
+        });
+        const ambientReaction = makeChatRuntimeEvent({
+          id: `ambient-reaction-${eventId}`,
+          signal_type: "speech_humor",
+          title: "Chat reaction",
+          source: "chat_reactions",
+          status: "info",
+          priority: "normal",
+          speech_text: "Tiny ambient gremlin made a joke.",
+          controls: [],
+          created_at: "2024-01-01T00:00:00Z",
+        });
+        store.dispatch(
+          recordChatBubbleImpression({
+            id: `prior-actionable-${eventId}`,
+            kind: "actionable",
+          }),
+        );
+        store.dispatch(
+          setBuddySnapshot(
+            makeSnapshot({ runtime_queue: [urgentRuntime, ambientReaction] }),
+          ),
+        );
+
+        const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+        await expectCompanionNotification(
+          container,
+          `runtime:urgent-runtime-${eventId}`,
+        );
+        expectNoCompanionNotificationNow(
+          container,
+          `runtime:ambient-reaction-${eventId}`,
+        );
+        expect(
+          await screen.findByRole("button", { name: "Investigate" }),
+        ).toBeInTheDocument();
       } finally {
         vi.useRealTimers();
       }

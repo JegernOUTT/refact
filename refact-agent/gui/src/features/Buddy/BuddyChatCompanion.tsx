@@ -92,6 +92,7 @@ interface NotificationCandidate {
   notification: NotificationItem;
   kind: BuddyChatBubbleClass;
   rank: number;
+  preventsAmbientOverride?: boolean;
 }
 
 const EVENT_ONCE_FRESHNESS_MS = 75_000;
@@ -302,6 +303,10 @@ function pickNotificationCandidate(
   const ambient = sorted.find((candidate) => candidate.kind === "ambient");
   if (top && top.rank < 20 && ambient?.rank !== top.rank) return top;
   if (ambient && ambientRatio(impressions) < AMBIENT_RATIO_TARGET) {
+    const urgent = sorted.find(
+      (candidate) => candidate.preventsAmbientOverride === true,
+    );
+    if (urgent) return urgent;
     return ambient;
   }
   return top;
@@ -532,6 +537,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       candidates.push({
         kind: classifyRuntimeEvent(event),
         rank: runtimeEventRank(event, index),
+        preventsAmbientOverride: isErrorRuntimeEvent(event),
         notification: {
           id,
           sourceId: event.id,
