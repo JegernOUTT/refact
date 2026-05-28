@@ -27,6 +27,7 @@ const ALLOWED_FOR_SUBAGENT: &[&str] = &[
     "knowledge",
     "web",
     "web_search",
+    "shell",
     "tasks_set",
     "compress_chat_probe",
     "compress_chat_apply",
@@ -50,7 +51,7 @@ impl Tool for ToolSubagent {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Spawn a read-only research subagent that works independently. Background by default; pass wait=true to block until it finishes. Use this for investigation, code exploration, and analysis. For implementation/editing tasks use `delegate()`.".to_string(),
+            description: "Spawn a non-editing research subagent that works independently. Background by default; pass wait=true to block until it finishes. Use this for investigation, code exploration, shell-backed inspection, and analysis. For implementation/editing tasks use `delegate()`.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     (
@@ -66,7 +67,7 @@ impl Tool for ToolSubagent {
                     (
                         "tools",
                         "string",
-                        "Optional comma-separated read-only tools (e.g. 'cat,tree,search_pattern'). Empty means use the configured `subagent` toolset.",
+                        "Optional comma-separated analysis tools (e.g. 'cat,tree,search_pattern,shell'). Empty means use the configured `subagent` toolset.",
                     ),
                     ("max_steps", "string", "Step budget (default 15, max 50)."),
                     (
@@ -267,7 +268,7 @@ fn validate_read_only_tools(tools: &[String], configured_tools: &[String]) -> Re
         !is_allowed_for_subagent(tool) || !is_configured_for_subagent(tool, configured_tools)
     }) {
         return Err(format!(
-            "subagent() is read-only. Tool '{}' is not in the allowed set for read-only subagents ({}). Use delegate() for implementation/editing.",
+            "Tool '{}' is not in the allowed set for subagents ({}). Use delegate() for implementation/editing.",
             bad,
             format_allowed_tools(configured_tools)
         ));
@@ -316,7 +317,7 @@ fn build_subagent_prompt(
         .as_ref()
         .filter(|tools| !tools.is_empty())
         .map(|tools| tools.join(", "))
-        .unwrap_or_else(|| "configured `subagent` toolset (read-only)".to_string());
+        .unwrap_or_else(|| "configured `subagent` toolset".to_string());
     format!(
         r#"# Your Task
 {task}
@@ -456,6 +457,7 @@ mod tests {
             "knowledge",
             "web",
             "web_search",
+            "shell",
             "compress_chat_probe",
             "compress_chat_apply",
             "tasks_set",
@@ -538,7 +540,7 @@ mod tests {
                 .expect_err("unknown editing tool should be rejected");
 
         assert!(error.contains("Tool 'future_editing_tool'"));
-        assert!(error.contains("not in the allowed set for read-only subagents"));
+        assert!(error.contains("not in the allowed set for subagents"));
         assert!(error.contains(&format_allowed_tools(&configured_tools)));
     }
 
@@ -560,6 +562,13 @@ mod tests {
     }
 
     #[test]
+    fn shell_tool_is_accepted_when_configured() {
+        let configured_tools = configured_read_only_tools();
+
+        assert!(validate_read_only_tools(&["shell".to_string()], &configured_tools).is_ok());
+    }
+
+    #[test]
     fn tools_empty_uses_default_toolset_without_rejection() {
         let args = HashMap::from_iter([("tools".to_string(), json!("  ,  "))]);
         let tools = parse_optional_csv(&args, "tools").unwrap();
@@ -568,7 +577,7 @@ mod tests {
         let spawn_tools = tools.clone().or_else(|| Some(configured_tools.clone()));
         assert_eq!(spawn_tools, Some(configured_tools));
         let prompt = build_subagent_prompt("look", "facts", &tools, 15);
-        assert!(prompt.contains("configured `subagent` toolset (read-only)"));
+        assert!(prompt.contains("configured `subagent` toolset"));
     }
 
     #[serial]
