@@ -422,11 +422,13 @@ pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgen
     if session.closed {
         return;
     }
+    let agent = crate::agents::types::BackgroundAgentSummary::from(record);
+    session.upsert_background_agent(agent.clone());
     let seq = session.event_seq.saturating_add(1);
     session.emit(ChatEvent::BackgroundAgentUpdated {
         chat_id: record.parent_chat_id.clone(),
         seq,
-        agent: record.into(),
+        agent,
     });
 }
 

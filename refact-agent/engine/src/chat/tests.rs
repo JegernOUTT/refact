@@ -272,7 +272,9 @@ mod tests {
             .await
             .unwrap();
 
-        let snap = ChatSession::snapshot_with_agents(app, &session).await;
+        let (snap, snapshot_background_agents) =
+            ChatSession::snapshot_with_agents(app, &session).await;
+        assert_eq!(snapshot_background_agents.len(), 4);
 
         match snap {
             ChatEvent::Snapshot {

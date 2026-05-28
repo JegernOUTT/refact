@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -126,6 +126,10 @@ pub struct ChatSession {
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub waiting_for_card_ids: Vec<String>,
     pub background_completion_burst: BurstGuard,
+    /// Latest known background agent summaries for this parent chat, keyed by `agent_id`.
+    /// Kept in sync by `emit_background_agent_update` and snapshot enrichment paths so
+    /// every `ChatEvent::Snapshot` carries the current agent set instead of an empty list.
+    pub background_agents: HashMap<String, BackgroundAgentSummary>,
 }
 
 #[derive(Debug, Clone)]

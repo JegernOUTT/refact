@@ -728,7 +728,7 @@ impl ToolTaskRestartAgent {
         app.chat.facade.maybe_save_session(agent_chat_id).await?;
         app.chat
             .facade
-            .push_command(agent_chat_id, ChatCommand::Regenerate {})
+            .push_priority_command(agent_chat_id, ChatCommand::Regenerate {})
             .await?;
 
         Ok(())

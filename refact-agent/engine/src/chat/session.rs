@@ -53,6 +53,25 @@ fn has_non_metadata_extra(message: &ChatMessage) -> bool {
         .any(|key| !key.starts_with('_') && key != "openai_response_id")
 }
 
+fn is_background_agent_terminal(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+}
+
+fn should_replace_background_agent(
+    existing: Option<&BackgroundAgentSummary>,
+    incoming: &BackgroundAgentSummary,
+) -> bool {
+    match existing {
+        None => true,
+        Some(existing) if incoming.change_seq > existing.change_seq => true,
+        Some(existing) if incoming.change_seq < existing.change_seq => false,
+        Some(existing) => {
+            is_background_agent_terminal(&incoming.status)
+                && !is_background_agent_terminal(&existing.status)
+        }
+    }
+}
+
 pub type SessionsMap = Arc<ARwLock<HashMap<String, Arc<AMutex<ChatSession>>>>>;
 
 pub fn create_sessions_map() -> SessionsMap {
@@ -186,6 +205,7 @@ impl ChatSession {
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             background_completion_burst: BurstGuard::new(),
+            background_agents: HashMap::new(),
         }
     }
 
@@ -246,6 +266,7 @@ impl ChatSession {
             wake_up_at,
             waiting_for_card_ids,
             background_completion_burst: BurstGuard::new(),
+            background_agents: HashMap::new(),
         }
     }
 
@@ -343,11 +364,32 @@ impl ChatSession {
         }
     }
 
-    pub fn snapshot(&self) -> ChatEvent {
-        self.snapshot_with_background_agents(Vec::new())
+    pub fn upsert_background_agent(&mut self, agent: BackgroundAgentSummary) {
+        if should_replace_background_agent(self.background_agents.get(&agent.agent_id), &agent) {
+            self.background_agents.insert(agent.agent_id.clone(), agent);
+        }
     }
 
-    fn snapshot_with_background_agents(
+    pub fn upsert_background_agents<I>(&mut self, agents: I)
+    where
+        I: IntoIterator<Item = BackgroundAgentSummary>,
+    {
+        for agent in agents {
+            self.upsert_background_agent(agent);
+        }
+    }
+
+    pub fn snapshot(&self) -> ChatEvent {
+        let mut background_agents: Vec<_> = self.background_agents.values().cloned().collect();
+        background_agents.sort_by(|a, b| {
+            b.change_seq
+                .cmp(&a.change_seq)
+                .then(a.agent_id.cmp(&b.agent_id))
+        });
+        self.snapshot_with_background_agents(background_agents)
+    }
+
+    pub fn snapshot_with_background_agents(
         &self,
         background_agents: Vec<BackgroundAgentSummary>,
     ) -> ChatEvent {
@@ -373,21 +415,37 @@ impl ChatSession {
     pub fn snapshot_with_agents(
         app: AppState,
         session: &ChatSession,
-    ) -> impl std::future::Future<Output = ChatEvent> + Send + 'static {
+    ) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static
+    {
         let chat_id = session.chat_id.clone();
+        let base_background_agents: HashMap<String, BackgroundAgentSummary> =
+            session.background_agents.clone();
         let mut snapshot = session.snapshot();
         async move {
+            let mut background_agents = base_background_agents;
             let agents = app
                 .agents
                 .list_for_parent(&chat_id, AgentListFilter::default())
                 .await;
+            for agent in agents.iter().map(BackgroundAgentSummary::from) {
+                if should_replace_background_agent(background_agents.get(&agent.agent_id), &agent) {
+                    background_agents.insert(agent.agent_id.clone(), agent);
+                }
+            }
+            let mut background_agents: Vec<_> = background_agents.into_values().collect();
+            background_agents.sort_by(|a, b| {
+                b.change_seq
+                    .cmp(&a.change_seq)
+                    .then(a.agent_id.cmp(&b.agent_id))
+            });
             if let ChatEvent::Snapshot {
-                background_agents, ..
+                background_agents: snapshot_background_agents,
+                ..
             } = &mut snapshot
             {
-                *background_agents = agents.iter().map(BackgroundAgentSummary::from).collect();
+                *snapshot_background_agents = background_agents.clone();
             }
-            snapshot
+            (snapshot, background_agents)
         }
     }
 
@@ -730,6 +788,44 @@ impl ChatSession {
             queue_size: self.runtime.queue_size,
             queued_items: self.runtime.queued_items.clone(),
         });
+    }
+
+    /// Insert a priority command at the head of the queue and interrupt the
+    /// currently advancing loop so the new command is picked up ASAP.
+    ///
+    /// Mirrors what HTTP priority user messages do: if generation or tool
+    /// execution is active, abort the current stream and drop any pending
+    /// tool_calls so the queue processor immediately moves to the next item.
+    /// Used by event-message injections (planner↔agent communication,
+    /// background-agent completion, task agent monitor stall/wake notices,
+    /// task broadcast, agent steer) so they perturb the advancing loop the
+    /// same way as priority user messages.
+    pub fn enqueue_priority_command(&mut self, mut request: CommandRequest) {
+        request.priority = true;
+        let interrupts_active_loop = matches!(
+            &request.command,
+            ChatCommand::UserMessage { .. }
+                | ChatCommand::RetryFromIndex { .. }
+                | ChatCommand::Regenerate {}
+                | ChatCommand::Abort {}
+        );
+        let active = matches!(
+            self.runtime.state,
+            SessionState::Generating | SessionState::ExecutingTools
+        );
+        if interrupts_active_loop && active {
+            self.abort_stream();
+            self.clear_pending_tool_calls_for_interruption();
+        }
+        let insert_pos = self
+            .command_queue
+            .iter()
+            .position(|r| !r.priority)
+            .unwrap_or(self.command_queue.len());
+        self.command_queue.insert(insert_pos, request);
+        self.touch();
+        self.emit_queue_update();
+        self.queue_notify.notify_one();
     }
 
     pub fn set_paused_with_reasons_and_auto_approved(
@@ -1195,6 +1291,12 @@ pub async fn get_or_create_session_with_trajectory(
         (s, true)
     };
 
+    let background_agents = app
+        .agents
+        .list_for_parent(chat_id, AgentListFilter::default())
+        .await;
+    session.upsert_background_agents(background_agents.iter().map(BackgroundAgentSummary::from));
+
     if is_new {
         session.thread.auto_enrichment_enabled = Some(true);
         if let Some(mode_config) = crate::yaml_configs::customization_registry::get_mode_config(
@@ -1373,6 +1475,7 @@ pub fn start_session_cleanup_task(app: AppState) {
 mod tests {
     use super::*;
     use super::super::types::{ChatCommand, CommandRequest};
+    use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use serde_json::json;
     use std::time::Instant;
 
@@ -1876,6 +1979,251 @@ mod tests {
         assert!(session.messages.is_empty());
         assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(session.runtime.state, SessionState::Idle);
+    }
+
+    #[test]
+    fn enqueue_priority_command_interrupts_active_generation() {
+        let mut session = make_session();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+        session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-regenerate".into(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+
+        assert!(session.draft_message.is_none());
+        assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(session
+            .user_interrupt_flag
+            .load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.command_queue.len(), 1);
+        assert!(session.command_queue[0].priority);
+        assert!(matches!(
+            session.command_queue[0].command,
+            ChatCommand::Regenerate {}
+        ));
+    }
+
+    #[test]
+    fn enqueue_priority_abort_interrupts_active_generation() {
+        let mut session = make_session();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+
+        session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-abort".into(),
+            priority: false,
+            command: ChatCommand::Abort {},
+        });
+
+        assert!(session.draft_message.is_none());
+        assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(matches!(
+            session.command_queue[0].command,
+            ChatCommand::Abort {}
+        ));
+    }
+
+    #[test]
+    fn enqueue_priority_command_clears_unanswered_tool_calls() {
+        let mut session = make_session();
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        session.messages.push(ChatMessage {
+            message_id: "assistant-with-tools".into(),
+            role: "assistant".into(),
+            tool_calls: Some(vec![ChatToolCall {
+                id: "tool-pending".into(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "cat".into(),
+                    arguments: "{}".into(),
+                },
+                tool_type: "function".into(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        });
+
+        session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-user".into(),
+            priority: false,
+            command: ChatCommand::UserMessage {
+                content: json!("interrupt"),
+                attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
+            },
+        });
+
+        assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.messages[0].tool_calls.is_none());
+        assert!(session.command_queue[0].priority);
+    }
+
+    #[test]
+    fn enqueue_priority_command_preserves_answered_tool_calls() {
+        let mut session = make_session();
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        session.messages.push(ChatMessage {
+            message_id: "assistant-with-tools".into(),
+            role: "assistant".into(),
+            tool_calls: Some(vec![
+                ChatToolCall {
+                    id: "tool-answered".into(),
+                    index: Some(0),
+                    function: ChatToolFunction {
+                        name: "cat".into(),
+                        arguments: "{}".into(),
+                    },
+                    tool_type: "function".into(),
+                    extra_content: None,
+                },
+                ChatToolCall {
+                    id: "tool-pending".into(),
+                    index: Some(1),
+                    function: ChatToolFunction {
+                        name: "tree".into(),
+                        arguments: "{}".into(),
+                    },
+                    tool_type: "function".into(),
+                    extra_content: None,
+                },
+            ]),
+            ..Default::default()
+        });
+        session.messages.push(ChatMessage {
+            role: "tool".into(),
+            tool_call_id: "tool-answered".into(),
+            content: ChatContent::SimpleText("done".into()),
+            ..Default::default()
+        });
+
+        session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-regenerate".into(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+
+        let tool_calls = session.messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "tool-answered");
+    }
+
+    #[test]
+    fn snapshot_includes_cached_background_agents() {
+        let mut session = make_session();
+        let agent = BackgroundAgentSummary {
+            agent_id: "bgagent-cached".into(),
+            parent_chat_id: session.chat_id.clone(),
+            child_chat_id: Some("child-chat".into()),
+            kind: "subagent".into(),
+            status: "completed".into(),
+            title: "Cached agent".into(),
+            progress: None,
+            step_count: 2,
+            last_activity: None,
+            target_files: vec![],
+            edited_files: vec![],
+            diff_summary: None,
+            conflict_summary: None,
+            result_summary: Some("done".into()),
+            error: None,
+            started_at: None,
+            finished_at: Some("2026-05-28T00:00:00Z".into()),
+            change_seq: 7,
+        };
+        session
+            .background_agents
+            .insert(agent.agent_id.clone(), agent.clone());
+
+        let snapshot = session.snapshot();
+
+        match snapshot {
+            ChatEvent::Snapshot {
+                background_agents, ..
+            } => assert_eq!(background_agents, vec![agent]),
+            _ => panic!("Expected Snapshot"),
+        }
+    }
+
+    #[test]
+    fn stale_background_agent_update_does_not_replace_terminal_status() {
+        let mut session = make_session();
+        let completed = BackgroundAgentSummary {
+            agent_id: "bgagent-cached".into(),
+            parent_chat_id: session.chat_id.clone(),
+            child_chat_id: Some("child-chat".into()),
+            kind: "subagent".into(),
+            status: "completed".into(),
+            title: "Cached agent".into(),
+            progress: None,
+            step_count: 2,
+            last_activity: None,
+            target_files: vec![],
+            edited_files: vec![],
+            diff_summary: None,
+            conflict_summary: None,
+            result_summary: Some("done".into()),
+            error: None,
+            started_at: None,
+            finished_at: Some("2026-05-28T00:00:00Z".into()),
+            change_seq: 7,
+        };
+        let stale_running = BackgroundAgentSummary {
+            status: "running".into(),
+            finished_at: None,
+            result_summary: None,
+            change_seq: 6,
+            ..completed.clone()
+        };
+        session.upsert_background_agent(completed.clone());
+        session.upsert_background_agent(stale_running);
+
+        let cached = session.background_agents.get("bgagent-cached").unwrap();
+        assert_eq!(cached.status, "completed");
+        assert_eq!(cached.change_seq, 7);
+    }
+
+    #[test]
+    fn same_sequence_background_agent_update_keeps_non_terminal_existing() {
+        let mut session = make_session();
+        let running = BackgroundAgentSummary {
+            agent_id: "bgagent-cached".into(),
+            parent_chat_id: session.chat_id.clone(),
+            child_chat_id: Some("child-chat".into()),
+            kind: "subagent".into(),
+            status: "running".into(),
+            title: "Cached agent".into(),
+            progress: Some("Applying patch".into()),
+            step_count: 2,
+            last_activity: None,
+            target_files: vec![],
+            edited_files: vec![],
+            diff_summary: None,
+            conflict_summary: None,
+            result_summary: None,
+            error: None,
+            started_at: None,
+            finished_at: None,
+            change_seq: 7,
+        };
+        let stale_running = BackgroundAgentSummary {
+            progress: Some("Queued".into()),
+            ..running.clone()
+        };
+        session.upsert_background_agent(running.clone());
+        session.upsert_background_agent(stale_running);
+
+        let cached = session.background_agents.get("bgagent-cached").unwrap();
+        assert_eq!(cached.progress.as_deref(), Some("Applying patch"));
     }
 
     #[test]

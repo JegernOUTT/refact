@@ -221,7 +221,7 @@ const createInitialState = (): Chat => {
   );
   const currentThreadId = openThreadIds.includes(persistedTabs.currentThreadId)
     ? persistedTabs.currentThreadId
-    : openThreadIds[openThreadIds.length - 1] ?? "";
+    : (openThreadIds[openThreadIds.length - 1] ?? "");
 
   return {
     current_thread_id: currentThreadId,
@@ -305,6 +305,28 @@ function isWorktreeMeta(value: unknown): value is WorktreeMeta {
   );
 }
 
+function isBackgroundAgentTerminal(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "interrupted"
+  );
+}
+
+function shouldReplaceBackgroundAgent(
+  existing: { status: string; change_seq: number } | undefined,
+  incoming: { status: string; change_seq: number },
+): boolean {
+  if (!existing) return true;
+  if (incoming.change_seq > existing.change_seq) return true;
+  if (incoming.change_seq < existing.change_seq) return false;
+  return (
+    isBackgroundAgentTerminal(incoming.status) &&
+    !isBackgroundAgentTerminal(existing.status)
+  );
+}
+
 export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(hydratePersistedChatTabs, (state) => {
     const persistedTabs = loadPersistedChatTabs();
@@ -323,7 +345,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       persistedTabs.currentThreadId,
     )
       ? persistedTabs.currentThreadId
-      : openThreadIds[openThreadIds.length - 1] ?? "";
+      : (openThreadIds[openThreadIds.length - 1] ?? "");
 
     state.threads = threads;
     state.open_thread_ids = openThreadIds;
@@ -1092,9 +1114,19 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const snapshotMessages = (event.messages as ChatMessages).map(
           normalizeMessage,
         );
-        const backgroundAgents = Object.fromEntries(
-          event.background_agents.map((agent) => [agent.agent_id, agent]),
-        );
+        const backgroundAgents = {
+          ...(existingRuntime?.background_agents ?? {}),
+        };
+        for (const agent of event.background_agents) {
+          if (
+            shouldReplaceBackgroundAgent(
+              backgroundAgents[agent.agent_id],
+              agent,
+            )
+          ) {
+            backgroundAgents[agent.agent_id] = agent;
+          }
+        }
 
         const backendModel = event.thread.model.trim();
         const backendToolUse = event.thread.tool_use;
@@ -1174,7 +1206,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           auto_enrichment_enabled:
             typeof event.thread.auto_enrichment_enabled === "boolean"
               ? (event.thread.auto_enrichment_enabled as boolean)
-              : existing?.auto_enrichment_enabled ?? false,
+              : (existing?.auto_enrichment_enabled ?? false),
           auto_compact_enabled:
             typeof event.thread.auto_compact_enabled === "boolean"
               ? event.thread.auto_compact_enabled
@@ -1258,7 +1290,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if (eventSeq != null && lastSeq != null && eventSeq <= lastSeq) {
           break;
         }
-        rt.background_agents[event.agent.agent_id] = event.agent;
+        if (
+          shouldReplaceBackgroundAgent(
+            rt.background_agents[event.agent.agent_id],
+            event.agent,
+          )
+        ) {
+          rt.background_agents[event.agent.agent_id] = event.agent;
+        }
         rt.last_applied_seq = event.seq;
         break;
       }

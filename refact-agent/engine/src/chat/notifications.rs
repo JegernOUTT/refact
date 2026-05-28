@@ -8,11 +8,9 @@ use tokio::task::JoinHandle;
 
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::types::{ChatEvent, ChatSession, SessionState};
+use crate::chat::types::{ChatCommand, ChatEvent, ChatSession, CommandRequest};
 use crate::exec::{ExecStatus, ProcessCompletionEvent};
 use crate::global_context::SharedGlobalContext;
-
-const IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn spawn_notification_subscriber(gcx: SharedGlobalContext) -> JoinHandle<()> {
     let mut rx = gcx.exec_registry.subscribe_completion();
@@ -46,32 +44,35 @@ async fn handle_process_completion(gcx: SharedGlobalContext, event: ProcessCompl
     let Some(session_arc) = session_arc else {
         return;
     };
-    inject_when_idle(session_arc, event).await;
+    inject_as_priority(gcx, session_arc, event).await;
 }
 
-async fn inject_when_idle(session_arc: Arc<AMutex<ChatSession>>, event: ProcessCompletionEvent) {
-    loop {
-        let notify = {
-            let mut session = session_arc.lock().await;
-            if session.closed {
-                return;
-            }
-            if is_stream_busy(session.runtime.state) {
-                session.queue_notify.clone()
-            } else {
-                inject_process_completion_message(&mut session, event);
-                return;
-            }
-        };
-        let _ = tokio::time::timeout(IDLE_WAIT_TIMEOUT, notify.notified()).await;
+async fn inject_as_priority(
+    gcx: SharedGlobalContext,
+    session_arc: Arc<AMutex<ChatSession>>,
+    event: ProcessCompletionEvent,
+) {
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let processor_running = {
+        let mut session = session_arc.lock().await;
+        if session.closed {
+            return;
+        }
+        inject_process_completion_message(&mut session, event.clone());
+        session.enqueue_priority_command(CommandRequest {
+            client_request_id: format!("process-completed-{}", event.process_id),
+            priority: true,
+            command: ChatCommand::Regenerate {},
+        });
+        session.queue_processor_running.clone()
+    };
+    if !processor_running.swap(true, Ordering::SeqCst) {
+        tokio::spawn(crate::chat::queue::process_command_queue(
+            app,
+            session_arc,
+            processor_running,
+        ));
     }
-}
-
-fn is_stream_busy(state: SessionState) -> bool {
-    matches!(
-        state,
-        SessionState::Generating | SessionState::ExecutingTools
-    )
 }
 
 pub(crate) fn inject_process_completion_message(
@@ -173,6 +174,27 @@ mod tests {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "process completion event not injected"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn wait_for_queued_regenerate(session: &Arc<AMutex<ChatSession>>) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            {
+                let session = session.lock().await;
+                if session
+                    .command_queue
+                    .iter()
+                    .any(|request| matches!(request.command, ChatCommand::Regenerate {}))
+                {
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "process completion regenerate was not queued"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -293,14 +315,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn injection_waits_for_idle_chat() {
+    async fn injection_interrupts_busy_chat() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let subscriber = spawn_notification_subscriber(gcx.clone());
-        let chat_id = "injection-waits-for-idle-chat";
+        let chat_id = "injection-interrupts-busy-chat";
         let session = test_session(&gcx, chat_id).await;
         {
             let mut session = session.lock().await;
-            session.set_runtime_state(SessionState::Generating, None);
+            session.start_stream();
+            session
+                .queue_processor_running
+                .store(true, Ordering::SeqCst);
         }
 
         let process_id = spawn_notification_test_process(
@@ -311,16 +336,23 @@ mod tests {
         )
         .await;
         let _ = gcx.exec_registry.wait(&process_id).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(find_process_completed(&session).await.is_none());
-
-        {
-            let mut session = session.lock().await;
-            session.set_runtime_state(SessionState::Idle, None);
-            session.queue_notify.notify_waiters();
-        }
         let message = wait_for_process_completed(&session).await;
         assert_eq!(process_payload(&message)["process_id"], json!(process_id));
+        wait_for_queued_regenerate(&session).await;
+        {
+            let session = session.lock().await;
+            assert!(session.abort_flag.load(Ordering::SeqCst));
+            assert_eq!(
+                session.runtime.state,
+                crate::chat::types::SessionState::Idle
+            );
+        }
+        {
+            let session = session.lock().await;
+            session
+                .queue_processor_running
+                .store(false, Ordering::SeqCst);
+        }
         subscriber.abort();
     }
 

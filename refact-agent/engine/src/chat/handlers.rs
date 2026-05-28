@@ -76,7 +76,11 @@ pub async fn handle_v1_chat_subscribe(
     let initial_seq = session.event_seq;
     let snapshot = ChatSession::snapshot_with_agents(app.clone(), &session);
     drop(session);
-    let snapshot = snapshot.await;
+    let (snapshot, background_agents) = snapshot.await;
+    {
+        let mut session = session_arc.lock().await;
+        session.upsert_background_agents(background_agents);
+    }
 
     let initial_envelope = EventEnvelope {
         chat_id: chat_id.clone(),
@@ -128,7 +132,11 @@ pub async fn handle_v1_chat_subscribe(
                             let recovery_seq = session.event_seq;
                             let recovery_snapshot = ChatSession::snapshot_with_agents(app.clone(), &session);
                             drop(session);
-                            let recovery_snapshot = recovery_snapshot.await;
+                            let (recovery_snapshot, background_agents) = recovery_snapshot.await;
+                            {
+                                let mut session = session_for_stream.lock().await;
+                                session.upsert_background_agents(background_agents);
+                            }
                             let recovery_envelope = EventEnvelope {
                                 chat_id: chat_id_for_stream.clone(),
                                 seq: recovery_seq,
@@ -448,26 +456,17 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
-    if request.priority && matches!(&request.command, ChatCommand::UserMessage { .. }) {
-        session.abort_stream();
-        session.clear_pending_tool_calls_for_interruption();
-    }
-
+    let client_request_id_for_ack = request.client_request_id.clone();
     if request.priority {
-        let insert_pos = session
-            .command_queue
-            .iter()
-            .position(|r| !r.priority)
-            .unwrap_or(session.command_queue.len());
-        session.command_queue.insert(insert_pos, request.clone());
+        session.enqueue_priority_command(request);
     } else {
-        session.command_queue.push_back(request.clone());
+        session.command_queue.push_back(request);
+        session.touch();
+        session.emit_queue_update();
     }
-    session.touch();
-    session.emit_queue_update();
 
     session.emit(ChatEvent::Ack {
-        client_request_id: request.client_request_id,
+        client_request_id: client_request_id_for_ack,
         accepted: true,
         result: Some(serde_json::json!({"queued": true})),
     });

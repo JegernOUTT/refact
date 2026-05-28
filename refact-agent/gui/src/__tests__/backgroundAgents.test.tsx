@@ -269,7 +269,102 @@ describe("background agents", () => {
     });
   });
 
-  test("reducer hydrates background agents from snapshot and resets prior state", () => {
+  test("reducer ignores stale same-agent running update after terminal status", () => {
+    const completed = makeAgent({ status: "completed", change_seq: 5 });
+    const staleRunning = makeAgent({ status: "running", change_seq: 4 });
+    const initial = makeState();
+    const runtime = initial.threads[chatId];
+    if (!runtime) throw new Error("missing runtime");
+    runtime.background_agents = { [completed.agent_id]: completed };
+
+    const state = chatReducer(
+      initial,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "1",
+        type: "background_agent_updated",
+        agent: staleRunning,
+      }),
+    );
+
+    expect(state.threads[chatId]?.background_agents).toEqual({
+      [completed.agent_id]: completed,
+    });
+  });
+
+  test("reducer ignores same-sequence non-terminal regression", () => {
+    const active = makeAgent({
+      status: "running",
+      progress: "Applying patch",
+      change_seq: 5,
+    });
+    const staleQueued = makeAgent({
+      status: "running",
+      progress: "Queued",
+      change_seq: 5,
+    });
+    const initial = makeState();
+    const runtime = initial.threads[chatId];
+    if (!runtime) throw new Error("missing runtime");
+    runtime.background_agents = { [active.agent_id]: active };
+
+    const state = chatReducer(
+      initial,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "1",
+        type: "background_agent_updated",
+        agent: staleQueued,
+      }),
+    );
+
+    expect(state.threads[chatId]?.background_agents).toEqual({
+      [active.agent_id]: active,
+    });
+  });
+
+  test("reducer accepts same-sequence terminal update over running state", () => {
+    const running = makeAgent({ status: "running", change_seq: 5 });
+    const completed = makeAgent({ status: "completed", change_seq: 5 });
+    const initial = makeState();
+    const runtime = initial.threads[chatId];
+    if (!runtime) throw new Error("missing runtime");
+    runtime.background_agents = { [running.agent_id]: running };
+
+    const state = chatReducer(
+      initial,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "1",
+        type: "background_agent_updated",
+        agent: completed,
+      }),
+    );
+
+    expect(state.threads[chatId]?.background_agents).toEqual({
+      [completed.agent_id]: completed,
+    });
+  });
+
+  test("snapshot does not revert terminal background agent to running", () => {
+    const completed = makeAgent({ status: "completed", change_seq: 5 });
+    const staleRunning = makeAgent({ status: "running", change_seq: 4 });
+    const initial = makeState();
+    const runtime = initial.threads[chatId];
+    if (!runtime) throw new Error("missing runtime");
+    runtime.background_agents = { [completed.agent_id]: completed };
+
+    const state = chatReducer(
+      initial,
+      applyChatEvent(makeSnapshot(chatId, [staleRunning])),
+    );
+
+    expect(state.threads[chatId]?.background_agents).toEqual({
+      [completed.agent_id]: completed,
+    });
+  });
+
+  test("reducer merges background agents from snapshot with prior state", () => {
     const oldAgent = makeAgent({ agent_id: "old-agent" });
     const snapshotAgent = makeAgent({ agent_id: "snapshot-agent" });
     const initial = makeState();
@@ -283,6 +378,7 @@ describe("background agents", () => {
     );
 
     expect(state.threads[chatId]?.background_agents).toEqual({
+      [oldAgent.agent_id]: oldAgent,
       [snapshotAgent.agent_id]: snapshotAgent,
     });
   });
@@ -323,7 +419,7 @@ describe("background agents", () => {
     });
   });
 
-  test("empty snapshot background agent list produces empty state map", async () => {
+  test("empty snapshot background agent list preserves prior state map", async () => {
     const initial = makeState();
     const oldAgent = makeAgent({ agent_id: "old-agent" });
     const runtime = initial.threads[chatId];
@@ -333,7 +429,9 @@ describe("background agents", () => {
 
     const state = chatReducer(initial, applyChatEvent(event));
 
-    expect(state.threads[chatId]?.background_agents).toEqual({});
+    expect(state.threads[chatId]?.background_agents).toEqual({
+      [oldAgent.agent_id]: oldAgent,
+    });
   });
 
   test("selectBackgroundAgentsByThread returns the right map", () => {

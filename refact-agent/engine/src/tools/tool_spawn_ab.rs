@@ -304,7 +304,7 @@ async fn start_variant_session(gcx: Arc<GlobalContext>, chat_id: &str) -> Result
     let app = crate::app_state::AppState::from_gcx(gcx).await;
     app.chat
         .facade
-        .push_command(chat_id, ChatCommand::Regenerate {})
+        .push_priority_command(chat_id, ChatCommand::Regenerate {})
         .await
 }
 

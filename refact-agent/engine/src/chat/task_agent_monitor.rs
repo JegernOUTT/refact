@@ -273,9 +273,7 @@ async fn notify_planner_about_reasoning_token_limit(
         let mut session = planner_session.lock().await;
         session.add_message(notice);
         let request = regenerate_request("task-agent-reasoning-token-limit");
-        session.command_queue.push_back(request);
-        session.emit_queue_update();
-        session.queue_notify.notify_one();
+        session.enqueue_priority_command(request);
         session.queue_processor_running.clone()
     };
 
@@ -550,9 +548,7 @@ async fn notify_planner_about_stalled_agent(
         let mut session = planner_session.lock().await;
         session.add_message(notice);
         let request = regenerate_request("task-agent-stall");
-        session.command_queue.push_back(request);
-        session.emit_queue_update();
-        session.queue_notify.notify_one();
+        session.enqueue_priority_command(request);
         session.queue_processor_running.clone()
     };
 
@@ -1046,9 +1042,7 @@ pub(crate) async fn notify_planner_agents_finished(
         let mut session = planner_session.lock().await;
         session.add_message(notice);
         let request = regenerate_request("task-agent-finished");
-        session.command_queue.push_back(request);
-        session.emit_queue_update();
-        session.queue_notify.notify_one();
+        session.enqueue_priority_command(request);
         session.queue_processor_running.clone()
     };
 
@@ -1536,9 +1530,7 @@ async fn sweep_planner_wake_ups(app: AppState) -> Result<(), String> {
                 let mut session = session_arc.lock().await;
                 session.add_message(notice);
                 let request = regenerate_request("planner-wake-up");
-                session.command_queue.push_back(request);
-                session.emit_queue_update();
-                session.queue_notify.notify_one();
+                session.enqueue_priority_command(request);
                 session.queue_processor_running.clone()
             };
 

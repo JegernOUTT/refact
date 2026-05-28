@@ -158,16 +158,12 @@ impl EngineChatSessionFacade {
             command,
         };
         if priority {
-            let insert_pos = session
-                .command_queue
-                .iter()
-                .position(|r| !r.priority)
-                .unwrap_or(session.command_queue.len());
-            session.command_queue.insert(insert_pos, request);
+            session.enqueue_priority_command(request);
         } else {
             session.command_queue.push_back(request);
+            session.touch();
+            session.emit_queue_update();
         }
-        session.touch();
         let processor_running = session.queue_processor_running.clone();
         let queue_notify = session.queue_notify.clone();
         drop(session);
@@ -201,36 +197,21 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         let session_arc =
             chat::get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id)
                 .await;
+        let background_agents: Vec<_> = self
+            .gcx
+            .agents
+            .list_for_parent(chat_id, crate::agents::types::AgentListFilter::default())
+            .await
+            .iter()
+            .map(crate::agents::types::BackgroundAgentSummary::from)
+            .collect();
         let mut session = session_arc.lock().await;
         session.messages = update.messages;
         session.thread.previous_response_id = update.previous_response_id;
         session.cache_guard_force_next = true;
         session.increment_version();
+        session.upsert_background_agents(background_agents);
         let snapshot = session.snapshot();
-        let snapshot = match snapshot {
-            refact_chat_api::ChatEvent::Snapshot {
-                thread,
-                runtime,
-                messages,
-                ..
-            } => {
-                let background_agents = self
-                    .gcx
-                    .agents
-                    .list_for_parent(chat_id, crate::agents::types::AgentListFilter::default())
-                    .await
-                    .iter()
-                    .map(crate::agents::types::BackgroundAgentSummary::from)
-                    .collect();
-                refact_chat_api::ChatEvent::Snapshot {
-                    thread,
-                    runtime,
-                    messages,
-                    background_agents,
-                }
-            }
-            event => event,
-        };
         session.emit(snapshot);
         Ok(())
     }

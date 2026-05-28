@@ -50,14 +50,11 @@ pub async fn push_completion_to_parent(
             }
         }
         session.add_message(notice);
-        session.command_queue.push_back(CommandRequest {
+        session.enqueue_priority_command(CommandRequest {
             client_request_id: format!("background-agent-finished-{message_id}"),
             priority: true,
             command: ChatCommand::Regenerate {},
         });
-        session.emit_queue_update();
-        session.touch();
-        session.queue_notify.notify_one();
         session.queue_processor_running.clone()
     };
 

@@ -259,9 +259,9 @@ impl CronRunner {
                 return Ok(false);
             }
             session.add_message(event_message);
-            session.command_queue.push_back(CommandRequest {
+            session.enqueue_priority_command(CommandRequest {
                 client_request_id: format!("cron-fire-{}", Uuid::new_v4()),
-                priority: false,
+                priority: true,
                 command: ChatCommand::UserMessage {
                     content: serde_json::Value::String(prompt),
                     attachments: vec![],
@@ -269,8 +269,6 @@ impl CronRunner {
                     suppress_auto_enrichment: false,
                 },
             });
-            session.emit_queue_update();
-            session.queue_notify.notify_one();
             session.queue_processor_running.clone()
         };
 
