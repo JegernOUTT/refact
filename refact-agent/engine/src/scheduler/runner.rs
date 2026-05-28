@@ -24,6 +24,7 @@ use super::types::ScheduledTask;
 
 const DEFAULT_SLEEP_MS: u64 = 60_000;
 const IDLE_DEFER_MS: u64 = 30_000;
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const RUNNER_TZ: chrono_tz::Tz = chrono_tz::UTC;
 
 pub struct CronRunner {
@@ -121,12 +122,18 @@ impl CronRunner {
         }
 
         if final_fire {
-            if let Err(error) = self.store.remove(&task.id).await {
-                tracing::warn!(
-                    "failed to remove expired scheduled task {}: {}",
-                    task.id,
-                    error
-                );
+            match self.store.remove(&task.id).await {
+                Ok(true) => self.emit_auto_expired_notice(&task).await,
+                Ok(false) => {
+                    tracing::warn!("expired scheduled task {} was already removed", task.id);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to remove expired scheduled task {}: {}",
+                        task.id,
+                        error
+                    );
+                }
             }
         } else {
             let fire_count = task.fire_count.saturating_add(1);
@@ -196,6 +203,21 @@ impl CronRunner {
             tokio::spawn(process_command_queue(app, session_arc, processor_flag));
         }
         Ok(true)
+    }
+
+    async fn emit_auto_expired_notice(&self, task: &ScheduledTask) {
+        let Some(chat_id) = task.chat_id.as_ref() else {
+            return;
+        };
+        let session_arc = {
+            let sessions = self.gcx.chat_sessions.read().await;
+            sessions.get(chat_id).cloned()
+        };
+        let Some(session_arc) = session_arc else {
+            return;
+        };
+        let mut session = session_arc.lock().await;
+        session.add_message(auto_expired_notice_message(task));
     }
 }
 
@@ -286,6 +308,22 @@ fn cron_fire_message(task: &ScheduledTask, final_fire: bool) -> ChatMessage {
     )
 }
 
+fn auto_expired_notice_message(task: &ScheduledTask) -> ChatMessage {
+    event(
+        EventSubkind::SystemNotice,
+        "scheduler.cron",
+        json!({
+            "task_id": task.id,
+            "reason": "auto_expired",
+        }),
+        format!(
+            "Recurring task '{}' auto-expired after {}d",
+            task.description,
+            task.auto_expire_after_ms / DAY_MS
+        ),
+    )
+}
+
 fn scheduled_fire_at_ms(task: &ScheduledTask, now: u64, jitter_cfg: &JitterConfig) -> Option<u64> {
     let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
     let next = if task.recurring {
@@ -307,7 +345,7 @@ fn task_is_due(task: &ScheduledTask, now: u64, jitter_cfg: &JitterConfig) -> boo
 fn task_final_after_fire(task: &ScheduledTask, now: u64) -> bool {
     task.recurring
         && task.auto_expire_after_ms > 0
-        && now >= task.created_at_ms.saturating_add(task.auto_expire_after_ms)
+        && now.saturating_sub(task.created_at_ms) > task.auto_expire_after_ms
 }
 
 fn now_ms() -> u64 {
@@ -343,10 +381,17 @@ mod tests {
             created_at_ms: now - 120_000,
             chat_id: Some("chat-1".to_string()),
             mode: Some("agent".to_string()),
-            last_fired_at_ms: Some(now - 65_000),
+            last_fired_at_ms: Some(now - 120_000),
             fire_count: 0,
             auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
         }
+    }
+
+    fn expired_task(id: &str, now: u64) -> ScheduledTask {
+        let mut task = task(id, now);
+        task.created_at_ms = now - 2 * DAY_MS - 1;
+        task.auto_expire_after_ms = 2 * DAY_MS;
+        task
     }
 
     async fn gcx_with_session(state: SessionState) -> SharedGlobalContext {
@@ -366,6 +411,22 @@ mod tests {
             .await
             .get("chat-1")
             .cloned()
+            .unwrap()
+    }
+
+    fn event_message<'a>(
+        session: &'a ChatSession,
+        subkind: &str,
+        task_id: &str,
+    ) -> &'a crate::call_validation::ChatMessage {
+        session
+            .messages
+            .iter()
+            .find(|message| {
+                message.role == EVENT_ROLE
+                    && message.extra["event"]["subkind"].as_str() == Some(subkind)
+                    && message.extra["event"]["payload"]["task_id"].as_str() == Some(task_id)
+            })
             .unwrap()
     }
 
@@ -439,7 +500,7 @@ mod tests {
         runner.fire_due_tasks(now).await;
 
         let stored = store.list().await.into_iter().next().unwrap();
-        assert_eq!(stored.last_fired_at_ms, Some(now - 65_000));
+        assert_eq!(stored.last_fired_at_ms, Some(now - 120_000));
         assert_eq!(stored.fire_count, 0);
         assert!(runner.deferred_until_ms["cron_defer"] >= now + IDLE_DEFER_MS);
         let session = session(&gcx).await;
@@ -451,11 +512,38 @@ mod tests {
     #[tokio::test]
     async fn recurring_auto_expires_after_horizon() {
         let now = now_ms();
-        let store = Arc::new(InMemoryCronStore::new());
         let mut task = task("cron_expire", now);
-        task.created_at_ms = now - 120_000;
-        task.auto_expire_after_ms = 60_000;
-        store.add(task).await.unwrap();
+        task.created_at_ms = now - DAY_MS;
+        task.auto_expire_after_ms = DAY_MS;
+
+        assert!(!task_final_after_fire(&task, now));
+        task.created_at_ms -= 1;
+        assert!(task_final_after_fire(&task, now));
+        task.recurring = false;
+        assert!(!task_final_after_fire(&task, now));
+    }
+
+    #[tokio::test]
+    async fn final_fire_event_payload_has_final_true() {
+        let now = now_ms();
+        let message = cron_fire_message(&expired_task("cron_final", now), true);
+
+        assert_eq!(message.extra["event"]["subkind"], json!("cron_fire"));
+        assert_eq!(
+            message.extra["event"]["payload"]["task_id"],
+            json!("cron_final")
+        );
+        assert_eq!(message.extra["event"]["payload"]["final"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn expired_task_removed_from_store() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(expired_task("cron_expire_removed", now))
+            .await
+            .unwrap();
         let gcx = gcx_with_session(SessionState::Idle).await;
         let mut runner = CronRunner::new(store.clone(), gcx.clone());
 
@@ -464,14 +552,16 @@ mod tests {
         assert!(store.list().await.is_empty());
         let session = session(&gcx).await;
         let session = session.lock().await;
-        let event_message = session
-            .messages
-            .iter()
-            .find(|message| message.role == EVENT_ROLE)
-            .unwrap();
+        let fire_event = event_message(&session, "cron_fire", "cron_expire_removed");
+        assert_eq!(fire_event.extra["event"]["payload"]["final"], json!(true));
+        let notice_event = event_message(&session, "system_notice", "cron_expire_removed");
         assert_eq!(
-            event_message.extra["event"]["payload"]["final"],
-            json!(true)
+            notice_event.extra["event"]["payload"],
+            json!({"task_id": "cron_expire_removed", "reason": "auto_expired"})
+        );
+        assert_eq!(
+            notice_event.content.content_text_only(),
+            "Recurring task 'scheduled prompt' auto-expired after 2d"
         );
     }
 
