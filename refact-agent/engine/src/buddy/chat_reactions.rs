@@ -1034,6 +1034,7 @@ mod tests {
             "what if we split this into two smaller steps",
             "please check the assumptions before we proceed",
         ];
+        assert!(deterministic_humor_bucket(samples[0]));
         let kinds: Vec<ChatReactionKind> = samples
             .iter()
             .map(|text| classify_chat_reaction_kind(text, &s).unwrap())
@@ -1115,6 +1116,18 @@ mod tests {
             reaction.kind,
             ChatReactionKind::Humor | ChatReactionKind::Insight
         ));
+    }
+
+    #[test]
+    fn classify_humor_disabled_suppresses_humor_bucket() {
+        let mut s = BuddySettings::default();
+        s.humor_enabled = false;
+        s.humor_level = HumorLevel::Normal;
+        let text = "please ask about the next small step before we change the helper";
+
+        assert!(deterministic_humor_bucket(text));
+        let reaction = classify_chat_reaction(text, &s).unwrap();
+        assert_eq!(reaction.kind, ChatReactionKind::Insight);
     }
 
     #[test]

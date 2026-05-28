@@ -8,8 +8,14 @@ pub use refact_buddy_core::settings::*;
 pub async fn load_settings(project_root: &Path) -> BuddySettings {
     let path = project_root.join(".refact/buddy/settings.json");
     match fs::read_to_string(&path).await {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(s) => s,
+        Ok(content) => match serde_json::from_str::<BuddySettings>(&content) {
+            Ok(mut settings) => {
+                if settings.daily_digest_hour.is_some_and(|hour| hour > 23) {
+                    warn!("Invalid buddy daily_digest_hour in persisted settings, clearing value");
+                    settings.daily_digest_hour = None;
+                }
+                settings
+            }
             Err(e) => {
                 warn!("Failed to parse buddy settings: {}, using defaults", e);
                 BuddySettings::default()

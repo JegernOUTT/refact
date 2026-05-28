@@ -460,6 +460,59 @@ fn test_settings_request_rejects_invalid_digest_hour() {
     assert!(err.message.contains("daily_digest_hour"));
 }
 
+#[tokio::test]
+async fn test_settings_load_clears_invalid_persisted_digest_hour() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".refact/buddy/settings.json");
+    tokio::fs::create_dir_all(path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(
+        &path,
+        r#"{
+            "enabled": true,
+            "auto_diagnostics": true,
+            "auto_issue_creation": false,
+            "daily_digest_hour": 255
+        }"#,
+    )
+    .await
+    .unwrap();
+
+    let settings = super::settings::load_settings(dir.path()).await;
+
+    assert_eq!(settings.daily_digest_hour, None);
+    assert!(settings.enabled);
+}
+
+#[tokio::test]
+async fn test_settings_update_rejects_invalid_digest_without_mutating() {
+    let app = make_gcx_with_buddy().await;
+    let before = {
+        let buddy_arc = app.buddy.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        lock.as_ref().unwrap().settings.clone()
+    };
+    let req: crate::http::routers::v1::buddy::BuddySettingsRequest =
+        serde_json::from_str(r#"{"daily_digest_hour": 24, "quiet_mode": true}"#).unwrap();
+
+    let err = crate::http::routers::v1::buddy::handle_v1_buddy_settings_update(
+        axum::extract::State(app.clone()),
+        axum::Json(req),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status_code, hyper::StatusCode::BAD_REQUEST);
+    let after = {
+        let buddy_arc = app.buddy.buddy.clone();
+        let lock = buddy_arc.lock().await;
+        lock.as_ref().unwrap().settings.clone()
+    };
+    assert_eq!(after.daily_digest_hour, before.daily_digest_hour);
+    assert_eq!(after.quiet_mode, before.quiet_mode);
+}
+
 #[test]
 fn test_settings_request_rejects_unknown_observer() {
     let err = serde_json::from_str::<crate::http::routers::v1::buddy::BuddySettingsRequest>(
@@ -512,6 +565,49 @@ fn test_settings_request_apply_updates_full_contract() {
     assert!(!settings.observers.chat_pattern);
     assert!(!settings.observers.provider_health);
     assert!(settings.observers.task_health);
+}
+
+#[test]
+fn test_settings_request_tone_fields_mark_persona_dirty() {
+    for json in [
+        r#"{"humor_enabled":false}"#,
+        r#"{"humor_level":"normal"}"#,
+        r#"{"autonomy_level":"safe_auto"}"#,
+        r#"{"personality_prompt":"new prompt"}"#,
+        r#"{"personality_prompt":null}"#,
+        r#"{"clear_personality_prompt":true}"#,
+    ] {
+        let req: crate::http::routers::v1::buddy::BuddySettingsRequest =
+            serde_json::from_str(json).unwrap();
+        let mut settings = BuddySettings::default();
+        settings.personality_prompt = Some("old prompt".to_string());
+
+        assert!(req.apply_to_settings(&mut settings), "json: {json}");
+    }
+}
+
+#[tokio::test]
+async fn test_settings_update_tone_fields_bump_persona_cache_version() {
+    let app = make_gcx_with_buddy().await;
+    let before = refact_buddy_core::state::persona_cache_version();
+    let req: crate::http::routers::v1::buddy::BuddySettingsRequest = serde_json::from_str(
+        r#"{
+            "humor_enabled": false,
+            "humor_level": "normal",
+            "autonomy_level": "safe_auto",
+            "personality_prompt": "tiny chaos gremlin"
+        }"#,
+    )
+    .unwrap();
+
+    let _ = crate::http::routers::v1::buddy::handle_v1_buddy_settings_update(
+        axum::extract::State(app.clone()),
+        axum::Json(req),
+    )
+    .await
+    .unwrap();
+
+    assert!(refact_buddy_core::state::persona_cache_version() > before);
 }
 
 #[tokio::test]
@@ -3229,6 +3325,24 @@ fn policy_humor_off_setting() {
     settings.humor_level = HumorLevel::Off;
     let queue = OpportunityQueue::new();
     let opp = make_opp_with_priority("opp-off", BuddyPriority::Normal);
+    let result = evaluate(&opp, &settings, &queue);
+    assert!(matches!(
+        result,
+        PolicyDecision::Surface {
+            humor_allowed: false
+        }
+    ));
+}
+
+#[test]
+fn policy_humor_disabled_setting() {
+    use super::policy::{evaluate, PolicyDecision};
+    use super::opportunities::OpportunityQueue;
+    let mut settings = BuddySettings::default();
+    settings.humor_enabled = false;
+    settings.humor_level = HumorLevel::Normal;
+    let queue = OpportunityQueue::new();
+    let opp = make_opp_with_priority("opp-disabled", BuddyPriority::Normal);
     let result = evaluate(&opp, &settings, &queue);
     assert!(matches!(
         result,
