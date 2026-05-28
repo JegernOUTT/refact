@@ -2994,6 +2994,56 @@ describe("BuddyOpportunitiesFeed_suggestions", () => {
   });
 });
 
+describe("BuddyHome_disabled_state", () => {
+  it("disabled Buddy Home shows settings gear and Buddy enabled switch for re-enable", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(undefined, {
+          enabled: false,
+          settings: { ...makeSnapshot().settings, enabled: false },
+        }),
+      ),
+    );
+
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([]),
+      ),
+      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+
+    const settingsBtn = await screen.findByRole("button", { name: /settings/i });
+    expect(settingsBtn).toBeInTheDocument();
+
+    await user.click(settingsBtn);
+
+    const enabledSwitch = await screen.findByRole("switch", {
+      name: /buddy enabled/i,
+    });
+    expect(enabledSwitch).toBeInTheDocument();
+    expect(enabledSwitch).not.toBeChecked();
+
+    const settingsSection = await screen.findByTestId(
+      "buddy-home-settings-section",
+    );
+    expect(settingsSection).toBeInTheDocument();
+    expect(settingsSection).not.toHaveAttribute("style");
+  });
+});
+
 describe("BuddyRecentChats_opens_existing_chat", () => {
   it("clicking an existing chat row calls trajectory API and navigates to chat with buddy_meta", async () => {
     let trajectoryCalled = false;

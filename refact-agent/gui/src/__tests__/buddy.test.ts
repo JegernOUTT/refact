@@ -42,6 +42,7 @@ import {
   recordChatBubbleImpression,
   defaultBuddyPulse,
   defaultBuddySettings,
+  updateBuddySettings,
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
 import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
@@ -1677,6 +1678,35 @@ describe("buddySlice reducers", () => {
     expect(settings.daily_digest_hour).toBe(18);
   });
 
+  test("updateBuddySettings with partial observer overrides preserves mcp_auth default", () => {
+    const snap = makeSnapshot();
+    const initial = reducer(undefined, setBuddySnapshot(snap));
+    const updated: BuddySettings = {
+      ...defaultBuddySettings(),
+      observers: {
+        ...defaultBuddySettings().observers,
+        task_health: false,
+      },
+    };
+    const next = reducer(initial, updateBuddySettings(updated));
+    expect(next.snapshot?.settings.observers.task_health).toBe(false);
+    expect(next.snapshot?.settings.observers.mcp_auth).toBe(true);
+    expect(next.snapshot?.settings.observers.trajectory_clutter).toBe(true);
+  });
+
+  test("updateBuddySettings sets snapshot enabled from normalized settings", () => {
+    const snap = makeSnapshot();
+    const initial = reducer(undefined, setBuddySnapshot(snap));
+
+    const disabled: BuddySettings = { ...defaultBuddySettings(), enabled: false };
+    const s1 = reducer(initial, updateBuddySettings(disabled));
+    expect(s1.snapshot?.enabled).toBe(false);
+
+    const reenabled: BuddySettings = { ...defaultBuddySettings(), enabled: true };
+    const s2 = reducer(s1, updateBuddySettings(reenabled));
+    expect(s2.snapshot?.enabled).toBe(true);
+  });
+
   test("normalize_settings_deep_merges_observers", () => {
     const snap: BuddySnapshot = {
       state: makeState(),
@@ -2477,6 +2507,14 @@ describe("BuddyPanel hero layout", () => {
     const src = fs.readFileSync(path.join(buddyDir, "BuddyCanvas.tsx"), "utf8");
     expect(src).toContain("speechControls");
     expect(src).toContain("onSpeechControlClick");
+  });
+
+  test("BuddySettingsPanel does not dispatch updateBuddySettings directly", () => {
+    const source = fs.readFileSync(
+      path.join(buddyDir, "BuddySettingsPanel.tsx"),
+      "utf8",
+    );
+    expect(source).not.toContain("dispatch(updateBuddySettings(");
   });
 
   test("bulk opportunity dismiss uses settled results", () => {

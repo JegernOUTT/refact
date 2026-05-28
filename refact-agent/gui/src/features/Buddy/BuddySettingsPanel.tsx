@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Switch, Text, TextArea } from "@radix-ui/themes";
 import classNames from "classnames";
-import { useAppDispatch, useAppSelector } from "../../hooks";
-import { selectBuddySettings, updateBuddySettings } from "./buddySlice";
+import { useAppSelector } from "../../hooks";
+import { selectBuddySettings } from "./buddySlice";
 import { useUpdateBuddySettingsMutation } from "../../services/refact/buddy";
 import type { AutonomyLevel, BuddySettings, HumorLevel } from "./types";
 import styles from "./BuddySettingsPanel.module.css";
@@ -29,7 +29,6 @@ interface Props {
 
 export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
   const liveSettings = useAppSelector(selectBuddySettings);
-  const dispatch = useAppDispatch();
   const [updateSettingsMutation] = useUpdateBuddySettingsMutation();
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [promptDraft, setPromptDraft] = useState<string>("");
@@ -55,15 +54,14 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
       setSaveStatus("saving");
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       try {
-        const result = await updateSettingsMutation(patch).unwrap();
-        dispatch(updateBuddySettings(result));
+        await updateSettingsMutation(patch).unwrap();
         setSaveStatus("saved");
         savedTimerRef.current = setTimeout(() => setSaveStatus("idle"), 2000);
       } catch {
         setSaveStatus("failed");
       }
     },
-    [updateSettingsMutation, dispatch],
+    [updateSettingsMutation],
   );
 
   if (!liveSettings) return null;

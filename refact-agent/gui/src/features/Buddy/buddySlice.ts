@@ -288,6 +288,21 @@ export function defaultBuddySettings(): BuddySettings {
   };
 }
 
+export function normalizeBuddySettings(
+  settings?: Partial<BuddySettings>,
+): BuddySettings {
+  const defaults = defaultBuddySettings();
+  if (!settings) return defaults;
+  return {
+    ...defaults,
+    ...settings,
+    observers: {
+      ...defaults.observers,
+      ...settings.observers,
+    },
+  };
+}
+
 export function defaultBuddyPulse(): BuddyPulse {
   return {
     generated_at: null,
@@ -377,17 +392,9 @@ function normalizeBuddySnapshot(snapshot: BuddySnapshot): BuddySnapshot {
   const normalizedState = normalizeBuddyState(snapshot.state);
   const opportunities = snapshot.opportunities ?? normalizedState.opportunities;
   normalizedState.opportunities = opportunities;
-  const defaults = defaultBuddySettings();
   return {
     ...snapshot,
-    settings: {
-      ...defaults,
-      ...snapshot.settings,
-      observers: {
-        ...defaults.observers,
-        ...snapshot.settings.observers,
-      },
-    },
+    settings: normalizeBuddySettings(snapshot.settings),
     state: normalizedState,
     recent_diagnostics: snapshot.recent_diagnostics ?? [],
     runtime_queue: snapshot.runtime_queue ?? [],
@@ -556,11 +563,9 @@ export const buddySlice = createSlice({
     },
     updateBuddySettings: (state, action: PayloadAction<BuddySettings>) => {
       if (state.snapshot) {
-        state.snapshot.settings = {
-          ...defaultBuddySettings(),
-          ...action.payload,
-        };
-        state.snapshot.enabled = action.payload.enabled;
+        const normalized = normalizeBuddySettings(action.payload);
+        state.snapshot.settings = normalized;
+        state.snapshot.enabled = normalized.enabled;
       }
       // If snapshot is null but buddy is being re-enabled, wait for the next
       // StateUpdated event which will bootstrap the full snapshot via updateBuddyState.

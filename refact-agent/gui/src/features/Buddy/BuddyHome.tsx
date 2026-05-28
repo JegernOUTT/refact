@@ -629,7 +629,7 @@ export const BuddyHome: React.FC = () => {
     );
   }
 
-  if (snapshot === null || !enabled) {
+  if (snapshot === null) {
     return (
       <div className={styles.page}>
         <div className={styles.topBar}>
@@ -649,6 +649,45 @@ export const BuddyHome: React.FC = () => {
             {name} is not available
           </Text>
         </Flex>
+      </div>
+    );
+  }
+
+  if (!enabled) {
+    return (
+      <div className={styles.page}>
+        <div className={styles.topBar}>
+          <Button variant="ghost" size="1" onClick={handleBack}>
+            <ArrowLeftIcon width={14} height={14} />
+            Back
+          </Button>
+          <Text size="2" weight="bold" className={styles.topTitle}>
+            {name}
+          </Text>
+          <Button
+            variant="ghost"
+            size="1"
+            aria-label="Settings"
+            onClick={() => setShowSettings((v) => !v)}
+          >
+            <GearIcon width={14} height={14} />
+          </Button>
+        </div>
+        <main className={styles.content} data-testid="buddy-home-disabled">
+          <Flex align="center" justify="center" direction="column" gap="2">
+            <Text size="2" color="gray">
+              {name} is disabled
+            </Text>
+          </Flex>
+          {showSettings && (
+            <div
+              className={styles.settingsSection}
+              data-testid="buddy-home-settings-section"
+            >
+              <BuddySettingsPanel onClose={() => setShowSettings(false)} />
+            </div>
+          )}
+        </main>
       </div>
     );
   }
