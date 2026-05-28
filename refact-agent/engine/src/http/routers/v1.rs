@@ -95,6 +95,9 @@ use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_get, handle_v1_project_configs_rescan,
     handle_v1_project_configs_bootstrap,
 };
+use crate::http::routers::v1::scheduler::{
+    handle_v1_scheduler_cron_delete, handle_v1_scheduler_cron_get, handle_v1_scheduler_cron_post,
+};
 use crate::http::routers::v1::worktrees::{
     handle_v1_worktrees_cleanup, handle_v1_worktrees_cleanup_dry_run, handle_v1_worktrees_create,
     handle_v1_worktrees_delete, handle_v1_worktrees_diff, handle_v1_worktrees_get,
@@ -138,6 +141,7 @@ mod mcp_server_info;
 mod plugins;
 mod project_configs;
 pub mod project_information;
+pub mod scheduler;
 mod setup_status;
 pub mod sidebar;
 mod skills_marketplace;
@@ -565,6 +569,14 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/project-information/preview",
             post(handle_v1_project_information_preview),
+        )
+        .route(
+            "/scheduler/cron",
+            get(handle_v1_scheduler_cron_get).post(handle_v1_scheduler_cron_post),
+        )
+        .route(
+            "/scheduler/cron/:id",
+            delete(handle_v1_scheduler_cron_delete),
         )
         .route("/setup/status", get(handle_v1_setup_status))
         .route("/browser/start", post(handle_browser_start))

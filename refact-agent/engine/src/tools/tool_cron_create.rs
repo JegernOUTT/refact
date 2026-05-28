@@ -32,30 +32,30 @@ impl ToolCronCreate {
 }
 
 #[derive(Clone)]
-struct CronCreateInput {
-    cron: String,
-    prompt: String,
-    recurring: bool,
-    durable: bool,
-    description: String,
+pub(crate) struct CronCreateInput {
+    pub(crate) cron: String,
+    pub(crate) prompt: String,
+    pub(crate) recurring: bool,
+    pub(crate) durable: bool,
+    pub(crate) description: String,
 }
 
 #[derive(Clone)]
-struct CronCreateRuntime {
-    session_store: Arc<dyn CronStore>,
-    durable_store: Option<Arc<dyn CronStore>>,
-    change_notify: Arc<Notify>,
-    now_ms: u64,
-    timezone: Tz,
-    chat_id: Option<String>,
-    mode: Option<String>,
+pub(crate) struct CronCreateRuntime {
+    pub(crate) session_store: Arc<dyn CronStore>,
+    pub(crate) durable_store: Option<Arc<dyn CronStore>>,
+    pub(crate) change_notify: Arc<Notify>,
+    pub(crate) now_ms: u64,
+    pub(crate) timezone: Tz,
+    pub(crate) chat_id: Option<String>,
+    pub(crate) mode: Option<String>,
 }
 
 #[derive(Debug)]
-struct CronCreateOutcome {
-    task: ScheduledTask,
-    human_schedule: String,
-    summary: String,
+pub(crate) struct CronCreateOutcome {
+    pub(crate) task: ScheduledTask,
+    pub(crate) human_schedule: String,
+    pub(crate) summary: String,
 }
 
 #[async_trait]
@@ -209,7 +209,7 @@ async fn cron_tool_context(
     (app, chat_id, project_root)
 }
 
-async fn create_cron_job(
+pub(crate) async fn create_cron_job(
     input: CronCreateInput,
     runtime: CronCreateRuntime,
 ) -> Result<CronCreateOutcome, String> {

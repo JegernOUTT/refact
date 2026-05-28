@@ -66,6 +66,7 @@ import { StatsDashboard } from "./StatsDashboard";
 import { Dashboard } from "./Dashboard";
 import { BuddyHome } from "./Buddy/BuddyHome";
 import { BuddyErrorBoundary } from "./Buddy/BuddyErrorBoundary";
+import { SchedulerPanel } from "./Scheduler";
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
 import { SplashScreen } from "./Splash";
 import { selectBackendLastOkAt, selectBackendStatus } from "./Connection";
@@ -590,6 +591,9 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
               />
             )}
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
+            {!pageSwitching && renderedPage.name === "scheduler" && (
+              <SchedulerPanel onBack={goBack} />
+            )}
           </PageWrapper>
         </>
       )}

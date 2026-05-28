@@ -84,6 +84,7 @@ import {
 import { closeThread } from "../features/Chat/Thread";
 import { createChatWithId } from "../features/Chat/Thread/actions";
 import { push, selectCurrentPage } from "../features/Pages/pagesSlice";
+import { cronFireReceived } from "../features/Scheduler";
 import {
   ideToolCallResponse,
   ideTaskDone,
@@ -92,6 +93,7 @@ import {
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import { isToolMessage, modelsApi, providersApi } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
+import { schedulerApi } from "../services/refact/schedulerApi";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -613,6 +615,18 @@ startListening({
         }),
       );
     }
+  },
+});
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type !== "message_added") return;
+    const message = event.message;
+    if (message.role !== "event" || message.subkind !== "cron_fire") return;
+    listenerApi.dispatch(cronFireReceived(Date.now()));
+    listenerApi.dispatch(schedulerApi.util.invalidateTags(["CronTasks"]));
   },
 });
 

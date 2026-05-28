@@ -7,6 +7,7 @@ import {
   LightningBoltIcon,
   CubeIcon,
   RocketIcon,
+  StopwatchIcon,
 } from "@radix-ui/react-icons";
 import { useAppDispatch } from "../../../../hooks";
 import { push, type Page } from "../../../Pages/pagesSlice";
@@ -40,6 +41,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: <RocketIcon width={ICON_SIZE} height={ICON_SIZE} />,
     label: "Modes",
     page: { name: "customization" },
+  },
+  {
+    icon: <StopwatchIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    label: "Scheduler",
+    page: { name: "scheduler" },
   },
   {
     icon: <LightningBoltIcon width={ICON_SIZE} height={ICON_SIZE} />,

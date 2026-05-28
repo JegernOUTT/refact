@@ -1,0 +1,84 @@
+.panel {
+  height: 100%;
+  overflow: auto;
+  padding: var(--space-4);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+.form {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.inlineFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);
+  gap: var(--space-2);
+}
+
+.toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.error {
+  color: var(--red-11);
+}
+
+.tableWrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--gray-a4);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th {
+  color: var(--gray-11);
+  font-size: var(--font-size-1);
+  font-weight: 600;
+}
+
+.actions {
+  text-align: right;
+}
+
+.empty {
+  padding: var(--space-4);
+  color: var(--gray-11);
+  text-align: center;
+}

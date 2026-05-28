@@ -72,6 +72,8 @@ import { buddySlice } from "../features/Buddy/buddySlice";
 import { sidebarReducer } from "../features/Sidebar/sidebarSlice";
 import { buddyApi } from "../services/refact/buddy";
 import { notificationsSlice } from "../features/Notifications";
+import { schedulerSlice } from "../features/Scheduler";
+import { schedulerApi } from "../services/refact/schedulerApi";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -113,6 +115,7 @@ const rootReducer = combineSlices(
     [trajectoriesApi.reducerPath]: trajectoriesApi.reducer,
     [trajectoryApi.reducerPath]: trajectoryApi.reducer,
     [tasksApi.reducerPath]: tasksApi.reducer,
+    [schedulerApi.reducerPath]: schedulerApi.reducer,
     [taskMemoriesApi.reducerPath]: taskMemoriesApi.reducer,
     [taskDocumentsApi.reducerPath]: taskDocumentsApi.reducer,
     [browserApi.reducerPath]: browserApi.reducer,
@@ -143,6 +146,7 @@ const rootReducer = combineSlices(
   connectionSlice,
   browserSlice,
   notificationsSlice,
+  schedulerSlice,
 );
 
 const rootPersistConfig = {
@@ -218,6 +222,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           trajectoriesApi.middleware,
           trajectoryApi.middleware,
           tasksApi.middleware,
+          schedulerApi.middleware,
           taskMemoriesApi.middleware,
           taskDocumentsApi.middleware,
           browserApi.middleware,
