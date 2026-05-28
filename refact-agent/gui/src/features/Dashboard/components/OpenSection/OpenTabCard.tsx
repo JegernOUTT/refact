@@ -44,7 +44,9 @@ export const OpenTabCard: React.FC<OpenTabCardProps> = ({
             className={styles.notificationBadge}
             aria-label={`${tab.unreadNotificationCount} unread process notifications`}
           >
-            {tab.unreadNotificationCount > 9 ? "9+" : tab.unreadNotificationCount}
+            {tab.unreadNotificationCount > 9
+              ? "9+"
+              : tab.unreadNotificationCount}
           </span>
         )}
         {modeLabel && (
