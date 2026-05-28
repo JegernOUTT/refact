@@ -22,6 +22,7 @@ use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate, VerificationResult, VerifierReport};
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_OUTPUT_TAIL_CHARS: usize = 4000;
 const MAX_OUTPUT_CAPTURE_BYTES: usize = 512 * 1024;
 const MAX_DIFF_LINES: usize = 200;
@@ -382,7 +383,7 @@ async fn run_verification_argv(
     cwd: Option<PathBuf>,
     argv: Vec<String>,
 ) -> VerificationResult {
-    run_verification_argv_impl(worktree, command, cwd, argv, VERIFY_TIMEOUT).await
+    run_verification_argv_impl(worktree, command, cwd, argv, VERIFY_TIMEOUT, DRAIN_TIMEOUT).await
 }
 
 async fn run_verification_argv_impl(
@@ -391,6 +392,7 @@ async fn run_verification_argv_impl(
     cwd: Option<PathBuf>,
     argv: Vec<String>,
     timeout: Duration,
+    drain_timeout: Duration,
 ) -> VerificationResult {
     let Some(program) = argv.first() else {
         return VerificationResult {
@@ -470,12 +472,35 @@ async fn run_verification_argv_impl(
             };
         }
     };
-    let stdout_bytes = stdout_task.await.unwrap_or_default();
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
+    let stdout_abort = stdout_task.abort_handle();
+    let stderr_abort = stderr_task.abort_handle();
+    let drain_result = tokio::time::timeout(drain_timeout, async {
+        let stdout = stdout_task.await.unwrap_or_default();
+        let stderr = stderr_task.await.unwrap_or_default();
+        (stdout, stderr)
+    })
+    .await;
+    let (stdout_bytes, stderr_bytes, drain_suffix) = match drain_result {
+        Ok((stdout, stderr)) => (stdout, stderr, String::new()),
+        Err(_) => {
+            stdout_abort.abort();
+            stderr_abort.abort();
+            let _ = child.start_kill();
+            (
+                Vec::new(),
+                Vec::new(),
+                format!(
+                    "\noutput drain timed out after {} seconds; descendant process may have inherited stdout/stderr",
+                    drain_timeout.as_secs()
+                ),
+            )
+        }
+    };
     let output = format!(
-        "{}{}",
+        "{}{}{}",
         String::from_utf8_lossy(&stdout_bytes),
-        String::from_utf8_lossy(&stderr_bytes)
+        String::from_utf8_lossy(&stderr_bytes),
+        drain_suffix
     );
     VerificationResult {
         command: command.to_string(),
@@ -812,6 +837,7 @@ mod tests {
             Some(outside.path().to_path_buf()),
             vec!["cargo".to_string(), "check".to_string()],
             Duration::from_secs(30),
+            DRAIN_TIMEOUT,
         )
         .await;
 
@@ -832,6 +858,7 @@ mod tests {
                 None,
                 vec!["cat".to_string()],
                 Duration::from_secs(30),
+                DRAIN_TIMEOUT,
             ),
         )
         .await
@@ -851,11 +878,36 @@ mod tests {
             None,
             vec!["sleep".to_string(), "30".to_string()],
             Duration::from_millis(200),
+            DRAIN_TIMEOUT,
         )
         .await;
 
         assert!(!result.passed);
         assert!(result.output_tail.contains("timed out"));
         assert!(result.exit_code.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drain_times_out_when_descendant_holds_pipe() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // bash spawns a background sleep that inherits the stdout/stderr pipes and then exits;
+        // without the drain timeout the verifier hangs waiting for EOF from the background sleep
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_verification_argv_impl(
+                temp.path(),
+                "bash -c 'sleep 60 &'",
+                None,
+                vec!["bash".to_string(), "-c".to_string(), "sleep 60 &".to_string()],
+                Duration::from_secs(30),
+                Duration::from_millis(500),
+            ),
+        )
+        .await
+        .expect("verifier must not hang when descendant holds pipe open");
+
+        assert!(result.output_tail.contains("drain timed out"));
     }
 }
