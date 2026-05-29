@@ -919,10 +919,10 @@ describe("BuddyHome_renders_all_sections", () => {
     render(<BuddyHome />, { store });
     const errorsPanel = await screen.findByTestId("buddy-recent-errors-panel");
     expect(
-      within(errorsPanel).getByText("Model unavailable"),
+      within(errorsPanel).getByText("Model Unavailable"),
     ).toBeInTheDocument();
     expect(
-      within(errorsPanel).getByText("Context too large"),
+      within(errorsPanel).getByText("Context Too Large"),
     ).toBeInTheDocument();
     expect(within(errorsPanel).queryByText("×2")).not.toBeInTheDocument();
   });
