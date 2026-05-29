@@ -1,4 +1,5 @@
 pub mod browser_context;
+pub mod cache_diagnostics;
 pub mod cache_guard;
 pub mod config;
 mod content;

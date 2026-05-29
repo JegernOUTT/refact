@@ -2034,6 +2034,12 @@ pub async fn run_llm_stream<C: StreamCollector>(
             )
         })?;
 
+    crate::chat::cache_diagnostics::log_provider_request_hashes(
+        params.chat_id.as_deref(),
+        &params.llm_request.model_id,
+        &http_parts.body,
+    );
+
     let mut sanitized_for_commit: Option<serde_json::Value> = None;
     if let Some(chat_id) = &params.chat_id {
         let session_arc_opt = {
