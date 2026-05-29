@@ -4240,6 +4240,11 @@ describe("buddy chat reactions settings and bubbles", () => {
       "chat-reaction-humor",
       "I put the bug in a tiny wizard hat. Morale improved.",
     ],
+    [
+      "speech_chat_reaction",
+      "chat-reaction-ambient",
+      "Tiny companion blip: message received, gremlin ears perked.",
+    ],
   ])(
     "%s live chat reaction renders without error controls",
     async (signalType, eventId, speechText) => {

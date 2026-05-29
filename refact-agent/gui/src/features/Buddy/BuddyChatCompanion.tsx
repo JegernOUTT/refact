@@ -106,6 +106,7 @@ const AMBIENT_RATIO_TARGET = 0.5;
 const AMBIENT_SIGNALS = new Set<string>([
   "speech_humor",
   "speech_insight",
+  "speech_chat_reaction",
   "speech_memory_pulse_commentary",
   "speaker_insight",
   "speaker_memory_pulse_commentary",
@@ -120,6 +121,7 @@ const LIVE_CHAT_REACTION_SIGNALS = new Set<string>([
   "speech_humor",
   "speech_insight",
   "chat_bug_candidate",
+  "speech_chat_reaction",
   "chat_interaction",
   "chat_interaction_comment",
   "interaction_comment",

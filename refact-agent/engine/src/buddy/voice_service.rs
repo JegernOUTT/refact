@@ -54,6 +54,7 @@ pub(crate) enum ChatReactionSpeechIntent {
     Humor,
     Insight,
     BugCandidate,
+    Ambient,
 }
 
 pub struct VoiceService {
@@ -250,6 +251,7 @@ impl ChatReactionSpeechIntent {
             ChatReactionSpeechIntent::Humor => "speech:chat_reaction_humor",
             ChatReactionSpeechIntent::Insight => "speech:chat_reaction_insight",
             ChatReactionSpeechIntent::BugCandidate => "speech:chat_reaction_bug_candidate",
+            ChatReactionSpeechIntent::Ambient => "speech:chat_reaction_ambient",
         }
     }
 }
@@ -495,6 +497,8 @@ impl VoiceRenderRequest {
                 "Encourage one actionable next step, such as offering to look or isolate it."
             } else if self.intent_kind.ends_with("_insight") {
                 "Make an interaction-aware comment about asking, iterating, tweaking, simplifying, debugging, planning, retrying, comparing, or exploring; do not quote the message."
+            } else if self.intent_kind.ends_with("_ambient") {
+                "Make a friendly low-noise Pixel gremlin check-in about being present; do not quote the message."
             } else {
                 "Use a chaotic cute Pixel gremlin joke about the interaction pattern, not the exact text."
             };
@@ -614,6 +618,8 @@ fn fallback_phrases(intent_kind: &str) -> &'static [&'static str] {
         crate::buddy::chat_reactions::INSIGHT_LINES
     } else if intent_kind == ChatReactionSpeechIntent::BugCandidate.as_str() {
         crate::buddy::chat_reactions::BUG_LINES
+    } else if intent_kind == ChatReactionSpeechIntent::Ambient.as_str() {
+        crate::buddy::chat_reactions::AMBIENT_LINES
     } else if intent_kind.contains("failed") || intent_kind.contains("error") {
         &[
             "I spotted a snag and kept the trail marked.",
@@ -815,6 +821,32 @@ mod tests {
         let (_, user) = prompts.first().expect("prompt captured");
         assert!(user.contains("interaction-aware comment"));
         assert!(user.contains("asking, iterating, tweaking"));
+        assert!(user.contains("do not quote the message"));
+    }
+
+    #[tokio::test]
+    async fn chat_reaction_voice_prompt_guides_ambient_check_in() {
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let renderer = TestVoiceRenderer::new(vec![Some("soft companion blip".to_string())]);
+        let service = VoiceService::new_with_renderer(renderer.clone());
+        let persona = persona("helper_sprite");
+        let ctx = VoiceCtx {
+            persona: &persona,
+            identity_name: "Pixel",
+            pulse_one_liner: "Tests are running".to_string(),
+            workflow_id: Some("chat_reaction"),
+            workflow_summary: Some("please write a hello world example for me"),
+        };
+
+        let line = service
+            .render_chat_reaction(gcx, ctx, ChatReactionSpeechIntent::Ambient)
+            .await;
+
+        assert_eq!(line, "soft companion blip");
+        let prompts = renderer.prompts();
+        let (_, user) = prompts.first().expect("prompt captured");
+        assert!(user.contains("friendly low-noise Pixel gremlin check-in"));
+        assert!(user.contains("being present"));
         assert!(user.contains("do not quote the message"));
     }
 }

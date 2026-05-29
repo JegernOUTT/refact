@@ -171,6 +171,15 @@ pub const BUG_LINES: &[&str] = &[
     "Hmm, that pattern usually means something failed quietly. Want a closer look?",
 ];
 
+pub const AMBIENT_LINES: &[&str] = &[
+    "Pixel ping: I saw that. Tiny helpful goblin wave deployed.",
+    "Small gremlin check-in: I am here, wearing supervision socks.",
+    "Ambient Pixel sparkle: noted, no alarms, just tiny assistant energy.",
+    "I am quietly orbiting this chat with one cute chaos sticker.",
+    "Tiny companion blip: message received, gremlin ears perked.",
+    "Soft chaos nod: I am watching the trail without eating the breadcrumbs.",
+];
+
 fn stable_hash(text: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for byte in text.bytes() {
@@ -265,6 +274,13 @@ fn has_interaction_signal(lower: &str, tokens: &[&str]) -> bool {
         || lower.contains("let's")
         || lower.contains("lets")
         || lower.contains("step by step")
+}
+
+fn has_strong_insight_signal(lower: &str, tokens: &[&str]) -> bool {
+    INSIGHT_KEYWORDS
+        .iter()
+        .any(|kw| tokens.iter().any(|t| matches_insight_keyword(t, kw)))
+        || has_interaction_signal(lower, tokens)
 }
 
 pub struct AcceptedUserMessage {
@@ -392,6 +408,7 @@ pub enum ChatReactionKind {
     Humor,
     Insight,
     BugCandidate,
+    Ambient,
 }
 
 #[derive(Debug, Clone)]
@@ -461,18 +478,13 @@ pub fn classify_chat_reaction_kind(
     } else if settings.humor_enabled
         && settings.humor_level != HumorLevel::Off
         && deterministic_humor_bucket(text)
+        && !has_strong_insight_signal(&lower, &tokens)
     {
         Some(ChatReactionKind::Humor)
-    } else if INSIGHT_KEYWORDS
-        .iter()
-        .any(|kw| tokens.iter().any(|t| matches_insight_keyword(t, kw)))
-        || has_interaction_signal(&lower, &tokens)
-    {
-        Some(ChatReactionKind::Insight)
-    } else if settings.humor_enabled && settings.humor_level != HumorLevel::Off {
+    } else if has_strong_insight_signal(&lower, &tokens) {
         Some(ChatReactionKind::Insight)
     } else {
-        None
+        Some(ChatReactionKind::Ambient)
     }
 }
 
@@ -481,6 +493,7 @@ pub fn fallback_chat_reaction_text(kind: ChatReactionKind, seed: &str) -> String
         ChatReactionKind::Humor => pick_template(HUMOR_LINES, seed).to_string(),
         ChatReactionKind::Insight => pick_template(INSIGHT_LINES, seed).to_string(),
         ChatReactionKind::BugCandidate => pick_template(BUG_LINES, seed).to_string(),
+        ChatReactionKind::Ambient => pick_template(AMBIENT_LINES, seed).to_string(),
     }
 }
 
@@ -689,6 +702,7 @@ fn signal_type_for_kind(kind: &ChatReactionKind) -> &'static str {
         ChatReactionKind::Humor => "speech_humor",
         ChatReactionKind::Insight => "speech_insight",
         ChatReactionKind::BugCandidate => "chat_bug_candidate",
+        ChatReactionKind::Ambient => "speech_chat_reaction",
     }
 }
 
@@ -705,11 +719,17 @@ pub fn build_reaction_event(
             120_000u64,
             BuddyBubblePolicy::EventOnce,
         ),
+        ChatReactionKind::Ambient => (
+            "speech_chat_reaction",
+            90_000u64,
+            BuddyBubblePolicy::Ambient,
+        ),
     };
     let kind_str = match reaction.kind {
         ChatReactionKind::Humor => "humor",
         ChatReactionKind::Insight => "insight",
         ChatReactionKind::BugCandidate => "bug",
+        ChatReactionKind::Ambient => "ambient",
     };
     let dedupe_key = format!(
         "chat_reaction:{chat_id}:{kind_str}:{}",
@@ -754,6 +774,7 @@ async fn render_chat_reaction_text(
         ChatReactionKind::Humor => ChatReactionSpeechIntent::Humor,
         ChatReactionKind::Insight => ChatReactionSpeechIntent::Insight,
         ChatReactionKind::BugCandidate => ChatReactionSpeechIntent::BugCandidate,
+        ChatReactionKind::Ambient => ChatReactionSpeechIntent::Ambient,
     };
     let ctx = VoiceCtx {
         persona: &voice_inputs.persona,
@@ -936,6 +957,12 @@ impl ChatReactionLimiter {
     pub fn allow(&mut self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.allow_kind(chat_id, ChatReactionKind::Humor, now)
     }
+
+    pub fn reset(&mut self) {
+        self.per_chat_kind_last_at.clear();
+        self.global_hourly_count = 0;
+        self.global_window_start = Utc::now();
+    }
 }
 
 #[cfg(test)]
@@ -1043,15 +1070,14 @@ mod tests {
         );
 
         let mut no_kind = BuddySettings::default();
-        no_kind.humor_enabled = false;
-        no_kind.humor_level = HumorLevel::Off;
+        no_kind.chat_reactions_enabled = false;
         assert_eq!(
             chat_reaction_candidate(
                 &thread,
                 "please write a friendly greeting for this tiny helper",
                 Some(&no_kind),
             ),
-            Err(ChatReactionSkipReason::NoReactionKind)
+            Err(ChatReactionSkipReason::SettingsDisabled)
         );
     }
 
@@ -1098,31 +1124,34 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_humor_distribution_for_normal_interactions() {
+    fn deterministic_humor_distribution_for_generic_messages() {
         let s = BuddySettings::default();
         let samples = [
-            "please ask about the next small step before we change the helper",
-            "can you iterate on this wording and make the flow gentler",
-            "let us compare these two approaches for the sidebar behavior",
-            "please tweak the naming so the option feels clearer",
-            "explore a smaller version of the settings panel idea",
-            "plan the next checkpoint for this cleanup work",
-            "try again with a simpler explanation of the button states",
-            "walk through the tradeoff before we pick the path",
-            "please summarize what changed and what to verify next",
-            "can you make the response shorter and more direct",
-            "let us outline a tiny migration path for this feature",
-            "compare the current behavior with the expected interaction",
-            "please simplify the setup sequence for a new user",
-            "think through how the retry loop should feel in chat",
-            "explore whether this should be a toggle or a command",
-            "can you revise the plan after this feedback",
-            "please make the naming friendlier without changing behavior",
-            "iterate on the copy so it feels less formal",
-            "what if we split this into two smaller steps",
-            "please check the assumptions before we proceed",
+            "please write a hello world example for me",
+            "please make a small helper that formats the label",
+            "show me a short example of this pattern",
+            "please draft a friendly greeting for the onboarding screen",
+            "what is a simple way to arrange these notes",
+            "please explain this part in plain words",
+            "please create a tiny example with two inputs",
+            "show a compact version of the same idea",
+            "please make this text shorter for the tooltip",
+            "please give me a starter snippet for this",
+            "please outline a lightweight helper for this page",
+            "write a concise description for the button",
+            "please suggest a name for this option",
+            "please sketch a small example without extra details",
+            "show me how to phrase this as a checklist",
+            "please make the intro paragraph friendlier",
+            "please turn this note into a short message",
+            "write a quick placeholder for this empty space",
+            "please summarize this in one sentence",
+            "please give me a tiny reusable example",
         ];
-        assert!(deterministic_humor_bucket(samples[0]));
+        let humor_bucket_count = samples
+            .iter()
+            .filter(|text| deterministic_humor_bucket(text))
+            .count();
         let kinds: Vec<ChatReactionKind> = samples
             .iter()
             .map(|text| classify_chat_reaction_kind(text, &s).unwrap())
@@ -1131,16 +1160,19 @@ mod tests {
             .iter()
             .filter(|kind| matches!(kind, ChatReactionKind::Humor))
             .count();
-        let insight_count = kinds
+        let ambient_count = kinds
             .iter()
-            .filter(|kind| matches!(kind, ChatReactionKind::Insight))
+            .filter(|kind| matches!(kind, ChatReactionKind::Ambient))
             .count();
 
-        assert_eq!(humor_count, 8);
-        assert_eq!(insight_count, 12);
-        assert!(kinds
-            .iter()
-            .all(|kind| !matches!(kind, ChatReactionKind::BugCandidate)));
+        assert_eq!(humor_count, humor_bucket_count);
+        assert!(humor_count > 0);
+        assert!(ambient_count > 0);
+        assert_eq!(humor_count + ambient_count, samples.len());
+        assert!(kinds.iter().all(|kind| !matches!(
+            kind,
+            ChatReactionKind::BugCandidate | ChatReactionKind::Insight
+        )));
         assert_eq!(
             kinds,
             samples
@@ -1172,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_common_work_messages_mix_humor_and_insight() {
+    fn classify_common_work_messages_as_insight() {
         let s = BuddySettings::default();
         let mut humor = 0;
         let mut insight = 0;
@@ -1188,22 +1220,21 @@ mod tests {
             match reaction.kind {
                 ChatReactionKind::Humor => humor += 1,
                 ChatReactionKind::Insight => insight += 1,
-                ChatReactionKind::BugCandidate => panic!("unexpected bug reaction for: {text}"),
+                ChatReactionKind::BugCandidate | ChatReactionKind::Ambient => {
+                    panic!("unexpected non-work reaction for: {text}")
+                }
             }
         }
-        assert!(humor > 0);
-        assert!(insight > 0);
+        assert_eq!(humor, 0);
+        assert_eq!(insight, 4);
     }
 
     #[test]
-    fn classify_default_non_error_falls_back_to_insight_or_humor() {
+    fn classify_default_non_error_falls_back_to_ambient() {
         let s = BuddySettings::default();
         let reaction =
             classify_chat_reaction("please write a hello world example for me", &s).unwrap();
-        assert!(matches!(
-            reaction.kind,
-            ChatReactionKind::Humor | ChatReactionKind::Insight
-        ));
+        assert_eq!(reaction.kind, ChatReactionKind::Ambient);
     }
 
     #[test]
@@ -1219,10 +1250,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_none_when_humor_off_and_no_signal() {
+    fn classify_ambient_when_humor_off_and_no_signal() {
         let mut s = BuddySettings::default();
         s.humor_level = HumorLevel::Off;
-        assert!(classify_chat_reaction("please write a hello world example for me", &s).is_none());
+        let reaction = classify_chat_reaction("please write a hello world example for me", &s).unwrap();
+        assert_eq!(reaction.kind, ChatReactionKind::Ambient);
     }
 
     #[test]
@@ -1395,6 +1427,21 @@ mod tests {
         assert!(
             BUG_LINES.contains(&text.as_str()),
             "fallback must be one of BUG_LINES, got: {}",
+            text
+        );
+        assert!(
+            !text.contains(input),
+            "fallback must not echo the user message"
+        );
+    }
+
+    #[test]
+    fn fallback_ambient_uses_template() {
+        let input = "please write a hello world example for me";
+        let text = fallback_chat_reaction_text(ChatReactionKind::Ambient, input);
+        assert!(
+            AMBIENT_LINES.contains(&text.as_str()),
+            "fallback must be one of AMBIENT_LINES, got: {}",
             text
         );
         assert!(
@@ -1584,6 +1631,7 @@ mod tests {
             ChatReactionKind::Humor,
             ChatReactionKind::Insight,
             ChatReactionKind::BugCandidate,
+            ChatReactionKind::Ambient,
         ] {
             let text = fallback_chat_reaction_text(kind, input);
             assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
@@ -1621,8 +1669,8 @@ mod tests {
         ] {
             assert_eq!(
                 classify_chat_reaction_kind(text, &s),
-                None,
-                "short insight keyword must not overmatch: {text}"
+                Some(ChatReactionKind::Ambient),
+                "short insight keyword must not overmatch insight: {text}"
             );
         }
     }

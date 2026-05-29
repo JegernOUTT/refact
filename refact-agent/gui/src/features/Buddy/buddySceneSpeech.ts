@@ -38,6 +38,7 @@ const LIVE_CHAT_REACTION_SIGNALS = new Set([
   "speech_humor",
   "speech_insight",
   "chat_bug_candidate",
+  "speech_chat_reaction",
   "chat_interaction",
   "chat_interaction_comment",
   "interaction_comment",

@@ -8347,6 +8347,48 @@ async fn maybe_enqueue_chat_reaction_emits_humor_for_bucketed_interaction() {
     assert!(!speech.contains("next small step"));
 }
 
+#[tokio::test]
+async fn maybe_enqueue_chat_reaction_emits_ambient_for_generic_message() {
+    use super::chat_reactions::{AcceptedUserMessage, AMBIENT_LINES, maybe_enqueue_chat_reaction};
+    use crate::buddy::types::BuddyBubblePolicy;
+    use crate::call_validation::ChatContent;
+    use crate::chat::types::ThreadParams;
+
+    let (service, renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![None]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app = make_gcx_with_buddy().await;
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id: "ambient-reaction-chat".to_string(),
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(
+                "please write a hello world example for me".to_string(),
+            ),
+        },
+    )
+    .await;
+
+    let ev = wait_for_runtime_event(&app, "speech_chat_reaction").await;
+    assert_eq!(ev.source, "chat_reactions");
+    assert_eq!(ev.chat_id.as_deref(), Some("ambient-reaction-chat"));
+    assert_eq!(ev.bubble_policy, Some(BuddyBubblePolicy::Ambient));
+    assert!(ev.controls.is_empty());
+    let speech = ev.speech_text.as_deref().unwrap_or_default();
+    assert!(
+        AMBIENT_LINES.contains(&speech),
+        "speech_text must fall back to AMBIENT_LINES, got: {}",
+        speech
+    );
+    assert!(!speech.contains("hello world"));
+    assert_eq!(
+        renderer.intent_kinds(),
+        vec!["speech:chat_reaction_ambient".to_string()]
+    );
+}
+
 async fn wait_for_runtime_event(
     app: &AppState,
     signal_type: &str,
@@ -9191,5 +9233,30 @@ fn limiter_prunes_stale_chat_ids() {
         !lim.per_chat_kind_last_at
             .contains_key(&("chat-1".to_string(), ChatReactionKind::Humor)),
         "stale chat-1 entry must be pruned after second call"
+    );
+}
+
+#[test]
+fn limiter_reset_allows_first_post_enable_reaction() {
+    use super::chat_reactions::{ChatReactionKind, ChatReactionLimiter};
+
+    let mut lim = ChatReactionLimiter::new();
+    let t0 = chrono::Utc::now();
+    assert!(lim.allow_kind("chat-1", ChatReactionKind::Ambient, t0));
+    assert!(!lim.allow_kind(
+        "chat-1",
+        ChatReactionKind::Ambient,
+        t0 + Duration::seconds(10)
+    ));
+
+    lim.reset();
+
+    assert!(
+        lim.allow_kind(
+            "chat-1",
+            ChatReactionKind::Ambient,
+            t0 + Duration::seconds(11)
+        ),
+        "reset after Buddy re-enable must clear stale cooldown state"
     );
 }

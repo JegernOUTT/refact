@@ -397,8 +397,12 @@ pub async fn handle_v1_buddy_settings_update(
     let updated = {
         let mut lock = buddy_arc.lock().await;
         if let Some(service) = lock.as_mut() {
+            let was_enabled = service.settings.enabled;
             if req.apply_to_settings(&mut service.settings) {
                 crate::buddy::state::mark_persona_cache_dirty();
+            }
+            if !was_enabled && service.settings.enabled {
+                service.chat_reaction_limiter.reset();
             }
             if let Some(pi) = req.palette_index {
                 service.state.identity.palette_index = pi;
