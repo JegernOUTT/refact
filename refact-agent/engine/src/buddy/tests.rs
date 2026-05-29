@@ -9677,6 +9677,83 @@ fn runtime_event_coalesce_broadcasts_stored_id() {
 }
 
 #[tokio::test]
+async fn maybe_enqueue_chat_reaction_rolls_back_limiter_when_enqueue_skipped() {
+    use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
+    use crate::call_validation::ChatContent;
+    use crate::chat::types::ThreadParams;
+
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_delayed_responses(
+            vec![
+                Some("first insight".to_string()),
+                Some("second insight".to_string()),
+            ],
+            std::time::Duration::from_millis(100),
+        );
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app = make_gcx_with_buddy().await;
+    let chat_id = "rollback-reaction-chat".to_string();
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(
+                "please design a cache architecture for services".to_string(),
+            ),
+        },
+    )
+    .await;
+
+    {
+        let mut lock = app.buddy.buddy.lock().await;
+        lock.as_mut().unwrap().settings.chat_reactions_enabled = false;
+    }
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let rolled_back = {
+                let lock = app.buddy.buddy.lock().await;
+                let svc = lock.as_ref().unwrap();
+                svc.chat_reaction_debug
+                    .snapshot()
+                    .last_skip_reason
+                    .as_deref()
+                    == Some("settings_disabled")
+                    && svc.runtime_queue.items.is_empty()
+            };
+            if rolled_back {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first reaction should skip after settings are disabled");
+
+    {
+        let mut lock = app.buddy.buddy.lock().await;
+        lock.as_mut().unwrap().settings.chat_reactions_enabled = true;
+    }
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id,
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(
+                "please design a cache architecture for services again".to_string(),
+            ),
+        },
+    )
+    .await;
+
+    let ev = wait_for_runtime_event(&app, "speech_insight").await;
+    assert_eq!(ev.speech_text.as_deref(), Some("second insight"));
+}
+
+#[tokio::test]
 async fn bug_reaction_not_blocked_by_humor_cooldown() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
     use crate::call_validation::ChatContent;

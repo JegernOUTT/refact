@@ -818,22 +818,26 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
             return;
         };
         let now = chrono::Utc::now();
-        if let Err(reason) =
-            svc.chat_reaction_limiter
-                .try_allow_kind(&accepted.chat_id, candidate.kind.clone(), now)
-        {
-            svc.chat_reaction_debug
-                .record_skipped(&accepted.chat_id, reason);
-            debug!(
-                target: "buddy.chat_reactions",
-                chat_id = %accepted.chat_id,
-                reason = %reason.as_str(),
-                reaction_kind = ?candidate.kind,
-                analysis_hash = %message_hash(&candidate.analysis_text),
-                "buddy chat reaction skipped"
-            );
-            return;
-        }
+        let reservation = match svc.chat_reaction_limiter.try_allow_kind(
+            &accepted.chat_id,
+            candidate.kind.clone(),
+            now,
+        ) {
+            Ok(reservation) => reservation,
+            Err(reason) => {
+                svc.chat_reaction_debug
+                    .record_skipped(&accepted.chat_id, reason);
+                debug!(
+                    target: "buddy.chat_reactions",
+                    chat_id = %accepted.chat_id,
+                    reason = %reason.as_str(),
+                    reaction_kind = ?candidate.kind,
+                    analysis_hash = %message_hash(&candidate.analysis_text),
+                    "buddy chat reaction skipped"
+                );
+                return;
+            }
+        };
         let voice_inputs = ChatReactionVoiceInputs {
             persona: svc.state.personality.clone(),
             identity_name: svc.state.identity.name.clone(),
@@ -842,13 +846,13 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
                 svc.pulse.memory.pending_ops, svc.pulse.tasks.stuck
             ),
         };
-        (candidate, voice_inputs)
+        (candidate, reservation, voice_inputs)
     };
 
     let app2 = app.clone();
     let chat_id = accepted.chat_id.clone();
     tokio::spawn(async move {
-        let (candidate, voice_inputs) = plan;
+        let (candidate, reservation, voice_inputs) = plan;
         let signal_type = signal_type_for_kind(&candidate.kind).to_string();
         let speech = render_chat_reaction_text(
             &app2,
@@ -882,6 +886,7 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
                     "buddy chat reaction emitted"
                 );
             } else {
+                svc.chat_reaction_limiter.rollback(reservation);
                 svc.chat_reaction_debug
                     .record_skipped(&chat_id, ChatReactionSkipReason::SettingsDisabled);
                 debug!(
@@ -912,6 +917,14 @@ pub struct ChatReactionLimiter {
     global_window_start: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatReactionLimiterReservation {
+    key: (String, ChatReactionKind),
+    reserved_at: DateTime<Utc>,
+    previous_last_at: Option<DateTime<Utc>>,
+    window_start: DateTime<Utc>,
+}
+
 impl ChatReactionLimiter {
     pub fn new() -> Self {
         Self {
@@ -936,7 +949,7 @@ impl ChatReactionLimiter {
         chat_id: &str,
         kind: ChatReactionKind,
         now: DateTime<Utc>,
-    ) -> Result<(), ChatReactionSkipReason> {
+    ) -> Result<ChatReactionLimiterReservation, ChatReactionSkipReason> {
         self.per_chat_kind_last_at
             .retain(|_, last_at| (now - *last_at).num_seconds() < PER_CHAT_COOLDOWN_SECS);
         if (now - self.global_window_start).num_seconds() >= 3600 {
@@ -952,9 +965,34 @@ impl ChatReactionLimiter {
                 return Err(ChatReactionSkipReason::RateLimited);
             }
         }
-        self.per_chat_kind_last_at.insert(key, now);
+        let previous_last_at = self.per_chat_kind_last_at.get(&key).cloned();
+        self.per_chat_kind_last_at.insert(key.clone(), now);
         self.global_hourly_count += 1;
-        Ok(())
+        Ok(ChatReactionLimiterReservation {
+            key,
+            reserved_at: now,
+            previous_last_at,
+            window_start: self.global_window_start,
+        })
+    }
+
+    pub fn rollback(&mut self, reservation: ChatReactionLimiterReservation) {
+        let key = reservation.key;
+        if !self
+            .per_chat_kind_last_at
+            .get(&key)
+            .is_some_and(|last_at| *last_at == reservation.reserved_at)
+        {
+            return;
+        }
+        if self.global_window_start == reservation.window_start && self.global_hourly_count > 0 {
+            self.global_hourly_count -= 1;
+        }
+        if let Some(previous_last_at) = reservation.previous_last_at {
+            self.per_chat_kind_last_at.insert(key, previous_last_at);
+        } else {
+            self.per_chat_kind_last_at.remove(&key);
+        }
     }
 
     pub fn allow(&mut self, chat_id: &str, now: DateTime<Utc>) -> bool {
@@ -1289,6 +1327,49 @@ mod tests {
                 "chat-a",
                 ChatReactionKind::Insight,
                 now + Duration::seconds(10),
+            ),
+            Err(ChatReactionSkipReason::RateLimited)
+        );
+    }
+
+    #[test]
+    fn limiter_rollback_restores_quota_and_cooldown() {
+        let mut lim = ChatReactionLimiter::new();
+        let now = Utc::now();
+        let reservation = lim
+            .try_allow_kind("chat-a", ChatReactionKind::Insight, now)
+            .unwrap();
+
+        lim.rollback(reservation);
+
+        assert!(lim
+            .try_allow_kind(
+                "chat-a",
+                ChatReactionKind::Insight,
+                now + Duration::seconds(10),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn limiter_rollback_does_not_clobber_newer_reservation() {
+        let mut lim = ChatReactionLimiter::new();
+        let now = Utc::now();
+        let reservation = lim
+            .try_allow_kind("chat-a", ChatReactionKind::Insight, now)
+            .unwrap();
+        lim.per_chat_kind_last_at.insert(
+            ("chat-a".to_string(), ChatReactionKind::Insight),
+            now + Duration::seconds(PER_CHAT_COOLDOWN_SECS + 1),
+        );
+
+        lim.rollback(reservation);
+
+        assert_eq!(
+            lim.try_allow_kind(
+                "chat-a",
+                ChatReactionKind::Insight,
+                now + Duration::seconds(PER_CHAT_COOLDOWN_SECS + 2),
             ),
             Err(ChatReactionSkipReason::RateLimited)
         );
