@@ -392,6 +392,70 @@ describe("Dashboard progressive sidebar readiness", () => {
     expect(screen.queryByText(/No chats yet/i)).not.toBeInTheDocument();
   });
 
+  it("does not repeatedly load the same chat page boundary", async () => {
+    const listHandler = vi.fn(() =>
+      HttpResponse.json({
+        items: [],
+        next_cursor: "next-page-2",
+        has_more: true,
+        total_count: 2,
+      }),
+    );
+    server.use(http.get("http://127.0.0.1:8001/v1/trajectories", listHandler));
+
+    render(<Dashboard />, {
+      preloadedState: {
+        ...CONFIG_STATE,
+        history: {
+          chats: {
+            "chat-predefined": {
+              id: "chat-predefined",
+              title: "Predefined workspace chat",
+              updatedAt: "2024-01-01T00:00:00Z",
+              model: "gpt-4",
+              mode: "agent",
+              tool_use: "agent",
+              messages: [],
+              boost_reasoning: false,
+              include_project_info: true,
+              increase_max_tokens: false,
+              createdAt: "2024-01-01T00:00:00Z",
+              last_user_message_id: "",
+              message_count: 1,
+              total_lines_added: 0,
+              total_lines_removed: 0,
+              tasks_total: 0,
+              tasks_done: 0,
+              tasks_failed: 0,
+            },
+          },
+          isLoading: false,
+          loadError: null,
+          pagination: {
+            cursor: "next-page",
+            hasMore: true,
+            totalCount: 2,
+            generation: 0,
+          },
+        },
+        sidebar: READY_SIDEBAR,
+      },
+    });
+
+    const calls = (globalThis as Record<string, unknown>).__VIRTUOSO_CALLS__ as
+      | { endReached?: () => void }[]
+      | undefined;
+    const endReached = [...(calls ?? [])]
+      .reverse()
+      .find((call) => call.endReached)?.endReached;
+    expect(endReached).toBeDefined();
+    endReached?.();
+    endReached?.();
+
+    await screen.findByText("Predefined workspace chat");
+    expect(listHandler).toHaveBeenCalledTimes(1);
+  });
+
   it("shows task load errors instead of a loading skeleton forever", () => {
     render(<Dashboard />, {
       preloadedState: {

@@ -1,4 +1,10 @@
-import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useDeferredValue,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Flex, Skeleton, Spinner, Text, TextField } from "@radix-ui/themes";
 import {
   MagnifyingGlassIcon,
@@ -180,10 +186,16 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
     dispatch(push({ name: "chat" }));
   }, [dispatch]);
 
-  const handleEndReached = useCallback(() => {
-    if (hasMore && !isLoadingMore) {
-      void loadMoreAsync();
+  const endReachedArmedRef = useRef(true);
+  const handleAtBottomChange = useCallback((atBottom: boolean) => {
+    if (!atBottom) {
+      endReachedArmedRef.current = true;
     }
+  }, []);
+  const handleEndReached = useCallback(() => {
+    if (!hasMore || isLoadingMore || !endReachedArmedRef.current) return;
+    endReachedArmedRef.current = false;
+    void loadMoreAsync();
   }, [hasMore, isLoadingMore, loadMoreAsync]);
 
   const totalLabel = showLoading
@@ -276,6 +288,7 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
             <Virtuoso
               data={flatItems}
               endReached={handleEndReached}
+              atBottomStateChange={handleAtBottomChange}
               overscan={200}
               className={styles.virtuosoList}
               itemContent={(_index, item) => {

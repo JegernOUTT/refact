@@ -198,11 +198,10 @@ function kindForRuntime(
   nowMs: number,
 ): BuddyShowcaseKind | null {
   if (event === null) return null;
-  const providerSignal = event.dismissed === true ? false : hasProviderSignal(event);
+  const providerSignal =
+    event.dismissed === true ? false : hasProviderSignal(event);
   if (!isBuddyRuntimeEventVisible(event, nowMs) && !providerSignal) return null;
-  const providerKind = providerSignal
-    ? "stargazing_constellation"
-    : null;
+  const providerKind = providerSignal ? "stargazing_constellation" : null;
   if (providerKind && event.status === "failed") return providerKind;
   if (MEMORY_RUNTIME_SIGNALS.has(event.signal_type)) {
     return MEMORY_RUNTIME_STATUSES.has(event.status)
