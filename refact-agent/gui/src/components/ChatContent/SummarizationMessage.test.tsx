@@ -64,7 +64,9 @@ describe("SummarizationMessage", () => {
       role: "summarization",
       content: "no tier",
     };
-    const { user } = render(<SummarizationMessage message={messageWithoutTier} />);
+    const { user } = render(
+      <SummarizationMessage message={messageWithoutTier} />,
+    );
 
     expect(screen.getByTestId("summarization-card-tier")).toHaveTextContent(
       "Context compression",

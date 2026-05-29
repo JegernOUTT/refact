@@ -372,12 +372,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           return null;
       }
     },
-    [
-      handleBranch,
-      handleDelete,
-      onRetryWrapper,
-      collapsibleState,
-    ],
+    [handleBranch, handleDelete, onRetryWrapper, collapsibleState],
   );
 
   if (showLoading) {

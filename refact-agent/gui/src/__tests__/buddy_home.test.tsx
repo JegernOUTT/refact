@@ -3649,7 +3649,9 @@ describe("BuddyPanel_opportunity_notifications", () => {
 
     const { user } = render(<BuddyPanel />, { store });
 
-    expect(await screen.findByTestId("buddy-panel-disabled")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("buddy-panel-disabled"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Pixel is disabled")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Enable" }));
@@ -3771,7 +3773,9 @@ describe("BuddyHome_disabled_state", () => {
 
     const { user } = render(<BuddyHome />, { store });
 
-    expect(await screen.findByTestId("buddy-home-disabled")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("buddy-home-disabled"),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Enable Buddy" }));
 
     await waitFor(() => {

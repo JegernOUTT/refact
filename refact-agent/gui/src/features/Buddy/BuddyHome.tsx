@@ -688,11 +688,7 @@ export const BuddyHome: React.FC = () => {
             <Text size="2" color="gray" align="center">
               {name} is disabled. Pixel is still here, just politely lurking.
             </Text>
-            <Button
-              size="2"
-              onClick={handleEnable}
-              disabled={isSavingSettings}
-            >
+            <Button size="2" onClick={handleEnable} disabled={isSavingSettings}>
               Enable {name}
             </Button>
           </Flex>
