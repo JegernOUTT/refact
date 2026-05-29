@@ -47,7 +47,7 @@ mod tests {
     fn prefix(system_prompt: &str) -> FrozenRequestPrefix {
         new_frozen_request_prefix(
             Some(system_prompt.to_string()),
-            Some(json!([{"type":"function","function":{"name":"cat"}}])),
+            json!([{"type":"function","function":{"name":"cat"}}]),
         )
     }
 
@@ -308,7 +308,7 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
     let canonical_tools = build_canonical_openai_tools(gcx.clone(), &tool_descs, false, true).await;
     let frozen_prefix = new_frozen_request_prefix(
         system_prompt,
-        Some(serde_json::Value::Array(canonical_tools.tools)),
+        serde_json::Value::Array(canonical_tools.tools),
     );
     persist_init_frozen_prefix(app.clone(), &post.chat_meta.chat_id, frozen_prefix).await;
     let messages_to_stream_back = has_rag_results.in_json;
