@@ -74,6 +74,18 @@ struct RefreshTokenResponse {
     expires_in: i64,
 }
 
+fn expires_at_ms(now_ms: i64, expires_in_secs: i64) -> i64 {
+    now_ms.saturating_add(expires_in_secs.max(0).saturating_mul(1000))
+}
+
+fn oauth_tokens_from_token_response(token_resp: TokenResponse, now_ms: i64) -> OAuthTokens {
+    OAuthTokens {
+        access_token: token_resp.access_token,
+        refresh_token: token_resp.refresh_token.trim().to_string(),
+        expires_at: expires_at_ms(now_ms, token_resp.expires_in),
+    }
+}
+
 fn oauth_tokens_from_refresh_response(
     token_resp: RefreshTokenResponse,
     old_refresh_token: &str,
@@ -81,13 +93,14 @@ fn oauth_tokens_from_refresh_response(
 ) -> OAuthTokens {
     let refresh_token = token_resp
         .refresh_token
-        .filter(|refresh_token| !refresh_token.trim().is_empty())
+        .map(|refresh_token| refresh_token.trim().to_string())
+        .filter(|refresh_token| !refresh_token.is_empty())
         .unwrap_or_else(|| old_refresh_token.to_string());
 
     OAuthTokens {
         access_token: token_resp.access_token,
         refresh_token,
-        expires_at: now_ms + token_resp.expires_in * 1000,
+        expires_at: expires_at_ms(now_ms, token_resp.expires_in),
     }
 }
 
@@ -244,16 +257,10 @@ pub async fn exchange_code(
         .await
         .map_err(|e| format!("Failed to parse token response: {}", e))?;
 
-    let expires_at = chrono::Utc::now().timestamp_millis() + token_resp.expires_in * 1000;
+    let tokens =
+        oauth_tokens_from_token_response(token_resp, chrono::Utc::now().timestamp_millis());
 
-    Ok((
-        OAuthTokens {
-            access_token: token_resp.access_token,
-            refresh_token: token_resp.refresh_token,
-            expires_at,
-        },
-        session.provider_instance_id,
-    ))
+    Ok((tokens, session.provider_instance_id))
 }
 
 pub async fn refresh_access_token(
@@ -388,6 +395,22 @@ mod tests {
     }
 
     #[test]
+    fn refresh_response_with_whitespace_around_refresh_token_trims_new_token() {
+        let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "new-access-token",
+            "refresh_token": " refresh-new ",
+            "expires_in": 3600,
+        }))
+        .unwrap();
+
+        let tokens = oauth_tokens_from_refresh_response(token_resp, "old-refresh-token", 1000);
+
+        assert_eq!(tokens.access_token, "new-access-token");
+        assert_eq!(tokens.refresh_token, "refresh-new");
+        assert_eq!(tokens.expires_at, 3_601_000);
+    }
+
+    #[test]
     fn refresh_response_with_new_refresh_token_uses_new_token() {
         let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
             "access_token": "new-access-token",
@@ -401,6 +424,32 @@ mod tests {
         assert_eq!(tokens.access_token, "new-access-token");
         assert_eq!(tokens.refresh_token, "new-refresh-token");
         assert_eq!(tokens.expires_at, 3_601_000);
+    }
+
+    #[test]
+    fn exchange_response_trims_refresh_token() {
+        let token_resp: TokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "new-access-token",
+            "refresh_token": " exchange-new ",
+            "expires_in": 3600,
+        }))
+        .unwrap();
+
+        let tokens = oauth_tokens_from_token_response(token_resp, 1000);
+
+        assert_eq!(tokens.access_token, "new-access-token");
+        assert_eq!(tokens.refresh_token, "exchange-new");
+        assert_eq!(tokens.expires_at, 3_601_000);
+    }
+
+    #[test]
+    fn expiry_saturates_for_huge_expires_in() {
+        assert_eq!(expires_at_ms(1000, i64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn expiry_clamps_negative_expires_in_to_now() {
+        assert_eq!(expires_at_ms(1000, -3600), 1000);
     }
 
     #[tokio::test]
