@@ -24,6 +24,8 @@ const FILTER_LABELS: { kind: FilterKind; label: string }[] = [
   { kind: "system", label: "System" },
 ];
 
+const STALE_EMPTY_PLACEHOLDER_MS = 24 * 60 * 60 * 1000;
+
 function relativeTime(ts: string): string {
   if (!ts) return "";
   const diff = Date.now() - new Date(ts).getTime();
@@ -33,6 +35,15 @@ function relativeTime(ts: string): string {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function isStaleEmptyPlaceholder(entry: BuddyConversationEntry): boolean {
+  if (entry.kind !== "chat") return false;
+  if (entry.message_count > 0) return false;
+  if ((entry.title || "").trim() !== "New Conversation") return false;
+  const timestamp = Date.parse(entry.updated_at || entry.created_at);
+  if (!Number.isFinite(timestamp)) return false;
+  return Date.now() - timestamp > STALE_EMPTY_PLACEHOLDER_MS;
 }
 
 interface EntryRowProps {
@@ -119,14 +130,17 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
 
   const conversations = React.useMemo(() => {
     if (!allConversations) return [];
+    const visibleConversations = allConversations.filter(
+      (entry) => !isStaleEmptyPlaceholder(entry),
+    );
     const filtered =
       filter === "all"
-        ? allConversations
+        ? visibleConversations
         : filter === "system"
-          ? allConversations.filter(
+          ? visibleConversations.filter(
               (e) => e.kind === "system" || e.kind === "workflow",
             )
-          : allConversations.filter((e) => e.kind === filter);
+          : visibleConversations.filter((e) => e.kind === filter);
     return maxItems ? filtered.slice(0, maxItems) : filtered;
   }, [allConversations, filter, maxItems]);
 

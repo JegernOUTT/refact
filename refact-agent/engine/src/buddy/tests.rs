@@ -2117,6 +2117,57 @@ async fn test_ledger_skips_empty_chat_id() {
     assert!(tokio::fs::try_exists(&good_path).await.unwrap());
 }
 
+#[tokio::test]
+async fn test_ledger_lists_id_only_conversation_and_repairs_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let path = root.join(".refact/buddy/chats/conversations/id_only.json");
+    let json = serde_json::json!({
+        "id": "id_only", "title": "Recovered Chat", "kind": "chat",
+        "created_at": "2024-01-01T00:00:00Z",
+        "last_message_at": "2024-01-02T00:00:00Z",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    super::storage::atomic_write_json(&path, &json)
+        .await
+        .unwrap();
+
+    let entries = super::conversation_ledger::list_all_buddy_conversations(root, None).await;
+    let entry = entries.iter().find(|entry| entry.id == "id_only").unwrap();
+
+    assert_eq!(entry.title, "Recovered Chat");
+    assert_eq!(entry.message_count, 1);
+    assert!(tokio::fs::try_exists(&path).await.unwrap());
+    let repaired: serde_json::Value =
+        serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+    assert_eq!(repaired["id"].as_str(), Some("id_only"));
+    assert_eq!(repaired["chat_id"].as_str(), Some("id_only"));
+}
+
+#[tokio::test]
+async fn test_ledger_missing_id_and_chat_id_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    super::storage::bootstrap_buddy_storage(root).await.unwrap();
+
+    let path = root.join(".refact/buddy/chats/conversations/missing_ids.json");
+    let json = serde_json::json!({
+        "title": "Missing IDs", "kind": "chat",
+        "created_at": "2024-01-01T00:00:00Z",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    super::storage::atomic_write_json(&path, &json)
+        .await
+        .unwrap();
+
+    let entries = super::conversation_ledger::list_all_buddy_conversations(root, None).await;
+
+    assert!(entries.iter().all(|entry| entry.title != "Missing IDs"));
+    assert!(!tokio::fs::try_exists(&path).await.unwrap());
+}
+
 #[test]
 fn test_workflow_label_mapping() {
     assert_eq!(

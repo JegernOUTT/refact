@@ -12,6 +12,20 @@ use crate::types::BuddyConversationEntry;
 
 const MAX_BUDDY_LEDGER_JSON_BYTES: u64 = 1_024 * 1_024;
 
+#[derive(Default)]
+struct LedgerDiagnostics {
+    invalid_json: u32,
+    missing_id: u32,
+    repaired_id_alias: u32,
+    empty_conversation: u32,
+}
+
+enum LedgerReadOutcome {
+    Value(serde_json::Value),
+    InvalidJson,
+    Skipped,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuddyWorkflowMapping {
     pub kind: &'static str,
@@ -149,16 +163,16 @@ fn conversation_icon(val: &serde_json::Value, kind: &str) -> String {
     }
 }
 
-async fn read_buddy_ledger_json(path: &Path, label: &str) -> Option<serde_json::Value> {
+async fn read_buddy_ledger_json(path: &Path, label: &str) -> LedgerReadOutcome {
     let metadata = match fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(err) => {
             warn!("buddy: could not stat {} file {:?}: {}", label, path, err);
-            return None;
+            return LedgerReadOutcome::Skipped;
         }
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return None;
+        return LedgerReadOutcome::Skipped;
     }
     if metadata.len() > MAX_BUDDY_LEDGER_JSON_BYTES {
         warn!(
@@ -167,24 +181,75 @@ async fn read_buddy_ledger_json(path: &Path, label: &str) -> Option<serde_json::
             path,
             metadata.len()
         );
-        return None;
+        return LedgerReadOutcome::Skipped;
     }
     let content = match fs::read_to_string(path).await {
         Ok(content) => content,
         Err(err) => {
             warn!("buddy: could not read {} file {:?}: {}", label, path, err);
-            return None;
+            return LedgerReadOutcome::Skipped;
         }
     };
     match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(value) => Some(value),
+        Ok(value) => LedgerReadOutcome::Value(value),
         Err(err) => {
             warn!(
                 "buddy: skipping malformed {} file {:?}: {}",
                 label, path, err
             );
-            None
+            LedgerReadOutcome::InvalidJson
         }
+    }
+}
+
+fn non_empty_string_field(val: &serde_json::Value, key: &str) -> Option<String> {
+    let trimmed = val.get(key)?.as_str()?.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn conversation_id(val: &serde_json::Value) -> Option<(String, bool)> {
+    if let Some(chat_id) = non_empty_string_field(val, "chat_id") {
+        return Some((chat_id, false));
+    }
+    non_empty_string_field(val, "id").map(|id| (id, true))
+}
+
+async fn repair_conversation_id_alias(path: &Path, val: &mut serde_json::Value, id: &str) {
+    let Some(map) = val.as_object_mut() else {
+        return;
+    };
+    let mut changed = false;
+    for key in ["id", "chat_id"] {
+        let needs_repair = map
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim() != id)
+            .unwrap_or(true);
+        if needs_repair {
+            map.insert(key.to_string(), serde_json::Value::String(id.to_string()));
+            changed = true;
+        }
+    }
+    if !changed {
+        return;
+    }
+    let Ok(content) = serde_json::to_string_pretty(val) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(err) = fs::write(&tmp, content).await {
+        warn!(
+            "buddy: failed to write repaired conversation id alias {:?}: {}",
+            tmp, err
+        );
+        return;
+    }
+    if let Err(err) = fs::rename(&tmp, path).await {
+        let _ = fs::remove_file(&tmp).await;
+        warn!(
+            "buddy: failed to repair conversation id alias {:?}: {}",
+            path, err
+        );
     }
 }
 
@@ -193,6 +258,7 @@ pub async fn list_all_buddy_conversations(
     kind_filter: Option<Vec<String>>,
 ) -> Vec<BuddyConversationEntry> {
     let mut entries = Vec::new();
+    let mut diagnostics = LedgerDiagnostics::default();
 
     let conv_dir = project_root.join(".refact/buddy/chats/conversations");
     if let Ok(mut rd) = fs::read_dir(&conv_dir).await {
@@ -201,17 +267,18 @@ pub async fn list_all_buddy_conversations(
             if !path.extension().map(|e| e == "json").unwrap_or(false) {
                 continue;
             }
-            let Some(val) = read_buddy_ledger_json(&path, "conversation").await else {
-                continue;
+            let mut val = match read_buddy_ledger_json(&path, "conversation").await {
+                LedgerReadOutcome::Value(val) => val,
+                LedgerReadOutcome::InvalidJson => {
+                    diagnostics.invalid_json = diagnostics.invalid_json.saturating_add(1);
+                    continue;
+                }
+                LedgerReadOutcome::Skipped => continue,
             };
-            let id = val
-                .get("chat_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if id.is_empty() {
+            let Some((id, used_alias)) = conversation_id(&val) else {
+                diagnostics.missing_id = diagnostics.missing_id.saturating_add(1);
                 warn!(
-                    "buddy: deleting conversation file missing chat_id: {:?}",
+                    "buddy: deleting conversation file missing chat_id and id: {:?}",
                     path
                 );
                 if let Err(err) = fs::remove_file(&path).await {
@@ -221,7 +288,11 @@ pub async fn list_all_buddy_conversations(
                     );
                 }
                 continue;
+            };
+            if used_alias {
+                diagnostics.repaired_id_alias = diagnostics.repaired_id_alias.saturating_add(1);
             }
+            repair_conversation_id_alias(&path, &mut val, &id).await;
             let kind = conversation_kind(&val);
             let title = val
                 .get("title")
@@ -243,6 +314,9 @@ pub async fn list_all_buddy_conversations(
                 .and_then(|v| v.as_array())
                 .map(|a| a.len() as u32)
                 .unwrap_or(0);
+            if msgs == 0 {
+                diagnostics.empty_conversation = diagnostics.empty_conversation.saturating_add(1);
+            }
             let badge = conversation_badge(&val);
             let icon = conversation_icon(&val, &kind);
             entries.push(BuddyConversationEntry {
@@ -271,8 +345,13 @@ pub async fn list_all_buddy_conversations(
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let Some(val) = read_buddy_ledger_json(&path, "workflow").await else {
-                continue;
+            let val = match read_buddy_ledger_json(&path, "workflow").await {
+                LedgerReadOutcome::Value(val) => val,
+                LedgerReadOutcome::InvalidJson => {
+                    diagnostics.invalid_json = diagnostics.invalid_json.saturating_add(1);
+                    continue;
+                }
+                LedgerReadOutcome::Skipped => continue,
             };
             let mapping = workflow_id_to_mapping(&stem);
             let entry_count = val
@@ -311,6 +390,20 @@ pub async fn list_all_buddy_conversations(
 
     if let Some(filter) = &kind_filter {
         entries.retain(|e| filter.iter().any(|f| f == &e.kind));
+    }
+
+    if diagnostics.invalid_json > 0
+        || diagnostics.missing_id > 0
+        || diagnostics.repaired_id_alias > 0
+        || diagnostics.empty_conversation > 0
+    {
+        warn!(
+            "buddy: ledger diagnostics invalid_json={} missing_id={} repaired_id_alias={} empty_conversation={}",
+            diagnostics.invalid_json,
+            diagnostics.missing_id,
+            diagnostics.repaired_id_alias,
+            diagnostics.empty_conversation
+        );
     }
 
     entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));

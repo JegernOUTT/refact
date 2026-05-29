@@ -3853,6 +3853,40 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
     expect(trajectoryCalled).toBe(false);
   });
 
+  it("hides stale empty placeholders ahead of real Buddy chats", async () => {
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([
+          makeConversation({
+            id: "old-empty-placeholder",
+            kind: "chat",
+            title: "New Conversation",
+            created_at: "2024-01-01T00:00:00Z",
+            updated_at: "2024-01-01T00:00:00Z",
+            status: "active",
+            message_count: 0,
+          }),
+          makeConversation({
+            id: "real-buddy-chat",
+            kind: "chat",
+            title: "Real Buddy Chat",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+            status: "active",
+            message_count: 2,
+          }),
+        ]),
+      ),
+    );
+
+    render(<BuddyRecentChats showFilters={false} compact maxItems={1} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    expect(await screen.findByText("Real Buddy Chat")).toBeInTheDocument();
+    expect(screen.queryByText("New Conversation")).not.toBeInTheDocument();
+  });
+
   it("clicking an existing chat row calls trajectory API and navigates to chat with buddy_meta", async () => {
     let trajectoryCalled = false;
     server.use(
