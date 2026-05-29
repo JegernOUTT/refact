@@ -25,7 +25,7 @@ const CACHE_GUARD_DIFF_TRUNCATION_NOTICE: &str = concat!(
 );
 const CACHE_GUARD_DIFF_PREVIEW_NOTICE: &str = concat!(
     "\n[cache guard diff generated from bounded structural preview: ",
-    "large arrays and text payloads are represented by hashes/truncation notices]\n"
+    "large arrays use count summaries and text payloads are redacted/truncated]\n"
 );
 
 const IGNORED_KEYS: &[&str] = &[
@@ -110,51 +110,37 @@ pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
 }
 
 pub fn is_append_only_prefix(prev: &Value, next: &Value) -> bool {
-    is_append_only_prefix_inner(prev, next, true, None)
+    is_append_only_prefix_inner(prev, next, None)
 }
 
-fn is_append_only_prefix_inner(
-    prev: &Value,
-    next: &Value,
-    strict_object: bool,
-    parent_key: Option<&str>,
-) -> bool {
+fn is_append_only_prefix_inner(prev: &Value, next: &Value, parent_key: Option<&str>) -> bool {
     match (prev, next) {
         (Value::Null, Value::Null)
         | (Value::Bool(_), Value::Bool(_))
         | (Value::Number(_), Value::Number(_))
         | (Value::String(_), Value::String(_)) => prev == next,
         (Value::Array(a), Value::Array(b)) => {
-            if parent_key == Some("tools") {
-                return a == b;
-            }
-            if a.len() > b.len() {
-                return false;
-            }
             if matches!(parent_key, Some("messages" | "input")) {
-                return a
-                    .iter()
-                    .zip(b.iter())
-                    .all(|(old_item, new_item)| old_item == new_item);
+                return a.len() <= b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(old_item, new_item)| old_item == new_item);
             }
-            a.iter().zip(b.iter()).all(|(old_item, new_item)| {
-                is_append_only_prefix_inner(old_item, new_item, false, None)
-            })
+            a == b
         }
         (Value::Object(a), Value::Object(b)) => {
-            if strict_object {
-                if a.len() != b.len() {
-                    return false;
-                }
-                if !a.keys().all(|k| b.contains_key(k)) {
-                    return false;
-                }
+            let a_keys = a.keys().filter(|k| !is_ignored_key(k)).count();
+            let b_keys = b.keys().filter(|k| !is_ignored_key(k)).count();
+            if a_keys != b_keys {
+                return false;
             }
-            a.iter().all(|(k, old_v)| {
-                b.get(k)
-                    .map(|new_v| is_append_only_prefix_inner(old_v, new_v, false, Some(k)))
-                    .unwrap_or(false)
-            })
+            a.iter()
+                .filter(|(k, _)| !is_ignored_key(k))
+                .all(|(k, old_v)| {
+                    b.get(k)
+                        .map(|new_v| is_append_only_prefix_inner(old_v, new_v, Some(k)))
+                        .unwrap_or(false)
+                })
         }
         _ => false,
     }
@@ -213,10 +199,10 @@ fn preview_value_for_cache_guard_diff(value: &Value, parent_key: Option<&str>) -
                 .collect();
             if omitted > 0 {
                 preview_values.push(json_summary_cache_guard_preview(format!(
-                    "[cache guard preview truncated: total_items={} omitted_items={} omitted_sha256={}]",
+                    "[cache guard preview truncated: total_items={} retained_items={} omitted_items={}]",
                     values.len(),
-                    omitted,
-                    hash_cache_guard_values(&values[CACHE_GUARD_PREVIEW_ARRAY_MAX_ITEMS..])
+                    values.len() - omitted,
+                    omitted
                 )));
             }
             Value::Array(preview_values)
@@ -226,12 +212,6 @@ fn preview_value_for_cache_guard_diff(value: &Value, parent_key: Option<&str>) -
         }
         scalar => scalar.clone(),
     }
-}
-
-fn hash_cache_guard_values(values: &[Value]) -> String {
-    let digest = Sha256::digest(serde_json::to_vec(values).unwrap_or_default());
-    let digest_hex = hex::encode(digest);
-    digest_hex[..16].to_string()
 }
 
 fn json_summary_cache_guard_preview(summary: String) -> Value {
@@ -451,12 +431,16 @@ pub async fn commit_cache_guard_snapshot(
     session.cache_guard_snapshot = Some(sanitized_body);
 }
 
+fn is_ignored_key(key: &str) -> bool {
+    IGNORED_KEYS.contains(&key)
+}
+
 fn sanitize_value(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = Map::new();
             for (k, v) in map {
-                if IGNORED_KEYS.contains(&k.as_str()) {
+                if is_ignored_key(k) {
                     continue;
                 }
                 out.insert(k.clone(), sanitize_value(v));
@@ -500,11 +484,14 @@ mod tests {
     #[test]
     fn test_append_only_prefix_objects_and_arrays() {
         let prev = json!({"messages": [1, 2], "meta": {"a": 1}});
-        let next = json!({"messages": [1, 2, 3], "meta": {"a": 1, "b": 2}});
+        let next = json!({"messages": [1, 2, 3], "meta": {"a": 1}});
         assert!(is_append_only_prefix(&prev, &next));
 
-        let bad = json!({"messages": [1, 99, 3], "meta": {"a": 1}});
-        assert!(!is_append_only_prefix(&prev, &bad));
+        let bad_message = json!({"messages": [1, 99, 3], "meta": {"a": 1}});
+        assert!(!is_append_only_prefix(&prev, &bad_message));
+
+        let bad_meta = json!({"messages": [1, 2, 3], "meta": {"a": 1, "b": 2}});
+        assert!(!is_append_only_prefix(&prev, &bad_meta));
     }
 
     #[test]
@@ -540,6 +527,48 @@ mod tests {
             json!({"type": "function", "function": {"name": "tool_a", "description": "Changed"}});
         let next_changed = json!({"messages": [1, 2], "tools": [tool_a_changed]});
         assert!(!is_append_only_prefix(&prev, &next_changed));
+    }
+
+    #[test]
+    fn test_non_conversation_arrays_are_strict() {
+        let prev = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": [{"type": "text", "text": "stable"}]
+        });
+        let appended = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"}
+            ],
+            "system": [
+                {"type": "text", "text": "stable"},
+                {"type": "text", "text": "new prefix"}
+            ]
+        });
+        let nested_key = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": [{"type": "text", "text": "stable", "name": "new"}]
+        });
+
+        assert!(!is_append_only_prefix(&prev, &appended));
+        assert!(!is_append_only_prefix(&prev, &nested_key));
+    }
+
+    #[test]
+    fn test_non_conversation_scalars_are_strict() {
+        let prev = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "instructions": "stable prefix"
+        });
+        let next = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"}
+            ],
+            "instructions": "changed prefix"
+        });
+
+        assert!(!is_append_only_prefix(&prev, &next));
     }
 
     #[test]
@@ -662,6 +691,51 @@ mod tests {
         assert!(preview_text.contains("[redacted text chars="));
         assert!(preview_text.contains("sha256="));
         assert!(preview_text.contains("[truncated"));
+    }
+
+    #[test]
+    fn cache_guard_diff_preview_omitted_arrays_use_count_summary() {
+        let secret_tail = (0..64)
+            .map(|i| json!({"api_key": format!("sk-omitted-secret-{i}")}))
+            .collect::<Vec<_>>();
+        let raw_digest = {
+            let digest = Sha256::digest(serde_json::to_vec(&secret_tail).unwrap());
+            let digest_hex = hex::encode(digest);
+            digest_hex[..16].to_string()
+        };
+        let mut values = vec![json!({"safe": "kept"}); CACHE_GUARD_PREVIEW_ARRAY_MAX_ITEMS];
+        values.extend(secret_tail);
+        let body = json!({"metadata": values});
+
+        let preview = preview_body_for_cache_guard_diff(&body);
+        let preview_text = serde_json::to_string(&preview).unwrap();
+
+        assert!(preview_text.contains("total_items=88"));
+        assert!(preview_text.contains("retained_items=24"));
+        assert!(preview_text.contains("omitted_items=64"));
+        assert!(!preview_text.contains("omitted_sha256"));
+        assert!(!preview_text.contains(&raw_digest));
+        assert!(!preview_text.contains("sk-omitted-secret"));
+    }
+
+    #[test]
+    fn cache_guard_diff_preview_huge_omitted_arrays_are_bounded() {
+        let mut values = vec![json!({"safe": "kept"}); CACHE_GUARD_PREVIEW_ARRAY_MAX_ITEMS];
+        values.extend((0..10_000).map(
+            |i| json!({"secret": format!("sk-huge-omitted-secret-{i}-{}", "x".repeat(1024))}),
+        ));
+        let body = json!({"metadata": values});
+        let started = std::time::Instant::now();
+
+        let preview = preview_body_for_cache_guard_diff(&body);
+        let elapsed = started.elapsed();
+        let preview_text = serde_json::to_string(&preview).unwrap();
+
+        assert!(elapsed < std::time::Duration::from_secs(2));
+        assert!(preview_text.contains("total_items=10024"));
+        assert!(preview_text.contains("omitted_items=10000"));
+        assert!(!preview_text.contains("sk-huge-omitted-secret"));
+        assert!(preview_text.len() < 2_000);
     }
 
     #[test]
