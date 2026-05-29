@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use refact_chat_history::history_limit::{
-    CompactAggression, remove_invalid_tool_calls_and_tool_calls_results,
-    tier0_deterministic_compact_with,
-};
+use refact_chat_history::history_limit::remove_invalid_tool_calls_and_tool_calls_results;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -140,13 +137,13 @@ fn should_autocompact_before_steer(
 
 fn autocompact_messages_for_resume(messages: &mut Vec<ChatMessage>) -> bool {
     let before = serde_json::to_string(messages).ok();
-    let stats = tier0_deterministic_compact_with(messages, 2, CompactAggression::Aggressive);
+    let summarized = crate::chat::summarization::summarize_oldest_segment_with_static_summary(
+        messages,
+        "Previous non-user task-agent activity was summarized before planner steering.",
+        "agent_steer",
+    );
     remove_invalid_tool_calls_and_tool_calls_results(messages);
-    stats.context_files_deduped > 0
-        || stats.context_files_elided > 0
-        || stats.tool_outputs_truncated > 0
-        || stats.tokens_saved_estimate > 0
-        || serde_json::to_string(messages).ok() != before
+    summarized || serde_json::to_string(messages).ok() != before
 }
 
 fn validate_agent_snapshot(

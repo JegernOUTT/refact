@@ -13,8 +13,8 @@ use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use refact_chat_history::history_limit::{
-    CompactAggression, compress_duplicate_context_files, compute_context_budget,
-    remove_invalid_tool_calls_and_tool_calls_results, tier0_deterministic_compact_with,
+    compress_duplicate_context_files, compute_context_budget,
+    remove_invalid_tool_calls_and_tool_calls_results,
 };
 use refact_chat_history::trajectory_ops::TOOLS_TO_PRESERVE;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
@@ -503,7 +503,7 @@ impl Tool for ToolCompressChatApply {
                 "strength": {
                     "type": "string",
                     "enum": ["conservative", "balanced", "aggressive"],
-                    "description": "conservative=explicit ops only, balanced=+auto dedup, aggressive=+dedup+tier0 truncation"
+                    "description": "conservative=explicit ops only, balanced=+auto dedup, aggressive=+dedup+segment summary"
                 },
                 "preserve_last_turns": {
                     "type": "integer",
@@ -781,14 +781,17 @@ impl Tool for ToolCompressChatApply {
             let cur_tokens: usize = head_messages.iter().map(approx_tokens_for_message).sum();
             let needs_more = target_tokens.map_or(true, |t| cur_tokens > t);
             if needs_more {
-                let preserve_n = head_messages.len().saturating_sub(preserve_cutoff);
-                let report = tier0_deterministic_compact_with(
+                let before = serde_json::to_string(&head_messages).ok();
+                if crate::chat::summarization::summarize_oldest_segment_with_static_summary(
                     &mut head_messages,
-                    preserve_n,
-                    CompactAggression::Aggressive,
-                );
-                tool_truncated += report.tool_outputs_truncated;
-                dedup_count += report.context_files_deduped;
+                    "Previous non-user chat activity was summarized by compress_chat_apply.",
+                    "compress_chat_apply",
+                ) {
+                    let after = serde_json::to_string(&head_messages).ok();
+                    if after != before {
+                        dedup_count += 1;
+                    }
+                }
             }
         }
 

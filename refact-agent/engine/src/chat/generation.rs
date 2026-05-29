@@ -36,11 +36,7 @@ use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
-use crate::chat::diagnostics::{
-    make_ui_only_compaction_report_message, make_ui_only_error_message,
-    make_ui_only_retry_status_message,
-};
-use crate::chat::history_limit::{tier0_deterministic_compact_with, CompactAggression};
+use crate::chat::diagnostics::{make_ui_only_error_message, make_ui_only_retry_status_message};
 use crate::chat::trajectory_ops::approx_token_count;
 use refact_core::llm_types::BaseModelRecord;
 
@@ -779,7 +775,13 @@ pub fn start_generation(
                 }
             }
 
-            crate::chat::summarization::maybe_apply_tier1(gcx.clone(), &session_arc, &thread).await;
+            crate::chat::summarization::apply_segment_summarization(
+                gcx.clone(),
+                &session_arc,
+                &thread,
+                false,
+            )
+            .await;
 
             thread = {
                 let session = session_arc.lock().await;
@@ -910,59 +912,44 @@ pub fn start_generation(
                             error.message
                         );
                     } else {
-                        let previous_reactive_attempts = {
+                        let reactive_attempt = {
                             let session = session_arc.lock().await;
-                            session.thread.reactive_compact_attempts.unwrap_or(0)
+                            session.thread.reactive_compact_attempts.unwrap_or(0) + 1
                         };
-                        if previous_reactive_attempts == 0 {
+                        if reactive_attempt
+                            <= crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS
+                        {
                             let original_error = error.message.clone();
-                            let reactive_attempt = 1;
                             warn!(
-                                "Context limit error, applying one-shot Tier 0 compact: {}",
+                                "Context limit error, summarizing oldest eligible segment attempt {}/{}: {}",
+                                reactive_attempt,
+                                crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
                                 original_error,
                             );
                             {
                                 let mut session = session_arc.lock().await;
                                 session.clear_stream_for_retry();
                                 session.add_message(make_ui_only_error_message(&original_error));
-                                let report = tier0_deterministic_compact_with(
-                                    &mut session.messages,
-                                    2,
-                                    CompactAggression::Standard,
-                                );
-                                session.add_message(make_ui_only_compaction_report_message(
-                                    &report,
-                                    reactive_attempt,
-                                    None,
-                                ));
                                 session.thread.reactive_compact_attempts = Some(reactive_attempt);
-                                session.thread.previous_response_id = None;
-                                session.cache_guard_force_next = true;
                             }
-                            continue;
-                        }
-
-                        warn!(
-                            "Context limit error after one-shot reactive compact; applying normal compaction: {}",
-                            error.message,
-                        );
-                        let compacted = crate::chat::summarization::force_apply_tier1(
-                            gcx.clone(),
-                            &session_arc,
-                            &thread,
-                        )
-                        .await;
-                        if compacted {
-                            {
+                            let compacted =
+                                crate::chat::summarization::apply_segment_summarization(
+                                    gcx.clone(),
+                                    &session_arc,
+                                    &thread,
+                                    true,
+                                )
+                                .await;
+                            if compacted {
                                 let mut session = session_arc.lock().await;
                                 session.clear_stream_for_retry();
                                 session.thread.previous_response_id = None;
                                 session.cache_guard_force_next = true;
+                                continue;
                             }
-                            continue;
                         }
                         error.message = format!(
-                            "Context too large after one-shot reactive compact and normal compactification failed. Original error: {}",
+                            "Context too large and no eligible segment summary could be applied. Original error: {}",
                             error.message
                         );
                     }
@@ -2509,53 +2496,49 @@ mod tests {
     }
 
     #[test]
-    fn test_context_limit_reactive_compact_is_one_shot() {
+    fn test_context_limit_reactive_compact_attempts_are_bounded() {
         let mut reactive_attempts = 0usize;
-        let first_overflow_uses_reactive = reactive_attempts == 0;
-        if first_overflow_uses_reactive {
-            reactive_attempts = 1;
+        let max = crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS;
+        let first_attempt_allowed = reactive_attempts < max;
+        if first_attempt_allowed {
+            reactive_attempts += 1;
         }
-        let second_overflow_uses_normal_compaction = reactive_attempts > 0;
+        let second_attempt_allowed = reactive_attempts < max;
+        if second_attempt_allowed {
+            reactive_attempts += 1;
+        }
+        let third_attempt_blocked = reactive_attempts >= max;
 
-        assert!(first_overflow_uses_reactive);
-        assert!(second_overflow_uses_normal_compaction);
-        assert_eq!(reactive_attempts, 1);
+        assert!(first_attempt_allowed);
+        assert!(second_attempt_allowed);
+        assert!(third_attempt_blocked);
+        assert_eq!(reactive_attempts, max);
     }
 
     #[test]
-    fn test_context_limit_compaction_appends_ui_only_diagnostics() {
-        let mut messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
-        let long_output = "x".repeat(500);
-        messages.push(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(long_output),
-            tool_call_id: "tc1".to_string(),
-            ..Default::default()
-        });
-
-        messages.push(make_ui_only_error_message(
-            "context_length_exceeded: too many tokens",
-        ));
-        let report =
-            tier0_deterministic_compact_with(&mut messages, 0, CompactAggression::Standard);
-        messages.push(make_ui_only_compaction_report_message(&report, 1, None));
-
-        assert_eq!(messages[messages.len() - 2].role, "error");
-        assert_eq!(messages[messages.len() - 1].role, "summarization");
-        assert!(crate::chat::diagnostics::is_ui_only_message(
-            &messages[messages.len() - 2]
-        ));
-        assert!(crate::chat::diagnostics::is_ui_only_message(
-            &messages[messages.len() - 1]
-        ));
-        assert_eq!(
-            messages[messages.len() - 1].summarization_tier.as_deref(),
-            Some("tier2_reactive")
+    fn test_context_limit_compaction_sets_cache_guard_after_segment_summary() {
+        let mut session = ChatSession::new("test".to_string());
+        session.messages = vec![
+            make_user_msg("hello"),
+            make_assistant_msg("old answer"),
+            make_user_msg("again"),
+        ];
+        assert!(
+            crate::chat::summarization::summarize_oldest_segment_with_static_summary(
+                &mut session.messages,
+                "summary",
+                "test",
+            )
         );
-        assert!(messages[messages.len() - 1]
-            .content
-            .content_text_only()
-            .contains("Tool outputs truncated: 1"));
+        session.thread.previous_response_id = None;
+        session.cache_guard_force_next = true;
+
+        assert!(session.cache_guard_force_next);
+        assert!(session.thread.previous_response_id.is_none());
+        assert!(session
+            .messages
+            .iter()
+            .any(crate::chat::summarization::is_segment_summary));
     }
 
     #[test]
@@ -2593,8 +2576,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tier1_compact_circuit_breaker_stops_at_two() {
-        let max = crate::chat::summarization::MAX_TIER1_COMPACT_ATTEMPTS;
+    fn test_segment_summary_circuit_breaker_stops_at_two() {
+        let max = crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS;
         assert_eq!(max, 2);
         let mut count = 0usize;
         let mut stopped = false;
@@ -2611,9 +2594,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tier1_compact_count_resets_on_success() {
-        let tier1_count = 0usize;
-        assert_eq!(tier1_count, 0);
+    fn test_segment_summary_count_resets_on_success() {
+        let segment_summary_count = 0usize;
+        assert_eq!(segment_summary_count, 0);
     }
 
     #[test]

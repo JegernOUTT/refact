@@ -1,25 +1,24 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
+use uuid::Uuid;
 
-use crate::call_validation::ChatMessage;
+use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::diagnostics::{filter_ui_only_messages, is_ui_only_message};
 use crate::chat::history_limit::{compute_context_budget, ContextPressure};
-use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::linearize::apply_summarization_linearize;
-use crate::chat::trajectory_ops::approx_token_count;
 use crate::global_context::GlobalContext;
 use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
-use refact_chat_history::compression_exemption::{event_subkind, exemption_for, CompressionExemption};
+use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
 
-pub const MAX_TIER1_COMPACT_ATTEMPTS: usize = 2;
-pub const MAX_TIER1_ANCHORS_BEFORE_MERGE: usize = 4;
-const TIER1_OVERHEAD_TOKENS: usize = 1024;
-const SUMMARY_TEXT_EXTRA_KEY: &str = "summary_text";
+pub const MAX_SEGMENT_SUMMARY_ATTEMPTS: usize = 2;
+const SEGMENT_SUMMARY_OVERHEAD_TOKENS: usize = 1024;
+const SUMMARY_KIND: &str = "llm_segment_summary";
+const SUMMARY_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone)]
-pub enum Tier1Failure {
+pub enum SegmentSummaryFailure {
     NoModelAvailable,
     InputTooLarge {
         excerpt_chars: usize,
@@ -30,34 +29,40 @@ pub enum Tier1Failure {
     Transient(String),
 }
 
-impl std::fmt::Display for Tier1Failure {
+impl std::fmt::Display for SegmentSummaryFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Tier1Failure::NoModelAvailable => {
-                write!(f, "no model available for tier1 summarization")
+            SegmentSummaryFailure::NoModelAvailable => {
+                write!(f, "no model available for segment summarization")
             }
-            Tier1Failure::InputTooLarge {
+            SegmentSummaryFailure::InputTooLarge {
                 excerpt_chars,
                 budget_chars,
             } => write!(
                 f,
-                "tier1 input too large after truncation: {} chars (budget {})",
+                "segment input too large after truncation: {} chars (budget {})",
                 excerpt_chars, budget_chars
             ),
-            Tier1Failure::NoMessagesToSummarize => write!(f, "no messages to summarize"),
-            Tier1Failure::PressureTooLow => write!(f, "context pressure not high enough"),
-            Tier1Failure::Transient(msg) => write!(f, "{}", msg),
+            SegmentSummaryFailure::NoMessagesToSummarize => write!(f, "no messages to summarize"),
+            SegmentSummaryFailure::PressureTooLow => write!(f, "context pressure not high enough"),
+            SegmentSummaryFailure::Transient(msg) => write!(f, "{}", msg),
         }
     }
 }
 
-impl Tier1Failure {
+impl SegmentSummaryFailure {
     pub fn is_structural(&self) -> bool {
         matches!(
             self,
-            Tier1Failure::NoModelAvailable | Tier1Failure::InputTooLarge { .. }
+            SegmentSummaryFailure::NoModelAvailable | SegmentSummaryFailure::InputTooLarge { .. }
         )
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SummarySegment {
+    pub start: usize,
+    pub end: usize,
 }
 
 fn safe_char_boundary(s: &str, mut idx: usize) -> usize {
@@ -70,424 +75,184 @@ fn safe_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-const SUMMARIZATION_PROMPT: &str = "Produce a structured summary of this conversation excerpt. Be comprehensive and accurate. Use this exact format:
+const SEGMENT_SUMMARY_PROMPT: &str = "Produce a factual summary of the non-user conversation segment. The source segment contains assistant replies, tool calls, tool results, diffs, events, context files, and diagnostics that occurred between two immutable user messages.
 
-## Task Goal / Primary Request
-<What the user asked for>
+Preserve facts that matter for continuing the task:
+- tool calls and tool results that affected the work
+- files read, edited, created, deleted, or discussed
+- decisions, assumptions, approvals, rejections, and constraints
+- errors encountered and fixes attempted
+- current state at the end of the segment
 
-## Key Technical Concepts
-<Important technologies, patterns, frameworks, tools mentioned>
+Do not claim to be the user. Do not invent instructions, approvals, file changes, or tool results. Do not quote hidden system or plan text. Write concise Markdown suitable for an assistant message.";
 
-## Files and Code Sections
-<Files referenced with key code snippets or changes, include file paths>
-
-## Errors Encountered and Fixes Applied
-<Problems found and how they were resolved>
-
-## Tool Interaction Summary
-<Key tool calls made and their results>
-
-## User Messages
-<Paraphrase of what the user said>
-
-## Pending Tasks
-<Any incomplete work mentioned>
-
-## Current Work State
-<What was being worked on when this summary ends>
-
-## Next Step
-<Direct quote or close paraphrase of what should happen next>";
-
-fn find_tool_safe_boundary(messages: &[ChatMessage], target_idx: usize) -> usize {
-    let mut idx = target_idx.min(messages.len());
-    while idx > 0 {
-        let msg = &messages[idx - 1];
-        if msg.preserve == Some(true) {
-            idx -= 1;
-            continue;
-        }
-        if msg.role == "tool" || msg.role == "diff" {
-            idx -= 1;
-            continue;
-        }
-        if msg.role == "assistant" && msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty()) {
-            idx -= 1;
-            continue;
-        }
-        break;
-    }
-    idx
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SummaryRange {
-    start: usize,
-    end: usize,
-}
-
-fn authoritative_summary_ranges(messages: &[ChatMessage]) -> Vec<SummaryRange> {
-    let mut ranges: Vec<SummaryRange> = messages
-        .iter()
-        .filter(|msg| is_real_summarization_anchor(msg))
-        .filter_map(|msg| {
-            let (start, end) = msg.summarized_range?;
-            (start <= end).then_some(SummaryRange { start, end })
-        })
-        .collect();
-    ranges.sort_by_key(|range| (range.start, range.end));
-    ranges
-}
-
-fn ranges_overlap(a: SummaryRange, b: SummaryRange) -> bool {
-    a.start <= b.end && b.start <= a.end
-}
-
-fn idx_is_covered_by_existing_summary(idx: usize, existing_ranges: &[SummaryRange]) -> bool {
-    existing_ranges
-        .iter()
-        .any(|range| range.start <= idx && idx <= range.end)
-}
-
-fn range_contains_preserved_or_summary(
-    messages: &[ChatMessage],
-    start: usize,
-    end: usize,
-    existing_ranges: &[SummaryRange],
-    block_summary_messages: bool,
-) -> bool {
-    (start..end).any(|idx| {
-        messages[idx].preserve == Some(true)
-            || exemption_for(&messages[idx]) == CompressionExemption::Never
-            || (block_summary_messages && is_real_summarization_anchor(&messages[idx]))
-            || idx_is_covered_by_existing_summary(idx, existing_ranges)
-    })
-}
-
-fn first_preserved_or_summarized_offset(
-    messages: &[ChatMessage],
-    start: usize,
-    end: usize,
-    existing_ranges: &[SummaryRange],
-    block_summary_messages: bool,
-) -> Option<usize> {
-    messages[start..end]
-        .iter()
-        .enumerate()
-        .find(|(offset, msg)| {
-            msg.preserve == Some(true)
-                || exemption_for(msg) == CompressionExemption::Never
-                || (block_summary_messages && is_real_summarization_anchor(msg))
-                || idx_is_covered_by_existing_summary(start + *offset, existing_ranges)
-        })
-        .map(|(offset, _)| offset)
-}
-
-fn adjust_range_after_removing_indices(
-    range: SummaryRange,
-    removed_indices: &[usize],
-) -> SummaryRange {
-    let removed_before_start = removed_indices
-        .iter()
-        .filter(|idx| **idx < range.start)
-        .count();
-    let removed_through_end = removed_indices
-        .iter()
-        .filter(|idx| **idx <= range.end)
-        .count();
-    let start = range.start.saturating_sub(removed_before_start);
-    let end = range.end.saturating_sub(removed_through_end).max(start);
-    SummaryRange { start, end }
-}
-
-fn is_real_summarization_anchor(message: &ChatMessage) -> bool {
-    if is_ui_only_message(message) {
+pub fn is_segment_summary(message: &ChatMessage) -> bool {
+    if message.role != "assistant" || is_ui_only_message(message) {
         return false;
     }
-    let known_tier = matches!(
-        message.summarization_tier.as_deref(),
-        Some("tier0_deterministic") | Some("tier1_llm") | Some("tier1_merged")
-    );
-    if message.role == "event" && event_subkind(message) == Some("summarization_marker") {
-        return known_tier && message.summarized_range.is_some();
-    }
-    message.role == "summarization" && known_tier
-}
-
-fn set_summary_content(message: &mut ChatMessage, summary: String) {
     message
         .extra
-        .insert(SUMMARY_TEXT_EXTRA_KEY.to_string(), Value::String(summary));
+        .get("compression")
+        .and_then(|value| value.get("kind"))
+        .and_then(|value| value.as_str())
+        == Some(SUMMARY_KIND)
 }
 
-fn visible_tier1_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    filter_ui_only_messages(messages.to_vec())
+fn segment_summary_source_hash(message: &ChatMessage) -> Option<&str> {
+    message
+        .extra
+        .get("compression")
+        .and_then(|value| value.get("source_hash"))
+        .and_then(|value| value.as_str())
 }
 
-fn visible_tier1_messages_with_original_indices(
-    messages: &[ChatMessage],
-) -> (Vec<ChatMessage>, Vec<usize>) {
-    messages
+fn is_excluded_from_segment(message: &ChatMessage) -> bool {
+    if message.role == "system" || message.role == "user" {
+        return true;
+    }
+    exemption_for(message) == CompressionExemption::Never
+}
+
+pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment> {
+    let user_indices: Vec<usize> = messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| !is_ui_only_message(message))
-        .map(|(idx, message)| (message.clone(), idx))
-        .unzip()
-}
-
-fn effective_context_budget_after_existing_summaries(
-    messages: &[ChatMessage],
-    effective_n_ctx: usize,
-) -> (usize, ContextPressure) {
-    let linearized_messages = apply_summarization_linearize(messages.to_vec());
-    let visible_messages = visible_tier1_messages(&linearized_messages);
-    let budget = compute_context_budget(&visible_messages, effective_n_ctx);
-    (budget.used_tokens_estimate, budget.pressure)
-}
-
-fn translate_summarized_range_to_original(summ_msg: &mut ChatMessage, original_indices: &[usize]) {
-    if let Some((start, end)) = summ_msg.summarized_range {
-        summ_msg.summarized_range = match (original_indices.get(start), original_indices.get(end)) {
-            (Some(original_start), Some(original_end)) => Some((*original_start, *original_end)),
-            _ => None,
-        };
+        .filter_map(|(idx, msg)| (msg.role == "user").then_some(idx))
+        .collect();
+    if user_indices.len() < 2 {
+        return Vec::new();
     }
-}
 
-fn make_summarization_marker(
-    summary: String,
-    start: usize,
-    end: usize,
-    tier_label: &str,
-    tokens_before: usize,
-    tokens_after: usize,
-    messages_compacted: usize,
-) -> ChatMessage {
-    let mut message = event(
-        EventSubkind::SummarizationMarker,
-        "chat.summarizer",
-        json!({
-            "tokens_before": tokens_before,
-            "tokens_after": tokens_after,
-            "messages_compacted": messages_compacted,
-        }),
-        format!("compacted {messages_compacted} msgs"),
-    );
-    message.summarized_range = Some((start, end));
-    message.summarization_tier = Some(tier_label.to_string());
-    message.summarized_token_estimate = Some(tokens_before);
-    set_summary_content(&mut message, summary);
-    message
-}
-
-pub fn find_summarization_boundary(messages: &[ChatMessage]) -> (usize, usize) {
-    let (visible_messages, original_indices) =
-        visible_tier1_messages_with_original_indices(messages);
-    let (start, end) = find_summarization_boundary_visible(&visible_messages, false);
-    (
-        original_indices.get(start).copied().unwrap_or(start),
-        original_indices.get(end).copied().unwrap_or(end),
-    )
-}
-
-fn find_summarization_boundary_visible(
-    messages: &[ChatMessage],
-    force_full_recompact: bool,
-) -> (usize, usize) {
-    let existing_ranges = if force_full_recompact {
-        Vec::new()
-    } else {
-        authoritative_summary_ranges(messages)
-    };
-    let block_summary_messages = !force_full_recompact;
-    let mut start = 0usize;
-
-    let preserve_tail = 4usize;
-    let safe_end = messages.len().saturating_sub(preserve_tail);
-
-    loop {
-        if start >= safe_end {
-            return (start, start);
-        }
-        if messages[start].preserve == Some(true)
-            || exemption_for(&messages[start]) == CompressionExemption::Never
-            || (block_summary_messages && is_real_summarization_anchor(&messages[start]))
-            || idx_is_covered_by_existing_summary(start, &existing_ranges)
-        {
+    let mut segments = Vec::new();
+    for pair in user_indices.windows(2) {
+        let left_user = pair[0];
+        let right_user = pair[1];
+        let mut start = left_user + 1;
+        while start < right_user && is_excluded_from_segment(&messages[start]) {
             start += 1;
-            continue;
         }
-        if safe_end <= start + 2 {
-            return (start, start);
-        }
-
-        let range = safe_end - start;
-        let target_end = start + range / 2;
-        let mut adjusted_end = find_tool_safe_boundary(messages, target_end);
-
-        if adjusted_end > start
-            && range_contains_preserved_or_summary(
-                messages,
-                start,
-                adjusted_end,
-                &existing_ranges,
-                block_summary_messages,
-            )
-        {
-            if let Some(offset) = first_preserved_or_summarized_offset(
-                messages,
-                start,
-                adjusted_end,
-                &existing_ranges,
-                block_summary_messages,
-            ) {
-                if offset > 1 {
-                    adjusted_end = find_tool_safe_boundary(messages, start + offset);
-                    if adjusted_end > start
-                        && range_contains_preserved_or_summary(
-                            messages,
-                            start,
-                            adjusted_end,
-                            &existing_ranges,
-                            block_summary_messages,
-                        )
-                    {
-                        return (start, start);
-                    }
-                } else {
-                    start += offset + 1;
-                    continue;
+        let mut idx = start;
+        while idx < right_user {
+            if is_excluded_from_segment(&messages[idx]) {
+                if start < idx {
+                    segments.push(SummarySegment {
+                        start,
+                        end: idx - 1,
+                    });
                 }
+                idx += 1;
+                while idx < right_user && is_excluded_from_segment(&messages[idx]) {
+                    idx += 1;
+                }
+                start = idx;
+            } else {
+                idx += 1;
             }
         }
-
-        if adjusted_end <= start + 1 {
-            return (start, start);
+        if start < right_user {
+            segments.push(SummarySegment {
+                start,
+                end: right_user - 1,
+            });
         }
+    }
 
-        return (start, adjusted_end.saturating_sub(1));
+    segments
+}
+
+fn canonical_source_value(message: &ChatMessage) -> Value {
+    let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("message_id");
+    }
+    value
+}
+
+pub fn source_hash_for_messages(messages: &[ChatMessage]) -> String {
+    let canonical: Vec<Value> = messages.iter().map(canonical_source_value).collect();
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn source_message_ids(messages: &[ChatMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .map(|message| message.message_id.clone())
+        .collect()
+}
+
+fn segment_is_matching_summary(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+    segment.start == segment.end
+        && is_segment_summary(&messages[segment.start])
+        && segment_summary_source_hash(&messages[segment.start]).is_some()
+}
+
+fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
+    closed_non_user_segments(messages)
+        .into_iter()
+        .find(|segment| !segment_is_matching_summary(messages, *segment))
+}
+
+fn estimated_context_pressure(messages: &[ChatMessage], effective_n_ctx: usize) -> ContextPressure {
+    let visible_messages = filter_ui_only_messages(messages.to_vec());
+    compute_context_budget(&visible_messages, effective_n_ctx).pressure
+}
+
+fn role_label(role: &str) -> &str {
+    match role {
+        "assistant" => "ASSISTANT",
+        "tool" | "diff" => "TOOL",
+        "context_file" => "CONTEXT_FILE",
+        "event" => "EVENT",
+        "error" => "ERROR",
+        "cd_instruction" => "INSTRUCTION",
+        other => other,
     }
 }
 
-/// Summarize a slice of already-visible messages.
-///
-/// The caller MUST pass a slice with no UI-only entries (use
-/// [`visible_tier1_messages_with_original_indices`] and then translate the
-/// returned range back to original session indices). The returned message's
-/// `summarized_range` is relative to the caller-provided `messages` slice.
-async fn tier1_summarize_range(
-    gcx: Arc<GlobalContext>,
-    messages: &[ChatMessage],
-    n_ctx: usize,
-    force_full_recompact: bool,
-    range_override: Option<(usize, usize)>,
-) -> Result<ChatMessage, Tier1Failure> {
-    debug_assert!(
-        messages.iter().all(|m| !is_ui_only_message(m)),
-        "tier1_summarize requires pre-filtered (visible) messages"
-    );
-
-    let (_, pressure_after_existing_summaries) =
-        effective_context_budget_after_existing_summaries(messages, n_ctx);
-    if !matches!(
-        pressure_after_existing_summaries,
-        ContextPressure::High | ContextPressure::Critical
-    ) && !force_full_recompact
-    {
-        return Err(Tier1Failure::PressureTooLow);
-    }
-
-    let (start, end) = range_override
-        .unwrap_or_else(|| find_summarization_boundary_visible(messages, force_full_recompact));
-    if end <= start || end >= messages.len() {
-        return Err(Tier1Failure::NoMessagesToSummarize);
-    }
-
-    let chunk = &messages[start..=end];
-    let token_estimate = approx_token_count(chunk);
-
-    let mut conversation_text: String = chunk
+fn segment_text(messages: &[ChatMessage]) -> String {
+    messages
         .iter()
-        .map(|m| {
-            let content = m.content.content_text_only();
-            let role_label = match m.role.as_str() {
-                "assistant" => "ASSISTANT",
-                "user" => "USER",
-                "tool" | "diff" => "TOOL",
-                "context_file" => "CONTEXT",
-                _ => "OTHER",
-            };
-            format!("[{}]: {}\n\n", role_label, content)
+        .map(|message| {
+            let content = message.content.content_text_only();
+            let mut parts = vec![format!("[{}]", role_label(&message.role))];
+            if !message.tool_call_id.is_empty() {
+                parts.push(format!("tool_call_id={}", message.tool_call_id));
+            }
+            if let Some(tool_calls) = &message.tool_calls {
+                if !tool_calls.is_empty() {
+                    let calls: Vec<String> = tool_calls
+                        .iter()
+                        .map(|call| format!("{}({})", call.function.name, call.id))
+                        .collect();
+                    parts.push(format!("tool_calls={}", calls.join(", ")));
+                }
+            }
+            format!("{}\n{}\n", parts.join(" "), content)
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
-        .await
-        .map_err(|e| Tier1Failure::Transient(e.message.clone()))?;
-
-    let model = if !caps.defaults.chat_light_model.is_empty() {
-        caps.defaults.chat_light_model.clone()
-    } else if !caps.defaults.chat_default_model.is_empty() {
-        caps.defaults.chat_default_model.clone()
-    } else {
-        return Err(Tier1Failure::NoModelAvailable);
-    };
-
-    let model_rec = crate::caps::resolve_chat_model(caps, &model)
-        .map_err(|_| Tier1Failure::NoModelAvailable)?;
-    let model_n_ctx = if model_rec.base.n_ctx > 0 {
-        model_rec.base.n_ctx
-    } else {
-        16384
-    };
-    let max_new_tokens = (model_n_ctx / 4).min(4096).max(512);
-
-    let input_budget_tokens = model_n_ctx
-        .saturating_sub(max_new_tokens)
-        .saturating_sub(TIER1_OVERHEAD_TOKENS);
-    let input_budget_chars = input_budget_tokens.saturating_mul(3);
-    if input_budget_chars == 0 {
-        return Err(Tier1Failure::InputTooLarge {
-            excerpt_chars: conversation_text.len(),
-            budget_chars: 0,
-        });
-    }
-    if conversation_text.len() > input_budget_chars {
-        let original_len = conversation_text.len();
-        let head_keep = input_budget_chars * 2 / 3;
-        let tail_keep = input_budget_chars.saturating_sub(head_keep + 200);
-        let head_end =
-            safe_char_boundary(&conversation_text, head_keep.min(conversation_text.len()));
-        let tail_start_raw = conversation_text.len().saturating_sub(tail_keep);
-        let tail_start = safe_char_boundary(&conversation_text, tail_start_raw);
-        let head = conversation_text[..head_end].to_string();
-        let tail = conversation_text[tail_start..].to_string();
-        if head.len() + tail.len() + 200 > input_budget_chars && tail_keep == 0 {
-            return Err(Tier1Failure::InputTooLarge {
-                excerpt_chars: original_len,
-                budget_chars: input_budget_chars,
-            });
-        }
-        let elided = original_len.saturating_sub(head.len() + tail.len());
-        conversation_text = format!(
-            "{}\n\n[... {} chars elided to fit summarizer input budget ...]\n\n{}",
-            head, elided, tail
-        );
-    }
-
+async fn summarize_segment_text(
+    gcx: Arc<GlobalContext>,
+    text: String,
+    model: String,
+    model_n_ctx: usize,
+    max_new_tokens: usize,
+) -> Result<String, SegmentSummaryFailure> {
     let summarize_messages = vec![
-        ChatMessage::new("system".to_string(), SUMMARIZATION_PROMPT.to_string()),
+        ChatMessage::new("system".to_string(), SEGMENT_SUMMARY_PROMPT.to_string()),
         ChatMessage::new(
             "user".to_string(),
-            format!(
-                "Summarize this conversation excerpt:\n\n{}",
-                conversation_text
-            ),
+            format!("Summarize this non-user segment:\n\n{}", text),
         ),
     ];
 
     let config = SubchatConfig {
-        tool_name: "tier1_summarize".to_string(),
+        tool_name: "segment_summarize".to_string(),
         stateful: false,
         autonomous_no_confirm: false,
         chat_id: None,
@@ -516,71 +281,184 @@ async fn tier1_summarize_range(
 
     let result = run_subchat(gcx, summarize_messages, config)
         .await
-        .map_err(Tier1Failure::Transient)?;
+        .map_err(SegmentSummaryFailure::Transient)?;
 
-    let summary = result
+    Ok(result
         .messages
         .iter()
         .rev()
-        .find(|m| m.role == "assistant")
-        .map(|m| m.content.content_text_only())
-        .unwrap_or_else(|| "Summary unavailable".to_string());
-
-    let tier_label = if force_full_recompact {
-        "tier1_merged"
-    } else {
-        "tier1_llm"
-    };
-    info!(
-        "Tier1 ({}) summarization produced {} chars for messages {}..={}",
-        tier_label,
-        summary.len(),
-        start,
-        end
-    );
-    let tokens_after = summary.len() / 4 + 10;
-
-    Ok(make_summarization_marker(
-        summary,
-        start,
-        end,
-        tier_label,
-        token_estimate,
-        tokens_after,
-        chunk.len(),
-    ))
+        .find(|message| message.role == "assistant")
+        .map(|message| message.content.content_text_only())
+        .unwrap_or_else(|| "Summary unavailable".to_string()))
 }
 
-pub async fn tier1_summarize(
+fn make_segment_summary_message(
+    summary: String,
+    source_messages: &[ChatMessage],
+    summary_model: &str,
+) -> ChatMessage {
+    let source_hash = source_hash_for_messages(source_messages);
+    let source_ids = source_message_ids(source_messages);
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "compression".to_string(),
+        json!({
+            "schema_version": SUMMARY_SCHEMA_VERSION,
+            "kind": SUMMARY_KIND,
+            "source_hash": source_hash,
+            "source_message_ids": source_ids,
+            "created_at": created_at,
+            "summary_model": summary_model,
+        }),
+    );
+
+    ChatMessage {
+        message_id: Uuid::new_v4().to_string(),
+        role: "assistant".to_string(),
+        content: ChatContent::SimpleText(summary),
+        summarized_range: Some((0, source_messages.len().saturating_sub(1))),
+        summarization_tier: Some(SUMMARY_KIND.to_string()),
+        summarized_token_estimate: Some(crate::chat::trajectory_ops::approx_token_count(
+            source_messages,
+        )),
+        extra,
+        ..Default::default()
+    }
+}
+
+async fn summarize_segment(
     gcx: Arc<GlobalContext>,
     messages: &[ChatMessage],
-    n_ctx: usize,
-    force_full_recompact: bool,
-) -> Result<ChatMessage, Tier1Failure> {
-    tier1_summarize_range(gcx, messages, n_ctx, force_full_recompact, None).await
+    model: String,
+    model_n_ctx: usize,
+) -> Result<ChatMessage, SegmentSummaryFailure> {
+    let mut text = segment_text(messages);
+    let max_new_tokens = (model_n_ctx / 4).min(4096).max(512);
+    let input_budget_tokens = model_n_ctx
+        .saturating_sub(max_new_tokens)
+        .saturating_sub(SEGMENT_SUMMARY_OVERHEAD_TOKENS);
+    let input_budget_chars = input_budget_tokens.saturating_mul(3);
+    if input_budget_chars == 0 {
+        return Err(SegmentSummaryFailure::InputTooLarge {
+            excerpt_chars: text.len(),
+            budget_chars: 0,
+        });
+    }
+    if text.len() > input_budget_chars {
+        let original_len = text.len();
+        let head_keep = input_budget_chars * 2 / 3;
+        let tail_keep = input_budget_chars.saturating_sub(head_keep + 200);
+        let head_end = safe_char_boundary(&text, head_keep.min(text.len()));
+        let tail_start_raw = text.len().saturating_sub(tail_keep);
+        let tail_start = safe_char_boundary(&text, tail_start_raw);
+        let head = text[..head_end].to_string();
+        let tail = text[tail_start..].to_string();
+        if head.len() + tail.len() + 200 > input_budget_chars && tail_keep == 0 {
+            return Err(SegmentSummaryFailure::InputTooLarge {
+                excerpt_chars: original_len,
+                budget_chars: input_budget_chars,
+            });
+        }
+        let elided = original_len.saturating_sub(head.len() + tail.len());
+        text = format!(
+            "{}\n\n[... {} chars elided to fit summarizer input budget ...]\n\n{}",
+            head, elided, tail
+        );
+    }
+
+    let summary =
+        summarize_segment_text(gcx, text, model.clone(), model_n_ctx, max_new_tokens).await?;
+    Ok(make_segment_summary_message(summary, messages, &model))
 }
 
-pub async fn maybe_apply_tier1(
+async fn resolve_summary_model(
     gcx: Arc<GlobalContext>,
-    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
-    thread: &crate::chat::types::ThreadParams,
-) {
-    let _ = apply_tier1(gcx, session_arc, thread, false).await;
+    thread_model: &str,
+) -> Result<(String, usize), SegmentSummaryFailure> {
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0)
+        .await
+        .map_err(|e| SegmentSummaryFailure::Transient(e.message.clone()))?;
+    let model = if !caps.defaults.chat_light_model.is_empty() {
+        caps.defaults.chat_light_model.clone()
+    } else if !caps.defaults.chat_default_model.is_empty() {
+        caps.defaults.chat_default_model.clone()
+    } else if !thread_model.is_empty() {
+        thread_model.to_string()
+    } else {
+        return Err(SegmentSummaryFailure::NoModelAvailable);
+    };
+    let model_rec = crate::caps::resolve_chat_model(caps, &model)
+        .map_err(|_| SegmentSummaryFailure::NoModelAvailable)?;
+    let model_n_ctx = if model_rec.base.n_ctx > 0 {
+        model_rec.base.n_ctx
+    } else {
+        16384
+    };
+    Ok((model, model_n_ctx))
 }
 
-pub async fn force_apply_tier1(
+async fn effective_n_ctx_for_thread(
     gcx: Arc<GlobalContext>,
-    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     thread: &crate::chat::types::ThreadParams,
+) -> Option<usize> {
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0)
+        .await
+        .ok()?;
+    crate::caps::resolve_chat_model(caps, &thread.model)
+        .ok()
+        .map(|record| {
+            let model_n_ctx = if record.base.n_ctx > 0 {
+                record.base.n_ctx
+            } else {
+                crate::chat::config::tokens().default_n_ctx
+            };
+            match thread.context_tokens_cap {
+                Some(cap) if cap > 0 => cap.min(model_n_ctx),
+                _ => model_n_ctx,
+            }
+        })
+}
+
+fn last_visible_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|message| !is_ui_only_message(message))
+        .map(|message| {
+            message.role == "assistant"
+                && message
+                    .tool_calls
+                    .as_ref()
+                    .map_or(false, |calls| !calls.is_empty())
+        })
+        .unwrap_or(false)
+}
+
+fn replace_segment(messages: &mut Vec<ChatMessage>, segment: SummarySegment, summary: ChatMessage) {
+    messages.splice(segment.start..=segment.end, [summary]);
+}
+
+pub fn summarize_oldest_segment_with_static_summary(
+    messages: &mut Vec<ChatMessage>,
+    summary_text: &str,
+    summary_model: &str,
 ) -> bool {
-    apply_tier1(gcx, session_arc, thread, true).await
+    let Some(segment) = first_eligible_segment(messages) else {
+        return false;
+    };
+    let source_messages = messages[segment.start..=segment.end].to_vec();
+    let summary =
+        make_segment_summary_message(summary_text.to_string(), &source_messages, summary_model);
+    replace_segment(messages, segment, summary);
+    true
 }
 
-async fn apply_tier1(
+pub async fn apply_segment_summarization(
     gcx: Arc<GlobalContext>,
     session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     thread: &crate::chat::types::ThreadParams,
-    force_full_recompact: bool,
+    force: bool,
 ) -> bool {
     if !thread.auto_compact_enabled_effective() {
         return false;
@@ -588,630 +466,330 @@ async fn apply_tier1(
 
     let raw_messages = {
         let session = session_arc.lock().await;
-        if session.tier1_compaction_disabled && !force_full_recompact {
+        if session.tier1_compaction_disabled && !force {
             return false;
         }
-        if session.tier1_compact_attempts >= MAX_TIER1_COMPACT_ATTEMPTS && !force_full_recompact {
+        if session.tier1_compact_attempts >= MAX_SEGMENT_SUMMARY_ATTEMPTS && !force {
             return false;
         }
-        let last_visible_has_pending_tool_calls = session
-            .messages
-            .iter()
-            .rev()
-            .find(|msg| !is_ui_only_message(msg))
-            .map(|msg| {
-                msg.role == "assistant"
-                    && msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty())
-            })
-            .unwrap_or(false);
-        if last_visible_has_pending_tool_calls {
+        if last_visible_has_pending_tool_calls(&session.messages) {
             return false;
         }
         session.messages.clone()
     };
 
-    let caps_res =
-        crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await;
-    let effective_n_ctx_opt = caps_res.ok().and_then(|caps| {
-        crate::caps::resolve_chat_model(caps, &thread.model)
-            .ok()
-            .map(|rec| {
-                let model_n_ctx = if rec.base.n_ctx > 0 {
-                    rec.base.n_ctx
-                } else {
-                    crate::chat::config::tokens().default_n_ctx
-                };
-                match thread.context_tokens_cap {
-                    Some(cap) if cap > 0 => cap.min(model_n_ctx),
-                    _ => model_n_ctx,
-                }
-            })
-    });
-
-    let effective_n_ctx = match effective_n_ctx_opt {
-        Some(v) => v,
+    let Some(segment) = first_eligible_segment(&raw_messages) else {
+        return false;
+    };
+    let effective_n_ctx = match effective_n_ctx_for_thread(gcx.clone(), thread).await {
+        Some(value) => value,
         None => return false,
     };
-
-    let (visible_messages, original_indices) =
-        visible_tier1_messages_with_original_indices(&raw_messages);
-    if visible_messages.is_empty() {
+    let pressure = estimated_context_pressure(&raw_messages, effective_n_ctx);
+    if !force && !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
         return false;
     }
 
-    let raw_budget = compute_context_budget(&visible_messages, effective_n_ctx);
-    let (linearized_used_tokens, linearized_pressure) =
-        effective_context_budget_after_existing_summaries(&raw_messages, effective_n_ctx);
-    let anchor_count = visible_messages
-        .iter()
-        .filter(|m| is_real_summarization_anchor(m))
-        .count();
-    let should_merge_anchors = anchor_count >= MAX_TIER1_ANCHORS_BEFORE_MERGE
-        && matches!(
-            linearized_pressure,
-            ContextPressure::High | ContextPressure::Critical
-        );
-    let force_full_recompact = force_full_recompact || should_merge_anchors;
-
-    if !matches!(
-        linearized_pressure,
-        ContextPressure::High | ContextPressure::Critical
-    ) && !force_full_recompact
-    {
-        return false;
-    }
-
-    let next_attempt = {
-        let session = session_arc.lock().await;
-        session.tier1_compact_attempts + 1
+    let (model, model_n_ctx) = match resolve_summary_model(gcx.clone(), &thread.model).await {
+        Ok(value) => value,
+        Err(failure) => {
+            let mut session = session_arc.lock().await;
+            if failure.is_structural() {
+                session.tier1_compaction_disabled = true;
+            } else {
+                session.tier1_compact_attempts += 1;
+            }
+            warn!("Segment summarization failed before subchat: {}", failure);
+            return false;
+        }
     };
 
-    warn!(
-        "Context at {:?} pressure after existing summaries (raw {:?}, anchors: {}, raw_tokens: {}, linearized_tokens: {}), attempting tier1 summarization (attempt {}/{}, full_recompact={})",
-        linearized_pressure,
-        raw_budget.pressure,
-        anchor_count,
-        raw_budget.used_tokens_estimate,
-        linearized_used_tokens,
-        next_attempt,
-        MAX_TIER1_COMPACT_ATTEMPTS,
-        force_full_recompact,
+    let source_messages = raw_messages[segment.start..=segment.end].to_vec();
+    let source_hash = source_hash_for_messages(&source_messages);
+    info!(
+        "Segment summarization attempting messages {}..={} ({} msgs, source_hash={})",
+        segment.start,
+        segment.end,
+        source_messages.len(),
+        source_hash,
     );
 
-    let summary_range =
-        find_summarization_boundary_visible(&visible_messages, force_full_recompact);
-
-    match tier1_summarize_range(
-        gcx,
-        &visible_messages,
-        effective_n_ctx,
-        force_full_recompact,
-        Some(summary_range),
-    )
-    .await
-    {
-        Ok(mut summ_msg) => {
-            translate_summarized_range_to_original(&mut summ_msg, &original_indices);
+    match summarize_segment(gcx, &source_messages, model, model_n_ctx).await {
+        Ok(summary) => {
             let mut session = session_arc.lock().await;
-            session.tier1_compact_attempts += 1;
-            if force_full_recompact {
-                if let Some((orig_start, orig_end)) = summ_msg.summarized_range {
-                    let merged_range = SummaryRange {
-                        start: orig_start,
-                        end: orig_end,
-                    };
-                    let obsolete_anchor_ids: Vec<(usize, String)> = session
-                        .messages
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, msg)| {
-                            if !is_real_summarization_anchor(msg) {
-                                return None;
-                            }
-                            let (start, end) = msg.summarized_range?;
-                            let old_range = SummaryRange { start, end };
-                            ranges_overlap(old_range, merged_range)
-                                .then_some((idx, msg.message_id.clone()))
-                        })
-                        .collect();
-                    let removed_indices: Vec<usize> = obsolete_anchor_ids
-                        .iter()
-                        .filter_map(|(idx, _)| (*idx <= orig_end).then_some(*idx))
-                        .collect();
-                    let removed_total = obsolete_anchor_ids.len();
-                    for (_, message_id) in obsolete_anchor_ids {
-                        session.remove_message(&message_id);
-                    }
-                    let adjusted =
-                        adjust_range_after_removing_indices(merged_range, &removed_indices);
-                    summ_msg.summarized_range = Some((adjusted.start, adjusted.end));
-                    info!(
-                        "Tier1 full recompact removed {} overlapping summarization anchors",
-                        removed_total
-                    );
-                }
+            let Some(current_segment) = first_eligible_segment(&session.messages) else {
+                return false;
+            };
+            let current_source =
+                session.messages[current_segment.start..=current_segment.end].to_vec();
+            if source_hash_for_messages(&current_source) != source_hash {
+                warn!("Segment summarization skipped because source messages changed while summarizing");
+                return false;
             }
+            replace_segment(&mut session.messages, current_segment, summary);
+            session.tier1_compact_attempts += 1;
+            session.tier1_compaction_disabled = false;
             session.thread.previous_response_id = None;
-            session.add_message(summ_msg);
             session.cache_guard_force_next = true;
+            session.increment_version();
+            session.touch();
             info!(
-                "Tier1 summarization applied, messages count now {}",
+                "Segment summarization applied, messages count now {}",
                 session.messages.len()
             );
-            return true;
+            true
         }
         Err(failure) => {
             let mut session = session_arc.lock().await;
             if failure.is_structural() {
                 session.tier1_compaction_disabled = true;
                 warn!(
-                    "Tier1 summarization structurally disabled for this session: {}",
+                    "Segment summarization structurally disabled for this session: {}",
                     failure
                 );
             } else {
                 session.tier1_compact_attempts += 1;
-                warn!("Tier1 summarization failed (non-fatal): {}", failure);
+                warn!("Segment summarization failed: {}", failure);
             }
+            false
         }
     }
-
-    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_validation::ChatContent;
+    use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
 
-    fn make_user_msg(content: &str) -> ChatMessage {
+    fn user(text: &str) -> ChatMessage {
         ChatMessage {
             role: "user".to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
+            content: ChatContent::SimpleText(text.to_string()),
             ..Default::default()
         }
     }
 
-    fn make_assistant_msg(content: &str) -> ChatMessage {
+    fn assistant(text: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
+            content: ChatContent::SimpleText(text.to_string()),
             ..Default::default()
         }
     }
 
-    fn make_summarization_msg(range: (usize, usize)) -> ChatMessage {
-        make_summarization_marker(
-            "previous summary".to_string(),
-            range.0,
-            range.1,
-            "tier1_llm",
-            120,
-            14,
-            range.1.saturating_sub(range.0) + 1,
+    fn tool(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            tool_call_id: "call_1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn context_file(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn event(text: &str) -> ChatMessage {
+        crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "test.summarization",
+            json!({}),
+            text.to_string(),
         )
     }
 
-    fn make_ui_only_reactive_report(content: &str) -> ChatMessage {
-        let mut extra = serde_json::Map::new();
-        extra.insert("_ui_only".to_string(), serde_json::Value::Bool(true));
+    fn plan(text: &str) -> ChatMessage {
         ChatMessage {
-            role: "summarization".to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
-            summarization_tier: Some("tier2_reactive".to_string()),
-            extra,
+            role: "plan".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
             ..Default::default()
         }
     }
 
-    #[test]
-    fn test_find_boundary_no_previous_summary() {
-        let messages: Vec<ChatMessage> = (0..10)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        let (start, end) = find_summarization_boundary(&messages);
-        assert_eq!(start, 0);
-        assert!(end > 0, "end should be positive");
-        assert!(end < messages.len(), "end should be before last message");
-    }
-
-    #[test]
-    fn test_find_boundary_after_previous_summary() {
-        let mut messages: Vec<ChatMessage> = (0..6)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        messages.push(make_summarization_msg((0, 3)));
-        for i in 0..5 {
-            if i % 2 == 0 {
-                messages.push(make_user_msg("new user"));
-            } else {
-                messages.push(make_assistant_msg("new asst"));
-            }
-        }
-        let (start, end) = find_summarization_boundary(&messages);
-        assert_eq!(start, 4, "should start after the summarized range");
-        assert!(end >= start, "end should be >= start");
-    }
-
-    #[test]
-    fn test_find_boundary_skips_existing_ranges_in_chunks() {
-        let mut messages: Vec<ChatMessage> = (0..18)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        messages.push(make_summarization_msg((0, 3)));
-        messages.push(make_summarization_msg((5, 9)));
-
-        let (start, end) = find_summarization_boundary(&messages);
-
-        assert_eq!(start, 10);
-        assert!(
-            end > start,
-            "expected a new unsummarized chunk after existing ranges, got {start}..={end}"
-        );
-    }
-
-    #[test]
-    fn find_summarization_boundary_ignores_ui_only_reactive_report() {
-        let mut messages: Vec<ChatMessage> = (0..6)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        messages.push(make_ui_only_reactive_report("Reactive compaction report"));
-        for i in 0..6 {
-            if i % 2 == 0 {
-                messages.push(make_user_msg("new user"));
-            } else {
-                messages.push(make_assistant_msg("new asst"));
-            }
-        }
-
-        let (start, end) = find_summarization_boundary(&messages);
-
-        assert_eq!(start, 0);
-        assert!(end > 0);
-    }
-
-    #[test]
-    fn tier1_summarize_filters_ui_only_messages_from_prompt_boundary() {
-        let hidden = make_ui_only_reactive_report("context_length_exceeded diagnostic");
-        let messages = vec![
-            make_user_msg("visible 1"),
-            hidden,
-            make_assistant_msg("visible 2"),
-            make_user_msg("visible 3"),
-        ];
-
-        let filtered = visible_tier1_messages(&messages);
-
-        assert_eq!(filtered.len(), 3);
-        assert!(filtered.iter().all(|msg| !msg
-            .content
-            .content_text_only()
-            .contains("context_length_exceeded")));
-    }
-
-    #[test]
-    fn test_find_boundary_skips_preserved_at_start() {
-        let mut messages: Vec<ChatMessage> = (0..14)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        messages[1].preserve = Some(true);
-        let (start, end) = find_summarization_boundary(&messages);
-        assert!(
-            start >= 2,
-            "should skip past preserved msg at index 1, got start={}",
-            start
-        );
-        assert!(
-            end > start,
-            "should still produce a usable range, got {}..={}",
-            start,
-            end
-        );
-        assert!(!messages[start..=end]
-            .iter()
-            .any(|msg| msg.preserve == Some(true)));
-    }
-
-    #[test]
-    fn test_summarization_without_tier_is_not_anchor() {
-        let msg_no_tier = ChatMessage {
-            role: "summarization".to_string(),
-            content: ChatContent::SimpleText("untyped summary".to_string()),
-            summarized_range: Some((0, 2)),
-            summarization_tier: None,
-            ..Default::default()
-        };
-        assert!(!is_real_summarization_anchor(&msg_no_tier));
-    }
-
-    #[test]
-    fn summarization_marker_is_event_not_user_message() {
-        let marker = make_summarization_msg((1, 3));
-
-        assert_eq!(marker.role, "event");
-        assert_ne!(marker.role, "user");
-        let event = marker.extra.get("event").unwrap();
-        assert_eq!(event["subkind"], "summarization_marker");
-        assert_eq!(event["source"], "chat.summarizer");
-        assert_eq!(event["payload"]["messages_compacted"], json!(3));
-        assert_eq!(marker.content.content_text_only(), "compacted 3 msgs");
-        assert_eq!(
-            marker
-                .extra
-                .get(SUMMARY_TEXT_EXTRA_KEY)
-                .and_then(|value| value.as_str()),
-            Some("previous summary")
-        );
-        assert!(is_real_summarization_anchor(&marker));
-    }
-
-    #[test]
-    fn test_tier2_reactive_is_not_authoritative_anchor() {
-        let reactive = make_ui_only_reactive_report("compaction diagnostic");
-        assert!(!is_real_summarization_anchor(&reactive));
-    }
-
-    #[test]
-    fn test_ranges_overlap_detects_partial_and_full_overlap() {
-        let merged = SummaryRange { start: 0, end: 6 };
-
-        assert!(ranges_overlap(merged, SummaryRange { start: 0, end: 1 }));
-        assert!(ranges_overlap(merged, SummaryRange { start: 4, end: 8 }));
-        assert!(!ranges_overlap(merged, SummaryRange { start: 7, end: 9 }));
-    }
-
-    #[test]
-    fn test_adjust_range_after_removing_indices_uses_position_mapping() {
-        let adjusted =
-            adjust_range_after_removing_indices(SummaryRange { start: 2, end: 8 }, &[0, 3]);
-
-        assert_eq!(adjusted, SummaryRange { start: 1, end: 6 });
-    }
-
-    #[test]
-    fn translate_summarized_range_drops_out_of_bounds_ranges() {
-        let original_indices = vec![1, 2, 3];
-        let mut summ_msg = make_summarization_msg((1, 9));
-
-        translate_summarized_range_to_original(&mut summ_msg, &original_indices);
-
-        assert_eq!(summ_msg.summarized_range, None);
-    }
-
-    #[test]
-    fn test_force_full_recompact_starts_from_zero() {
-        let mut messages: Vec<ChatMessage> = (0..12)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        messages.insert(5, make_summarization_msg((0, 3)));
-        let (start_normal, _) = find_summarization_boundary_visible(&messages, false);
-        assert!(
-            start_normal > 3,
-            "normal mode starts after the summarized range"
-        );
-        let (start_full, end_full) = find_summarization_boundary_visible(&messages, true);
-        assert_eq!(start_full, 0, "force_full_recompact starts from 0");
-        assert!(
-            end_full > start_full,
-            "force_full_recompact should include summary anchor content when merging"
-        );
-    }
-
-    #[test]
-    fn test_tier1_failure_classification() {
-        assert!(Tier1Failure::NoModelAvailable.is_structural());
-        assert!(Tier1Failure::InputTooLarge {
-            excerpt_chars: 1_000_000,
-            budget_chars: 1_000,
-        }
-        .is_structural());
-        assert!(!Tier1Failure::Transient("network".to_string()).is_structural());
-        assert!(!Tier1Failure::NoMessagesToSummarize.is_structural());
-        assert!(!Tier1Failure::PressureTooLow.is_structural());
-    }
-
-    #[test]
-    fn tier1_summarization_range_skips_ui_only_messages() {
-        let messages: Vec<ChatMessage> = (0..10)
-            .map(|i| {
-                if matches!(i, 0 | 3 | 5) {
-                    make_ui_only_reactive_report(&format!("hidden {i}"))
-                } else if i % 2 == 0 {
-                    make_user_msg(&format!("user {i}"))
-                } else {
-                    make_assistant_msg(&format!("assistant {i}"))
-                }
-            })
-            .collect();
-        let (filtered, original_indices) = visible_tier1_messages_with_original_indices(&messages);
-        let mut summ_msg = make_summarization_msg((2, 4));
-
-        translate_summarized_range_to_original(&mut summ_msg, &original_indices);
-
-        assert_eq!(filtered.len(), 7);
-        assert_eq!(original_indices, vec![1, 2, 4, 6, 7, 8, 9]);
-        assert_eq!(summ_msg.summarized_range, Some((4, 7)));
-    }
-
-    #[test]
-    fn tier1_summarization_range_no_ui_only_unchanged() {
-        let messages: Vec<ChatMessage> = (0..10)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {i}"))
-                } else {
-                    make_assistant_msg(&format!("assistant {i}"))
-                }
-            })
-            .collect();
-        let (_, original_indices) = visible_tier1_messages_with_original_indices(&messages);
-        let mut summ_msg = make_summarization_msg((2, 4));
-
-        translate_summarized_range_to_original(&mut summ_msg, &original_indices);
-
-        assert_eq!(original_indices, (0..10).collect::<Vec<usize>>());
-        assert_eq!(summ_msg.summarized_range, Some((2, 4)));
-    }
-
-    #[test]
-    fn test_find_boundary_empty_messages() {
-        let messages: Vec<ChatMessage> = vec![];
-        let (start, end) = find_summarization_boundary(&messages);
-        assert_eq!(start, 0);
-        assert_eq!(end, 0);
-    }
-
-    #[test]
-    fn test_find_boundary_too_few_messages() {
-        let messages = vec![make_user_msg("hello"), make_assistant_msg("hi")];
-        let (start, end) = find_summarization_boundary(&messages);
-        assert_eq!(start, end, "not enough messages to summarize");
-    }
-
-    #[test]
-    fn test_tier1_not_applied_when_pressure_low() {
-        let messages = vec![make_user_msg("hello"), make_assistant_msg("hi")];
-        let budget = compute_context_budget(&messages, 1_000_000);
-        assert!(matches!(budget.pressure, ContextPressure::Low));
-    }
-
-    #[test]
-    fn tier1_pressure_check_uses_existing_summaries() {
-        let large_summarized_text = "x".repeat(3_800);
-        let messages = vec![
-            make_user_msg(&large_summarized_text),
-            make_assistant_msg("answer"),
-            make_summarization_msg((0, 1)),
-            make_user_msg("follow up"),
-            make_assistant_msg("recent answer"),
-        ];
-
-        let raw_budget = compute_context_budget(&messages, 1_000);
-        let (_, linearized_pressure) =
-            effective_context_budget_after_existing_summaries(&messages, 1_000);
-
-        assert!(matches!(raw_budget.pressure, ContextPressure::Critical));
-        assert!(matches!(linearized_pressure, ContextPressure::Low));
-    }
-
-    #[test]
-    fn test_max_tier1_attempts_constant() {
-        assert_eq!(MAX_TIER1_COMPACT_ATTEMPTS, 2);
-    }
-
-    #[test]
-    fn test_tier1_failures_counted_toward_limit() {
-        let mut count = 0usize;
-        count += 1;
-        assert_eq!(count, 1);
-        count += 1;
-        assert_eq!(count, 2);
-        assert!(
-            count >= MAX_TIER1_COMPACT_ATTEMPTS,
-            "after 2 failures count should meet limit"
-        );
-    }
-
-    #[test]
-    fn test_find_boundary_avoids_splitting_tool_pairs() {
-        use crate::call_validation::{ChatToolCall, ChatToolFunction};
-        let tool_call = ChatToolCall {
-            id: "call_1".to_string(),
-            index: Some(0),
-            function: ChatToolFunction {
-                name: "shell".to_string(),
-                arguments: "{}".to_string(),
-            },
-            tool_type: "function".to_string(),
-            extra_content: None,
-        };
-        let mut messages: Vec<ChatMessage> = (0..8)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        messages.push(ChatMessage {
+    fn assistant_with_tool_call() -> ChatMessage {
+        ChatMessage {
             role: "assistant".to_string(),
             content: ChatContent::SimpleText(String::new()),
-            tool_calls: Some(vec![tool_call]),
+            tool_calls: Some(vec![ChatToolCall {
+                id: "call_1".to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "shell".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
             ..Default::default()
-        });
-        messages.push(ChatMessage {
-            role: "tool".to_string(),
-            tool_call_id: "call_1".to_string(),
-            content: ChatContent::SimpleText("result".to_string()),
-            ..Default::default()
-        });
-        messages.push(make_user_msg("after tools"));
-        let (start, end) = find_summarization_boundary(&messages);
-        if end > start {
-            let msg_at_end = &messages[end];
-            assert_ne!(
-                msg_at_end.role, "tool",
-                "boundary should not end on a tool result"
-            );
         }
     }
 
     #[test]
-    fn test_summarization_boundary_skips_preserved_messages() {
-        let mut messages: Vec<ChatMessage> = (0..12)
-            .map(|i| {
-                if i % 2 == 0 {
-                    make_user_msg(&format!("user {}", i))
-                } else {
-                    make_assistant_msg(&format!("assistant {}", i))
-                }
-            })
-            .collect();
-        messages[3].preserve = Some(true);
-        let (start, end) = find_summarization_boundary(&messages);
-        assert_eq!(start, 0);
-        assert!(
-            end < 3,
-            "boundary must exclude preserved message, got {start}..={end}"
+    fn closed_segments_adjacent_users_has_no_segment() {
+        let messages = vec![user("a"), user("b")];
+        assert!(closed_non_user_segments(&messages).is_empty());
+    }
+
+    #[test]
+    fn closed_segments_tail_non_user_run_is_not_included() {
+        let messages = vec![user("a"), assistant("old"), user("b"), assistant("tail")];
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 1, end: 1 }]
         );
-        assert!(!messages[start..=end]
+    }
+
+    #[test]
+    fn closed_segments_include_event_tool_context_file_inside_run() {
+        let messages = vec![
+            user("a"),
+            assistant_with_tool_call(),
+            tool("result"),
+            event("notice"),
+            context_file("file"),
+            user("b"),
+        ];
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 1, end: 4 }]
+        );
+    }
+
+    #[test]
+    fn closed_segments_never_include_user_messages() {
+        let messages = vec![
+            user("a"),
+            assistant("x"),
+            user("b"),
+            assistant("y"),
+            user("c"),
+        ];
+        for segment in closed_non_user_segments(&messages) {
+            assert!(!messages[segment.start..=segment.end]
+                .iter()
+                .any(|message| message.role == "user"));
+        }
+    }
+
+    #[test]
+    fn closed_segments_skip_plan_role_inside_closed_run() {
+        let messages = vec![
+            user("a"),
+            assistant("x"),
+            plan("sacred"),
+            assistant("y"),
+            user("b"),
+        ];
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![
+                SummarySegment { start: 1, end: 1 },
+                SummarySegment { start: 3, end: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn static_summary_preserves_user_messages_byte_identically() {
+        let mut messages = vec![
+            user("first exact bytes"),
+            assistant("old answer"),
+            tool("tool result"),
+            user("second exact bytes"),
+            assistant("tail answer"),
+        ];
+        let before_users: Vec<String> = messages
             .iter()
-            .any(|msg| msg.preserve == Some(true)));
+            .filter(|message| message.role == "user")
+            .map(|message| serde_json::to_string(message).unwrap())
+            .collect();
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "summary",
+            "test-model",
+        ));
+
+        let after_users: Vec<String> = messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| serde_json::to_string(message).unwrap())
+            .collect();
+        assert_eq!(after_users, before_users);
+    }
+
+    #[test]
+    fn static_summary_creates_assistant_compression_message() {
+        let mut messages = vec![user("a"), assistant("old"), user("b")];
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "summary",
+            "test-model",
+        ));
+
+        assert_eq!(messages[1].role, "assistant");
+        assert!(is_segment_summary(&messages[1]));
+        let compression = messages[1].extra.get("compression").unwrap();
+        assert_eq!(compression["schema_version"], json!(1));
+        assert_eq!(compression["kind"], json!(SUMMARY_KIND));
+        assert_eq!(compression["summary_model"], json!("test-model"));
+    }
+
+    #[test]
+    fn static_summary_is_idempotent_for_existing_summary_segment() {
+        let mut messages = vec![user("a"), assistant("old"), user("b")];
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "summary",
+            "test-model",
+        ));
+        let once = serde_json::to_string(&messages).unwrap();
+
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "summary changed",
+            "test-model",
+        ));
+        let twice = serde_json::to_string(&messages).unwrap();
+
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn source_hash_ignores_message_id() {
+        let mut left = assistant("same");
+        left.message_id = "left".to_string();
+        let mut right = assistant("same");
+        right.message_id = "right".to_string();
+
+        assert_eq!(
+            source_hash_for_messages(&[left]),
+            source_hash_for_messages(&[right])
+        );
+    }
+
+    #[test]
+    fn pressure_check_can_be_low() {
+        let messages = vec![user("hello"), assistant("hi"), user("again")];
+        assert!(matches!(
+            estimated_context_pressure(&messages, 1_000_000),
+            ContextPressure::Low
+        ));
+    }
+
+    #[test]
+    fn failure_classification_marks_model_and_size_structural() {
+        assert!(SegmentSummaryFailure::NoModelAvailable.is_structural());
+        assert!(SegmentSummaryFailure::InputTooLarge {
+            excerpt_chars: 10,
+            budget_chars: 1,
+        }
+        .is_structural());
+        assert!(!SegmentSummaryFailure::Transient("network".to_string()).is_structural());
     }
 }

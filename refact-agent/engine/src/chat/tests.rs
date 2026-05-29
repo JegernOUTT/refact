@@ -1673,8 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_roles_compression_preserves_plan_and_drops_old_ticks() {
-        let preserve_last_n = 3;
+    fn hidden_roles_compression_preserves_plan_and_summarizes_assistant_segment() {
         let plan_content = "Keep this plan exactly intact.";
         let mut messages = vec![crate::chat::internal_roles::plan(
             "agent",
@@ -1682,46 +1681,34 @@ mod tests {
             plan_content,
             None,
         )];
-        let mut expected_turns = Vec::new();
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("first".to_string()),
+            ..Default::default()
+        });
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("assistant turn".to_string()),
+            ..Default::default()
+        });
+        messages.push(crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::Tick,
+            "smoke.tick",
+            json!({ "tick": 1 }),
+            "tick 1".to_string(),
+        ));
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("second".to_string()),
+            ..Default::default()
+        });
 
-        for turn_idx in 0..20 {
-            let role = if turn_idx % 2 == 0 {
-                "user"
-            } else {
-                "assistant"
-            };
-            let content = format!("{role} turn {turn_idx}");
-            expected_turns.push((role.to_string(), content.clone()));
-            messages.push(ChatMessage {
-                role: role.to_string(),
-                content: ChatContent::SimpleText(content),
-                ..Default::default()
-            });
-
-            if turn_idx % 2 == 1 {
-                let tick_idx = turn_idx / 2;
-                messages.push(crate::chat::internal_roles::event(
-                    crate::chat::internal_roles::EventSubkind::Tick,
-                    "smoke.tick",
-                    json!({ "tick": tick_idx }),
-                    format!("tick {tick_idx}"),
-                ));
-            }
-        }
-
-        for tick_idx in 10..15 {
-            messages.push(crate::chat::internal_roles::event(
-                crate::chat::internal_roles::EventSubkind::Tick,
-                "smoke.tick",
-                json!({ "tick": tick_idx }),
-                format!("tick {tick_idx}"),
-            ));
-        }
-
-        refact_chat_history::history_limit::tier0_deterministic_compact_with(
-            &mut messages,
-            preserve_last_n,
-            refact_chat_history::history_limit::CompactAggression::Standard,
+        assert!(
+            crate::chat::summarization::summarize_oldest_segment_with_static_summary(
+                &mut messages,
+                "summary",
+                "test",
+            )
         );
 
         let plans: Vec<_> = messages
@@ -1730,27 +1717,15 @@ mod tests {
             .collect();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].content.content_text_only(), plan_content);
-
-        let tick_count = messages
+        let users: Vec<_> = messages
             .iter()
-            .filter(|message| {
-                message.role == "event"
-                    && message
-                        .extra
-                        .get("event")
-                        .and_then(|event| event.get("subkind"))
-                        .and_then(|subkind| subkind.as_str())
-                        == Some("tick")
-            })
-            .count();
-        assert!(tick_count <= preserve_last_n);
-
-        let actual_turns: Vec<_> = messages
-            .iter()
-            .filter(|message| message.role == "user" || message.role == "assistant")
-            .map(|message| (message.role.clone(), message.content.content_text_only()))
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.content_text_only())
             .collect();
-        assert_eq!(actual_turns, expected_turns);
+        assert_eq!(users, vec!["first", "second"]);
+        assert!(messages
+            .iter()
+            .any(crate::chat::summarization::is_segment_summary));
     }
 
     #[tokio::test]
@@ -2000,7 +1975,7 @@ fn summarization_marker_is_event_not_user_message() {
         "compacted 4 msgs",
     );
     marker.summarized_range = Some((1, 4));
-    marker.summarization_tier = Some("tier1_llm".to_string());
+    marker.summarization_tier = Some("llm_segment_summary".to_string());
     marker.summarized_token_estimate = Some(1200);
 
     assert_eq!(marker.role, "event");

@@ -22,13 +22,10 @@ use crate::chat::stream_core::{
     run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
     LlmStreamError, clear_unbound_openai_codex_websocket_session,
 };
-use crate::chat::diagnostics::{
-    append_ui_only_reactive_compaction_diagnostics, format_tier0_compaction_report,
-};
+use crate::chat::diagnostics::make_ui_only_error_message;
 use crate::chat::retry_policy::{
     classify_llm_error_for_retry, retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
 };
-use crate::chat::history_limit::{CompactAggression, tier0_deterministic_compact_with};
 use crate::chat::tools::{execute_tools, resolve_tool_call_aliases, ExecuteToolsOptions};
 use crate::chat::types::{TaskMeta, ThreadParams};
 use crate::worktrees::types::WorktreeMeta;
@@ -55,8 +52,8 @@ fn should_compact_context_limit_error(
 async fn emit_parent_compaction_diagnostics(
     config: &SubchatConfig,
     error: &str,
-    report: &crate::chat::history_limit::Tier0CompactReport,
     attempt: usize,
+    compacted: bool,
 ) {
     let (Some(parent_tx), Some(tool_call_id)) = (
         config.parent_subchat_tx.as_ref(),
@@ -64,18 +61,23 @@ async fn emit_parent_compaction_diagnostics(
     ) else {
         return;
     };
-    let error_msg = json!({
+    let status = if compacted {
+        format!(
+            "Context limit error handled by summarizing the oldest closed non-user segment (attempt {}):\n{}",
+            attempt, error,
+        )
+    } else {
+        format!(
+            "Context limit error had no eligible closed non-user segment to summarize (attempt {}):\n{}",
+            attempt, error,
+        )
+    };
+    let msg = json!({
         "tool_call_id": tool_call_id,
-        "subchat_id": format!("⚠️ Context limit error before compaction:\n{}", error),
+        "subchat_id": status,
         "attached_files": []
     });
-    let report_msg = json!({
-        "tool_call_id": tool_call_id,
-        "subchat_id": format_tier0_compaction_report(report, attempt),
-        "attached_files": []
-    });
-    let _ = parent_tx.lock().await.send(error_msg);
-    let _ = parent_tx.lock().await.send(report_msg);
+    let _ = parent_tx.lock().await.send(msg);
 }
 
 async fn apply_subchat_reactive_compaction(
@@ -84,22 +86,23 @@ async fn apply_subchat_reactive_compaction(
     error: &str,
     attempt: usize,
     preserve_last_message: bool,
-) {
+) -> bool {
     let last = if preserve_last_message {
         messages.pop()
     } else {
         None
     };
-    let report = tier0_deterministic_compact_with(
+    messages.push(make_ui_only_error_message(error));
+    let compacted = crate::chat::summarization::summarize_oldest_segment_with_static_summary(
         messages,
-        0,
-        CompactAggression::Standard,
+        "Previous non-user subchat activity was summarized after a context-limit error.",
+        "subchat_reactive",
     );
-    append_ui_only_reactive_compaction_diagnostics(messages, error, &report, attempt);
     if let Some(msg) = last {
         messages.push(msg);
     }
-    emit_parent_compaction_diagnostics(config, error, &report, attempt).await;
+    emit_parent_compaction_diagnostics(config, error, attempt, compacted).await;
+    compacted
 }
 
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
@@ -1147,7 +1150,7 @@ async fn run_subchat_loop(
                     let original_error = err.clone();
                     context_limit_compact_count += 1;
                     warn!(
-                        "Subchat context limit, applying one-shot Tier 0 compact attempt {}/{}: {}",
+                        "Subchat context limit, applying segment summarization attempt {}/{}: {}",
                         context_limit_compact_count,
                         MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
                         original_error,
@@ -1265,7 +1268,7 @@ async fn run_subchat_with_wrap_up(
                     let original_error = err.clone();
                     context_limit_compact_count += 1;
                     warn!(
-                        "Subchat wrap-up context limit, applying one-shot Tier 0 compact attempt {}/{}: {}",
+                        "Subchat wrap-up context limit, applying segment summarization attempt {}/{}: {}",
                         context_limit_compact_count,
                         MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
                         original_error,
@@ -1356,7 +1359,7 @@ async fn run_subchat_with_wrap_up(
                 let original_error = err.clone();
                 context_limit_compact_count += 1;
                 warn!(
-                    "Subchat wrap-up final context limit, applying one-shot Tier 0 compact attempt {}/{}: {}",
+                    "Subchat wrap-up final context limit, applying segment summarization attempt {}/{}: {}",
                     context_limit_compact_count,
                     MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
                     original_error,
@@ -2150,11 +2153,9 @@ mod subchat_tests {
         assert!(messages
             .iter()
             .any(|message| message.role == "error" && is_ui_only_message(message)));
-        assert!(messages.iter().any(|message| {
-            message.role == "summarization"
-                && message.summarization_tier.as_deref() == Some("tier2_reactive")
-                && is_ui_only_message(message)
-        }));
+        assert!(messages
+            .iter()
+            .any(crate::chat::summarization::is_segment_summary));
     }
 
     #[tokio::test]
@@ -2171,6 +2172,7 @@ mod subchat_tests {
                 tool_call_id: "tc1".to_string(),
                 ..Default::default()
             },
+            ChatMessage::new("user".to_string(), "second".to_string()),
         ];
 
         apply_subchat_reactive_compaction(
@@ -2183,7 +2185,6 @@ mod subchat_tests {
         .await;
 
         let first = rx.try_recv().unwrap();
-        let second = rx.try_recv().unwrap();
         assert_eq!(
             first.get("tool_call_id").and_then(|v| v.as_str()),
             Some("call_1")
@@ -2192,12 +2193,7 @@ mod subchat_tests {
             .get("subchat_id")
             .and_then(|v| v.as_str())
             .unwrap()
-            .contains("context_length_exceeded"));
-        assert!(second
-            .get("subchat_id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .contains("Reactive compaction report"));
+            .contains("summarizing the oldest closed non-user segment"));
     }
 
     #[test]

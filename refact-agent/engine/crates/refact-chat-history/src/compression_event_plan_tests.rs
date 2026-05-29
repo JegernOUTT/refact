@@ -1,24 +1,8 @@
 use serde_json::json;
 
-use crate::compression_exemption::event_subkind;
-use crate::history_limit::{tier0_deterministic_compact_with, CompactAggression, CompressionStrength};
+use crate::compression_exemption::{event_subkind, exemption_for, CompressionExemption};
+use crate::history_limit::CompressionStrength;
 use refact_core::chat_types::{ChatContent, ChatMessage};
-
-fn user(text: &str) -> ChatMessage {
-    ChatMessage {
-        role: "user".to_string(),
-        content: ChatContent::SimpleText(text.to_string()),
-        ..Default::default()
-    }
-}
-
-fn assistant(text: &str) -> ChatMessage {
-    ChatMessage {
-        role: "assistant".to_string(),
-        content: ChatContent::SimpleText(text.to_string()),
-        ..Default::default()
-    }
-}
 
 fn plan(text: &str) -> ChatMessage {
     let mut extra = serde_json::Map::new();
@@ -58,16 +42,8 @@ fn event(subkind: &str, source: &str, text: &str) -> ChatMessage {
     }
 }
 
-fn aggression_for_strength(strength: &CompressionStrength) -> Option<CompactAggression> {
-    match strength {
-        CompressionStrength::Absent => None,
-        CompressionStrength::Low | CompressionStrength::Medium => Some(CompactAggression::Standard),
-        CompressionStrength::High => Some(CompactAggression::Aggressive),
-    }
-}
-
 #[test]
-fn plan_is_never_compressed() {
+fn plan_is_never_compressed_for_all_strength_values() {
     let plan = plan("PLAN: keep this byte-for-byte");
     let plan_json = serde_json::to_string(&plan).unwrap();
     let strengths = [
@@ -78,133 +54,28 @@ fn plan_is_never_compressed() {
     ];
 
     for strength in strengths {
-        let mut messages = Vec::with_capacity(2001);
-        messages.push(plan.clone());
-        for i in 0..1000 {
-            messages.push(user(&format!("user turn {i}")));
-            messages.push(assistant(&format!("assistant turn {i}")));
-        }
-
-        if let Some(aggression) = aggression_for_strength(&strength) {
-            tier0_deterministic_compact_with(&mut messages, 4, aggression);
-        }
-
-        let plans: Vec<&ChatMessage> = messages
-            .iter()
-            .filter(|message| message.role == "plan")
-            .collect();
-        assert_eq!(plans.len(), 1, "strength {strength:?}");
-        assert_eq!(serde_json::to_string(plans[0]).unwrap(), plan_json);
-    }
-}
-
-#[test]
-fn tick_dropped_outside_window() {
-    let mut messages = Vec::new();
-    for i in 0..50 {
-        messages.push(event("tick", "clock", &format!("tick {i}")));
-    }
-    for i in 0..5 {
-        messages.push(user(&format!("turn {i}")));
-    }
-
-    tier0_deterministic_compact_with(&mut messages, 3, CompactAggression::Standard);
-
-    assert!(!messages
-        .iter()
-        .any(|message| message.role == "event" && event_subkind(message) == Some("tick")));
-    assert_eq!(
-        messages
-            .iter()
-            .filter(|message| message.role == "user")
-            .count(),
-        5
-    );
-}
-
-#[test]
-fn process_completed_keeps_recent_n() {
-    let mut messages = Vec::new();
-    for i in 0..10 {
-        messages.push(event(
-            "process_completed",
-            "exec:build",
-            &format!("process completed {i}"),
-        ));
-    }
-
-    tier0_deterministic_compact_with(&mut messages, 0, CompactAggression::Standard);
-
-    let process_events: Vec<&ChatMessage> = messages
-        .iter()
-        .filter(|message| event_subkind(message) == Some("process_completed"))
-        .collect();
-    let summary_events: Vec<&ChatMessage> = messages
-        .iter()
-        .filter(|message| event_subkind(message) == Some("summarization_marker"))
-        .collect();
-
-    assert_eq!(process_events.len(), 3);
-    assert_eq!(summary_events.len(), 1);
-    assert!(summary_events[0]
-        .content
-        .content_text_only()
-        .contains("7 earlier process_completed events"));
-    assert!(summary_events[0]
-        .content
-        .content_text_only()
-        .contains("source=\"exec:build\""));
-    assert_eq!(
-        process_events[0].content.content_text_only(),
-        "process completed 7"
-    );
-    assert_eq!(
-        process_events[1].content.content_text_only(),
-        "process completed 8"
-    );
-    assert_eq!(
-        process_events[2].content.content_text_only(),
-        "process completed 9"
-    );
-}
-
-#[test]
-fn process_completed_summary_id_is_stable() {
-    let mut messages = Vec::new();
-    for i in 0..10 {
-        let mut message = event(
-            "process_completed",
-            "exec:build",
-            &format!("process completed {i}"),
+        assert_eq!(
+            exemption_for(&plan),
+            CompressionExemption::Never,
+            "{strength:?}"
         );
-        message.message_id = format!("process-{i}");
-        messages.push(message);
+        assert_eq!(serde_json::to_string(&plan).unwrap(), plan_json);
     }
-
-    tier0_deterministic_compact_with(&mut messages, 0, CompactAggression::Standard);
-    let once = serde_json::to_string(&messages).unwrap();
-    tier0_deterministic_compact_with(&mut messages, 0, CompactAggression::Standard);
-    let twice = serde_json::to_string(&messages).unwrap();
-
-    assert_eq!(twice, once);
-    assert!(once.contains("event-history:process-0:process_completed:7:"));
 }
 
 #[test]
-fn anchor_preserved_under_aggressive() {
-    let notice = event("system_notice", "system", "do not drop this notice");
-    let notice_json = serde_json::to_string(&notice).unwrap();
-    let mut messages = vec![notice];
-    for i in 0..10 {
-        messages.push(user(&format!("turn {i}")));
-    }
+fn event_exemptions_match_hidden_role_contract() {
+    let tick = event("tick", "tool.sleep", "tick");
+    let process = event("process_completed", "exec.registry", "done");
+    let notice = event("system_notice", "system", "notice");
+    let summary = event("summarization_marker", "chat.summarizer", "summary");
 
-    tier0_deterministic_compact_with(&mut messages, 2, CompactAggression::Aggressive);
-
-    let notices: Vec<&ChatMessage> = messages
-        .iter()
-        .filter(|message| event_subkind(message) == Some("system_notice"))
-        .collect();
-    assert_eq!(notices.len(), 1);
-    assert_eq!(serde_json::to_string(notices[0]).unwrap(), notice_json);
+    assert_eq!(event_subkind(&tick), Some("tick"));
+    assert_eq!(exemption_for(&tick), CompressionExemption::DropOnAge);
+    assert_eq!(exemption_for(&process), CompressionExemption::KeepRecentN);
+    assert_eq!(exemption_for(&notice), CompressionExemption::PreserveAnchor);
+    assert_eq!(
+        exemption_for(&summary),
+        CompressionExemption::PreserveAnchor
+    );
 }

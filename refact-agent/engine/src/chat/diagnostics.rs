@@ -4,7 +4,6 @@ use uuid::Uuid;
 use refact_chat_history::retry_policy::{classify_user_error, user_error_info};
 
 use crate::call_validation::{ChatContent, ChatMessage};
-use crate::chat::history_limit::Tier0CompactReport;
 
 const UI_ONLY_MARKER: &str = "_ui_only";
 
@@ -97,66 +96,6 @@ pub fn make_ui_only_retry_status_message(
     }
 }
 
-pub fn format_tier0_compaction_report(report: &Tier0CompactReport, attempt: usize) -> String {
-    format!(
-        "{}\n\n{}\n\n{}\n{}\n{}\n{}\n{}",
-        "## Reactive compaction report",
-        "Context limit was reached, so Refact compacted the conversation before retrying.",
-        format!("- Attempt: {}", attempt),
-        format!(
-            "- Context file entries deduplicated: {}",
-            report.context_files_deduped,
-        ),
-        format!(
-            "- Context file entries elided: {}",
-            report.context_files_elided,
-        ),
-        format!(
-            "- Tool outputs truncated: {}",
-            report.tool_outputs_truncated
-        ),
-        format!("- Estimated tokens saved: {}", report.tokens_saved_estimate),
-    )
-}
-
-pub fn make_ui_only_compaction_report_message(
-    report: &Tier0CompactReport,
-    attempt: usize,
-    affected_range: Option<(usize, usize)>,
-) -> ChatMessage {
-    let mut extra = serde_json::Map::new();
-    mark_ui_only(&mut extra);
-    extra.insert("compaction_report".to_string(), Value::Bool(true));
-
-    ChatMessage {
-        message_id: Uuid::new_v4().to_string(),
-        role: "summarization".to_string(),
-        content: ChatContent::SimpleText(format_tier0_compaction_report(report, attempt)),
-        summarization_tier: Some("tier2_reactive".to_string()),
-        summarized_range: affected_range,
-        summarized_token_estimate: Some(report.tokens_saved_estimate),
-        extra,
-        ..Default::default()
-    }
-}
-
-pub fn append_ui_only_reactive_compaction_diagnostics(
-    messages: &mut Vec<ChatMessage>,
-    error: &str,
-    report: &Tier0CompactReport,
-    attempt: usize,
-) {
-    let range = if messages.is_empty() {
-        None
-    } else {
-        Some((0usize, messages.len().saturating_sub(1)))
-    };
-    messages.push(make_ui_only_error_message(error));
-    messages.push(make_ui_only_compaction_report_message(
-        report, attempt, range,
-    ));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,35 +110,6 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].content.content_text_only(), "visible");
-    }
-
-    #[test]
-    fn compaction_report_contains_tier0_details() {
-        let report = Tier0CompactReport {
-            context_files_deduped: 2,
-            context_files_elided: 1,
-            tool_outputs_truncated: 3,
-            tokens_saved_estimate: 456,
-        };
-        let message = make_ui_only_compaction_report_message(&report, 2, Some((0, 9)));
-
-        assert!(is_ui_only_message(&message));
-        assert_eq!(message.role, "summarization");
-        assert_eq!(
-            message.summarization_tier.as_deref(),
-            Some("tier2_reactive")
-        );
-        assert_eq!(message.summarized_token_estimate, Some(456));
-        assert_eq!(
-            message.extra.get("compaction_report"),
-            Some(&Value::Bool(true))
-        );
-        let content = message.content.content_text_only();
-        assert!(content.contains("Attempt: 2"));
-        assert!(content.contains("Context file entries deduplicated: 2"));
-        assert!(content.contains("Context file entries elided: 1"));
-        assert!(content.contains("Tool outputs truncated: 3"));
-        assert!(content.contains("Estimated tokens saved: 456"));
     }
 
     #[test]

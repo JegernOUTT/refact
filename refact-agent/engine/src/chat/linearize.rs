@@ -7,21 +7,13 @@ fn is_authoritative_summary(msg: &ChatMessage) -> bool {
     if is_ui_only_message(msg) {
         return false;
     }
-    let known_tier = matches!(
-        msg.summarization_tier.as_deref(),
-        Some("tier0_deterministic") | Some("tier1_llm") | Some("tier1_merged")
-    );
-    if msg.role == "event" {
-        return msg
+    msg.role == "assistant"
+        && msg
             .extra
-            .get("event")
-            .and_then(|event| event.get("subkind"))
-            .and_then(|subkind| subkind.as_str())
-            == Some("summarization_marker")
-            && known_tier
-            && msg.summarized_range.is_some();
-    }
-    msg.role == "summarization" && known_tier
+            .get("compression")
+            .and_then(|compression| compression.get("kind"))
+            .and_then(|kind| kind.as_str())
+            == Some("llm_segment_summary")
 }
 
 fn summary_content(msg: &ChatMessage) -> String {
@@ -92,7 +84,7 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
             if let Some(entries) = summary_by_start.remove(&i) {
                 for (_, content) in entries {
                     result.push(ChatMessage {
-                        role: "user".to_string(),
+                        role: "assistant".to_string(),
                         content: ChatContent::SimpleText(content),
                         ..Default::default()
                     });
@@ -127,11 +119,24 @@ mod tests {
     }
 
     fn summarization(content: &str, range: (usize, usize)) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "schema_version": 1,
+                "kind": "llm_segment_summary",
+                "source_hash": "hash",
+                "source_message_ids": [],
+                "created_at": "now",
+                "summary_model": "test",
+            }),
+        );
         ChatMessage {
-            role: "summarization".to_string(),
+            role: "assistant".to_string(),
             content: ChatContent::SimpleText(content.to_string()),
             summarized_range: Some(range),
-            summarization_tier: Some("tier0_deterministic".to_string()),
+            summarization_tier: Some("llm_segment_summary".to_string()),
+            extra,
             ..Default::default()
         }
     }
@@ -185,7 +190,7 @@ mod tests {
         ];
         let result = apply_summarization_linearize(messages);
         let roles: Vec<&str> = result.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", "user", "user", "assistant"]);
+        assert_eq!(roles, vec!["user", "assistant", "user", "assistant"]);
         assert_eq!(result[0].content.content_text_only(), "hello");
         assert_eq!(
             result[1].content.content_text_only(),
@@ -217,14 +222,14 @@ mod tests {
             role: "summarization".to_string(),
             content: ChatContent::SimpleText(content.to_string()),
             summarized_range: Some(range),
-            summarization_tier: Some("tier2_reactive".to_string()),
+            summarization_tier: Some("legacy_reactive".to_string()),
             extra,
             ..Default::default()
         }
     }
 
     #[test]
-    fn test_linearize_ignores_ui_only_tier2_reactive_summaries() {
+    fn test_linearize_ignores_ui_only_legacy_reactive_summaries() {
         let messages = vec![
             user("hello"),
             assistant("hi"),
@@ -269,6 +274,7 @@ mod tests {
         assert_eq!(result[0].content.content_text_only(), "msg0");
         assert_eq!(result[1].content.content_text_only(), "msg1");
         assert_eq!(result[2].content.content_text_only(), "sum");
+        assert_eq!(result[2].role, "assistant");
         assert_eq!(result[3].content.content_text_only(), "msg3");
     }
 
@@ -295,7 +301,7 @@ mod tests {
         let result = apply_summarization_linearize(messages);
         let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
 
-        assert_eq!(roles, vec!["user", "plan"]);
+        assert_eq!(roles, vec!["assistant", "plan"]);
         assert_eq!(result[0].content.content_text_only(), "sum");
         assert_eq!(result[1].content.content_text_only(), "sacred plan");
     }

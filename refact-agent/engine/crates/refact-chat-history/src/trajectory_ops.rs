@@ -583,7 +583,7 @@ mod tests {
     fn sanitize_messages_for_new_thread_does_not_make_ui_only_model_visible() {
         let messages = vec![
             make_user_msg("visible"),
-            make_ui_only_msg("reactive compaction report"),
+            make_ui_only_msg("legacy diagnostic report"),
             make_assistant_msg("response"),
         ];
 
@@ -594,7 +594,7 @@ mod tests {
         assert!(sanitized.iter().all(|msg| !msg
             .content
             .content_text_only()
-            .contains("reactive compaction report")));
+            .contains("legacy diagnostic report")));
     }
 
     #[test]

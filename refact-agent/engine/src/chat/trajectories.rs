@@ -3194,10 +3194,7 @@ pub async fn handle_v1_trajectories_subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::diagnostics::{
-        is_ui_only_message, make_ui_only_compaction_report_message, make_ui_only_error_message,
-    };
-    use crate::chat::history_limit::Tier0CompactReport;
+    use crate::chat::diagnostics::{is_ui_only_message, make_ui_only_error_message};
     use crate::chat::types::{ActiveCommandContext, BurstGuard};
     use refact_chat_api::{ClaudeCodeIdentity, FrozenRequestPrefix};
     use serial_test::serial;
@@ -3868,15 +3865,15 @@ mod tests {
         let messages = vec![
             json!({
                 "role": "summarization",
-                "content": "Reactive compaction report",
-                "summarization_tier": "tier2_reactive",
+                "content": "Legacy diagnostic report",
+                "summarization_tier": "legacy_reactive",
                 "_ui_only": true
             }),
             json!({"role": "user", "content": "Fix sanitizers"}),
         ];
         let context = build_title_generation_context(&messages);
         assert!(context.contains("Fix sanitizers"));
-        assert!(!context.contains("Reactive compaction report"));
+        assert!(!context.contains("Legacy diagnostic report"));
     }
 
     #[test]
@@ -3884,15 +3881,15 @@ mod tests {
         let messages = vec![
             json!({
                 "role": "summarization",
-                "content": "Reactive compaction report",
-                "summarization_tier": "tier2_reactive",
+                "content": "Legacy diagnostic report",
+                "summarization_tier": "legacy_reactive",
                 "extra": {"_ui_only": true}
             }),
             json!({"role": "user", "content": "Fix sanitizers"}),
         ];
         let context = build_title_generation_context(&messages);
         assert!(context.contains("Fix sanitizers"));
-        assert!(!context.contains("Reactive compaction report"));
+        assert!(!context.contains("Legacy diagnostic report"));
     }
 
     #[test]
@@ -4216,34 +4213,17 @@ mod tests {
     fn trajectory_snapshot_from_session_preserves_ui_only_diagnostics() {
         let mut session = ChatSession::new("ui-only-snapshot".to_string());
         let diagnostic = make_ui_only_error_message("context_length_exceeded");
-        let compaction = make_ui_only_compaction_report_message(
-            &Tier0CompactReport {
-                context_files_deduped: 1,
-                context_files_elided: 0,
-                tool_outputs_truncated: 2,
-                tokens_saved_estimate: 345,
-            },
-            1,
-            None,
-        );
         session
             .messages
             .push(ChatMessage::new("user".to_string(), "Hello".to_string()));
         session.messages.push(diagnostic.clone());
-        session.messages.push(compaction.clone());
 
         let snapshot = trajectory_snapshot_from_session(&session);
 
-        assert_eq!(snapshot.messages.len(), 3);
+        assert_eq!(snapshot.messages.len(), 2);
         assert!(snapshot.messages.iter().any(|message| {
             message.message_id == diagnostic.message_id
                 && message.role == "error"
-                && is_ui_only_message(message)
-        }));
-        assert!(snapshot.messages.iter().any(|message| {
-            message.message_id == compaction.message_id
-                && message.role == "summarization"
-                && message.summarization_tier.as_deref() == Some("tier2_reactive")
                 && is_ui_only_message(message)
         }));
     }
