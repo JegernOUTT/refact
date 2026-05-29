@@ -17,6 +17,11 @@ const CACHE_GUARD_TOOL_NAME: &str = "cache_guard";
 const CACHE_GUARD_TOOL_CALL_ID: &str = "cacheguard_force";
 const CACHE_GUARD_RULE: &str = "Prompt cache prefix violation";
 const CACHE_GUARD_PREVIEW_STRING_MAX_CHARS: usize = 240;
+const CACHE_GUARD_DIFF_MAX_CHARS: usize = 32 * 1024;
+const CACHE_GUARD_DIFF_TRUNCATION_NOTICE: &str = concat!(
+    "\n...[cache guard diff truncated: omitted {omitted} chars; ",
+    "sanitized provider request body preview exceeded limit]\n"
+);
 
 const IGNORED_KEYS: &[&str] = &[
     "cache_control",
@@ -123,9 +128,9 @@ fn is_append_only_prefix_inner(
             if a.len() > b.len() {
                 return false;
             }
-            let is_messages_array = parent_key == Some("messages");
+            let is_strict_array_item = matches!(parent_key, Some("messages" | "input"));
             a.iter().zip(b.iter()).all(|(old_item, new_item)| {
-                is_append_only_prefix_inner(old_item, new_item, is_messages_array, None)
+                is_append_only_prefix_inner(old_item, new_item, is_strict_array_item, None)
             })
         }
         (Value::Object(a), Value::Object(b)) => {
@@ -159,6 +164,18 @@ pub fn unified_json_diff(prev: &Value, next: &Value) -> String {
         .context_radius(6)
         .header("previous", "current")
         .to_string()
+}
+
+fn cap_cache_guard_diff(diff: &str) -> String {
+    let char_count = diff.chars().count();
+    if char_count <= CACHE_GUARD_DIFF_MAX_CHARS {
+        return diff.to_string();
+    }
+
+    let kept: String = diff.chars().take(CACHE_GUARD_DIFF_MAX_CHARS).collect();
+    let omitted = char_count - CACHE_GUARD_DIFF_MAX_CHARS;
+    let notice = CACHE_GUARD_DIFF_TRUNCATION_NOTICE.replace("{omitted}", &omitted.to_string());
+    format!("{kept}{notice}")
 }
 
 fn preview_body_for_cache_guard_diff(value: &Value) -> Value {
@@ -347,10 +364,10 @@ pub async fn check_or_pause_cache_guard(
         return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
     };
 
-    let diff = unified_json_diff(
+    let diff = cap_cache_guard_diff(&unified_json_diff(
         &preview_body_for_cache_guard_diff(&previous),
         &preview_body_for_cache_guard_diff(&sanitized),
-    );
+    ));
     let estimated_extra_usd = estimate_extra_cache_miss_usd(app.clone(), model_id, &previous).await;
 
     let reason = {
@@ -497,6 +514,21 @@ mod tests {
         let next = json!({
             "messages": [
                 {"role": "user", "content": "hi", "extra": true}
+            ]
+        });
+        assert!(!is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn test_append_only_prefix_input_keys_strict() {
+        let prev = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        });
+        let next = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}], "extra": true}
             ]
         });
         assert!(!is_append_only_prefix(&prev, &next));
@@ -708,6 +740,58 @@ mod tests {
         assert!(!reason.contains("api_key=abcd"));
         assert!(reason.contains("[redacted text chars="));
         assert!(reason.contains("sha256="));
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.pause_reasons[0].command, reason);
+    }
+
+    #[tokio::test]
+    async fn cache_guard_violation_pause_reason_caps_huge_redacted_diff() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let prev_body = json!({
+            "input": (0..900).map(|i| json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": format!("safe-prefix-{i}")}]
+            })).collect::<Vec<_>>(),
+            "metadata": {"auth_token": "raw-token-value"},
+            "model": "test"
+        });
+        let mut next_body = prev_body.clone();
+        for item in next_body["input"].as_array_mut().unwrap() {
+            item["extra"] = json!("Bearer sk-secret-123 api_key=abcd");
+        }
+        next_body["metadata"]["auth_token"] = json!("changed-raw-token-value");
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        {
+            let mut s = session_arc.lock().await;
+            s.cache_guard_snapshot = Some(sanitize_body_for_cache_guard(&prev_body));
+        }
+
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        let CacheGuardOutcome::Paused { reason } = outcome else {
+            panic!("cache guard should pause on changed prefix");
+        };
+        let uncapped_diff = unified_json_diff(
+            &preview_body_for_cache_guard_diff(&sanitize_body_for_cache_guard(&prev_body)),
+            &preview_body_for_cache_guard_diff(&sanitize_body_for_cache_guard(&next_body)),
+        );
+        assert!(uncapped_diff.chars().count() > CACHE_GUARD_DIFF_MAX_CHARS);
+        assert!(reason.chars().count() < CACHE_GUARD_DIFF_MAX_CHARS + 1_000);
+        assert!(reason.contains("cache guard diff truncated"));
+        assert!(!reason.contains("sk-secret-123"));
+        assert!(!reason.contains("api_key=abcd"));
+        assert!(!reason.contains("raw-token-value"));
+        assert!(reason.contains("[REDACTED]"));
         let session = session_arc.lock().await;
         assert_eq!(session.runtime.pause_reasons[0].command, reason);
     }
