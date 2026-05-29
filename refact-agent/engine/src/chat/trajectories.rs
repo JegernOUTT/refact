@@ -457,39 +457,58 @@ pub fn first_system_prompt(messages: &[ChatMessage]) -> Option<String> {
     })
 }
 
+fn parsed_rfc3339_utc(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&chrono::Utc))
+}
+
+fn legacy_incomplete_prefix_from_messages(messages: &[ChatMessage]) -> Option<FrozenRequestPrefix> {
+    first_system_prompt(messages)
+        .map(|system_prompt| new_legacy_incomplete_frozen_request_prefix(Some(system_prompt)))
+}
+
 fn repair_transition_frozen_prefix(
     link_type: Option<&str>,
     messages: &[ChatMessage],
     frozen_request_prefix: Option<FrozenRequestPrefix>,
+    trajectory_created_at: Option<&str>,
+    provider_state_present: bool,
 ) -> (Option<FrozenRequestPrefix>, bool) {
+    let is_transition = is_mode_transition_or_handoff(link_type);
     let Some(prefix) = frozen_request_prefix else {
-        return (
-            first_system_prompt(messages).map(|system_prompt| {
-                new_legacy_incomplete_frozen_request_prefix(Some(system_prompt))
-            }),
-            false,
-        );
+        let repaired = is_transition && provider_state_present;
+        return (legacy_incomplete_prefix_from_messages(messages), repaired);
     };
-    if !is_mode_transition_or_handoff(link_type) {
+    if !is_transition {
         return (Some(prefix), false);
     }
-    let Some(frozen_system) = prefix
-        .system_prompt
-        .as_ref()
-        .filter(|text| !text.trim().is_empty())
-    else {
-        return (Some(prefix), false);
+
+    let first_system = first_system_prompt(messages);
+    let system_mismatch = match (
+        prefix
+            .system_prompt
+            .as_ref()
+            .filter(|text| !text.trim().is_empty()),
+        first_system.as_ref(),
+    ) {
+        (Some(frozen_system), Some(first_system)) => frozen_system != first_system,
+        _ => false,
     };
-    let Some(first_system) = first_system_prompt(messages) else {
-        return (Some(prefix), false);
-    };
-    if first_system == *frozen_system {
+    let prefix_created_before_trajectory = trajectory_created_at
+        .and_then(parsed_rfc3339_utc)
+        .zip(parsed_rfc3339_utc(&prefix.created_at))
+        .is_some_and(|(trajectory_created_at, prefix_created_at)| {
+            prefix_created_at < trajectory_created_at
+        });
+
+    if !(system_mismatch || prefix_created_before_trajectory) {
         return (Some(prefix), false);
     }
+
     (
-        Some(new_legacy_incomplete_frozen_request_prefix(Some(
-            first_system,
-        ))),
+        first_system
+            .map(|system_prompt| new_legacy_incomplete_frozen_request_prefix(Some(system_prompt))),
         true,
     )
 }
@@ -967,19 +986,23 @@ pub async fn load_trajectory_for_chat(
         .get("previous_response_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let loaded_frozen_request_prefix = t
-        .get("frozen_request_prefix")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let frozen_request_prefix_value = t.get("frozen_request_prefix").filter(|v| !v.is_null());
+    let loaded_frozen_request_prefix =
+        frozen_request_prefix_value.and_then(|v| serde_json::from_value(v.clone()).ok());
+    let claude_code_identity_value = t.get("claude_code_identity").filter(|v| !v.is_null());
+    let provider_state_present =
+        previous_response_id.is_some() || claude_code_identity_value.is_some();
     let (frozen_request_prefix, transition_prefix_repaired) = repair_transition_frozen_prefix(
         link_type.as_deref(),
         &messages,
         loaded_frozen_request_prefix,
+        t.get("created_at").and_then(|v| v.as_str()),
+        provider_state_present,
     );
     let claude_code_identity = if transition_prefix_repaired {
         None
     } else {
-        t.get("claude_code_identity")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        claude_code_identity_value.and_then(|v| serde_json::from_value(v.clone()).ok())
     };
     let previous_response_id = if transition_prefix_repaired {
         None
@@ -5168,6 +5191,157 @@ mod tests {
         .unwrap();
 
         let loaded = load_trajectory_for_chat(gcx, "transition-stale-frozen")
+            .await
+            .unwrap();
+        let prefix = loaded.thread.frozen_request_prefix.unwrap();
+        assert_eq!(
+            prefix.system_prompt.as_deref(),
+            Some("target task planner system")
+        );
+        assert!(prefix.tools_canonical.is_none());
+        assert!(loaded.thread.claude_code_identity.is_none());
+        assert!(loaded.thread.previous_response_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn mode_transition_no_frozen_prefix_with_copied_provider_state_is_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let traj_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&traj_dir).await.unwrap();
+        tokio::fs::write(
+            traj_dir.join("transition-no-prefix-provider.json"),
+            serde_json::to_string(&json!({
+                "id":"transition-no-prefix-provider",
+                "title":"Transition",
+                "created_at":"2024-01-02T00:00:00Z",
+                "updated_at":"2024-01-02T00:00:00Z",
+                "model":"model",
+                "mode":"task_planner",
+                "tool_use":"agent",
+                "parent_id":"source-chat",
+                "link_type":"mode_transition",
+                "previous_response_id":"resp_source",
+                "messages":[
+                    {"role":"system","content":"target task planner system"},
+                    {"role":"user","content":"hello"}
+                ],
+                "claude_code_identity": {
+                    "device_id":"source-device",
+                    "session_id":"source-session"
+                },
+                "include_project_info":true,
+                "checkpoints_enabled":true
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "transition-no-prefix-provider")
+            .await
+            .unwrap();
+        let prefix = loaded.thread.frozen_request_prefix.unwrap();
+        assert_eq!(
+            prefix.system_prompt.as_deref(),
+            Some("target task planner system")
+        );
+        assert!(prefix.tools_canonical.is_none());
+        assert!(loaded.thread.claude_code_identity.is_none());
+        assert!(loaded.thread.previous_response_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn mode_transition_matching_system_with_stale_tools_is_repaired_by_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let traj_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&traj_dir).await.unwrap();
+        tokio::fs::write(
+            traj_dir.join("transition-stale-tools-timestamp.json"),
+            serde_json::to_string(&json!({
+                "id":"transition-stale-tools-timestamp",
+                "title":"Transition",
+                "created_at":"2024-01-02T00:00:00Z",
+                "updated_at":"2024-01-02T00:00:00Z",
+                "model":"model",
+                "mode":"task_planner",
+                "tool_use":"agent",
+                "parent_id":"source-chat",
+                "link_type":"mode_transition",
+                "messages":[
+                    {"role":"system","content":"target task planner system"},
+                    {"role":"user","content":"hello"}
+                ],
+                "frozen_request_prefix": {
+                    "schema_version": 1,
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "system_prompt": "target task planner system",
+                    "tools_canonical": [{"type":"function","function":{"name":"old_source_tool"}}]
+                },
+                "include_project_info":true,
+                "checkpoints_enabled":true
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "transition-stale-tools-timestamp")
+            .await
+            .unwrap();
+        let prefix = loaded.thread.frozen_request_prefix.unwrap();
+        assert_eq!(
+            prefix.system_prompt.as_deref(),
+            Some("target task planner system")
+        );
+        assert!(prefix.tools_canonical.is_none());
+        assert!(loaded.thread.claude_code_identity.is_none());
+        assert!(loaded.thread.previous_response_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn mode_transition_malformed_frozen_prefix_with_provider_identity_is_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let traj_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&traj_dir).await.unwrap();
+        tokio::fs::write(
+            traj_dir.join("transition-malformed-prefix-provider.json"),
+            serde_json::to_string(&json!({
+                "id":"transition-malformed-prefix-provider",
+                "title":"Transition",
+                "created_at":"2024-01-02T00:00:00Z",
+                "updated_at":"2024-01-02T00:00:00Z",
+                "model":"model",
+                "mode":"task_planner",
+                "tool_use":"agent",
+                "parent_id":"source-chat",
+                "link_type":"mode_transition",
+                "previous_response_id":"resp_source",
+                "messages":[
+                    {"role":"system","content":"target task planner system"},
+                    {"role":"user","content":"hello"}
+                ],
+                "frozen_request_prefix": {
+                    "schema_version": "bad",
+                    "created_at": 7,
+                    "system_prompt": ["source system"],
+                    "tools_canonical": [{"type":"function","function":{"name":"old_source_tool"}}]
+                },
+                "claude_code_identity": {
+                    "device_id":"source-device",
+                    "session_id":"source-session"
+                },
+                "include_project_info":true,
+                "checkpoints_enabled":true
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "transition-malformed-prefix-provider")
             .await
             .unwrap();
         let prefix = loaded.thread.frozen_request_prefix.unwrap();
