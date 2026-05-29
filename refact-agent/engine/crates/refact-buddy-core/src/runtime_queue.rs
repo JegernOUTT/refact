@@ -1,9 +1,48 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use crate::types::BuddyRuntimeEvent;
 
 const MAX_QUEUE_SIZE: usize = 100;
+const PERSONALITY_RESERVED_SLOTS: usize = 8;
+
+pub fn is_personality_runtime_event(event: &BuddyRuntimeEvent) -> bool {
+    event.source == "chat_reactions"
+        || matches!(
+            event.signal_type.as_str(),
+            "speech_humor" | "speech_insight" | "speech_chat_reaction" | "chat_bug_candidate"
+        )
+}
+
+fn runtime_event_created_at(event: &BuddyRuntimeEvent) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&event.created_at)
+        .ok()
+        .map(|created_at| created_at.with_timezone(&Utc))
+}
+
+fn older_runtime_event_position(
+    left: &(usize, &BuddyRuntimeEvent),
+    right: &(usize, &BuddyRuntimeEvent),
+) -> std::cmp::Ordering {
+    match (
+        runtime_event_created_at(left.1),
+        runtime_event_created_at(right.1),
+    ) {
+        (Some(left_at), Some(right_at)) => {
+            left_at.cmp(&right_at).then_with(|| left.0.cmp(&right.0))
+        }
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left.0.cmp(&right.0),
+    }
+}
+
+fn newer_runtime_event_position(
+    left: &(usize, &BuddyRuntimeEvent),
+    right: &(usize, &BuddyRuntimeEvent),
+) -> std::cmp::Ordering {
+    older_runtime_event_position(left, right).reverse()
+}
 
 pub fn runtime_event_expired_at(event: &BuddyRuntimeEvent, now: DateTime<Utc>) -> bool {
     if event.persistent || event.ttl_ms.is_none() {
@@ -117,6 +156,7 @@ impl RuntimeQueue {
         }
 
         // Priority insertion: critical/high go to front
+        let input_id = event.id.clone();
         let insert_front = event.priority == "critical" || event.priority == "high";
         if insert_front {
             self.items.push_front(event);
@@ -124,18 +164,73 @@ impl RuntimeQueue {
             self.items.push_back(event);
         }
 
-        // Cap queue size, drop oldest low-priority first
         while self.items.len() > MAX_QUEUE_SIZE {
-            let dropped = if let Some(pos) = self.items.iter().position(|e| e.priority == "low") {
-                self.items.remove(pos)
-            } else {
-                self.items.pop_back()
-            };
+            let protected = self.protected_eviction_ids(&input_id);
+            let incoming_protected = HashSet::from([input_id.clone()]);
+            let dropped = self
+                .eviction_victim_position(&protected, false)
+                .or_else(|| self.eviction_victim_position(&incoming_protected, true))
+                .and_then(|pos| self.items.remove(pos));
             if let Some(ev) = dropped {
                 removed.push(ev.id);
+            } else {
+                break;
             }
         }
         removed
+    }
+
+    fn protected_eviction_ids(&self, incoming_id: &str) -> HashSet<String> {
+        let mut protected = HashSet::from([incoming_id.to_string()]);
+        let mut personality_events = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| is_personality_runtime_event(event))
+            .collect::<Vec<_>>();
+        personality_events.sort_by(newer_runtime_event_position);
+        for (_, event) in personality_events
+            .into_iter()
+            .take(PERSONALITY_RESERVED_SLOTS.min(MAX_QUEUE_SIZE))
+        {
+            protected.insert(event.id.clone());
+        }
+        protected
+    }
+
+    fn eviction_victim_position(
+        &self,
+        protected: &HashSet<String>,
+        allow_protected_personality_transient: bool,
+    ) -> Option<usize> {
+        if allow_protected_personality_transient {
+            return self
+                .oldest_position(|event| !event.persistent && !protected.contains(&event.id));
+        }
+        self.oldest_position(|event| event.priority == "low" && !protected.contains(&event.id))
+            .or_else(|| {
+                self.oldest_position(|event| event.dismissed && !protected.contains(&event.id))
+            })
+            .or_else(|| {
+                self.oldest_position(|event| {
+                    !protected.contains(&event.id)
+                        && !is_personality_runtime_event(event)
+                        && !event.persistent
+                })
+            })
+            .or_else(|| self.oldest_position(|event| !protected.contains(&event.id)))
+    }
+
+    fn oldest_position(
+        &self,
+        mut predicate: impl FnMut(&BuddyRuntimeEvent) -> bool,
+    ) -> Option<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| predicate(event))
+            .min_by(older_runtime_event_position)
+            .map(|(pos, _)| pos)
     }
 
     pub fn prune_expired_at(&mut self, now: DateTime<Utc>) -> Vec<String> {
@@ -236,6 +331,32 @@ mod tests {
         }
     }
 
+    fn make_error_event(id: &str, index: usize) -> BuddyRuntimeEvent {
+        let mut event = make_event(id, &format!("error-key-{index}"));
+        event.signal_type = "error".to_string();
+        event.source = "frontend".to_string();
+        event.status = "failed".to_string();
+        event.priority = if index % 2 == 0 { "high" } else { "critical" }.to_string();
+        event.persistent = true;
+        event.created_at = format!("2024-01-01T00:{:02}:{:02}Z", index / 60, index % 60);
+        event
+    }
+
+    fn make_personality_event(id: &str, index: usize) -> BuddyRuntimeEvent {
+        let mut event = make_event(id, &format!("reaction-key-{index}"));
+        event.signal_type = "speech_chat_reaction".to_string();
+        event.source = "chat_reactions".to_string();
+        event.status = "info".to_string();
+        event.priority = "normal".to_string();
+        event.created_at = format!("2099-01-01T01:{:02}:{:02}Z", index / 60, index % 60);
+        event.ttl_ms = Some(90_000);
+        event
+    }
+
+    fn has_event(queue: &RuntimeQueue, id: &str) -> bool {
+        queue.items.iter().any(|event| event.id == id)
+    }
+
     #[test]
     fn runtime_queue_prunes_expired_non_persistent_event() {
         let now = DateTime::parse_from_rfc3339("2024-01-01T00:00:10Z")
@@ -325,6 +446,96 @@ mod tests {
         assert_eq!(removed, vec!["expired".to_string()]);
         assert_eq!(queue.items.len(), 1);
         assert_eq!(queue.items[0].id, "incoming");
+    }
+
+    #[test]
+    fn chat_reaction_survives_full_high_error_queue() {
+        let mut queue = RuntimeQueue::new();
+        for i in 0..MAX_QUEUE_SIZE {
+            queue.enqueue(make_error_event(&format!("error-{i}"), i));
+        }
+
+        let removed = queue.enqueue(make_personality_event("reaction-fresh", 0));
+
+        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        assert!(has_event(&queue, "reaction-fresh"));
+        assert_eq!(removed, vec!["error-0".to_string()]);
+        assert!(!has_event(&queue, "error-0"));
+    }
+
+    #[test]
+    fn reserved_personality_events_survive_new_high_errors() {
+        let mut queue = RuntimeQueue::new();
+        for i in 0..PERSONALITY_RESERVED_SLOTS {
+            queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
+        }
+        for i in 0..(MAX_QUEUE_SIZE + 20) {
+            queue.enqueue(make_error_event(&format!("error-{i}"), i));
+        }
+
+        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        for i in 0..PERSONALITY_RESERVED_SLOTS {
+            assert!(has_event(&queue, &format!("reaction-{i}")));
+        }
+    }
+
+    #[test]
+    fn personality_reserve_does_not_exceed_queue_cap() {
+        let mut queue = RuntimeQueue::new();
+        for i in 0..(PERSONALITY_RESERVED_SLOTS * 3) {
+            queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
+        }
+        for i in 0..(MAX_QUEUE_SIZE * 2) {
+            queue.enqueue(make_error_event(&format!("error-{i}"), i));
+        }
+
+        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        let personality_count = queue
+            .items
+            .iter()
+            .filter(|event| is_personality_runtime_event(event))
+            .count();
+        assert!(personality_count >= PERSONALITY_RESERVED_SLOTS);
+        assert!(personality_count <= MAX_QUEUE_SIZE);
+    }
+
+    #[test]
+    fn excess_old_personality_events_can_be_evicted() {
+        let mut queue = RuntimeQueue::new();
+        for i in 0..(MAX_QUEUE_SIZE + PERSONALITY_RESERVED_SLOTS + 3) {
+            queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
+        }
+
+        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        assert!(!has_event(&queue, "reaction-0"));
+        for i in (MAX_QUEUE_SIZE + 3)..(MAX_QUEUE_SIZE + PERSONALITY_RESERVED_SLOTS + 3) {
+            assert!(has_event(&queue, &format!("reaction-{i}")));
+        }
+    }
+
+    #[test]
+    fn coalesced_event_does_not_trigger_eviction() {
+        let mut queue = RuntimeQueue::new();
+        for i in 0..MAX_QUEUE_SIZE {
+            queue.enqueue(make_error_event(&format!("error-{i}"), i));
+        }
+        let mut coalesced = make_error_event("error-replacement", 0);
+        coalesced.title = "Updated".to_string();
+
+        let removed = queue.enqueue(coalesced);
+
+        assert!(removed.is_empty());
+        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        assert!(has_event(&queue, "error-0"));
+        assert!(!has_event(&queue, "error-replacement"));
+        assert_eq!(
+            queue
+                .items
+                .iter()
+                .find(|event| event.dedupe_key.as_deref() == Some("error-key-0"))
+                .map(|event| event.title.as_str()),
+            Some("Updated")
+        );
     }
 
     #[test]
