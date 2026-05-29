@@ -103,6 +103,20 @@ pub struct TaskMeta {
     pub planner_chat_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct FrozenRequestPrefix {
+    pub schema_version: u32,
+    pub created_at: String,
+    pub system_prompt: Option<String>,
+    pub tools_canonical: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ClaudeCodeIdentity {
+    pub device_id: String,
+    pub session_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadParams {
     pub id: String,
@@ -157,6 +171,10 @@ pub struct ThreadParams {
     pub buddy_meta: Option<BuddyThreadMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_request_prefix: Option<FrozenRequestPrefix>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_identity: Option<ClaudeCodeIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
     pub reactive_compact_attempts: Option<usize>,
 }
@@ -206,6 +224,8 @@ impl Default for ThreadParams {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            frozen_request_prefix: None,
+            claude_code_identity: None,
             reactive_compact_attempts: None,
         }
     }
@@ -793,7 +813,44 @@ mod tests {
         assert!(params.worktree.is_none());
         assert!(!params.id.is_empty());
         assert!(params.auto_compact_enabled.is_none());
+        assert!(params.frozen_request_prefix.is_none());
+        assert!(params.claude_code_identity.is_none());
         assert!(params.auto_compact_enabled_effective());
+    }
+
+    #[test]
+    fn test_frozen_request_prefix_and_claude_code_identity_serde() {
+        let prefix = FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: "2026-05-29T00:00:00Z".to_string(),
+            system_prompt: Some("system".to_string()),
+            tools_canonical: Some(json!([{"type":"function"}])),
+        };
+        let identity = ClaudeCodeIdentity {
+            device_id: "device".to_string(),
+            session_id: "session".to_string(),
+        };
+        let params = ThreadParams {
+            frozen_request_prefix: Some(prefix.clone()),
+            claude_code_identity: Some(identity.clone()),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["frozen_request_prefix"]["schema_version"], 1);
+        assert_eq!(json["claude_code_identity"]["session_id"], "session");
+
+        let roundtrip: ThreadParams = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.frozen_request_prefix, Some(prefix));
+        assert_eq!(roundtrip.claude_code_identity, Some(identity));
+    }
+
+    #[test]
+    fn test_thread_params_without_frozen_fields_omits_them() {
+        let params = ThreadParams::default();
+        let json = serde_json::to_value(&params).unwrap();
+        assert!(json.get("frozen_request_prefix").is_none());
+        assert!(json.get("claude_code_identity").is_none());
     }
 
     #[test]

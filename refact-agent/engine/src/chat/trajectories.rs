@@ -863,10 +863,16 @@ pub async fn load_trajectory_for_chat(
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
 
         auto_compact_enabled: t.get("auto_compact_enabled").and_then(|v| v.as_bool()),
+        frozen_request_prefix: t
+            .get("frozen_request_prefix")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        claude_code_identity: t
+            .get("claude_code_identity")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         reactive_compact_attempts: t
             .get("reactive_compact_attempts")
             .and_then(|v| v.as_u64())
-            .map(|n| (n as usize).min(1)),
+            .map(|n| if n > 2 { 1 } else { n as usize }),
     };
 
     let auto_approve_editing_tools_present = t
@@ -980,6 +986,8 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         active_skill: None,
         buddy_meta: None,
         auto_compact_enabled: None,
+        frozen_request_prefix: None,
+        claude_code_identity: None,
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
@@ -1029,6 +1037,8 @@ pub async fn save_trajectory_as(
         auto_enrichment_enabled: thread.auto_enrichment_enabled,
         buddy_meta: thread.buddy_meta.clone(),
         auto_compact_enabled: thread.auto_compact_enabled,
+        frozen_request_prefix: thread.frozen_request_prefix.clone(),
+        claude_code_identity: thread.claude_code_identity.clone(),
         reactive_compact_attempts: thread.reactive_compact_attempts,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
@@ -1104,6 +1114,14 @@ pub async fn save_trajectory_snapshot(
     }
     if let Some(auto_compact) = snapshot.auto_compact_enabled {
         trajectory["auto_compact_enabled"] = json!(auto_compact);
+    }
+    if let Some(ref frozen_request_prefix) = snapshot.frozen_request_prefix {
+        trajectory["frozen_request_prefix"] =
+            serde_json::to_value(frozen_request_prefix).unwrap_or_default();
+    }
+    if let Some(ref claude_code_identity) = snapshot.claude_code_identity {
+        trajectory["claude_code_identity"] =
+            serde_json::to_value(claude_code_identity).unwrap_or_default();
     }
     if let Some(reactive_compact_attempts) = snapshot.reactive_compact_attempts {
         trajectory["reactive_compact_attempts"] = json!(reactive_compact_attempts);
@@ -3079,6 +3097,7 @@ mod tests {
     };
     use crate::chat::history_limit::Tier0CompactReport;
     use crate::chat::types::{ActiveCommandContext, BurstGuard};
+    use refact_chat_api::{ClaudeCodeIdentity, FrozenRequestPrefix};
     use serial_test::serial;
     use std::path::Path;
     use std::process::Command;
@@ -3184,6 +3203,8 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            frozen_request_prefix: None,
+            claude_code_identity: None,
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
@@ -4089,6 +4110,8 @@ mod tests {
                 auto_enrichment_enabled: None,
                 buddy_meta: None,
                 auto_compact_enabled: None,
+                frozen_request_prefix: None,
+                claude_code_identity: None,
                 reactive_compact_attempts: None,
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
@@ -4637,6 +4660,8 @@ mod tests {
             auto_enrichment_enabled: None,
             buddy_meta: None,
             auto_compact_enabled: None,
+            frozen_request_prefix: None,
+            claude_code_identity: None,
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
@@ -4665,6 +4690,107 @@ mod tests {
             .and_then(|item| item.worktree.clone())
             .unwrap();
         assert_eq!(listed_worktree.id, worktree.id);
+    }
+
+    #[tokio::test]
+    async fn frozen_request_prefix_and_claude_code_identity_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let tools_canonical = json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "cat",
+                    "description": "Read a file",
+                    "parameters": {"type": "object"}
+                }
+            }
+        ]);
+        let frozen_request_prefix = FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: "2026-05-29T00:00:00Z".to_string(),
+            system_prompt: Some("verbatim system".to_string()),
+            tools_canonical: Some(tools_canonical.clone()),
+        };
+        let claude_code_identity = ClaudeCodeIdentity {
+            device_id: "device-123".to_string(),
+            session_id: "session-456".to_string(),
+        };
+        let mut snapshot = test_snapshot(
+            "frozen-prefix-roundtrip",
+            "Frozen Prefix",
+            vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+        );
+        snapshot.frozen_request_prefix = Some(frozen_request_prefix.clone());
+        snapshot.claude_code_identity = Some(claude_code_identity.clone());
+
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join("frozen-prefix-roundtrip.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["frozen_request_prefix"]["tools_canonical"],
+            tools_canonical
+        );
+        assert_eq!(raw["claude_code_identity"]["device_id"], "device-123");
+
+        let loaded = load_trajectory_for_chat(gcx, "frozen-prefix-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.thread.frozen_request_prefix,
+            Some(frozen_request_prefix)
+        );
+        assert_eq!(
+            loaded.thread.claude_code_identity,
+            Some(claude_code_identity)
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_request_prefix_and_claude_code_identity_missing_in_legacy_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        {
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let traj_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&traj_dir).await.unwrap();
+        tokio::fs::write(
+            traj_dir.join("legacy-frozen-prefix.json"),
+            r#"{
+                "id":"legacy-frozen-prefix",
+                "title":"Legacy",
+                "created_at":"2024-01-01T00:00:00Z",
+                "updated_at":"2024-01-01T00:00:00Z",
+                "model":"model",
+                "mode":"agent",
+                "tool_use":"agent",
+                "messages":[{"role":"user","content":"hello"}],
+                "include_project_info":true,
+                "checkpoints_enabled":true
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "legacy-frozen-prefix")
+            .await
+            .unwrap();
+        assert!(loaded.thread.frozen_request_prefix.is_none());
+        assert!(loaded.thread.claude_code_identity.is_none());
     }
 
     #[tokio::test]
@@ -4792,10 +4918,7 @@ mod tests {
         let loaded = load_trajectory_for_chat(gcx, "reactive-attempts-roundtrip")
             .await
             .unwrap();
-        assert_eq!(
-            loaded.thread.reactive_compact_attempts,
-            Some(1)
-        );
+        assert_eq!(loaded.thread.reactive_compact_attempts, Some(1));
     }
 
     #[tokio::test]

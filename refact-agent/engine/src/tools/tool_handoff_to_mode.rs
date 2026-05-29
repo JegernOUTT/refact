@@ -415,6 +415,8 @@ impl Tool for ToolHandoffToMode {
             auto_enrichment_enabled: thread.auto_enrichment_enabled,
             buddy_meta: None,
             auto_compact_enabled: thread.auto_compact_enabled,
+            frozen_request_prefix: thread.frozen_request_prefix.clone(),
+            claude_code_identity: thread.claude_code_identity.clone(),
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
