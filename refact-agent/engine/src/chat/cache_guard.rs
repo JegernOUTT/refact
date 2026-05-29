@@ -8,6 +8,7 @@ use similar::{Algorithm, TextDiff};
 use tokio::sync::{Mutex as AMutex};
 
 use crate::app_state::AppState;
+use crate::chat::types::{ChatSession, TaskMeta};
 use crate::tokens::{cached_tokenizer, count_text_tokens_with_fallback};
 
 const CACHE_GUARD_TOOL_NAME: &str = "cache_guard";
@@ -54,8 +55,41 @@ pub fn cache_guard_event_message(payload: Value, summary: impl Into<String>) -> 
     )
 }
 
-pub async fn is_guard_enabled_for_model(_app: AppState, _model_id: &str) -> bool {
-    false
+pub async fn is_guard_enabled(app: AppState, model_id: &str, session: &ChatSession) -> bool {
+    is_guard_enabled_for_task_meta(app, model_id, session.thread.task_meta.as_ref()).await
+}
+
+async fn is_guard_enabled_for_task_meta(
+    app: AppState,
+    model_id: &str,
+    task_meta: Option<&TaskMeta>,
+) -> bool {
+    if task_meta.is_some_and(|meta| is_task_management_role(&meta.role)) {
+        return false;
+    }
+
+    model_supports_cache_guard(app, model_id).await
+}
+
+fn is_task_management_role(role: &str) -> bool {
+    matches!(role, "planner" | "agent" | "agents" | "task_agent")
+}
+
+async fn model_supports_cache_guard(app: AppState, model_id: &str) -> bool {
+    let supports_cache_control =
+        crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
+            .await
+            .ok()
+            .and_then(|caps| crate::caps::resolve_chat_model(caps, model_id).ok())
+            .map(|record| record.base.supports_cache_control)
+            .unwrap_or(false);
+    if supports_cache_control {
+        return true;
+    }
+
+    crate::providers::pricing::lookup_model_pricing(&app.gcx, model_id)
+        .await
+        .is_some_and(|pricing| pricing.cache_read.is_some() || pricing.cache_creation.is_some())
 }
 
 pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
@@ -157,7 +191,11 @@ pub async fn check_or_pause_cache_guard(
     model_id: &str,
     request_body: &Value,
 ) -> Result<CacheGuardOutcome, String> {
-    if !is_guard_enabled_for_model(app.clone(), model_id).await {
+    let task_meta = {
+        let session = session_arc.lock().await;
+        session.thread.task_meta.clone()
+    };
+    if !is_guard_enabled_for_task_meta(app.clone(), model_id, task_meta.as_ref()).await {
         return Ok(CacheGuardOutcome::Pass(None));
     }
 
@@ -377,13 +415,12 @@ mod tests {
         assert_eq!(message.content.content_text_only(), "cache guard probe");
     }
 
-    #[tokio::test]
-    async fn cache_guard_disabled_even_for_cache_priced_models() {
+    async fn app_with_cache_priced_model(model_id: &str) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
         let mut model_caps = std::collections::HashMap::new();
         model_caps.insert(
-            "openai/gpt-4o".to_string(),
+            model_id.to_string(),
             crate::caps::model_caps::ModelCapabilities {
                 n_ctx: 128_000,
                 max_output_tokens: 16_384,
@@ -408,8 +445,44 @@ mod tests {
                 .unwrap()
                 .as_secs();
         }
+        app
+    }
 
-        assert!(!is_guard_enabled_for_model(app, "openai/gpt-4o").await);
+    fn task_meta(role: &str) -> TaskMeta {
+        TaskMeta {
+            task_id: "task-1".to_string(),
+            role: role.to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: None,
+        }
+    }
+
+    fn session_with_task_role(role: Option<&str>) -> crate::chat::types::ChatSession {
+        let mut session = crate::chat::types::ChatSession::new("test-cache-guard".to_string());
+        session.thread.task_meta = role.map(task_meta);
+        session
+    }
+
+    #[tokio::test]
+    async fn cache_guard_enabled_for_normal_cache_priced_chat() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+
+        assert!(is_guard_enabled(app, "test/model-with-cache", &session).await);
+    }
+
+    #[tokio::test]
+    async fn cache_guard_disabled_for_task_management_roles() {
+        for role in ["planner", "agents", "agent", "task_agent"] {
+            let app = app_with_cache_priced_model("test/model-with-cache").await;
+            let session = session_with_task_role(Some(role));
+
+            assert!(
+                !is_guard_enabled(app, "test/model-with-cache", &session).await,
+                "cache guard should be disabled for task role {role}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -426,38 +499,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_guard_violation_passes_without_pausing_when_disabled() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = AppState::from_gcx(gcx.clone()).await;
-        let mut model_caps = std::collections::HashMap::new();
-        model_caps.insert(
-            "test/model-with-cache".to_string(),
-            crate::caps::model_caps::ModelCapabilities {
-                n_ctx: 128_000,
-                max_output_tokens: 16_384,
-                pricing: Some(crate::providers::traits::ModelPricing {
-                    prompt: 2.5,
-                    generated: 10.0,
-                    cache_read: Some(1.25),
-                    cache_creation: None,
-                    context_over_200k: None,
-                }),
-                ..Default::default()
-            },
-        );
-        {
-            let mut caps = app.model.caps.write().await;
-            caps.caps = Some(std::sync::Arc::new(crate::caps::CodeAssistantCaps {
-                model_caps: std::sync::Arc::new(model_caps),
-                ..Default::default()
-            }));
-            caps.last_attempted_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-        }
-
-        let session = crate::chat::types::ChatSession::new("test-paused".to_string());
+    async fn cache_guard_violation_in_normal_chat_pauses() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
         let prev_body =
             json!({"messages": [{"role": "user", "content": "hello"}], "model": "test"});
         let session_arc = Arc::new(tokio::sync::Mutex::new(session));
@@ -478,13 +522,76 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(matches!(outcome, CacheGuardOutcome::Pass(_)));
+        assert!(matches!(outcome, CacheGuardOutcome::Paused { .. }));
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.pause_reasons.len(), 1);
+        assert!(is_cache_guard_pause_reason(
+            &session.runtime.pause_reasons[0]
+        ));
+    }
+
+    #[tokio::test]
+    async fn cache_guard_violation_in_task_agent_chat_passes_without_pausing() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(Some("agents"));
+        let prev_body =
+            json!({"messages": [{"role": "user", "content": "hello"}], "model": "test"});
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        {
+            let mut s = session_arc.lock().await;
+            s.cache_guard_snapshot = Some(sanitize_body_for_cache_guard(&prev_body));
+        }
+
+        let next_body =
+            json!({"messages": [{"role": "assistant", "content": "hi"}], "model": "test"});
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, CacheGuardOutcome::Pass(None)));
         let session = session_arc.lock().await;
         assert!(session.runtime.pause_reasons.is_empty());
     }
 
-    #[test]
-    fn test_append_only_prefix_ignores_previous_response_id() {
+    #[tokio::test]
+    async fn cache_guard_force_next_allows_one_intentional_reset() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let prev_body =
+            json!({"messages": [{"role": "user", "content": "hello"}], "model": "test"});
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        {
+            let mut s = session_arc.lock().await;
+            s.cache_guard_snapshot = Some(sanitize_body_for_cache_guard(&prev_body));
+            s.cache_guard_force_next = true;
+        }
+
+        let next_body =
+            json!({"messages": [{"role": "assistant", "content": "hi"}], "model": "test"});
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, CacheGuardOutcome::Pass(Some(_))));
+        let session = session_arc.lock().await;
+        assert!(!session.cache_guard_force_next);
+        assert!(session.runtime.pause_reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_guard_skips_openai_previous_response_id() {
         // When previous_response_id is present, the request body uses tail-only mode
         // (only new messages after last assistant), so the full-body comparison is invalid.
         // The cache guard should skip validation in this case.
@@ -510,7 +617,26 @@ mod tests {
             &sanitize_body_for_cache_guard(&prev),
             &sanitize_body_for_cache_guard(&next_stateful),
         ));
-        // The check_or_pause_cache_guard function would skip entirely when
-        // previous_response_id is present, avoiding this false violation.
+
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        {
+            let mut session = session_arc.lock().await;
+            session.cache_guard_snapshot = Some(sanitize_body_for_cache_guard(&prev));
+        }
+
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_stateful,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, CacheGuardOutcome::Pass(None)));
+        let session = session_arc.lock().await;
+        assert!(session.runtime.pause_reasons.is_empty());
     }
 }
