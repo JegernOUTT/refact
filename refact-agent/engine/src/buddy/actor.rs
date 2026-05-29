@@ -768,6 +768,14 @@ impl BuddyService {
         }
     }
 
+    pub fn expire_runtime_events_at(&mut self, now: DateTime<Utc>) -> Vec<String> {
+        let removed = self.runtime_queue.prune_expired_at(now);
+        for id in &removed {
+            self.persist_removal(id.clone());
+        }
+        removed
+    }
+
     fn apply_runtime_dismissal_memory(
         &mut self,
         mut event: BuddyRuntimeEvent,
@@ -1978,6 +1986,7 @@ pub async fn buddy_background_task(gcx: AppState) {
                     svc.expire_opportunities();
                     svc.opportunity_queue.refresh_cooldowns(now);
                     svc.expire_drafts(now);
+                    svc.expire_runtime_events_at(now);
                 }
             }
         }

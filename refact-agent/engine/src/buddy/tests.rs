@@ -2629,6 +2629,53 @@ async fn test_runtime_queue_now_playing_persists() {
     );
 }
 
+#[test]
+fn buddy_service_expire_runtime_events_persists_removed_tombstones() {
+    use super::actor::{make_runtime_event, RuntimeQueueWriteOp};
+    use super::storage::RuntimeQueueRecord;
+
+    let (events_tx, _) = broadcast::channel(16);
+    let (queue_tx, mut queue_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        events_tx,
+        Some(queue_tx),
+    );
+    let mut event = make_runtime_event(
+        "signal",
+        "expired",
+        "src",
+        "expired-key",
+        "completed",
+        Some("normal"),
+    );
+    event.id = "expired-runtime-event".to_string();
+    event.created_at = "2024-01-01T00:00:00Z".to_string();
+    event.ttl_ms = Some(1000);
+    svc.enqueue_runtime_event(event);
+
+    let now = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:02Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let removed = svc.expire_runtime_events_at(now);
+
+    assert_eq!(removed, vec!["expired-runtime-event".to_string()]);
+    assert!(svc.runtime_queue.items.is_empty());
+    let mut saw_tombstone = false;
+    while let Ok(op) = queue_rx.try_recv() {
+        if let RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Removed { id }) = op {
+            if id == "expired-runtime-event" {
+                saw_tombstone = true;
+            }
+        }
+    }
+    assert!(saw_tombstone);
+}
+
 /// Backward-compat: legacy logs that contain bare `BuddyRuntimeEvent` JSON
 /// objects (no `kind` tag) must still load successfully.
 #[tokio::test]
