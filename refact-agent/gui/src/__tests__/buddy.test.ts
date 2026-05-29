@@ -58,7 +58,10 @@ import {
   STAGES,
 } from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
-import { updateSceneAnimation } from "../features/Buddy/canvas/animLoop";
+import {
+  triggerSignalAnimation,
+  updateSceneAnimation,
+} from "../features/Buddy/canvas/animLoop";
 import { createInitialAnimState } from "../features/Buddy/state";
 import { setUpStore } from "../app/store";
 import { trajectoriesApi } from "../services/refact";
@@ -2108,6 +2111,67 @@ describe("BuddyChatCompanion triggers", () => {
     const fallback = getSignalDef("future_backend_signal");
     expect(fallback.icon).toBe("✨");
     expect(fallback.isError).toBe(false);
+  });
+
+  test.each<[string, string, string]>([
+    ["speech_humor", "happy", "perk"],
+    ["speech_chat_reaction", "happy", "perk"],
+    ["speech_insight", "curious", "thinking"],
+    ["chat_bug_candidate", "curious", "perk"],
+  ])(
+    "%s uses a friendly non-error signal definition",
+    (signal, mood, scene) => {
+      const def = SIGNALS[signal];
+      expect(def).toBeDefined();
+      expect(def.isError).toBe(false);
+      expect(def.mood).toBe(mood);
+      expect(def.scene).toBe(scene);
+      expect(def.animationType).not.toBe("shake");
+    },
+  );
+
+  test.each<string>([
+    "speech_humor",
+    "speech_insight",
+    "speech_chat_reaction",
+    "chat_bug_candidate",
+  ])("%s does not bump errorStreak or keep failure eyes", (signal) => {
+    const anim = createInitialAnimState();
+    const emit = vi.fn();
+    anim.errorStreak = 4;
+
+    triggerSignalAnimation(anim, signal, emit);
+
+    expect(anim.errorStreak).toBeLessThanOrEqual(4);
+    expect(["X", "spiral", "teary", "angry"]).not.toContain(anim.eyeStyle);
+    expect(anim.activeScene).toBe(SIGNALS[signal].scene);
+  });
+
+  test("unknown signal animation remains a no-op", () => {
+    const anim = createInitialAnimState();
+    const emit = vi.fn();
+    anim.errorStreak = 2;
+
+    triggerSignalAnimation(anim, "future_backend_signal", emit);
+
+    expect(anim.errorStreak).toBe(2);
+    expect(anim.eyeStyle).toBe("normal");
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  test("chat companion dispatches selected live chat reaction signal once", () => {
+    const source = fs.readFileSync(
+      path.join(buddyDir, "BuddyChatCompanion.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain(
+      "reactionSignalForNotification(notification, runtimeQueue, nowPlaying)",
+    );
+    expect(source).toContain(
+      "signaledNotificationIdRef.current === notification.id",
+    );
+    expect(source).toContain("triggerBuddySignal(reactionSignal)");
   });
 
   test("diagnostic stored in recentDiagnostics on addBuddyDiagnostic", () => {

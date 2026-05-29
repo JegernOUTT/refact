@@ -63,6 +63,7 @@ import {
   isBuddyRuntimeEventVisible,
   isErrorRuntimeEvent,
 } from "./buddyRuntimeEvents";
+import { SIGNALS } from "./constants";
 import {
   compareBuddyRuntimeEvents,
   formatBuddyRuntimeEventText,
@@ -383,6 +384,22 @@ function isPersistentActiveProgressEvent(event: BuddyRuntimeEvent): boolean {
   );
 }
 
+function reactionSignalForNotification(
+  notification: NotificationItem | null,
+  runtimeQueue: BuddyRuntimeEvent[],
+  nowPlaying: BuddyRuntimeEvent | null,
+): string | null {
+  if (notification?.source !== "runtime") return null;
+  const event = [nowPlaying, ...runtimeQueue].find(
+    (candidate): candidate is BuddyRuntimeEvent =>
+      candidate?.id === notification.sourceId,
+  );
+  if (!event || !isLiveChatReactionEvent(event)) return null;
+  return Object.prototype.hasOwnProperty.call(SIGNALS, event.signal_type)
+    ? event.signal_type
+    : "speech_chat_reaction";
+}
+
 function isFreshRuntimeEventForBubble(event: BuddyRuntimeEvent): boolean {
   const createdAtTime = validCreatedAtMs(event.created_at);
   if (createdAtTime == null) return false;
@@ -432,6 +449,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   );
 
   const buddy = useBuddyState();
+  const triggerBuddySignal = buddy.signal;
   const { unread } = useBuddyOpportunities();
   const executeOpportunityAction = useExecuteBuddyAction();
   const [dismissMutation] = useDismissBuddySuggestionMutation();
@@ -452,6 +470,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const prevChatIdRef = useRef(chatId);
   const recordedNotificationIdsRef = useRef<Set<string>>(new Set());
   const threadErrorFirstSeenRef = useRef<Map<string, string>>(new Map());
+  const signaledNotificationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (prevChatIdRef.current !== chatId) {
@@ -772,6 +791,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   ]);
 
   const notification = selectedCandidate?.notification ?? null;
+  const reactionSignal = useMemo(
+    () => reactionSignalForNotification(notification, runtimeQueue, nowPlaying),
+    [notification, nowPlaying, runtimeQueue],
+  );
+
   useEffect(() => {
     setActionError(null);
   }, [notification?.id]);
@@ -806,6 +830,13 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       }),
     );
   }, [dispatch, selectedCandidate]);
+
+  useEffect(() => {
+    if (!notification || !reactionSignal) return;
+    if (signaledNotificationIdRef.current === notification.id) return;
+    signaledNotificationIdRef.current = notification.id;
+    triggerBuddySignal(reactionSignal);
+  }, [notification, reactionSignal, triggerBuddySignal]);
 
   const completeBubbleInteraction = useCallback(() => {
     dispatch(snoozeChatBubbles(undefined));

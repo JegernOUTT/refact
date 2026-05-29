@@ -249,6 +249,13 @@ function updateWalk(anim: BuddyAnimState, semantic: BuddySemanticState): void {
   }
 }
 
+const FRIENDLY_REACTION_SIGNALS = new Set([
+  "speech_humor",
+  "speech_insight",
+  "speech_chat_reaction",
+  "chat_bug_candidate",
+]);
+
 function updateMoodDrift(
   anim: BuddyAnimState,
   semantic: BuddySemanticState,
@@ -340,10 +347,11 @@ export function triggerSignalAnimation(
     spawnAfterimage(anim);
   }
 
-  if (anim.errorStreak >= 5) {
+  const isFriendlyReaction = FRIENDLY_REACTION_SIGNALS.has(signalType);
+  if (!isFriendlyReaction && anim.errorStreak >= 5) {
     anim.eyeStyle = "X";
     anim.eyeStyleTimer = 240;
-  } else if (anim.errorStreak >= 3) {
+  } else if (!isFriendlyReaction && anim.errorStreak >= 3) {
     anim.eyeStyle = "spiral";
     anim.eyeStyleTimer = 300;
   } else if (signalType === "task_failed") {
