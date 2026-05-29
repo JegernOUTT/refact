@@ -6,7 +6,7 @@ use crate::call_validation::{ChatContent, ChatMessage};
 
 pub const EVENT_ROLE: &str = "event";
 pub const PLAN_ROLE: &str = "plan";
-pub const MAX_PLAN_BODY_CHARS: usize = 16 * 1024;
+pub const MAX_PLAN_BODY_CHARS: usize = 96 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +21,7 @@ pub enum EventSubkind {
     VerifierReport,
     CancellationNote,
     SystemNotice,
+    PlanDelta,
 }
 
 pub fn event(
@@ -51,6 +52,14 @@ pub fn last_is_event(messages: &[ChatMessage]) -> bool {
     messages
         .last()
         .is_some_and(|message| message.role == EVENT_ROLE)
+}
+
+pub fn plan_delta(
+    source: impl Into<String>,
+    payload: serde_json::Value,
+    content: impl Into<String>,
+) -> ChatMessage {
+    event(EventSubkind::PlanDelta, source, payload, content)
 }
 
 pub fn mode_switch_event(
@@ -237,5 +246,20 @@ mod tests {
             serde_json::to_value(EventSubkind::SystemNotice).unwrap(),
             json!("system_notice")
         );
+        assert_eq!(
+            serde_json::to_value(EventSubkind::PlanDelta).unwrap(),
+            json!("plan_delta")
+        );
+    }
+
+    #[test]
+    fn plan_delta_helper_produces_correct_role_and_subkind() {
+        let msg = plan_delta("tool.set_plan", json!({"seq": 7}), "append note");
+
+        assert_eq!(msg.role, EVENT_ROLE);
+        let event_meta = msg.extra.get("event").expect("extra.event missing");
+        assert_eq!(event_meta["subkind"], json!("plan_delta"));
+        assert_eq!(event_meta["source"], json!("tool.set_plan"));
+        assert_eq!(event_meta["payload"]["seq"], json!(7));
     }
 }

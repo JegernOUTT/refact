@@ -94,6 +94,19 @@ pub fn render_event_message(msg: &ChatMessage) -> String {
         .and_then(|m| m.get("subkind"))
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+    let content = msg.content.content_text_only();
+    if subkind == "plan_delta" {
+        let seq = meta
+            .and_then(|m| m.get("payload"))
+            .and_then(|payload| payload.get("seq"))
+            .and_then(|seq| seq.as_u64())
+            .unwrap_or(0);
+        return format!(
+            "<plan-update seq=\"{}\">{}</plan-update>",
+            seq,
+            escape_xml_text(&content)
+        );
+    }
     let source = meta
         .and_then(|m| m.get("source"))
         .and_then(|v| v.as_str())
@@ -102,7 +115,6 @@ pub fn render_event_message(msg: &ChatMessage) -> String {
         .and_then(|m| m.get("payload"))
         .unwrap_or(&serde_json::Value::Null);
     let payload_json = serde_json::to_string(payload).unwrap_or_else(|_| "null".to_string());
-    let content = msg.content.content_text_only();
     format!(
         "<event subkind=\"{}\" source=\"{}\">\n<payload>{}</payload>\n<message>{}</message>\n</event>",
         escape_xml_attr(subkind),
@@ -153,4 +165,38 @@ fn escape_xml_attr(input: &str) -> String {
     escape_xml_text(input)
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event(subkind: &str, payload: serde_json::Value, content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            json!({
+                "subkind": subkind,
+                "source": "tool.set_plan",
+                "payload": payload,
+            }),
+        );
+        ChatMessage {
+            role: "event".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn render_plan_update_event_emits_plan_update_block() {
+        let msg = event("plan_delta", json!({"seq": 5}), "use <new> & better plan");
+
+        assert_eq!(
+            render_event_message(&msg),
+            "<plan-update seq=\"5\">use &lt;new&gt; &amp; better plan</plan-update>"
+        );
+    }
 }

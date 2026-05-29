@@ -33,6 +33,7 @@ pub fn exemption_for(msg: &ChatMessage) -> CompressionExemption {
     }
 
     match event_subkind(msg) {
+        Some("plan_delta") => CompressionExemption::Never,
         Some("tick" | "mode_switch") => CompressionExemption::DropOnAge,
         Some("process_completed" | "cron_fire") => CompressionExemption::KeepRecentN,
         Some("tool_decision" | "ide_callback" | "verifier_report") => {

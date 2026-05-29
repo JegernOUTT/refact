@@ -1,5 +1,5 @@
 use crate::call_validation::ChatMessage;
-use crate::chat::internal_roles::{self, PLAN_ROLE};
+use crate::chat::internal_roles::{self, EVENT_ROLE, PLAN_ROLE};
 use crate::chat::types::ChatSession;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,40 @@ pub fn current_plan(session: &ChatSession) -> Option<&ChatMessage> {
     versioned_plans(session)
         .max_by_key(|(index, version, _)| (*version, *index))
         .map(|(_, _, message)| message)
+}
+
+pub fn current_base_plan(session: &ChatSession) -> Option<&ChatMessage> {
+    current_plan(session)
+}
+
+pub fn plan_delta_events(session: &ChatSession) -> Vec<&ChatMessage> {
+    session
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == EVENT_ROLE
+                && message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("subkind"))
+                    .and_then(|subkind| subkind.as_str())
+                    == Some("plan_delta")
+        })
+        .collect()
+}
+
+pub fn synthesize_current_plan(session: &ChatSession) -> Option<String> {
+    let base = current_base_plan(session)?.content.content_text_only();
+    let deltas = plan_delta_events(session);
+    if deltas.is_empty() {
+        return Some(base);
+    }
+    let notes = deltas
+        .into_iter()
+        .map(|message| message.content.content_text_only())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(format!("{base}\n\n---\n\n## Plan updates\n\n{notes}"))
 }
 
 pub fn plan_history(session: &ChatSession) -> Vec<&ChatMessage> {
@@ -113,6 +147,67 @@ mod tests {
     }
 
     #[test]
+    fn current_base_plan_returns_single_plan() {
+        let mut session = make_session();
+        install_plan(&mut session, "agent", "base");
+
+        let current = current_base_plan(&session).unwrap();
+
+        assert_eq!(current.role, PLAN_ROLE);
+        assert_eq!(current.content.content_text_only(), "base");
+    }
+
+    #[test]
+    fn plan_delta_events_in_order() {
+        let mut session = make_session();
+        session.add_message(internal_roles::plan_delta(
+            "tool.set_plan",
+            serde_json::json!({"seq": 1}),
+            "first",
+        ));
+        session.add_message(internal_roles::event(
+            internal_roles::EventSubkind::SystemNotice,
+            "system",
+            serde_json::json!({}),
+            "ignore",
+        ));
+        session.add_message(internal_roles::plan_delta(
+            "tool.set_plan",
+            serde_json::json!({"seq": 2}),
+            "second",
+        ));
+
+        let deltas = plan_delta_events(&session);
+
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].content.content_text_only(), "first");
+        assert_eq!(deltas[1].content.content_text_only(), "second");
+    }
+
+    #[test]
+    fn synthesize_current_plan_concats_base_and_deltas() {
+        let mut session = make_session();
+        install_plan(&mut session, "agent", "base plan");
+        session.add_message(internal_roles::plan_delta(
+            "tool.set_plan",
+            serde_json::json!({"seq": 1}),
+            "first update",
+        ));
+        session.add_message(internal_roles::plan_delta(
+            "tool.set_plan",
+            serde_json::json!({"seq": 2}),
+            "second update",
+        ));
+
+        let synthesized = synthesize_current_plan(&session).unwrap();
+
+        assert_eq!(
+            synthesized,
+            "base plan\n\n---\n\n## Plan updates\n\nfirst update\n\nsecond update"
+        );
+    }
+
+    #[test]
     fn plan_history_desc_by_version() {
         let mut session = make_session();
 
@@ -141,7 +236,10 @@ mod tests {
             body.chars().count() < oversized.chars().count(),
             "body should be shorter than original"
         );
-        assert!(body.contains("[truncated:"), "truncation marker must be present");
+        assert!(
+            body.contains("[truncated:"),
+            "truncation marker must be present"
+        );
     }
 
     #[test]
@@ -159,7 +257,10 @@ mod tests {
             std::str::from_utf8(body.as_bytes()).is_ok(),
             "body must be valid UTF-8"
         );
-        assert!(body.contains("[truncated:"), "truncation marker must be present");
+        assert!(
+            body.contains("[truncated:"),
+            "truncation marker must be present"
+        );
     }
 
     #[test]
@@ -171,10 +272,7 @@ mod tests {
         let msg = current_plan(&session).unwrap();
         let plan_meta = msg.extra.get("plan").unwrap();
         assert_eq!(plan_meta["truncated"], serde_json::json!(true));
-        assert_eq!(
-            plan_meta["original_chars"],
-            serde_json::json!(original_len)
-        );
+        assert_eq!(plan_meta["original_chars"], serde_json::json!(original_len));
     }
 
     #[test]

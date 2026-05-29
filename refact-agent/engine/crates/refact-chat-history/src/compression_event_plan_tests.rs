@@ -69,6 +69,7 @@ fn event_exemptions_match_hidden_role_contract() {
     let process = event("process_completed", "exec.registry", "done");
     let notice = event("system_notice", "system", "notice");
     let summary = event("summarization_marker", "chat.summarizer", "summary");
+    let plan_delta = event("plan_delta", "tool.set_plan", "append-only note");
 
     assert_eq!(event_subkind(&tick), Some("tick"));
     assert_eq!(exemption_for(&tick), CompressionExemption::DropOnAge);
@@ -78,4 +79,5 @@ fn event_exemptions_match_hidden_role_contract() {
         exemption_for(&summary),
         CompressionExemption::PreserveAnchor
     );
+    assert_eq!(exemption_for(&plan_delta), CompressionExemption::Never);
 }
