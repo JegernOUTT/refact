@@ -1496,9 +1496,44 @@ pub async fn get_or_create_session_with_trajectory(
     }
 
     if inserted && !is_new {
-        migrate_legacy_frozen_prefix_on_open(app.clone(), session_arc.clone()).await;
+        if !transition_identity_repaired {
+            migrate_legacy_frozen_prefix_on_open(app.clone(), session_arc.clone()).await;
+        }
         if transition_identity_repaired {
-            super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+            let loaded_for_repair = {
+                let session = session_arc.lock().await;
+                super::trajectories::LoadedTrajectory {
+                    messages: session.messages.clone(),
+                    thread: session.thread.clone(),
+                    created_at: session.created_at.clone(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    wake_up_at: session.wake_up_at,
+                    waiting_for_card_ids: session.waiting_for_card_ids.clone(),
+                    auto_approve_editing_tools_present: true,
+                    auto_approve_dangerous_commands_present: true,
+                    transition_identity_repaired: true,
+                }
+            };
+            let repaired_version = {
+                let session = session_arc.lock().await;
+                session.trajectory_version
+            };
+            if let Err(e) = super::trajectories::persist_loaded_trajectory_repair_raw(
+                gcx.clone(),
+                &loaded_for_repair,
+            )
+            .await
+            {
+                warn!(
+                    "Failed to persist repaired trajectory for {}: {}",
+                    chat_id, e
+                );
+            } else {
+                let mut session = session_arc.lock().await;
+                if session.trajectory_version == repaired_version {
+                    session.trajectory_dirty = false;
+                }
+            }
         }
     }
 

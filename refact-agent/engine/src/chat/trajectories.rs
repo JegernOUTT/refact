@@ -250,6 +250,7 @@ struct TrajectoryListCandidate {
     path: PathBuf,
 }
 
+#[derive(Clone)]
 pub struct LoadedTrajectory {
     pub messages: Vec<ChatMessage>,
     pub thread: ThreadParams,
@@ -1617,7 +1618,7 @@ pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSe
     }
 }
 
-async fn persist_loaded_trajectory_repair_raw(
+pub(crate) async fn persist_loaded_trajectory_repair_raw(
     gcx: Arc<GlobalContext>,
     loaded: &LoadedTrajectory,
 ) -> Result<(), String> {
@@ -1651,6 +1652,14 @@ async fn persist_loaded_trajectory_repair_raw(
     trajectory_object.insert(
         "created_at".to_string(),
         serde_json::Value::String(loaded.created_at.clone()),
+    );
+    trajectory_object.insert(
+        "auto_approve_editing_tools".to_string(),
+        json!(loaded.thread.auto_approve_editing_tools),
+    );
+    trajectory_object.insert(
+        "auto_approve_dangerous_commands".to_string(),
+        json!(loaded.thread.auto_approve_dangerous_commands),
     );
     trajectory_object.insert(
         "updated_at".to_string(),
@@ -1704,6 +1713,10 @@ pub async fn check_external_reload_pending(
     }
     if let Some(mut loaded) = load_trajectory_for_chat(gcx.clone(), &chat_id).await {
         let transition_identity_repaired = loaded.transition_identity_repaired;
+        let loaded_had_auto_approve_editing_tools_present =
+            loaded.auto_approve_editing_tools_present;
+        let loaded_had_auto_approve_dangerous_commands_present =
+            loaded.auto_approve_dangerous_commands_present;
         apply_mode_defaults_to_thread(
             gcx.clone(),
             &mut loaded.thread,
@@ -1711,7 +1724,12 @@ pub async fn check_external_reload_pending(
             loaded.auto_approve_dangerous_commands_present,
         )
         .await;
-        let should_persist_repair = {
+        let mut loaded_for_repair = loaded.clone();
+        loaded_for_repair.auto_approve_editing_tools_present =
+            loaded_had_auto_approve_editing_tools_present;
+        loaded_for_repair.auto_approve_dangerous_commands_present =
+            loaded_had_auto_approve_dangerous_commands_present;
+        let repaired_version = {
             let mut session = session_arc.lock().await;
             if session.runtime.state == SessionState::Idle && !session.trajectory_dirty {
                 info!("Applying pending external reload for {}", chat_id);
@@ -1727,13 +1745,23 @@ pub async fn check_external_reload_pending(
                 }
                 let snapshot = session.snapshot();
                 session.emit(snapshot);
-                transition_identity_repaired
+                transition_identity_repaired.then_some(session.trajectory_version)
             } else {
-                false
+                None
             }
         };
-        if should_persist_repair {
-            maybe_save_trajectory(AppState::from_gcx(gcx).await, session_arc).await;
+        if let Some(repaired_version) = repaired_version {
+            if let Err(e) = persist_loaded_trajectory_repair_raw(gcx, &loaded_for_repair).await {
+                warn!(
+                    "Failed to persist repaired trajectory for {}: {}",
+                    chat_id, e
+                );
+            } else {
+                let mut session = session_arc.lock().await;
+                if session.trajectory_version == repaired_version {
+                    session.trajectory_dirty = false;
+                }
+            }
         }
     }
 }
@@ -1910,6 +1938,10 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
 
     if let Some(mut loaded) = load_trajectory_for_chat(gcx.clone(), chat_id).await {
         let transition_identity_repaired = loaded.transition_identity_repaired;
+        let loaded_had_auto_approve_editing_tools_present =
+            loaded.auto_approve_editing_tools_present;
+        let loaded_had_auto_approve_dangerous_commands_present =
+            loaded.auto_approve_dangerous_commands_present;
         apply_mode_defaults_to_thread(
             gcx.clone(),
             &mut loaded.thread,
@@ -1917,7 +1949,12 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             loaded.auto_approve_dangerous_commands_present,
         )
         .await;
-        let should_persist_repair = {
+        let mut loaded_for_repair = loaded.clone();
+        loaded_for_repair.auto_approve_editing_tools_present =
+            loaded_had_auto_approve_editing_tools_present;
+        loaded_for_repair.auto_approve_dangerous_commands_present =
+            loaded_had_auto_approve_dangerous_commands_present;
+        let repaired_version = {
             let mut session = session_arc.lock().await;
             if session.runtime.state != SessionState::Idle || session.trajectory_dirty {
                 session.external_reload_pending = true;
@@ -1936,10 +1973,20 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             }
             let snapshot = session.snapshot();
             session.emit(snapshot);
-            transition_identity_repaired
+            transition_identity_repaired.then_some(session.trajectory_version)
         };
-        if should_persist_repair {
-            maybe_save_trajectory(app, session_arc).await;
+        if let Some(repaired_version) = repaired_version {
+            if let Err(e) = persist_loaded_trajectory_repair_raw(gcx, &loaded_for_repair).await {
+                warn!(
+                    "Failed to persist repaired trajectory for {}: {}",
+                    chat_id, e
+                );
+            } else {
+                let mut session = session_arc.lock().await;
+                if session.trajectory_version == repaired_version {
+                    session.trajectory_dirty = false;
+                }
+            }
         }
     }
 }
@@ -5973,7 +6020,17 @@ mod tests {
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:00:00Z",
                 "include_project_info": true,
-                "checkpoints_enabled": true
+                "checkpoints_enabled": true,
+                "browser_meta": {
+                    "browser_runtime_id": "browser-open",
+                    "tab_urls": ["https://example.com/open"],
+                    "active_tab_id": "tab-open",
+                    "attach_screenshot_on_send": true
+                },
+                "custom_future_field": {
+                    "keep": true,
+                    "nested": {"value": 43}
+                }
             }))
             .unwrap(),
         )
@@ -6006,6 +6063,8 @@ mod tests {
         assert!(raw["frozen_request_prefix"]["tools_canonical"].is_null());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-open");
+        assert_eq!(raw["custom_future_field"]["nested"]["value"], 43);
     }
 
     #[tokio::test]
@@ -6037,7 +6096,17 @@ mod tests {
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:00:00Z",
                 "include_project_info": true,
-                "checkpoints_enabled": true
+                "checkpoints_enabled": true,
+                "browser_meta": {
+                    "browser_runtime_id": "browser-immediate",
+                    "tab_urls": ["https://example.com/immediate"],
+                    "active_tab_id": "tab-immediate",
+                    "attach_screenshot_on_send": false
+                },
+                "custom_future_field": {
+                    "keep": true,
+                    "nested": {"value": 44}
+                }
             }))
             .unwrap(),
         )
@@ -6062,6 +6131,8 @@ mod tests {
         assert!(raw.get("frozen_request_prefix").is_none());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-immediate");
+        assert_eq!(raw["custom_future_field"]["nested"]["value"], 44);
     }
 
     #[tokio::test]
@@ -6149,7 +6220,17 @@ mod tests {
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:00:00Z",
                 "include_project_info": true,
-                "checkpoints_enabled": true
+                "checkpoints_enabled": true,
+                "browser_meta": {
+                    "browser_runtime_id": "browser-global",
+                    "tab_urls": ["https://example.com/global"],
+                    "active_tab_id": "tab-global",
+                    "attach_screenshot_on_send": true
+                },
+                "custom_future_field": {
+                    "keep": true,
+                    "nested": {"value": 46}
+                }
             }))
             .unwrap(),
         )
@@ -6181,6 +6262,8 @@ mod tests {
         assert!(raw.get("frozen_request_prefix").is_none());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-global");
+        assert_eq!(raw["custom_future_field"]["nested"]["value"], 46);
         assert!(!tokio::fs::try_exists(project_path).await.unwrap());
     }
 
@@ -6407,7 +6490,17 @@ mod tests {
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:00:00Z",
                 "include_project_info": true,
-                "checkpoints_enabled": true
+                "checkpoints_enabled": true,
+                "browser_meta": {
+                    "browser_runtime_id": "browser-immediate",
+                    "tab_urls": ["https://example.com/immediate"],
+                    "active_tab_id": "tab-immediate",
+                    "attach_screenshot_on_send": false
+                },
+                "custom_future_field": {
+                    "keep": true,
+                    "nested": {"value": 44}
+                }
             }))
             .unwrap(),
         )
@@ -6436,6 +6529,8 @@ mod tests {
         assert!(raw.get("frozen_request_prefix").is_none());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-immediate");
+        assert_eq!(raw["custom_future_field"]["nested"]["value"], 44);
     }
 
     #[tokio::test]
@@ -6474,7 +6569,17 @@ mod tests {
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:00:00Z",
                 "include_project_info": true,
-                "checkpoints_enabled": true
+                "checkpoints_enabled": true,
+                "browser_meta": {
+                    "browser_runtime_id": "browser-pending",
+                    "tab_urls": ["https://example.com/pending"],
+                    "active_tab_id": "tab-pending",
+                    "attach_screenshot_on_send": true
+                },
+                "custom_future_field": {
+                    "keep": true,
+                    "nested": {"value": 45}
+                }
             }))
             .unwrap(),
         )
@@ -6529,6 +6634,8 @@ mod tests {
         assert!(raw["frozen_request_prefix"]["tools_canonical"].is_null());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-pending");
+        assert_eq!(raw["custom_future_field"]["nested"]["value"], 45);
     }
 
     #[tokio::test]
