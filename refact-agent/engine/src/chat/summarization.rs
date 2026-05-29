@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::call_validation::{ChatContent, ChatMessage};
+use crate::call_validation::{ChatContent, ChatMessage, DiffChunk};
 use crate::chat::diagnostics::{filter_ui_only_messages, is_ui_only_message};
 use crate::chat::history_limit::{compute_context_budget, ContextPressure};
 use crate::chat::internal_roles::{event, EventSubkind};
@@ -24,7 +24,7 @@ const CONTEXT_FILE_NAME_MAX_CHARS: usize = 180;
 const MESSAGE_CONTENT_TRUNCATED_MARKER: &str = "\n[... message content truncated ...]";
 const TOOL_CALL_ARGUMENTS_TRUNCATED_MARKER: &str = "…";
 const SUMMARY_KIND: &str = "llm_segment_summary";
-const SUMMARY_SCHEMA_VERSION: u64 = 1;
+const SUMMARY_SCHEMA_VERSION: u64 = 2;
 
 #[derive(Debug, Clone)]
 pub enum SegmentSummaryFailure {
@@ -88,16 +88,35 @@ fn safe_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-const SEGMENT_SUMMARY_PROMPT: &str = "Produce a factual summary of the non-user conversation segment. The source segment contains assistant replies, tool calls, tool results, diffs, events, context files, and diagnostics that occurred between two immutable user messages.
+const SEGMENT_SUMMARY_PROMPT: &str =
+    "Summarize the following non-user conversation segment for compact context storage. \
+Minimize information loss. Every fact needed to continue the task must be preserved.
 
-Preserve facts that matter for continuing the task:
-- tool calls and tool results that affected the work
-- files read, edited, created, deleted, or discussed
-- decisions, assumptions, approvals, rejections, and constraints
-- errors encountered and fixes attempted
-- current state at the end of the segment
+Use EXACTLY these Markdown sections (write \"(none)\" if a section has nothing):
 
-Do not claim to be the user. Do not invent instructions, approvals, file changes, or tool results. Do not quote hidden system or plan text. Write concise Markdown suitable for an assistant message.";
+## Current Task State
+What was being worked on. Progress made. Current status or blocker.
+
+## Key Files
+Files EDITED, CREATED, or DELETED: exact path + what changed.
+Files central to errors or needed next: path + why it matters.
+Skip files only read without consequence.
+
+## Decisions & Constraints
+Explicit user requirements, approvals, rejections, constraints. Quote exact user instructions.
+Confirmed assumptions and design decisions.
+
+## Tool Outcomes
+Results that changed state or revealed problems.
+- Failed commands: exact error message and exit code
+- Test failures: test name and failure message
+- Successful writes/edits: file paths only
+Format: `tool(args)` → result. Skip successful read-only operations.
+
+## Dropped Context
+One sentence: what was omitted (e.g. \"14 routine file reads omitted\").
+
+Rules: include exact paths, error text, exit codes. No invented content. 150–500 words total.";
 
 pub fn is_segment_summary(message: &ChatMessage) -> bool {
     if message.role != "assistant" || is_ui_only_message(message) {
@@ -216,7 +235,8 @@ fn estimated_context_pressure(messages: &[ChatMessage], effective_n_ctx: usize) 
 fn role_label(role: &str) -> &str {
     match role {
         "assistant" => "ASSISTANT",
-        "tool" | "diff" => "TOOL",
+        "tool" => "TOOL_RESULT",
+        "diff" => "FILE_EDIT",
         "context_file" => "CONTEXT_FILE",
         "event" => "EVENT",
         "error" => "ERROR",
@@ -387,12 +407,57 @@ fn segment_content_text(message: &ChatMessage) -> String {
     }
 }
 
+fn edited_file_names(messages: &[ChatMessage]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for message in messages {
+        if message.role == "diff" {
+            match &message.content {
+                ChatContent::ContextFiles(files) => {
+                    for f in files {
+                        names.insert(f.file_name.clone());
+                    }
+                }
+                ChatContent::SimpleText(text) => {
+                    if let Ok(chunks) = serde_json::from_str::<Vec<DiffChunk>>(text) {
+                        for chunk in chunks {
+                            names.insert(chunk.file_name);
+                            if let Some(file_name_rename) = chunk.file_name_rename {
+                                names.insert(file_name_rename);
+                            }
+                        }
+                    }
+                }
+                ChatContent::Multimodal(_) => {}
+            }
+        }
+    }
+    names
+}
+
 fn segment_text(messages: &[ChatMessage]) -> String {
+    let edited = edited_file_names(messages);
     messages
         .iter()
         .map(|message| {
             let content = segment_content_text(message);
-            let mut parts = vec![format!("[{}]", role_label(&message.role))];
+            let importance_prefix = if message.role == "context_file" {
+                if let ChatContent::ContextFiles(files) = &message.content {
+                    if files.iter().any(|f| edited.contains(&f.file_name)) {
+                        "[IMPORTANT] "
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            };
+            let mut parts = vec![format!(
+                "{}[{}]",
+                importance_prefix,
+                role_label(&message.role)
+            )];
             if !message.tool_call_id.is_empty() {
                 parts.push(format!("tool_call_id={}", message.tool_call_id));
             }
@@ -424,13 +489,21 @@ async fn summarize_segment_text(
     model: String,
     model_n_ctx: usize,
     max_new_tokens: usize,
+    goal_hint: Option<String>,
 ) -> Result<String, SegmentSummaryFailure> {
+    let user_content = match goal_hint {
+        Some(hint) if !hint.trim().is_empty() => {
+            format!(
+                "User goal for this segment: {}\n\nSummarize this segment:\n\n{}",
+                hint.trim(),
+                text
+            )
+        }
+        _ => format!("Summarize this segment:\n\n{}", text),
+    };
     let summarize_messages = vec![
         ChatMessage::new("system".to_string(), SEGMENT_SUMMARY_PROMPT.to_string()),
-        ChatMessage::new(
-            "user".to_string(),
-            format!("Summarize this non-user segment:\n\n{}", text),
-        ),
+        ChatMessage::new("user".to_string(), user_content),
     ];
 
     let config = SubchatConfig {
@@ -526,9 +599,10 @@ async fn summarize_segment(
     messages: &[ChatMessage],
     model: String,
     model_n_ctx: usize,
+    goal_hint: Option<String>,
 ) -> Result<ChatMessage, SegmentSummaryFailure> {
     let mut text = segment_text(messages);
-    let max_new_tokens = (model_n_ctx / 4).min(4096).max(512);
+    let max_new_tokens = (model_n_ctx / 4).min(6000).max(1024);
     let input_budget_tokens = model_n_ctx
         .saturating_sub(max_new_tokens)
         .saturating_sub(SEGMENT_SUMMARY_OVERHEAD_TOKENS);
@@ -561,8 +635,15 @@ async fn summarize_segment(
         );
     }
 
-    let summary =
-        summarize_segment_text(gcx, text, model.clone(), model_n_ctx, max_new_tokens).await?;
+    let summary = summarize_segment_text(
+        gcx,
+        text,
+        model.clone(),
+        model_n_ctx,
+        max_new_tokens,
+        goal_hint,
+    )
+    .await?;
     Ok(make_segment_summary_message(summary, messages, &model))
 }
 
@@ -645,8 +726,20 @@ pub async fn summarize_oldest_segment_with_resolved_model(
     let Some(segment) = first_eligible_segment(messages) else {
         return Err(SegmentSummaryFailure::NoMessagesToSummarize);
     };
+    let goal_hint = messages[..segment.start]
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.content_text_only());
     let source_messages = messages[segment.start..=segment.end].to_vec();
-    let summary = summarize_segment(gcx, &source_messages, model.to_string(), model_n_ctx).await?;
+    let summary = summarize_segment(
+        gcx,
+        &source_messages,
+        model.to_string(),
+        model_n_ctx,
+        goal_hint,
+    )
+    .await?;
     replace_segment(messages, segment, summary);
     Ok(true)
 }
@@ -752,7 +845,13 @@ pub async fn apply_segment_summarization(
         source_hash,
     );
 
-    match summarize_segment(gcx, &source_messages, model, model_n_ctx).await {
+    let goal_hint = raw_messages[..segment.start]
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.content_text_only());
+
+    match summarize_segment(gcx, &source_messages, model, model_n_ctx, goal_hint).await {
         Ok(summary) => {
             let mut session = session_arc.lock().await;
             let Some(current_segment) = first_eligible_segment(&session.messages) else {
@@ -805,10 +904,7 @@ pub async fn apply_segment_summarization(
             let index = session.messages.len();
             session.messages.push(fail_event);
             let message = session.messages[index].clone();
-            session.emit(ChatEvent::MessageAdded {
-                message,
-                index,
-            });
+            session.emit(ChatEvent::MessageAdded { message, index });
             emit_compression_runtime(&mut session, false);
             session.increment_version();
             false
@@ -1098,11 +1194,52 @@ mod tests {
         let text = segment_text(&messages);
 
         assert!(text.contains("[ASSISTANT]"));
-        assert!(text.contains("[TOOL] tool_call_id=call_1"));
+        assert!(text.contains("[TOOL_RESULT] tool_call_id=call_1"));
         assert!(text.contains("[CONTEXT_FILE]"));
         assert!(text.contains("[ERROR]"));
         assert!(text.contains("[REDACTED_SK_TOKEN]") || text.contains("[REDACTED]"));
         assert_no_raw_secrets(&text);
+    }
+
+    #[test]
+    fn segment_text_labels_diff_as_file_edit() {
+        let diff_msg = ChatMessage {
+            role: "diff".to_string(),
+            content: ChatContent::SimpleText("diff content".to_string()),
+            ..Default::default()
+        };
+        let text = segment_text(&[diff_msg]);
+        assert!(text.contains("[FILE_EDIT]"), "got: {text}");
+        assert!(
+            !text.contains("[TOOL]"),
+            "should not have old label: {text}"
+        );
+    }
+
+    #[test]
+    fn segment_text_marks_context_file_for_simple_text_diff_as_important() {
+        let diff = DiffChunk {
+            file_name: "src/edited.rs".to_string(),
+            file_action: "edit".to_string(),
+            line1: 1,
+            line2: 1,
+            lines_remove: "old".to_string(),
+            lines_add: "new".to_string(),
+            application_details: String::new(),
+            ..Default::default()
+        };
+        let diff_msg = ChatMessage {
+            role: "diff".to_string(),
+            content: ChatContent::SimpleText(json!([diff]).to_string()),
+            ..Default::default()
+        };
+        let important_context = context_files(vec![context_file_named("src/edited.rs", "edited")]);
+        let routine_context = context_files(vec![context_file_named("src/read_only.rs", "read")]);
+
+        let text = segment_text(&[diff_msg, important_context, routine_context]);
+
+        assert!(text.contains("[IMPORTANT] [CONTEXT_FILE]\nsrc/edited.rs:10-20"));
+        assert!(text.contains("\n[CONTEXT_FILE]\nsrc/read_only.rs:10-20"));
     }
 
     #[test]
@@ -1263,7 +1400,7 @@ mod tests {
         assert_eq!(messages[1].role, "assistant");
         assert!(is_segment_summary(&messages[1]));
         let compression = messages[1].extra.get("compression").unwrap();
-        assert_eq!(compression["schema_version"], json!(1));
+        assert_eq!(compression["schema_version"], json!(2));
         assert_eq!(compression["kind"], json!(SUMMARY_KIND));
         assert_eq!(compression["summary_model"], json!("test-model"));
     }
