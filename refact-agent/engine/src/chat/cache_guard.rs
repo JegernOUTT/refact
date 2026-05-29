@@ -17,10 +17,15 @@ const CACHE_GUARD_TOOL_NAME: &str = "cache_guard";
 const CACHE_GUARD_TOOL_CALL_ID: &str = "cacheguard_force";
 const CACHE_GUARD_RULE: &str = "Prompt cache prefix violation";
 const CACHE_GUARD_PREVIEW_STRING_MAX_CHARS: usize = 240;
+const CACHE_GUARD_PREVIEW_ARRAY_MAX_ITEMS: usize = 24;
 const CACHE_GUARD_DIFF_MAX_CHARS: usize = 32 * 1024;
 const CACHE_GUARD_DIFF_TRUNCATION_NOTICE: &str = concat!(
     "\n...[cache guard diff truncated: omitted {omitted} chars; ",
     "sanitized provider request body preview exceeded limit]\n"
+);
+const CACHE_GUARD_DIFF_PREVIEW_NOTICE: &str = concat!(
+    "\n[cache guard diff generated from bounded structural preview: ",
+    "large arrays and text payloads are represented by hashes/truncation notices]\n"
 );
 
 const IGNORED_KEYS: &[&str] = &[
@@ -120,17 +125,20 @@ fn is_append_only_prefix_inner(
         | (Value::Number(_), Value::Number(_))
         | (Value::String(_), Value::String(_)) => prev == next,
         (Value::Array(a), Value::Array(b)) => {
-            // The "tools" array is part of the prompt prefix — any change (including
-            // appending a new tool) invalidates the LLM cache. Require strict equality.
             if parent_key == Some("tools") {
                 return a == b;
             }
             if a.len() > b.len() {
                 return false;
             }
-            let is_strict_array_item = matches!(parent_key, Some("messages" | "input"));
+            if matches!(parent_key, Some("messages" | "input")) {
+                return a
+                    .iter()
+                    .zip(b.iter())
+                    .all(|(old_item, new_item)| old_item == new_item);
+            }
             a.iter().zip(b.iter()).all(|(old_item, new_item)| {
-                is_append_only_prefix_inner(old_item, new_item, is_strict_array_item, None)
+                is_append_only_prefix_inner(old_item, new_item, false, None)
             })
         }
         (Value::Object(a), Value::Object(b)) => {
@@ -194,17 +202,45 @@ fn preview_value_for_cache_guard_diff(value: &Value, parent_key: Option<&str>) -
             }
             Value::Object(out)
         }
-        Value::Array(values) => Value::Array(
-            values
+        Value::Array(values) => {
+            let omitted = values
+                .len()
+                .saturating_sub(CACHE_GUARD_PREVIEW_ARRAY_MAX_ITEMS);
+            let mut preview_values: Vec<Value> = values
                 .iter()
+                .take(CACHE_GUARD_PREVIEW_ARRAY_MAX_ITEMS)
                 .map(|value| preview_value_for_cache_guard_diff(value, parent_key))
-                .collect(),
-        ),
+                .collect();
+            if omitted > 0 {
+                preview_values.push(json_summary_cache_guard_preview(format!(
+                    "[cache guard preview truncated: total_items={} omitted_items={} omitted_sha256={}]",
+                    values.len(),
+                    omitted,
+                    hash_cache_guard_values(&values[CACHE_GUARD_PREVIEW_ARRAY_MAX_ITEMS..])
+                )));
+            }
+            Value::Array(preview_values)
+        }
         Value::String(text) => {
             Value::String(redact_and_truncate_cache_guard_preview(text, parent_key))
         }
         scalar => scalar.clone(),
     }
+}
+
+fn hash_cache_guard_values(values: &[Value]) -> String {
+    let digest = Sha256::digest(serde_json::to_vec(values).unwrap_or_default());
+    let digest_hex = hex::encode(digest);
+    digest_hex[..16].to_string()
+}
+
+fn json_summary_cache_guard_preview(summary: String) -> Value {
+    let mut out = Map::new();
+    out.insert(
+        "__cache_guard_preview__".to_string(),
+        Value::String(summary),
+    );
+    Value::Object(out)
 }
 
 fn redact_and_truncate_cache_guard_preview(text: &str, parent_key: Option<&str>) -> String {
@@ -364,10 +400,12 @@ pub async fn check_or_pause_cache_guard(
         return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
     };
 
-    let diff = cap_cache_guard_diff(&unified_json_diff(
+    let mut diff = unified_json_diff(
         &preview_body_for_cache_guard_diff(&previous),
         &preview_body_for_cache_guard_diff(&sanitized),
-    ));
+    );
+    diff.push_str(CACHE_GUARD_DIFF_PREVIEW_NOTICE);
+    let diff = cap_cache_guard_diff(&diff);
     let estimated_extra_usd = estimate_extra_cache_miss_usd(app.clone(), model_id, &previous).await;
 
     let reason = {
@@ -532,6 +570,59 @@ mod tests {
             ]
         });
         assert!(!is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn test_append_only_prefix_messages_nested_content_keys_strict() {
+        let prev = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+            ]
+        });
+        let next = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi", "extra": true}]}
+            ]
+        });
+        assert!(!is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn test_append_only_prefix_input_nested_content_keys_strict() {
+        let prev = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        });
+        let next = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi", "extra": true}]}
+            ]
+        });
+        assert!(!is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn test_append_only_prefix_allows_appended_messages_and_input_items() {
+        let prev = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+            ],
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        });
+        let next = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "hello"}]}
+            ],
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}
+            ]
+        });
+        assert!(is_append_only_prefix(&prev, &next));
     }
 
     #[test]
@@ -781,13 +872,9 @@ mod tests {
         let CacheGuardOutcome::Paused { reason } = outcome else {
             panic!("cache guard should pause on changed prefix");
         };
-        let uncapped_diff = unified_json_diff(
-            &preview_body_for_cache_guard_diff(&sanitize_body_for_cache_guard(&prev_body)),
-            &preview_body_for_cache_guard_diff(&sanitize_body_for_cache_guard(&next_body)),
-        );
-        assert!(uncapped_diff.chars().count() > CACHE_GUARD_DIFF_MAX_CHARS);
-        assert!(reason.chars().count() < CACHE_GUARD_DIFF_MAX_CHARS + 1_000);
-        assert!(reason.contains("cache guard diff truncated"));
+        assert!(reason.chars().count() < CACHE_GUARD_DIFF_MAX_CHARS / 2);
+        assert!(reason.contains("bounded structural preview"));
+        assert!(reason.contains("cache guard preview truncated"));
         assert!(!reason.contains("sk-secret-123"));
         assert!(!reason.contains("api_key=abcd"));
         assert!(!reason.contains("raw-token-value"));
