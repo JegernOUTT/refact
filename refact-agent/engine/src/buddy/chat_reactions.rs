@@ -276,11 +276,15 @@ fn has_interaction_signal(lower: &str, tokens: &[&str]) -> bool {
         || lower.contains("step by step")
 }
 
-fn has_strong_insight_signal(lower: &str, tokens: &[&str]) -> bool {
+fn has_work_insight_signal(tokens: &[&str]) -> bool {
     INSIGHT_KEYWORDS
         .iter()
+        .filter(|kw| **kw != "flow")
         .any(|kw| tokens.iter().any(|t| matches_insight_keyword(t, kw)))
-        || has_interaction_signal(lower, tokens)
+}
+
+fn has_strong_insight_signal(lower: &str, tokens: &[&str]) -> bool {
+    has_work_insight_signal(tokens) || has_interaction_signal(lower, tokens)
 }
 
 pub struct AcceptedUserMessage {
@@ -478,7 +482,7 @@ pub fn classify_chat_reaction_kind(
     } else if settings.humor_enabled
         && settings.humor_level != HumorLevel::Off
         && deterministic_humor_bucket(text)
-        && !has_strong_insight_signal(&lower, &tokens)
+        && !has_work_insight_signal(&tokens)
     {
         Some(ChatReactionKind::Humor)
     } else if has_strong_insight_signal(&lower, &tokens) {
@@ -1249,6 +1253,16 @@ mod tests {
         assert!(deterministic_humor_bucket(text));
         let reaction = classify_chat_reaction(text, &s).unwrap();
         assert_eq!(reaction.kind, ChatReactionKind::Insight);
+    }
+
+    #[test]
+    fn classify_bucketed_interaction_as_humor_when_humor_enabled() {
+        let s = BuddySettings::default();
+        let text = "please ask about the next small step before we change the helper";
+
+        assert!(deterministic_humor_bucket(text));
+        let reaction = classify_chat_reaction(text, &s).unwrap();
+        assert_eq!(reaction.kind, ChatReactionKind::Humor);
     }
 
     #[test]
