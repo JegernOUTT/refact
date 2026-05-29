@@ -317,7 +317,7 @@ fn make_segment_summary_message(
         message_id: Uuid::new_v4().to_string(),
         role: "assistant".to_string(),
         content: ChatContent::SimpleText(summary),
-        summarized_range: Some((0, source_messages.len().saturating_sub(1))),
+        summarized_range: None,
         summarization_tier: Some(SUMMARY_KIND.to_string()),
         summarized_token_estimate: Some(crate::chat::trajectory_ops::approx_token_count(
             source_messages,
@@ -758,6 +758,50 @@ mod tests {
         let twice = serde_json::to_string(&messages).unwrap();
 
         assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn static_summary_has_no_current_history_range_anchor() {
+        let mut messages = vec![user("a"), assistant("old"), user("b")];
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "summary",
+            "test-model",
+        ));
+
+        assert_eq!(messages[1].summarized_range, None);
+        assert_eq!(
+            messages[1].summarization_tier,
+            Some(SUMMARY_KIND.to_string())
+        );
+    }
+
+    #[test]
+    fn static_summary_then_linearize_preserves_users_and_summary() {
+        let mut messages = vec![
+            user("first exact bytes"),
+            assistant("old answer"),
+            tool("tool result"),
+            user("second exact bytes"),
+        ];
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "summary",
+            "test-model",
+        ));
+        let result = crate::chat::linearize::apply_summarization_linearize(messages);
+        let text: Vec<String> = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect();
+        let roles: Vec<String> = result.iter().map(|message| message.role.clone()).collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert_eq!(
+            text,
+            vec!["first exact bytes", "summary", "second exact bytes"]
+        );
     }
 
     #[test]

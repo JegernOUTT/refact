@@ -24,29 +24,39 @@ fn summary_content(msg: &ChatMessage) -> String {
         .unwrap_or_else(|| msg.content.content_text_only())
 }
 
+fn is_legacy_range_summary(msg: &ChatMessage) -> bool {
+    is_authoritative_summary(msg) && msg.summarized_range.is_some()
+}
+
+fn legacy_summary_ranges(messages: &[ChatMessage]) -> Vec<(usize, usize, String)> {
+    messages
+        .iter()
+        .filter(|msg| is_authoritative_summary(msg))
+        .filter_map(|msg| {
+            let (start, end) = msg.summarized_range?;
+            if start > end || end >= messages.len() {
+                return None;
+            }
+            Some((start, end, summary_content(msg)))
+        })
+        .collect()
+}
+
 pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    if !messages.iter().any(|m| is_authoritative_summary(m)) {
+    let summaries = legacy_summary_ranges(&messages);
+    if summaries.is_empty() {
         return messages
             .into_iter()
-            .filter(|message| message.role != "summarization")
+            .filter(|message| message.role != "summarization" && !is_legacy_range_summary(message))
             .collect();
     }
-
-    let summaries: Vec<(usize, usize, String)> = messages
-        .iter()
-        .filter(|m| is_authoritative_summary(m))
-        .filter_map(|m| {
-            let (start, end) = m.summarized_range?;
-            Some((start, end, summary_content(m)))
-        })
-        .collect();
 
     let mut suppressed: HashSet<usize> = HashSet::new();
     for (start, end, _) in &summaries {
         for i in *start..=*end {
             if messages
                 .get(i)
-                .map(|msg| exemption_for(msg) == CompressionExemption::Never)
+                .map(|msg| msg.role == "user" || exemption_for(msg) == CompressionExemption::Never)
                 .unwrap_or(false)
             {
                 continue;
@@ -57,12 +67,7 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
 
     let mut summary_by_start: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
     for (start, end, content) in summaries {
-        let Some(insert_at) = (start..=end).find(|idx| {
-            messages
-                .get(*idx)
-                .map(|msg| exemption_for(msg) != CompressionExemption::Never)
-                .unwrap_or(false)
-        }) else {
+        let Some(insert_at) = (start..=end).find(|idx| suppressed.contains(idx)) else {
             continue;
         };
         summary_by_start
@@ -77,19 +82,16 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
     let mut result = Vec::with_capacity(messages.len());
 
     for (i, msg) in messages.iter().enumerate() {
-        if msg.role == "summarization" || is_authoritative_summary(msg) {
-            continue;
-        }
-        if suppressed.contains(&i) {
-            if let Some(entries) = summary_by_start.remove(&i) {
-                for (_, content) in entries {
-                    result.push(ChatMessage {
-                        role: "assistant".to_string(),
-                        content: ChatContent::SimpleText(content),
-                        ..Default::default()
-                    });
-                }
+        if let Some(entries) = summary_by_start.remove(&i) {
+            for (_, content) in entries {
+                result.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: ChatContent::SimpleText(content),
+                    ..Default::default()
+                });
             }
+        }
+        if msg.role == "summarization" || is_legacy_range_summary(msg) || suppressed.contains(&i) {
             continue;
         }
         result.push(msg.clone());
@@ -118,7 +120,7 @@ mod tests {
         }
     }
 
-    fn summarization(content: &str, range: (usize, usize)) -> ChatMessage {
+    fn summarization(content: &str, range: Option<(usize, usize)>) -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
             "compression".to_string(),
@@ -134,7 +136,7 @@ mod tests {
         ChatMessage {
             role: "assistant".to_string(),
             content: ChatContent::SimpleText(content.to_string()),
-            summarized_range: Some(range),
+            summarized_range: range,
             summarization_tier: Some("llm_segment_summary".to_string()),
             extra,
             ..Default::default()
@@ -178,26 +180,30 @@ mod tests {
     }
 
     #[test]
-    fn test_linearize_summarization_replaces_range() {
+    fn test_linearize_summarization_replaces_non_user_range_members() {
         let messages = vec![
-            user("hello"),          // 0
-            assistant("response1"), // 1
-            user("follow up"),      // 2
-            assistant("response2"), // 3
-            user("new question"),   // 4
-            summarization("Summary of messages 1-3", (1, 3)),
-            assistant("final"), // 6
+            user("hello"),
+            assistant("response1"),
+            user("follow up"),
+            assistant("response2"),
+            user("new question"),
+            summarization("Summary of messages 1-3", Some((1, 3))),
+            assistant("final"),
         ];
         let result = apply_summarization_linearize(messages);
         let roles: Vec<&str> = result.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", "assistant", "user", "assistant"]);
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "user", "assistant"]
+        );
         assert_eq!(result[0].content.content_text_only(), "hello");
         assert_eq!(
             result[1].content.content_text_only(),
             "Summary of messages 1-3"
         );
-        assert_eq!(result[2].content.content_text_only(), "new question");
-        assert_eq!(result[3].content.content_text_only(), "final");
+        assert_eq!(result[2].content.content_text_only(), "follow up");
+        assert_eq!(result[3].content.content_text_only(), "new question");
+        assert_eq!(result[4].content.content_text_only(), "final");
     }
 
     #[test]
@@ -252,7 +258,7 @@ mod tests {
             user("old user"),
             assistant("old assistant"),
             user("current question"),
-            summarization("stale summary", (10, 11)),
+            summarization("stale summary", Some((10, 11))),
         ];
         let result = apply_summarization_linearize(messages);
         let roles: Vec<&str> = result.iter().map(|m| m.role.as_str()).collect();
@@ -263,18 +269,17 @@ mod tests {
     #[test]
     fn test_linearize_messages_after_summarized_range_preserved() {
         let messages = vec![
-            user("msg0"),      // 0
-            assistant("msg1"), // 1
-            user("msg2"),      // 2 - in range
-            summarization("sum", (2, 2)),
-            user("msg3"), // 4
+            user("msg0"),
+            assistant("msg1"),
+            user("msg2"),
+            summarization("sum", Some((2, 2))),
+            user("msg3"),
         ];
         let result = apply_summarization_linearize(messages);
         assert_eq!(result.len(), 4);
         assert_eq!(result[0].content.content_text_only(), "msg0");
         assert_eq!(result[1].content.content_text_only(), "msg1");
-        assert_eq!(result[2].content.content_text_only(), "sum");
-        assert_eq!(result[2].role, "assistant");
+        assert_eq!(result[2].content.content_text_only(), "msg2");
         assert_eq!(result[3].content.content_text_only(), "msg3");
     }
 
@@ -296,14 +301,16 @@ mod tests {
             user("old"),
             plan("sacred plan"),
             user("new"),
-            summarization("sum", (0, 2)),
+            summarization("sum", Some((0, 2))),
         ];
         let result = apply_summarization_linearize(messages);
         let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
 
-        assert_eq!(roles, vec!["assistant", "plan"]);
-        assert_eq!(result[0].content.content_text_only(), "sum");
-        assert_eq!(result[1].content.content_text_only(), "sacred plan");
+        assert_eq!(roles, vec!["user", "assistant", "plan", "user"]);
+        assert_eq!(result[0].content.content_text_only(), "old");
+        assert_eq!(result[1].content.content_text_only(), "sum");
+        assert_eq!(result[2].content.content_text_only(), "sacred plan");
+        assert_eq!(result[3].content.content_text_only(), "new");
     }
 
     #[test]
@@ -313,8 +320,8 @@ mod tests {
             assistant("msg1"),
             user("msg2"),
             assistant("msg3"),
-            summarization("summary-a", (0, 2)),
-            summarization("summary-b", (1, 3)),
+            summarization("summary-a", Some((0, 2))),
+            summarization("summary-b", Some((1, 3))),
             user("tail"),
         ];
 
@@ -324,6 +331,23 @@ mod tests {
             .map(|msg| msg.content.content_text_only())
             .collect();
 
-        assert_eq!(text, vec!["summary-a", "summary-b", "tail"]);
+        assert_eq!(text, vec!["msg0", "summary-a", "summary-b", "msg2", "tail"]);
+    }
+
+    #[test]
+    fn linearize_preserves_in_place_segment_summary_between_users() {
+        let messages = vec![
+            user("A exact bytes"),
+            summarization("summary", None),
+            user("B exact bytes"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert_eq!(result[0].content.content_text_only(), "A exact bytes");
+        assert_eq!(result[1].content.content_text_only(), "summary");
+        assert_eq!(result[2].content.content_text_only(), "B exact bytes");
     }
 }

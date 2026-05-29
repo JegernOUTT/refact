@@ -47,6 +47,25 @@ fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
 }
 
+fn summarize_modifiable_prefix(
+    messages: &mut Vec<ChatMessage>,
+    preserve_cutoff: usize,
+    summary_text: &str,
+    summary_model: &str,
+) -> bool {
+    let cutoff = preserve_cutoff.min(messages.len());
+    let mut modifiable = messages[..cutoff].to_vec();
+    if !crate::chat::summarization::summarize_oldest_segment_with_static_summary(
+        &mut modifiable,
+        summary_text,
+        summary_model,
+    ) {
+        return false;
+    }
+    messages.splice(..cutoff, modifiable);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +139,56 @@ mod tests {
 
         assert_eq!(find_preserve_cutoff(&messages, 1), 2);
         assert_eq!(find_preserve_cutoff(&messages, 2), 0);
+    }
+
+    #[test]
+    fn aggressive_static_summary_preserves_tail_after_cutoff() {
+        let mut messages = vec![
+            user_message("old user"),
+            assistant_message("old assistant"),
+            user_message("tail user"),
+            assistant_message("tail assistant"),
+            user_message("active tool user"),
+        ];
+        let preserve_cutoff = find_preserve_cutoff(&messages, 1);
+        let preserved_tail_count = messages.len() - preserve_cutoff;
+        let preserved_tail_before = serde_json::to_string(&messages[preserve_cutoff..]).unwrap();
+
+        assert!(summarize_modifiable_prefix(
+            &mut messages,
+            preserve_cutoff,
+            "summary",
+            "test-model",
+        ));
+
+        let preserved_tail_start = messages.len() - preserved_tail_count;
+        let preserved_tail_after =
+            serde_json::to_string(&messages[preserved_tail_start..]).unwrap();
+        assert_eq!(preserved_tail_after, preserved_tail_before);
+        assert!(messages
+            .iter()
+            .any(crate::chat::summarization::is_segment_summary));
+    }
+
+    #[test]
+    fn aggressive_static_summary_ignores_eligible_segment_only_in_preserved_tail() {
+        let mut messages = vec![
+            user_message("old user"),
+            user_message("tail user"),
+            assistant_message("tail assistant"),
+            user_message("active tool user"),
+        ];
+        let preserve_cutoff = find_preserve_cutoff(&messages, 1);
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(!summarize_modifiable_prefix(
+            &mut messages,
+            preserve_cutoff,
+            "summary",
+            "test-model",
+        ));
+
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
     }
 }
 
@@ -782,8 +851,9 @@ impl Tool for ToolCompressChatApply {
             let needs_more = target_tokens.map_or(true, |t| cur_tokens > t);
             if needs_more {
                 let before = serde_json::to_string(&head_messages).ok();
-                if crate::chat::summarization::summarize_oldest_segment_with_static_summary(
+                if summarize_modifiable_prefix(
                     &mut head_messages,
+                    preserve_cutoff,
                     "Previous non-user chat activity was summarized by compress_chat_apply.",
                     "compress_chat_apply",
                 ) {
