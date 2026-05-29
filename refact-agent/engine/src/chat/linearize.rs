@@ -67,7 +67,12 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
 
     let mut summary_by_start: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
     for (start, end, content) in summaries {
-        let Some(insert_at) = (start..=end).find(|idx| suppressed.contains(idx)) else {
+        let insert_at = if let Some(insert_at) = (start..=end).find(|idx| suppressed.contains(idx))
+        {
+            insert_at
+        } else if start < end {
+            (start + 1).min(messages.len())
+        } else {
             continue;
         };
         summary_by_start
