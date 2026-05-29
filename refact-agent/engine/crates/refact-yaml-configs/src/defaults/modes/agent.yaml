@@ -292,6 +292,7 @@ tools:
   - worktree_merge
   - ask_questions
   - set_plan
+  - update_plan
   - get_plan
   - process_start
   - process_list
@@ -352,6 +353,8 @@ tool_confirm:
     - match: "handoff_to_mode"
       action: auto
     - match: "set_plan"
+      action: auto
+    - match: "update_plan"
       action: auto
     - match: "get_plan"
       action: auto

@@ -46,6 +46,7 @@ mod tool_rm;
 mod tool_search;
 mod tool_search_trajectories;
 mod tool_set_plan;
+pub mod tool_update_plan;
 mod tool_shell;
 mod tool_sleep;
 mod tool_spawn_ab;

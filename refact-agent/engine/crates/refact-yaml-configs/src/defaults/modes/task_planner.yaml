@@ -401,6 +401,7 @@ tools:
   - wait_agents
   - ask_questions
   - set_plan
+  - update_plan
   - get_plan
   - compress_chat_probe
   - compress_chat_apply
@@ -435,6 +436,12 @@ tool_confirm:
     - match: "knowledge"
       action: auto
     - match: "task_*"
+      action: auto
+    - match: "set_plan"
+      action: auto
+    - match: "update_plan"
+      action: auto
+    - match: "get_plan"
       action: auto
     - match: "agent_diff"
       action: auto

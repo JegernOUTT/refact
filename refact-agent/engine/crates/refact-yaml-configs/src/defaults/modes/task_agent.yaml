@@ -233,6 +233,7 @@ tools:
   - doc_list
   - doc_get
   - set_plan
+  - update_plan
   - get_plan
   - process_start
   - process_list
