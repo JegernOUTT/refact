@@ -40,6 +40,12 @@ const PET_DECAY_INTERVAL_SECS: u64 = 15;
 const OBSERVER_CONCURRENCY: usize = 4;
 const MEMORY_OPS_ARCHIVE_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 const MEMORY_OPS_COMPACT_INTERVAL_SECS: u64 = 6 * 60 * 60;
+const BUDDY_SPEECH_MAX_CHARS: usize = 280;
+const BUDDY_TITLE_MAX_CHARS: usize = 120;
+const BUDDY_DESCRIPTION_MAX_CHARS: usize = 500;
+const BUDDY_STATIC_SPEECH_FALLBACK: &str = "Tiny gremlin update: something needs attention.";
+const BUDDY_STATIC_TITLE_FALLBACK: &str = "Buddy update";
+const BUDDY_STATIC_DESCRIPTION_FALLBACK: &str = "Buddy has an update ready.";
 
 pub(crate) async fn observe_buddy_facts_parallel(
     due_observers: Vec<Arc<dyn BuddyObserver>>,
@@ -264,35 +270,48 @@ fn contains_redaction_marker(text: &str) -> bool {
     lower.contains("[redacted") || lower.contains("<redacted") || lower.contains("&lt;redacted")
 }
 
-fn safe_generated_buddy_text(generated: &str, fallback: String) -> String {
-    let normalized = normalize_generated_buddy_text(generated);
+fn cap_generated_buddy_text(text: &str, max_chars: usize) -> String {
+    crate::llm::safe_truncate(text, max_chars)
+        .trim()
+        .to_string()
+}
+
+fn safe_buddy_candidate(text: &str, max_chars: usize) -> Option<String> {
+    let normalized = normalize_generated_buddy_text(text);
     let redacted = redact_sensitive(&normalized);
     if normalized.is_empty() || redacted != normalized || contains_redaction_marker(&normalized) {
-        fallback
+        None
     } else {
-        normalized
+        Some(cap_generated_buddy_text(&normalized, max_chars))
     }
+}
+
+fn safe_generated_buddy_text(
+    generated: &str,
+    fallback: String,
+    static_fallback: &'static str,
+    max_chars: usize,
+) -> String {
+    safe_buddy_candidate(generated, max_chars)
+        .or_else(|| safe_buddy_candidate(&fallback, max_chars))
+        .unwrap_or_else(|| cap_generated_buddy_text(static_fallback, max_chars))
 }
 
 fn safe_generated_buddy_text_opt(
     generated: Option<String>,
     fallback: Option<String>,
+    static_fallback: &'static str,
+    max_chars: usize,
 ) -> Option<String> {
-    match generated {
-        Some(text) => {
-            let normalized = normalize_generated_buddy_text(&text);
-            let redacted = redact_sensitive(&normalized);
-            if normalized.is_empty()
-                || redacted != normalized
-                || contains_redaction_marker(&normalized)
-            {
-                fallback
-            } else {
-                Some(normalized)
-            }
-        }
-        None => fallback,
-    }
+    generated
+        .as_deref()
+        .and_then(|text| safe_buddy_candidate(text, max_chars))
+        .or_else(|| {
+            fallback
+                .as_deref()
+                .and_then(|text| safe_buddy_candidate(text, max_chars))
+        })
+        .or_else(|| Some(cap_generated_buddy_text(static_fallback, max_chars)))
 }
 
 pub async fn render_buddy_speech(
@@ -320,7 +339,12 @@ pub async fn render_buddy_speech(
         .await
         .render_speech(gcx, voice_ctx, intent)
         .await;
-    speech.text = safe_generated_buddy_text(&speech.text, fallback_text);
+    speech.text = safe_generated_buddy_text(
+        &speech.text,
+        fallback_text,
+        BUDDY_STATIC_SPEECH_FALLBACK,
+        BUDDY_SPEECH_MAX_CHARS,
+    );
     speech
 }
 
@@ -351,8 +375,18 @@ pub async fn render_buddy_runtime_event(
         .render_runtime_event(gcx, voice_ctx, status)
         .await;
     (
-        safe_generated_buddy_text(&title, fallback_title),
-        safe_generated_buddy_text_opt(description, fallback_description),
+        safe_generated_buddy_text(
+            &title,
+            fallback_title,
+            BUDDY_STATIC_TITLE_FALLBACK,
+            BUDDY_TITLE_MAX_CHARS,
+        ),
+        safe_generated_buddy_text_opt(
+            description,
+            fallback_description,
+            BUDDY_STATIC_DESCRIPTION_FALLBACK,
+            BUDDY_DESCRIPTION_MAX_CHARS,
+        ),
     )
 }
 
@@ -381,7 +415,12 @@ pub async fn render_buddy_activity_title(
         .await
         .render_activity_title(gcx, voice_ctx, intent)
         .await;
-    safe_generated_buddy_text(&title, fallback_title)
+    safe_generated_buddy_text(
+        &title,
+        fallback_title,
+        BUDDY_STATIC_TITLE_FALLBACK,
+        BUDDY_TITLE_MAX_CHARS,
+    )
 }
 
 impl BuddyService {

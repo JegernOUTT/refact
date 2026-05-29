@@ -2813,6 +2813,125 @@ async fn normal_generated_buddy_speech_is_preserved() {
     assert_eq!(speech.text, generated);
 }
 
+#[tokio::test]
+async fn generated_buddy_speech_with_secret_fallback_uses_static_safe_text() {
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![Some(
+            "Speech Bearer sk-GENERATEDSECRET1234567890".to_string(),
+        )]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+
+    let speech = super::actor::render_buddy_speech(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Pixel".to_string(),
+        BuddyPulse::default(),
+        Some("secret_fallback_speech_test".to_string()),
+        "workflow summary".to_string(),
+        crate::buddy::voice_service::SpeechIntent::QuestComplete,
+        "Fallback Bearer sk-FALLBACKSECRET1234567890".to_string(),
+    )
+    .await;
+
+    assert_eq!(
+        speech.text,
+        "Tiny gremlin update: something needs attention."
+    );
+    assert!(!speech.text.contains("GENERATEDSECRET"));
+    assert!(!speech.text.contains("FALLBACKSECRET"));
+    assert!(!speech.text.contains("[REDACTED"));
+}
+
+#[tokio::test]
+async fn runtime_event_secret_fallbacks_use_static_safe_text() {
+    let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+        vec![Some("Runtime token=GENERATEDSECRET".to_string())],
+    );
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+
+    let (title, description) = super::actor::render_buddy_runtime_event(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Pixel".to_string(),
+        BuddyPulse::default(),
+        Some("secret_fallback_runtime_test".to_string()),
+        "Workflow Bearer sk-DESCRIPTIONGENERATED1234567890".to_string(),
+        "completed",
+        "Fallback title Bearer sk-TITLESECRET1234567890".to_string(),
+        Some("Fallback description token=DESCRIPTIONSECRET".to_string()),
+    )
+    .await;
+
+    assert_eq!(title, "Buddy update");
+    assert_eq!(description.as_deref(), Some("Buddy has an update ready."));
+    let rendered = format!("{} {}", title, description.unwrap_or_default());
+    assert!(!rendered.contains("GENERATEDSECRET"));
+    assert!(!rendered.contains("DESCRIPTIONGENERATED"));
+    assert!(!rendered.contains("TITLESECRET"));
+    assert!(!rendered.contains("DESCRIPTIONSECRET"));
+    assert!(!rendered.contains("[REDACTED"));
+}
+
+#[tokio::test]
+async fn oversized_fallback_buddy_speech_is_capped() {
+    let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+        vec![Some("Bearer sk-FORCEFALLBACK1234567890".to_string())],
+    );
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+
+    let fallback = "f".repeat(400);
+    let speech = super::actor::render_buddy_speech(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Pixel".to_string(),
+        BuddyPulse::default(),
+        Some("oversized_fallback_speech_test".to_string()),
+        "workflow summary".to_string(),
+        crate::buddy::voice_service::SpeechIntent::QuestAccept,
+        fallback,
+    )
+    .await;
+
+    assert_eq!(speech.text.chars().count(), 280);
+    assert!(speech.text.chars().all(|c| c == 'f'));
+}
+
+#[tokio::test]
+async fn oversized_runtime_title_and_description_fallbacks_are_capped() {
+    let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+        vec![Some("Bearer sk-FORCEFALLBACK1234567890".to_string())],
+    );
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+
+    let (title, description) = super::actor::render_buddy_runtime_event(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Pixel".to_string(),
+        BuddyPulse::default(),
+        Some("oversized_runtime_test".to_string()),
+        "workflow summary".to_string(),
+        "completed",
+        "t".repeat(200),
+        Some("d".repeat(700)),
+    )
+    .await;
+
+    assert_eq!(title.chars().count(), 120);
+    assert_eq!(description.unwrap().chars().count(), 500);
+}
+
 // =============================================================================
 // FactStore tests
 // =============================================================================
