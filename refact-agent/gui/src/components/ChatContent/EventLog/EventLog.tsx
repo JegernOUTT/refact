@@ -140,7 +140,7 @@ export const EventLog: React.FC<EventLogProps> = ({
     [events, selectedSet],
   );
 
-  if (events.length === 0 || filteredEvents.length === 0) return null;
+  if (events.length === 0) return null;
 
   const handleSummaryClick = (event: React.MouseEvent<HTMLElement>) => {
     event.preventDefault();
@@ -218,17 +218,23 @@ export const EventLog: React.FC<EventLogProps> = ({
             ))}
           </Flex>
           <Flex direction="column" gap="1">
-            {filteredEvents.map((event, index) => {
-              const key = entryKey(event, index);
-              return (
-                <EventLogEntry
-                  key={key}
-                  event={event}
-                  entryId={key}
-                  onEventClick={handleEventClick}
-                />
-              );
-            })}
+            {filteredEvents.length > 0 ? (
+              filteredEvents.map((event, index) => {
+                const key = entryKey(event, index);
+                return (
+                  <EventLogEntry
+                    key={key}
+                    event={event}
+                    entryId={key}
+                    onEventClick={handleEventClick}
+                  />
+                );
+              })
+            ) : (
+              <Text size="1" color="gray">
+                All event subkinds are hidden by filters.
+              </Text>
+            )}
           </Flex>
         </Box>
       </details>

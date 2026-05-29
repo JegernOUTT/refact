@@ -59,13 +59,18 @@ describe("SummarizationMessage", () => {
     );
   });
 
-  it("renders nothing when summarization_tier is missing", () => {
+  it("renders an untyped summarization message as context compression", async () => {
     const messageWithoutTier: SummarizationMessageType = {
       role: "summarization",
       content: "no tier",
     };
-    render(<SummarizationMessage message={messageWithoutTier} />);
-    expect(screen.queryByTestId("summarization-card")).toBeNull();
+    const { user } = render(<SummarizationMessage message={messageWithoutTier} />);
+
+    expect(screen.getByTestId("summarization-card-tier")).toHaveTextContent(
+      "Context compression",
+    );
+    await user.click(screen.getByTestId("summarization-card-header"));
+    expect(screen.getByText("no tier")).toBeInTheDocument();
   });
 
   it("shows the 1-based range in the header", () => {

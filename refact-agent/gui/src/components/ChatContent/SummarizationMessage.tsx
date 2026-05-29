@@ -17,7 +17,7 @@ type TierMeta = {
   badgeClass: string;
 };
 
-function metaForTier(tier: SummarizationTier): TierMeta {
+function metaForTier(tier?: SummarizationTier): TierMeta {
   switch (tier) {
     case "tier0_deterministic":
       return {
@@ -43,10 +43,19 @@ function metaForTier(tier: SummarizationTier): TierMeta {
         icon: "🛟",
         badgeClass: styles.tierBadgeTier2,
       };
+    default:
+      return {
+        label: "Context compression",
+        icon: "🗜️",
+        badgeClass: styles.tierBadgeTier0,
+      };
   }
 }
 
-function tokenLabelFor(tier: SummarizationTier, estimate: number): string {
+function tokenLabelFor(
+  tier: SummarizationTier | undefined,
+  estimate: number,
+): string {
   const formatted = `~${estimate.toLocaleString()} tokens`;
   switch (tier) {
     case "tier1_llm":
@@ -54,6 +63,7 @@ function tokenLabelFor(tier: SummarizationTier, estimate: number): string {
       return `${formatted} summarized`;
     case "tier0_deterministic":
     case "tier2_reactive":
+    default:
       return `${formatted} saved`;
   }
 }
@@ -99,9 +109,6 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
     return parseReactiveStats(contentText);
   }, [tier, contentText]);
 
-  if (!tier) {
-    return null;
-  }
   const meta = metaForTier(tier);
 
   const rangeLabel = message.summarized_range

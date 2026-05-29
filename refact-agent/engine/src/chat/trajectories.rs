@@ -86,7 +86,6 @@ async fn atomic_write_json_with_tmp_path(
 }
 
 use super::types::{ThreadParams, SessionState, ChatSession};
-use super::diagnostics::is_ui_only_message;
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
 use super::SessionsMap;
@@ -268,7 +267,6 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
     let messages = session
         .messages
         .iter()
-        .filter(|message| !is_ui_only_message(message))
         .filter(|message| message.role != "assistant" || has_displayable_assistant_content(message))
         .cloned()
         .collect();
@@ -3077,7 +3075,10 @@ pub async fn handle_v1_trajectories_subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::diagnostics::make_ui_only_error_message;
+    use crate::chat::diagnostics::{
+        is_ui_only_message, make_ui_only_compaction_report_message, make_ui_only_error_message,
+    };
+    use crate::chat::history_limit::Tier0CompactReport;
     use crate::chat::types::{ActiveCommandContext, BurstGuard};
     use serial_test::serial;
     use std::path::Path;
@@ -4013,6 +4014,42 @@ mod tests {
     }
 
     #[test]
+    fn trajectory_snapshot_from_session_preserves_ui_only_diagnostics() {
+        let mut session = ChatSession::new("ui-only-snapshot".to_string());
+        let diagnostic = make_ui_only_error_message("context_length_exceeded");
+        let compaction = make_ui_only_compaction_report_message(
+            &Tier0CompactReport {
+                context_files_deduped: 1,
+                context_files_elided: 0,
+                tool_outputs_truncated: 2,
+                tokens_saved_estimate: 345,
+            },
+            1,
+            None,
+        );
+        session
+            .messages
+            .push(ChatMessage::new("user".to_string(), "Hello".to_string()));
+        session.messages.push(diagnostic.clone());
+        session.messages.push(compaction.clone());
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+
+        assert_eq!(snapshot.messages.len(), 3);
+        assert!(snapshot.messages.iter().any(|message| {
+            message.message_id == diagnostic.message_id
+                && message.role == "error"
+                && is_ui_only_message(message)
+        }));
+        assert!(snapshot.messages.iter().any(|message| {
+            message.message_id == compaction.message_id
+                && message.role == "summarization"
+                && message.summarization_tier.as_deref() == Some("tier2_reactive")
+                && is_ui_only_message(message)
+        }));
+    }
+
+    #[test]
     fn test_trajectory_snapshot_from_session_captures_fields() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
@@ -4347,7 +4384,7 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_snapshot_from_session_filters_ui_only_messages() {
+    fn trajectory_snapshot_from_session_preserves_ui_only_messages() {
         let mut session = ChatSession::new("ui-only-snapshot".to_string());
         session
             .messages
@@ -4358,9 +4395,10 @@ mod tests {
 
         let snapshot = trajectory_snapshot_from_session(&session);
 
-        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(snapshot.messages.len(), 2);
         assert_eq!(snapshot.messages[0].role, "user");
-        assert_eq!(snapshot.messages[0].content.content_text_only(), "visible");
+        assert_eq!(snapshot.messages[1].role, "error");
+        assert!(is_ui_only_message(&snapshot.messages[1]));
     }
 
     #[test]
@@ -4699,7 +4737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trajectory_persistence_filters_ui_only_messages() {
+    async fn trajectory_persistence_preserves_ui_only_messages() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
         let mut session = ChatSession::new("ui-only-roundtrip".to_string());
@@ -4715,12 +4753,10 @@ mod tests {
         let loaded = load_trajectory_for_chat(gcx, "ui-only-roundtrip")
             .await
             .unwrap();
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].role, "user");
-        assert!(loaded
-            .messages
-            .iter()
-            .all(|message| !is_ui_only_message(message)));
+        assert_eq!(loaded.messages[1].role, "error");
+        assert!(is_ui_only_message(&loaded.messages[1]));
     }
 
     #[tokio::test]

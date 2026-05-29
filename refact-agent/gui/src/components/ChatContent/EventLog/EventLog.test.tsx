@@ -130,13 +130,17 @@ describe("EventLog", () => {
     ]);
   });
 
-  it("hides the disclosure when no events match active filters", () => {
+  it("keeps the disclosure visible when no events match active filters", () => {
     render(<EventLog events={[modeSwitchEvent]} threadId="thread-no-match" />);
 
     openLog();
     fireEvent.click(screen.getByLabelText(/mode_switch/));
 
-    expect(screen.queryByTestId("event-log")).not.toBeInTheDocument();
+    expect(screen.getByTestId("event-log")).toBeInTheDocument();
+    expect(screen.getByText("1 event")).toBeInTheDocument();
+    expect(
+      screen.getByText("All event subkinds are hidden by filters."),
+    ).toBeInTheDocument();
   });
 
   it("localStorage persistence restores expanded and filter state", () => {
