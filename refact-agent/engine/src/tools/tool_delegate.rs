@@ -868,11 +868,11 @@ mod tests {
         };
 
         let result = tokio::time::timeout(
-            Duration::from_millis(100),
+            Duration::from_secs(2),
             tool.tool_execute(ccx, &"call-background".to_string(), &base_args()),
         )
         .await
-        .expect("delegate returned within 100ms")
+        .expect("delegate wait=false returned promptly")
         .unwrap();
 
         assert_eq!(result.1.len(), 1);

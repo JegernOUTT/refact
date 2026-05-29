@@ -2935,6 +2935,60 @@ async fn runtime_event_safe_generated_title_keeps_safe_generated_description() {
 }
 
 #[tokio::test]
+async fn runtime_event_unsafe_generated_title_ignores_safe_summary_without_fallback() {
+    let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+        vec![Some("Runtime token=GENERATEDSECRET".to_string())],
+    );
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+
+    let (title, description) = super::actor::render_buddy_runtime_event(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Pixel".to_string(),
+        BuddyPulse::default(),
+        Some("unsafe_title_safe_summary_test".to_string()),
+        "Safe workflow summary".to_string(),
+        "completed",
+        "Safe fallback title".to_string(),
+        None,
+    )
+    .await;
+
+    assert_eq!(title, "Safe fallback title");
+    assert_eq!(description.as_deref(), Some("Buddy has an update ready."));
+}
+
+#[tokio::test]
+async fn runtime_event_unsafe_generated_title_with_safe_fallbacks_uses_fallbacks() {
+    let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+        vec![Some("Runtime token=GENERATEDSECRET".to_string())],
+    );
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+
+    let (title, description) = super::actor::render_buddy_runtime_event(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Pixel".to_string(),
+        BuddyPulse::default(),
+        Some("unsafe_title_safe_fallbacks_test".to_string()),
+        "Safe workflow summary".to_string(),
+        "completed",
+        "Safe fallback title".to_string(),
+        Some("Safe fallback description".to_string()),
+    )
+    .await;
+
+    assert_eq!(title, "Safe fallback title");
+    assert_eq!(description.as_deref(), Some("Safe fallback description"));
+}
+
+#[tokio::test]
 async fn oversized_runtime_title_and_description_fallbacks_are_capped() {
     let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
         vec![Some("Bearer sk-FORCEFALLBACK1234567890".to_string())],

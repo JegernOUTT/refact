@@ -81,7 +81,7 @@ fn oauth_tokens_from_refresh_response(
 ) -> OAuthTokens {
     let refresh_token = token_resp
         .refresh_token
-        .filter(|refresh_token| !refresh_token.is_empty())
+        .filter(|refresh_token| !refresh_token.trim().is_empty())
         .unwrap_or_else(|| old_refresh_token.to_string());
 
     OAuthTokens {
@@ -360,6 +360,22 @@ mod tests {
         let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
             "access_token": "new-access-token",
             "refresh_token": "",
+            "expires_in": 3600,
+        }))
+        .unwrap();
+
+        let tokens = oauth_tokens_from_refresh_response(token_resp, "old-refresh-token", 1000);
+
+        assert_eq!(tokens.access_token, "new-access-token");
+        assert_eq!(tokens.refresh_token, "old-refresh-token");
+        assert_eq!(tokens.expires_at, 3_601_000);
+    }
+
+    #[test]
+    fn refresh_response_with_whitespace_refresh_token_preserves_old_token() {
+        let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "new-access-token",
+            "refresh_token": "   ",
             "expires_in": 3600,
         }))
         .unwrap();
