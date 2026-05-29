@@ -1195,6 +1195,48 @@ pub async fn run_llm_generation(
         mcp_lazy_active
     );
 
+    let (messages, existing_frozen_prefix) = {
+        let session = session_arc.lock().await;
+        (
+            session.messages.clone(),
+            session.thread.frozen_request_prefix.clone(),
+        )
+    };
+    let mut installed_frozen_prefix = false;
+    let frozen_request_prefix = match existing_frozen_prefix {
+        Some(prefix) => Some(prefix),
+        None => {
+            let system_prompt = messages.iter().find_map(|message| {
+                if message.role == "system" {
+                    match &message.content {
+                        ChatContent::SimpleText(text) => Some(text.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            });
+            let canonical_tools = build_canonical_openai_tools(
+                gcx.clone(),
+                &tools,
+                model_rec.supports_strict_tools,
+                model_rec.supports_tools,
+            )
+            .await;
+            let mut session = session_arc.lock().await;
+            installed_frozen_prefix = ensure_frozen_prefix(
+                &mut session,
+                system_prompt,
+                Some(serde_json::Value::Array(canonical_tools.tools)),
+            )
+            .is_some();
+            session.thread.frozen_request_prefix.clone()
+        }
+    };
+    if installed_frozen_prefix {
+        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+    }
+
     let model_n_ctx = if model_rec.base.n_ctx > 0 {
         model_rec.base.n_ctx
     } else {
@@ -1219,42 +1261,6 @@ pub async fn run_llm_generation(
         worktree: thread.worktree.clone(),
     };
 
-    let (messages, existing_frozen_prefix) = {
-        let session = session_arc.lock().await;
-        (
-            session.messages.clone(),
-            session.thread.frozen_request_prefix.clone(),
-        )
-    };
-    let frozen_request_prefix = match existing_frozen_prefix {
-        Some(prefix) => Some(prefix),
-        None => {
-            let system_prompt = messages.iter().find_map(|message| {
-                if message.role == "system" {
-                    match &message.content {
-                        ChatContent::SimpleText(text) => Some(text.clone()),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            });
-            let canonical_tools = build_canonical_openai_tools(
-                gcx.clone(),
-                &tools,
-                model_rec.supports_strict_tools,
-                model_rec.supports_tools,
-            )
-            .await;
-            let mut session = session_arc.lock().await;
-            ensure_frozen_prefix(
-                &mut session,
-                system_prompt,
-                Some(serde_json::Value::Array(canonical_tools.tools)),
-            );
-            session.thread.frozen_request_prefix.clone()
-        }
-    };
     let model_type_defaults = caps.user_defaults.defaults_for_model(
         &model_rec.base.id,
         &caps.defaults.chat_default_model,

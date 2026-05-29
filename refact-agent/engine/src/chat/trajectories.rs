@@ -5043,6 +5043,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frozen_legacy_normal_session_migrates_through_session_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "legacy-freeze-normal";
+        let trajectories_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&trajectories_dir).await.unwrap();
+        tokio::fs::write(
+            trajectories_dir.join(format!("{chat_id}.json")),
+            serde_json::to_string(&json!({
+                "id": chat_id,
+                "title": "Legacy",
+                "model": "test/model",
+                "mode": "agent",
+                "tool_use": "agent",
+                "messages": [
+                    {"role":"system","content":"legacy system"},
+                    {"role":"user","content":"hello"}
+                ],
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "include_project_info": true,
+                "checkpoints_enabled": true
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let session_arc = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        {
+            let mut session = session_arc.lock().await;
+            assert!(session.thread.frozen_request_prefix.is_none());
+            ensure_frozen_prefix(
+                &mut session,
+                Some("legacy system".to_string()),
+                Some(json!([{"type":"function","function":{"name":"cat"}}])),
+            );
+        }
+        maybe_save_trajectory(app, session_arc).await;
+
+        let raw: serde_json::Value = serde_json::from_str(
+            &tokio::fs::read_to_string(trajectories_dir.join(format!("{chat_id}.json")))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw["frozen_request_prefix"]["system_prompt"], "legacy system");
+        assert_eq!(raw["messages"][0]["content"], "legacy system");
+    }
+
+    #[tokio::test]
+    async fn frozen_legacy_task_session_migration_does_not_create_generic_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let task_id = "task-legacy-freeze";
+        let agent_id = "agent-1";
+        let chat_id = "legacy-task-freeze";
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join(task_id)
+            .join("trajectories")
+            .join("agents")
+            .join(agent_id)
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(task_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &task_path,
+            serde_json::to_string(&json!({
+                "id": chat_id,
+                "title": "Legacy Task",
+                "model": "model",
+                "mode": "task_agent",
+                "tool_use": "agent",
+                "messages": [{"role":"user","content":"hello task"}],
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "include_project_info": true,
+                "checkpoints_enabled": true,
+                "task_meta": {
+                    "task_id": task_id,
+                    "role": "agents",
+                    "agent_id": agent_id,
+                    "card_id": "T-1"
+                }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::create_dir_all(dir.path().join(".refact").join("tasks").join(task_id))
+            .await
+            .unwrap();
+        let session_arc = crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        )
+        .await;
+        {
+            let mut session = session_arc.lock().await;
+            assert!(session.thread.frozen_request_prefix.is_none());
+            ensure_frozen_prefix(&mut session, Some("task system".to_string()), Some(json!([])));
+        }
+        maybe_save_trajectory(app, session_arc).await;
+
+        let generic_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&task_path).await.unwrap()).unwrap();
+        assert!(!tokio::fs::try_exists(generic_path).await.unwrap());
+        assert_eq!(raw["frozen_request_prefix"]["system_prompt"], "task system");
+    }
+
+    #[tokio::test]
     async fn trajectory_updated_at_changes_when_title_changes_without_messages() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
