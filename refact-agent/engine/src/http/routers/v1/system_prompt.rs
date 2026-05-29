@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage, ChatMeta, validate_mode_for_request};
 use crate::chat::prepare::build_canonical_openai_tools;
-use crate::chat::trajectories::{new_frozen_request_prefix, persist_frozen_prefix};
+use crate::chat::trajectories::{
+    ensure_frozen_prefix, new_frozen_request_prefix, persist_frozen_prefix,
+};
 use crate::custom_error::ScratchError;
 use crate::indexing_utils::wait_for_indexing_if_needed;
 use crate::scratchpads::chat_utils_prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
@@ -84,6 +86,18 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
         system_prompt,
         Some(serde_json::Value::Array(canonical_tools.tools)),
     );
+    let session_arc = {
+        let sessions = app.gcx.chat_sessions.read().await;
+        sessions.get(&post.chat_meta.chat_id).cloned()
+    };
+    if let Some(session_arc) = session_arc {
+        let mut session = session_arc.lock().await;
+        ensure_frozen_prefix(
+            &mut session,
+            frozen_prefix.system_prompt.clone(),
+            frozen_prefix.tools_canonical.clone(),
+        );
+    }
     if let Err(error) =
         persist_frozen_prefix(gcx.clone(), &post.chat_meta.chat_id, frozen_prefix).await
     {

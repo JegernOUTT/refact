@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use regex::Regex;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
@@ -14,6 +16,7 @@ use crate::tokens::{cached_tokenizer, count_text_tokens_with_fallback};
 const CACHE_GUARD_TOOL_NAME: &str = "cache_guard";
 const CACHE_GUARD_TOOL_CALL_ID: &str = "cacheguard_force";
 const CACHE_GUARD_RULE: &str = "Prompt cache prefix violation";
+const CACHE_GUARD_PREVIEW_STRING_MAX_CHARS: usize = 240;
 
 const IGNORED_KEYS: &[&str] = &[
     "cache_control",
@@ -158,6 +161,118 @@ pub fn unified_json_diff(prev: &Value, next: &Value) -> String {
         .to_string()
 }
 
+fn preview_body_for_cache_guard_diff(value: &Value) -> Value {
+    preview_value_for_cache_guard_diff(value, None)
+}
+
+fn preview_value_for_cache_guard_diff(value: &Value, parent_key: Option<&str>) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (key, value) in map {
+                out.insert(
+                    key.clone(),
+                    preview_value_for_cache_guard_diff(value, Some(key.as_str())),
+                );
+            }
+            Value::Object(out)
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| preview_value_for_cache_guard_diff(value, parent_key))
+                .collect(),
+        ),
+        Value::String(text) => {
+            Value::String(redact_and_truncate_cache_guard_preview(text, parent_key))
+        }
+        scalar => scalar.clone(),
+    }
+}
+
+fn redact_and_truncate_cache_guard_preview(text: &str, parent_key: Option<&str>) -> String {
+    let redacted = if parent_key.is_some_and(is_sensitive_key) {
+        "[REDACTED]".to_string()
+    } else {
+        redact_common_secret_patterns(text)
+    };
+    if parent_key.is_some_and(is_payload_text_key) {
+        return fingerprint_cache_guard_payload(&redacted);
+    }
+    truncate_cache_guard_preview(&redacted)
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    normalized.contains("api_key")
+        || normalized.contains("apikey")
+        || normalized.contains("auth_token")
+        || normalized.contains("authorization")
+        || normalized.contains("bearer")
+        || normalized.contains("password")
+        || normalized.contains("secret")
+        || normalized == "token"
+        || normalized.ends_with("_token")
+}
+
+fn is_payload_text_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "arguments"
+            | "content"
+            | "description"
+            | "instructions"
+            | "m_content"
+            | "output"
+            | "prompt"
+            | "system"
+            | "text"
+    )
+}
+
+fn fingerprint_cache_guard_payload(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    let digest_hex = hex::encode(digest);
+    format!(
+        "[redacted text chars={} sha256={}]",
+        text.chars().count(),
+        &digest_hex[..16]
+    )
+}
+
+fn redact_common_secret_patterns(text: &str) -> String {
+    let patterns = [
+        (r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]"),
+        (r"sk-[A-Za-z0-9_-]{6,}", "[REDACTED_SECRET]"),
+        (
+            r#"(?i)([A-Za-z0-9_-]*api[_-]?key\s*[:=]\s*["']?)[^\s&"'`]+"#,
+            "${1}[REDACTED]",
+        ),
+    ];
+    let mut redacted = text.to_string();
+    for (pattern, replacement) in patterns {
+        if let Ok(regex) = Regex::new(pattern) {
+            redacted = regex.replace_all(&redacted, replacement).to_string();
+        }
+    }
+    redacted
+}
+
+fn truncate_cache_guard_preview(text: &str) -> String {
+    let char_count = text.chars().count();
+    if char_count <= CACHE_GUARD_PREVIEW_STRING_MAX_CHARS {
+        return text.to_string();
+    }
+    let kept: String = text
+        .chars()
+        .take(CACHE_GUARD_PREVIEW_STRING_MAX_CHARS)
+        .collect();
+    format!(
+        "{kept}…[truncated {} chars]",
+        char_count - CACHE_GUARD_PREVIEW_STRING_MAX_CHARS
+    )
+}
+
 pub async fn estimate_extra_cache_miss_usd(
     app: AppState,
     model_id: &str,
@@ -232,7 +347,10 @@ pub async fn check_or_pause_cache_guard(
         return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
     };
 
-    let diff = unified_json_diff(&previous, &sanitized);
+    let diff = unified_json_diff(
+        &preview_body_for_cache_guard_diff(&previous),
+        &preview_body_for_cache_guard_diff(&sanitized),
+    );
     let estimated_extra_usd = estimate_extra_cache_miss_usd(app.clone(), model_id, &previous).await;
 
     let reason = {
@@ -400,6 +518,30 @@ mod tests {
     }
 
     #[test]
+    fn cache_guard_diff_preview_redacts_secrets_and_truncates_large_strings() {
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": format!("Bearer sk-secret-123 api_key=abcd {}", "x".repeat(400))
+            }],
+            "metadata": {
+                "auth_token": "raw-token-value",
+                "safe_preview": "x".repeat(400)
+            }
+        });
+
+        let preview = preview_body_for_cache_guard_diff(&body);
+        let preview_text = serde_json::to_string(&preview).unwrap();
+
+        assert!(!preview_text.contains("sk-secret-123"));
+        assert!(!preview_text.contains("api_key=abcd"));
+        assert!(!preview_text.contains("raw-token-value"));
+        assert!(preview_text.contains("[redacted text chars="));
+        assert!(preview_text.contains("sha256="));
+        assert!(preview_text.contains("[truncated"));
+    }
+
+    #[test]
     fn cache_guard_emits_event_not_user_message() {
         let message = cache_guard_event_message(
             json!({"model": "test/model", "reason": "prefix_changed"}),
@@ -528,6 +670,46 @@ mod tests {
         assert!(is_cache_guard_pause_reason(
             &session.runtime.pause_reasons[0]
         ));
+    }
+
+    #[tokio::test]
+    async fn cache_guard_violation_pause_reason_redacts_secret_content() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let prev_body = json!({
+            "messages": [{"role": "user", "content": "Bearer sk-secret-123 api_key=abcd"}],
+            "model": "test"
+        });
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        {
+            let mut s = session_arc.lock().await;
+            s.cache_guard_snapshot = Some(sanitize_body_for_cache_guard(&prev_body));
+        }
+
+        let next_body = json!({
+            "messages": [{"role": "assistant", "content": "changed Bearer sk-secret-123 api_key=abcd"}],
+            "model": "test"
+        });
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        let CacheGuardOutcome::Paused { reason } = outcome else {
+            panic!("cache guard should pause on changed prefix");
+        };
+        assert!(reason.contains("Prompt cache append-only prefix check failed"));
+        assert!(!reason.contains("sk-secret-123"));
+        assert!(!reason.contains("api_key=abcd"));
+        assert!(reason.contains("[redacted text chars="));
+        assert!(reason.contains("sha256="));
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.pause_reasons[0].command, reason);
     }
 
     #[tokio::test]

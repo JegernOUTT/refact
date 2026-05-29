@@ -35,6 +35,7 @@ pub fn compute_provider_request_hashes(body: &Value) -> ProviderRequestHashes {
     let messages = body.get("messages").or_else(|| body.get("input"));
     let system = body
         .get("system")
+        .or_else(|| body.get("instructions"))
         .or_else(|| first_system_message(messages));
 
     ProviderRequestHashes {
@@ -158,5 +159,24 @@ mod tests {
 
         assert_eq!(hashes.messages_sha256, Some(sha256_hex(&body["input"])));
         assert_eq!(hashes.system_sha256, Some(sha256_hex(&body["input"][0])));
+    }
+
+    #[test]
+    fn responses_instructions_are_used_for_system_hash_before_input_fallback() {
+        let body = json!({
+            "model": "gpt-5",
+            "instructions": "You are helpful",
+            "input": [
+                {"role": "system", "content": "fallback rules"},
+                {"role": "user", "content": "hello"}
+            ],
+        });
+
+        let hashes = compute_provider_request_hashes(&body);
+
+        assert_eq!(
+            hashes.system_sha256,
+            Some(sha256_hex(&body["instructions"]))
+        );
     }
 }

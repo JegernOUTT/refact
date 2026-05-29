@@ -439,42 +439,15 @@ pub async fn persist_frozen_prefix(
     frozen_request_prefix: FrozenRequestPrefix,
 ) -> Result<(), String> {
     validate_trajectory_id(chat_id).map_err(|e| e.message)?;
-    let file_path = match find_trajectory_path(gcx.clone(), chat_id).await {
-        Some(path) => path,
-        None => {
-            let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
-            tokio::fs::create_dir_all(&trajectories_dir)
-                .await
-                .map_err(|e| format!("Failed to create trajectories dir: {}", e))?;
-            trajectories_dir.join(format!("{}.json", chat_id))
-        }
+    let Some(file_path) = find_trajectory_or_buddy_path(gcx.clone(), chat_id).await else {
+        return Ok(());
     };
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut trajectory = if file_path.exists() {
-        let content = tokio::fs::read_to_string(&file_path)
-            .await
-            .map_err(|e| format!("Failed to read trajectory: {}", e))?;
-        serde_json::from_str::<serde_json::Value>(&content)
-            .map_err(|e| format!("Failed to parse trajectory: {}", e))?
-    } else {
-        json!({
-            "id": chat_id,
-            "title": "New Chat",
-            "model": "",
-            "mode": "agent",
-            "tool_use": "agent",
-            "messages": [],
-            "created_at": now,
-            "updated_at": now,
-            "include_project_info": true,
-            "checkpoints_enabled": true,
-            "isTitleGenerated": false,
-            "auto_approve_editing_tools": false,
-            "auto_approve_dangerous_commands": false,
-            "autonomous_no_confirm": false,
-        })
-    };
+    let content = tokio::fs::read_to_string(&file_path)
+        .await
+        .map_err(|e| format!("Failed to read trajectory: {}", e))?;
+    let mut trajectory = serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|e| format!("Failed to parse trajectory: {}", e))?;
 
     if trajectory
         .get("frozen_request_prefix")
@@ -5044,6 +5017,29 @@ mod tests {
             raw_after_second["frozen_request_prefix"]["system_prompt"],
             "frozen system"
         );
+    }
+
+    #[tokio::test]
+    async fn frozen_persist_prefix_noops_when_trajectory_path_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let prefix = FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: "2026-05-29T00:00:00Z".to_string(),
+            system_prompt: Some("frozen system".to_string()),
+            tools_canonical: Some(json!([{"type": "function", "function": {"name": "cat"}}])),
+        };
+
+        persist_frozen_prefix(gcx, "agent-T-14-missing", prefix)
+            .await
+            .unwrap();
+
+        let generic_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join("agent-T-14-missing.json");
+        assert!(!tokio::fs::try_exists(generic_path).await.unwrap());
     }
 
     #[tokio::test]
