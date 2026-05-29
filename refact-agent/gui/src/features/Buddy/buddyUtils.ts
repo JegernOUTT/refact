@@ -15,6 +15,18 @@ export function formatBuddyTime(ts: string | null | undefined): string {
   });
 }
 
+export function formatFailureLabel(
+  value: string | null | undefined,
+): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return trimmed
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 /**
  * Format a large integer count (tokens, messages, …) using compact unit
  * suffixes (k, M, B, T). Picks the largest unit that keeps the value

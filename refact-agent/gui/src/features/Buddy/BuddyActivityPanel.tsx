@@ -2,7 +2,7 @@ import React from "react";
 import { SegmentedControl, Text, Tooltip } from "@radix-ui/themes";
 import classNames from "classnames";
 import type { BuddyActivityEntry } from "./types";
-import { formatBuddyTime } from "./buddyUtils";
+import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
 import styles from "./BuddyHome.module.css";
 
 type ActivityFilter = "all" | "refact_" | "buddy_";
@@ -10,16 +10,6 @@ type ActivityFilter = "all" | "refact_" | "buddy_";
 interface BuddyActivityPanelProps {
   activities: BuddyActivityEntry[];
   onOpenChat?: (chatId: string, title: string) => void;
-}
-
-function formatFailureLabel(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  return trimmed
-    .split(/[_\s-]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({

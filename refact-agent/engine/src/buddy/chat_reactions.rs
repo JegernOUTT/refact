@@ -299,7 +299,6 @@ pub enum ChatReactionSkipReason {
     TextTooShort,
     BuddyUnavailable,
     SettingsDisabled,
-    NoReactionKind,
     RateLimited,
 }
 
@@ -310,7 +309,6 @@ impl ChatReactionSkipReason {
             ChatReactionSkipReason::TextTooShort => "text_too_short",
             ChatReactionSkipReason::BuddyUnavailable => "buddy_unavailable",
             ChatReactionSkipReason::SettingsDisabled => "settings_disabled",
-            ChatReactionSkipReason::NoReactionKind => "no_reaction_kind",
             ChatReactionSkipReason::RateLimited => "rate_limited",
         }
     }
@@ -454,8 +452,7 @@ pub fn chat_reaction_candidate(
     if !settings_allow_chat_reactions(settings) {
         return Err(ChatReactionSkipReason::SettingsDisabled);
     }
-    let kind = classify_chat_reaction_kind(&analysis_text, settings)
-        .ok_or(ChatReactionSkipReason::NoReactionKind)?;
+    let kind = classify_chat_reaction_kind(&analysis_text, settings);
     Ok(ChatReactionCandidate {
         analysis_text,
         kind,
@@ -471,24 +468,21 @@ pub fn prepare_analysis_text(raw: &str) -> Option<String> {
     Some(normalized.chars().take(ANALYSIS_TEXT_MAX_CHARS).collect())
 }
 
-pub fn classify_chat_reaction_kind(
-    text: &str,
-    settings: &BuddySettings,
-) -> Option<ChatReactionKind> {
+pub fn classify_chat_reaction_kind(text: &str, settings: &BuddySettings) -> ChatReactionKind {
     let lower = text.to_lowercase();
     let tokens = word_tokens(&lower);
     if has_bug_signal(&lower, &tokens) {
-        Some(ChatReactionKind::BugCandidate)
+        ChatReactionKind::BugCandidate
     } else if settings.humor_enabled
         && settings.humor_level != HumorLevel::Off
         && deterministic_humor_bucket(text)
         && !has_work_insight_signal(&tokens)
     {
-        Some(ChatReactionKind::Humor)
+        ChatReactionKind::Humor
     } else if has_strong_insight_signal(&lower, &tokens) {
-        Some(ChatReactionKind::Insight)
+        ChatReactionKind::Insight
     } else {
-        Some(ChatReactionKind::Ambient)
+        ChatReactionKind::Ambient
     }
 }
 
@@ -806,7 +800,8 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
             Ok(candidate) => candidate,
             Err(reason) => {
                 if let Some(svc) = svc_guard.as_mut() {
-                    svc.chat_reaction_debug.record_skipped(&accepted.chat_id, reason);
+                    svc.chat_reaction_debug
+                        .record_skipped(&accepted.chat_id, reason);
                 }
                 debug!(
                     target: "buddy.chat_reactions",
@@ -826,7 +821,8 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
             svc.chat_reaction_limiter
                 .try_allow_kind(&accepted.chat_id, candidate.kind.clone(), now)
         {
-            svc.chat_reaction_debug.record_skipped(&accepted.chat_id, reason);
+            svc.chat_reaction_debug
+                .record_skipped(&accepted.chat_id, reason);
             debug!(
                 target: "buddy.chat_reactions",
                 chat_id = %accepted.chat_id,
@@ -976,11 +972,12 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    fn classify_chat_reaction(text: &str, settings: &BuddySettings) -> Option<ChatReaction> {
-        classify_chat_reaction_kind(text, settings).map(|kind| ChatReaction {
+    fn classify_chat_reaction(text: &str, settings: &BuddySettings) -> ChatReaction {
+        let kind = classify_chat_reaction_kind(text, settings);
+        ChatReaction {
             text: fallback_chat_reaction_text(kind.clone(), text),
             kind,
-        })
+        }
     }
 
     #[test]
@@ -1120,7 +1117,7 @@ mod tests {
             "there is an error in the refactor plan",
             "please plan around the crash while we iterate again",
         ] {
-            let reaction = classify_chat_reaction(text, &s).unwrap();
+            let reaction = classify_chat_reaction(text, &s);
             assert_eq!(
                 reaction.kind,
                 ChatReactionKind::BugCandidate,
@@ -1160,7 +1157,7 @@ mod tests {
             .count();
         let kinds: Vec<ChatReactionKind> = samples
             .iter()
-            .map(|text| classify_chat_reaction_kind(text, &s).unwrap())
+            .map(|text| classify_chat_reaction_kind(text, &s))
             .collect();
         let humor_count = kinds
             .iter()
@@ -1183,7 +1180,7 @@ mod tests {
             kinds,
             samples
                 .iter()
-                .map(|text| classify_chat_reaction_kind(text, &s).unwrap())
+                .map(|text| classify_chat_reaction_kind(text, &s))
                 .collect::<Vec<_>>()
         );
     }
@@ -1198,9 +1195,7 @@ mod tests {
             "what if we split this into two smaller steps",
             "try again with a simpler explanation of the sequence",
         ] {
-            let reaction = classify_chat_reaction(text, &s).unwrap_or_else(|| {
-                panic!("expected visible reaction for: {text}");
-            });
+            let reaction = classify_chat_reaction(text, &s);
             assert_ne!(
                 reaction.kind,
                 ChatReactionKind::BugCandidate,
@@ -1220,9 +1215,7 @@ mod tests {
             "rename the cache layer for the caching feature ux",
             "review the ui flow before the migration lands",
         ] {
-            let reaction = classify_chat_reaction(text, &s).unwrap_or_else(|| {
-                panic!("expected reaction for: {text}");
-            });
+            let reaction = classify_chat_reaction(text, &s);
             match reaction.kind {
                 ChatReactionKind::Humor => humor += 1,
                 ChatReactionKind::Insight => insight += 1,
@@ -1238,8 +1231,7 @@ mod tests {
     #[test]
     fn classify_default_non_error_falls_back_to_ambient() {
         let s = BuddySettings::default();
-        let reaction =
-            classify_chat_reaction("please write a hello world example for me", &s).unwrap();
+        let reaction = classify_chat_reaction("please write a hello world example for me", &s);
         assert_eq!(reaction.kind, ChatReactionKind::Ambient);
     }
 
@@ -1251,7 +1243,7 @@ mod tests {
         let text = "please ask about the next small step before we change the helper";
 
         assert!(deterministic_humor_bucket(text));
-        let reaction = classify_chat_reaction(text, &s).unwrap();
+        let reaction = classify_chat_reaction(text, &s);
         assert_eq!(reaction.kind, ChatReactionKind::Insight);
     }
 
@@ -1261,7 +1253,7 @@ mod tests {
         let text = "please ask about the next small step before we change the helper";
 
         assert!(deterministic_humor_bucket(text));
-        let reaction = classify_chat_reaction(text, &s).unwrap();
+        let reaction = classify_chat_reaction(text, &s);
         assert_eq!(reaction.kind, ChatReactionKind::Humor);
     }
 
@@ -1269,7 +1261,7 @@ mod tests {
     fn classify_ambient_when_humor_off_and_no_signal() {
         let mut s = BuddySettings::default();
         s.humor_level = HumorLevel::Off;
-        let reaction = classify_chat_reaction("please write a hello world example for me", &s).unwrap();
+        let reaction = classify_chat_reaction("please write a hello world example for me", &s);
         assert_eq!(reaction.kind, ChatReactionKind::Ambient);
     }
 
@@ -1280,8 +1272,7 @@ mod tests {
         let reaction = classify_chat_reaction(
             "can you iterate on this wording and compare the options",
             &s,
-        )
-        .unwrap();
+        );
         assert_eq!(reaction.kind, ChatReactionKind::Insight);
     }
 
@@ -1306,7 +1297,7 @@ mod tests {
     fn reaction_event_metadata() {
         let s = BuddySettings::default();
         let analysis_text = "there is a crash in production today";
-        let reaction = classify_chat_reaction(analysis_text, &s).unwrap();
+        let reaction = classify_chat_reaction(analysis_text, &s);
         assert_eq!(reaction.kind, ChatReactionKind::BugCandidate);
 
         let ev = build_reaction_event("chat-1", analysis_text, &reaction);
@@ -1331,7 +1322,7 @@ mod tests {
         let raw = "connection failed: Bearer sk-VERYSECRET crashed";
         let analysis = prepare_analysis_text(raw).unwrap();
         let s = BuddySettings::default();
-        let reaction = classify_chat_reaction(&analysis, &s).unwrap();
+        let reaction = classify_chat_reaction(&analysis, &s);
         let ev = build_reaction_event("chat-sec", &analysis, &reaction);
 
         assert!(
@@ -1664,8 +1655,7 @@ mod tests {
         let reaction = classify_chat_reaction(
             "please look at the latest debug output and run the contest",
             &s,
-        )
-        .unwrap();
+        );
         assert_ne!(
             reaction.kind,
             ChatReactionKind::BugCandidate,
@@ -1685,7 +1675,7 @@ mod tests {
         ] {
             assert_eq!(
                 classify_chat_reaction_kind(text, &s),
-                Some(ChatReactionKind::Ambient),
+                ChatReactionKind::Ambient,
                 "short insight keyword must not overmatch insight: {text}"
             );
         }
@@ -1694,7 +1684,7 @@ mod tests {
     #[test]
     fn keywords_match_multi_word_not_working_phrases() {
         let s = BuddySettings::default();
-        let reaction = classify_chat_reaction("the upload is not working anymore", &s).unwrap();
+        let reaction = classify_chat_reaction("the upload is not working anymore", &s);
         assert_eq!(
             reaction.kind,
             ChatReactionKind::BugCandidate,
@@ -1706,7 +1696,7 @@ mod tests {
     fn reaction_event_speech_text_is_buddy_template() {
         let s = BuddySettings::default();
         let input = "design a new architecture for the service layer";
-        let reaction = classify_chat_reaction(input, &s).unwrap();
+        let reaction = classify_chat_reaction(input, &s);
         assert_eq!(reaction.kind, ChatReactionKind::Insight);
         let ev = build_reaction_event("chat-template", input, &reaction);
         let speech = ev.speech_text.expect("speech_text must be set");

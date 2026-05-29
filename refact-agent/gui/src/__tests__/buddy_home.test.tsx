@@ -47,6 +47,7 @@ import {
   formatBuddyRuntimeEventText,
   isBuddySpeechExpired,
 } from "../features/Buddy/buddySceneSpeech";
+import { formatFailureLabel } from "../features/Buddy/buddyUtils";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 import { PALETTES, STAGES } from "../features/Buddy/constants";
@@ -534,6 +535,12 @@ describe("ActivityFeed_filter_chips_filter_by_workflow_prefix", () => {
 });
 
 describe("BuddyWorkflowFailureSummaries", () => {
+  it("formats failure category labels with the shared Buddy utility", () => {
+    expect(formatFailureLabel("model_unavailable")).toBe("Model Unavailable");
+    expect(formatFailureLabel(" context-too-large ")).toBe("Context Too Large");
+    expect(formatFailureLabel(" ")).toBeNull();
+  });
+
   it("shows structured failure categories in activity and recent error panels", () => {
     render(
       <>

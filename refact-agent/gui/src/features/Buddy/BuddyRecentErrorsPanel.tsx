@@ -2,7 +2,7 @@ import React from "react";
 import { Text, Tooltip } from "@radix-ui/themes";
 import classNames from "classnames";
 import type { BuddyRuntimeEvent } from "./types";
-import { formatBuddyTime } from "./buddyUtils";
+import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
 import styles from "./BuddyHome.module.css";
 
 export type RecentBuddyError = BuddyRuntimeEvent & {
@@ -16,16 +16,6 @@ interface BuddyRecentErrorsPanelProps {
   recentErrors: RecentBuddyError[];
   onInvestigate: (event: RecentBuddyError) => void | Promise<void>;
   onDismiss: (event: RecentBuddyError) => void | Promise<void>;
-}
-
-function formatFailureLabel(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  return trimmed
-    .split(/[_\s-]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
