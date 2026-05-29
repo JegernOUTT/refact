@@ -1016,8 +1016,10 @@ mod tests {
         );
         let text = segment_text(&[assistant(&huge)]);
 
-        assert!(text.contains("start 0123456789"));
+        assert!(text.contains("start"));
         assert!(text.contains(MESSAGE_CONTENT_TRUNCATED_MARKER));
+        assert!(!text.contains("0123456789"));
+        assert!(!text.contains(" end"));
         assert!(text.len() < huge.len());
         assert!(text.len() <= SEGMENT_MESSAGE_CONTENT_MAX_CHARS + 64);
     }
