@@ -245,6 +245,7 @@ export type EventEnvelope =
       type: "runtime_updated";
       state: string;
       error?: string;
+      is_compressing?: boolean;
     }
   | {
       chat_id: string;

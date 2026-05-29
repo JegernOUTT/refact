@@ -337,6 +337,13 @@ export const selectIsStreaming = (state: RootState) =>
 export const selectIsStreamingById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.streaming ?? false;
 
+export function selectIsCompressingById(
+  state: RootState,
+  id: string,
+): boolean {
+  return state.chat.threads[id]?.is_compressing ?? false;
+}
+
 export const selectSnapshotReceived = (state: RootState) =>
   state.chat.threads[state.chat.current_thread_id]?.snapshot_received ?? false;
 

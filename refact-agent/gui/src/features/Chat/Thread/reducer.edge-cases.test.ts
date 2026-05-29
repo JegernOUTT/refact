@@ -3,6 +3,7 @@ import { expect, test, describe, beforeEach } from "vitest";
 import { chatReducer } from "./reducer";
 import type { Chat } from "./types";
 import { newChatAction, applyChatEvent, markThreadSseError } from "./actions";
+import { selectIsCompressingById } from "./selectors";
 import type { ChatEventEnvelope } from "../../../services/refact/chatSubscription";
 import type { ChatMessage } from "../../../services/refact/types";
 
@@ -350,6 +351,55 @@ describe("Chat Thread Reducer - Edge Cases", () => {
 
       expect((msg?.extra as any)?.metering_a).toBe(150);
       expect((msg?.extra as any)?.metering_b).toBe(200);
+    });
+  });
+
+  describe("runtime updates", () => {
+    test("runtime_updated sets and clears is_compressing flag", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      expect(
+        selectIsCompressingById(
+          { chat: state } as Parameters<typeof selectIsCompressingById>[0],
+          chatId,
+        ),
+      ).toBe(false);
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "idle",
+          is_compressing: true,
+        }),
+      );
+
+      expect(
+        selectIsCompressingById(
+          { chat: state } as Parameters<typeof selectIsCompressingById>[0],
+          chatId,
+        ),
+      ).toBe(true);
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "3",
+          type: "runtime_updated",
+          state: "idle",
+          is_compressing: false,
+        }),
+      );
+
+      expect(
+        selectIsCompressingById(
+          { chat: state } as Parameters<typeof selectIsCompressingById>[0],
+          chatId,
+        ),
+      ).toBe(false);
     });
   });
 

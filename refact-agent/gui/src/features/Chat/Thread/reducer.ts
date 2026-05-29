@@ -1909,6 +1909,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
         } else if (newState !== "error") {
           rt.error = null;
         }
+        if (typeof event.is_compressing === "boolean") {
+          rt.is_compressing = event.is_compressing;
+        }
         rt.last_applied_seq = event.seq;
         break;
       }

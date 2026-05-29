@@ -209,6 +209,8 @@ export type ChatThreadRuntime = {
   confirmation: ThreadConfirmation;
   /** Whether the initial snapshot has been received from the backend */
   snapshot_received: boolean;
+  /** Whether the engine is running segment summarization */
+  is_compressing?: boolean;
   /** Task progress widget expanded/collapsed state */
   task_widget_expanded: boolean;
   /** Actual session state from backend (for waiting_user_input, completed, etc.) */

@@ -46,6 +46,7 @@ import {
   selectThreadById,
   selectChatId,
   selectThreadPauseById,
+  selectIsCompressingById,
 } from "../../features/Chat/Thread/selectors";
 import {
   createChatWithId,
@@ -76,6 +77,7 @@ import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
 import { PlanBanner } from "./PlanBanner";
+import { CompressionProgress } from "./CompressionProgress";
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -106,6 +108,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   );
   const isStreaming = useAppSelector((s) =>
     selectIsStreamingById(s, renderChatId),
+  );
+  const isCompressing = useAppSelector((s) =>
+    selectIsCompressingById(s, renderChatId),
   );
   const snapshotReceived = useAppSelector((s) =>
     selectSnapshotReceivedById(s, renderChatId),
@@ -245,9 +250,25 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return nextItems;
   }, [messages, isStreaming]);
 
+  const augmentedDisplayItems = useMemo(() => {
+    if (isCompressing && !isStreaming) {
+      return [
+        ...displayItems,
+        {
+          type: "compression_progress" as const,
+          key: "compression-progress-indicator",
+          messageIndex: -1,
+        },
+      ];
+    }
+    return displayItems;
+  }, [displayItems, isCompressing, isStreaming]);
+
   const initialScrollIndex = useMemo(() => {
-    return displayItems.length > 0 ? displayItems.length - 1 : undefined;
-  }, [displayItems]);
+    return augmentedDisplayItems.length > 0
+      ? augmentedDisplayItems.length - 1
+      : undefined;
+  }, [augmentedDisplayItems]);
 
   const virtuosoFooter = useMemo(
     () => (
@@ -370,6 +391,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             <SummarizationMessageCard key={item.key} message={item.message} />
           );
 
+        case "compression_progress":
+          return <CompressionProgress />;
+
         default:
           return null;
       }
@@ -418,7 +442,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       >
         <VirtualizedChatList
           key={renderChatId}
-          items={displayItems}
+          items={augmentedDisplayItems}
           renderItem={renderDisplayItem}
           initialScrollIndex={initialScrollIndex}
           footer={virtuosoFooter}
@@ -603,6 +627,12 @@ type DisplayItemSummarization = {
   message: SummarizationMessage;
 };
 
+type DisplayItemCompressionProgress = {
+  type: "compression_progress";
+  key: string;
+  messageIndex: number;
+};
+
 type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
@@ -613,7 +643,8 @@ type DisplayItem =
   | DisplayItemError
   | DisplayItemSkillActivated
   | DisplayItemSkillReport
-  | DisplayItemSummarization;
+  | DisplayItemSummarization
+  | DisplayItemCompressionProgress;
 
 function updateAssistantStreamingFlags(
   items: DisplayItem[],
