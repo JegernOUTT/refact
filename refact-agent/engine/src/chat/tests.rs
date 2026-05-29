@@ -1825,52 +1825,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn three_mode_switches_increment_plan_version() {
+    async fn mode_switch_does_not_create_second_plan() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
         let mut session = ChatSession::new("plan-version-test".to_string());
         session.thread.mode = "explore".to_string();
 
-        for mode in ["agent", "task_planner", "agent"] {
-            let old_mode = session.thread.mode.clone();
-            let patch = json!({"mode": mode});
-            let (changed, _) =
-                crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
-            assert!(changed);
-            crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
-                app.clone(),
-                &mut session,
-                &old_mode,
-                None,
-                "chat.session",
-            )
-            .await;
-        }
+        let old_mode = session.thread.mode.clone();
+        let patch = json!({"mode": "agent"});
+        let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
+        assert!(changed);
+        crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
+            app.clone(),
+            &mut session,
+            &old_mode,
+            None,
+            "chat.session",
+        )
+        .await;
+
+        session.add_message(crate::chat::internal_roles::plan_delta(
+            "tool.set_plan",
+            json!({"seq": 1}),
+            "keep this update",
+        ));
+        let base_plan_id = crate::chat::plan_role::current_base_plan(&session)
+            .unwrap()
+            .message_id
+            .clone();
+        let old_mode = session.thread.mode.clone();
+        let patch = json!({"mode": "task_planner"});
+        let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
+        assert!(changed);
+        crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
+            app,
+            &mut session,
+            &old_mode,
+            None,
+            "chat.session",
+        )
+        .await;
 
         let chronological: Vec<_> = session
             .messages
             .iter()
             .filter(|message| message.role == "plan")
             .collect();
-        assert_eq!(chronological.len(), 3);
+        assert_eq!(chronological.len(), 1);
+        assert_eq!(chronological[0].message_id, base_plan_id);
         assert_eq!(chronological[0].extra["plan"]["version"], json!(1));
-        assert_eq!(chronological[1].extra["plan"]["version"], json!(2));
-        assert_eq!(chronological[2].extra["plan"]["version"], json!(3));
         assert_eq!(chronological[0].extra["plan"]["mode"], json!("agent"));
-        assert_eq!(
-            chronological[1].extra["plan"]["mode"],
-            json!("task_planner")
-        );
-        assert_eq!(chronological[2].extra["plan"]["mode"], json!("agent"));
-        assert!(chronological[0].extra["plan"]["supersedes"].is_null());
-        assert_eq!(
-            chronological[1].extra["plan"]["supersedes"].as_str(),
-            Some(chronological[0].message_id.as_str())
-        );
-        assert_eq!(
-            chronological[2].extra["plan"]["supersedes"].as_str(),
-            Some(chronological[1].message_id.as_str())
-        );
+        let deltas = crate::chat::plan_role::plan_delta_events(&session);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].content.content_text_only(), "keep this update");
     }
 
     #[tokio::test]

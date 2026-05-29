@@ -11,7 +11,7 @@ pub fn is_ui_only_message(msg: &ChatMessage) -> bool {
 }
 
 pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
-    let extra = if is_ui_only_message(m) {
+    let extra = if is_ui_only_message(m) || matches!(m.role.as_str(), "plan" | "event") {
         m.extra.clone()
     } else {
         serde_json::Map::new()
@@ -561,6 +561,44 @@ mod tests {
         }
     }
 
+    fn make_plan_msg() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "plan".to_string(),
+            serde_json::json!({
+                "mode": "agent",
+                "version": 1,
+                "created_at_ms": 123,
+                "supersedes": null,
+            }),
+        );
+        ChatMessage {
+            role: "plan".to_string(),
+            content: ChatContent::SimpleText("base plan".to_string()),
+            preserve: Some(true),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn make_plan_delta_event() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            serde_json::json!({
+                "subkind": "plan_delta",
+                "source": "tool.set_plan",
+                "payload": {"seq": 1},
+            }),
+        );
+        ChatMessage {
+            role: "event".to_string(),
+            content: ChatContent::SimpleText("delta".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn sanitize_messages_for_model_switch_drops_ui_only_messages() {
         let mut messages = vec![
@@ -595,6 +633,22 @@ mod tests {
             .content
             .content_text_only()
             .contains("legacy diagnostic report")));
+    }
+
+    #[test]
+    fn sanitize_messages_for_new_thread_preserves_plan_and_plan_delta_extra() {
+        let messages = vec![make_plan_msg(), make_plan_delta_event()];
+
+        let sanitized = sanitize_messages_for_new_thread(&messages);
+
+        assert_eq!(sanitized.len(), 2);
+        assert_eq!(sanitized[0].role, "plan");
+        assert_eq!(sanitized[0].extra["plan"]["version"], serde_json::json!(1));
+        assert_eq!(sanitized[1].role, "event");
+        assert_eq!(
+            sanitized[1].extra["event"]["subkind"],
+            serde_json::json!("plan_delta")
+        );
     }
 
     #[test]

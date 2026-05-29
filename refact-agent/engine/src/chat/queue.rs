@@ -14,6 +14,7 @@ use crate::files_correction::get_project_dirs;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
 use crate::chat::internal_roles::mode_switch_event;
+use crate::chat::plan_role;
 use crate::yaml_configs::customization_registry::get_mode_config;
 
 use super::types::*;
@@ -548,19 +549,21 @@ pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
     } else {
         Some(session.thread.model.as_str())
     };
-    if let Some(mode_config) = get_mode_config(app.gcx.clone(), &new_mode, model_id).await {
-        let plan_template = mode_config.plan_template.trim();
-        if !plan_template.is_empty() {
-            let rendered = super::prompts::render_mode_plan_template(
-                app,
-                plan_template,
-                &mode_config.title,
-                session.thread.include_project_info,
-                &session.thread.task_meta,
-            )
-            .await;
-            if !rendered.trim().is_empty() {
-                session.install_plan(&new_mode, rendered.trim());
+    if plan_role::current_base_plan(session).is_none() {
+        if let Some(mode_config) = get_mode_config(app.gcx.clone(), &new_mode, model_id).await {
+            let plan_template = mode_config.plan_template.trim();
+            if !plan_template.is_empty() {
+                let rendered = super::prompts::render_mode_plan_template(
+                    app,
+                    plan_template,
+                    &mode_config.title,
+                    session.thread.include_project_info,
+                    &session.thread.task_meta,
+                )
+                .await;
+                if !rendered.trim().is_empty() {
+                    session.install_plan(&new_mode, rendered.trim());
+                }
             }
         }
     }
@@ -1410,7 +1413,7 @@ pub async fn process_command_queue(
                 let mut session = session_arc.lock().await;
                 for msg_value in messages {
                     if let Ok(msg) = serde_json::from_value::<ChatMessage>(msg_value) {
-                        if !is_allowed_role_for_restore(&msg.role) {
+                        if !is_allowed_for_restore(&msg) {
                             continue;
                         }
                         let sanitized = sanitize_message_for_restore(&msg);
@@ -1443,7 +1446,7 @@ pub async fn process_command_queue(
                     let mut msgs = Vec::new();
                     let mut found = false;
                     for m in &source_session.messages {
-                        if is_allowed_role_for_branch(&m.role) {
+                        if is_allowed_for_branch(m) {
                             msgs.push(sanitize_message_for_branch(m));
                         }
                         if m.message_id == up_to_message_id {
@@ -1593,8 +1596,29 @@ pub async fn process_command_queue(
     }
 }
 
-fn is_allowed_role_for_restore(role: &str) -> bool {
-    matches!(role, "user" | "assistant" | "system" | "tool")
+fn is_plan_delta_event(msg: &ChatMessage) -> bool {
+    msg.role == "event"
+        && msg
+            .extra
+            .get("event")
+            .and_then(|event| event.get("subkind"))
+            .and_then(|subkind| subkind.as_str())
+            == Some("plan_delta")
+}
+
+fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::Value> {
+    if matches!(msg.role.as_str(), "plan" | "event") {
+        msg.extra.clone()
+    } else {
+        serde_json::Map::new()
+    }
+}
+
+fn is_allowed_for_restore(msg: &ChatMessage) -> bool {
+    matches!(
+        msg.role.as_str(),
+        "user" | "assistant" | "system" | "tool" | "plan"
+    ) || is_plan_delta_event(msg)
 }
 
 /// Sanitize message for restoring from external trajectory — strips tool_calls for security
@@ -1615,6 +1639,7 @@ fn sanitize_message_for_restore(msg: &ChatMessage) -> ChatMessage {
         summarized_range: msg.summarized_range,
         summarization_tier: msg.summarization_tier.clone(),
         summarized_token_estimate: msg.summarized_token_estimate,
+        extra: hidden_role_extra(msg),
         ..Default::default()
     }
 }
@@ -1637,15 +1662,16 @@ fn sanitize_message_for_branch(msg: &ChatMessage) -> ChatMessage {
         summarized_range: msg.summarized_range,
         summarization_tier: msg.summarization_tier.clone(),
         summarized_token_estimate: msg.summarized_token_estimate,
+        extra: hidden_role_extra(msg),
         ..Default::default()
     }
 }
 
-fn is_allowed_role_for_branch(role: &str) -> bool {
+fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
     matches!(
-        role,
-        "user" | "assistant" | "system" | "tool" | "context_file"
-    )
+        msg.role.as_str(),
+        "user" | "assistant" | "system" | "tool" | "context_file" | "plan"
+    ) || is_plan_delta_event(msg)
 }
 
 async fn handle_tool_decisions(
@@ -2903,5 +2929,84 @@ mod tests {
     fn test_skill_activation_sets_context_marker() {
         assert_eq!(SKILLS_CONTEXT_MARKER, "skills_context",
             "SKILLS_CONTEXT_MARKER must equal 'skills_context' so prompts.rs detects existing skills context");
+    }
+
+    fn make_plan_message(content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "plan".to_string(),
+            json!({
+                "mode": "agent",
+                "version": 1,
+                "created_at_ms": 123,
+                "supersedes": null,
+            }),
+        );
+        ChatMessage {
+            message_id: Uuid::new_v4().to_string(),
+            role: "plan".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            preserve: Some(true),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn make_plan_delta_event(content: &str, seq: u32) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            json!({
+                "subkind": "plan_delta",
+                "source": "tool.set_plan",
+                "payload": {"seq": seq},
+            }),
+        );
+        ChatMessage {
+            message_id: Uuid::new_v4().to_string(),
+            role: "event".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restore_keeps_plan_role() {
+        let plan = make_plan_message("base plan");
+        let sanitized = sanitize_message_for_restore(&plan);
+
+        assert!(is_allowed_for_restore(&plan));
+        assert_eq!(sanitized.role, "plan");
+        assert_eq!(sanitized.content.content_text_only(), "base plan");
+        assert_eq!(sanitized.preserve, Some(true));
+        assert_eq!(sanitized.extra["plan"]["version"], json!(1));
+    }
+
+    #[test]
+    fn branch_keeps_plan_and_plan_delta() {
+        let plan = make_plan_message("base plan");
+        let delta = make_plan_delta_event("update", 2);
+        let other_event = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "test",
+            json!({}),
+            "skip",
+        );
+
+        assert!(is_allowed_for_branch(&plan));
+        assert!(is_allowed_for_branch(&delta));
+        assert!(!is_allowed_for_branch(&other_event));
+        let branched_plan = sanitize_message_for_branch(&plan);
+        let branched_delta = sanitize_message_for_branch(&delta);
+
+        assert_eq!(branched_plan.role, "plan");
+        assert_eq!(branched_plan.extra["plan"]["version"], json!(1));
+        assert_eq!(branched_delta.role, "event");
+        assert_eq!(
+            branched_delta.extra["event"]["subkind"],
+            json!("plan_delta")
+        );
+        assert_eq!(branched_delta.extra["event"]["payload"]["seq"], json!(2));
     }
 }

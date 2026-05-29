@@ -4536,6 +4536,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reopen_preserves_pinned_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let mut plan_extra = serde_json::Map::new();
+        plan_extra.insert(
+            "plan".to_string(),
+            json!({
+                "mode": "agent",
+                "version": 1,
+                "created_at_ms": 123,
+                "supersedes": null,
+            }),
+        );
+        let plan = ChatMessage {
+            role: "plan".to_string(),
+            content: ChatContent::SimpleText("base plan".to_string()),
+            preserve: Some(true),
+            extra: plan_extra,
+            ..Default::default()
+        };
+        let delta = crate::chat::internal_roles::plan_delta(
+            "tool.set_plan",
+            json!({"seq": 1}),
+            "append update",
+        );
+        let mut session = ChatSession::new("plan-reopen".to_string());
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        session.add_message(plan);
+        session.add_message(delta);
+
+        let snapshot = trajectory_snapshot_from_session(&session);
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "plan-reopen").await.unwrap();
+        let plans: Vec<_> = loaded
+            .messages
+            .iter()
+            .filter(|message| message.role == "plan")
+            .collect();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].content.content_text_only(), "base plan");
+        assert_eq!(plans[0].preserve, Some(true));
+        assert_eq!(plans[0].extra["plan"]["version"], json!(1));
+        let deltas: Vec<_> = loaded
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "event" && message.extra["event"]["subkind"] == json!("plan_delta")
+            })
+            .collect();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].content.content_text_only(), "append update");
+    }
+
+    #[tokio::test]
     async fn wake_up_at_round_trips_through_trajectory_save_and_load() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;

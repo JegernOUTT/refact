@@ -871,23 +871,33 @@ pub async fn assemble_new_chat(
         .map(str::trim)
         .filter(|plan| !plan.is_empty())
     {
-        let prefix = "## Initial Plan\n\n";
-        let prefix_symbols = text_symbols(prefix);
-        let plan_budget = remaining_messages_symbols.max(
-            MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP
-                .min(text_symbols(initial_plan) + prefix_symbols),
-        );
-        let mut text = prefix.to_string();
-        let mut remaining_plan_symbols = plan_budget.saturating_sub(prefix_symbols);
+        let plan_budget = remaining_messages_symbols
+            .max(MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP.min(text_symbols(initial_plan)));
+        let mut remaining_plan_symbols = plan_budget;
         if let Some(plan) = take_from_symbol_budget(initial_plan, &mut remaining_plan_symbols) {
-            text.push_str(&plan);
+            let created_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let mut extra = serde_json::Map::new();
+            // Mirrors engine internal_roles::plan without adding an engine dependency.
+            extra.insert(
+                "plan".to_string(),
+                serde_json::json!({
+                    "mode": "",
+                    "version": 1,
+                    "created_at_ms": created_at_ms,
+                    "supersedes": null,
+                }),
+            );
+            let used = text_symbols(&plan);
             new_messages.push(ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText(text),
+                role: "plan".to_string(),
+                content: ChatContent::SimpleText(plan),
                 preserve: Some(true),
+                extra,
                 ..Default::default()
             });
-            let used = prefix_symbols + text_symbols(&plan);
             remaining_messages_symbols = remaining_messages_symbols.saturating_sub(used);
         }
     }
@@ -1504,7 +1514,7 @@ MSG_ID:2
     }
 
     #[tokio::test]
-    async fn test_assemble_new_chat_includes_initial_plan_as_preserved_context() {
+    async fn assemble_new_chat_emits_plan_role_not_user_message() {
         let plan = "# Feature Implementation Plan\n\n## Tasks\n\n### Task 1: Build\n- [ ] Verify: `cargo test`";
         let messages = vec![ChatMessage {
             role: "user".to_string(),
@@ -1517,15 +1527,32 @@ MSG_ID:2
         };
 
         let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
-        let text = new_messages
+        let plan_messages: Vec<_> = new_messages
             .iter()
-            .map(|msg| msg.content.content_text_only())
-            .collect::<Vec<_>>()
-            .join("\n");
+            .filter(|msg| msg.role == "plan")
+            .collect();
 
-        assert!(text.contains("## Initial Plan"));
-        assert!(text.contains("Feature Implementation Plan"));
-        assert!(new_messages.iter().any(|msg| msg.preserve == Some(true)));
+        assert_eq!(plan_messages.len(), 1);
+        assert_eq!(plan_messages[0].content.content_text_only(), plan);
+        assert_eq!(plan_messages[0].preserve, Some(true));
+        assert_eq!(
+            plan_messages[0].extra["plan"]["mode"],
+            serde_json::json!("")
+        );
+        assert_eq!(
+            plan_messages[0].extra["plan"]["version"],
+            serde_json::json!(1)
+        );
+        assert!(plan_messages[0].extra["plan"]["supersedes"].is_null());
+        assert!(
+            plan_messages[0].extra["plan"]["created_at_ms"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(!new_messages.iter().any(|msg| {
+            msg.role == "user" && msg.content.content_text_only().contains("## Initial Plan")
+        }));
     }
 
     #[tokio::test]
