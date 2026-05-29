@@ -24,6 +24,55 @@ pub enum WorkflowFailureCategory {
 }
 
 impl WorkflowFailureCategory {
+    pub fn classify(error: &str) -> Self {
+        let lower = error.to_lowercase();
+        if lower.trim() == "aborted" || lower.contains("original error: aborted") {
+            return Self::Cancelled;
+        }
+        if lower.contains("tool '") && lower.contains("not found")
+            || lower.contains("unknown tool")
+            || lower.contains("tool not found")
+        {
+            return Self::ToolUnavailable;
+        }
+        if lower.contains("tool failed")
+            || lower.contains("tool execution failed")
+            || lower.contains("tool call failed")
+        {
+            return Self::ToolFailed;
+        }
+        match refact_chat_history::retry_policy::classify_user_error(error) {
+            refact_chat_history::retry_policy::UserErrorCategory::ModelUnavailable => {
+                Self::ModelUnavailable
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::ContextTooLarge => {
+                Self::ContextTooLarge
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::InvalidRequest
+            | refact_chat_history::retry_policy::UserErrorCategory::ToolSchemaInvalid => {
+                Self::InvalidRequest
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::ProviderTransient
+            | refact_chat_history::retry_policy::UserErrorCategory::NetworkFailure
+            | refact_chat_history::retry_policy::UserErrorCategory::StreamCorrupted => {
+                Self::ProviderTransient
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::ProviderRateLimit => {
+                Self::ProviderRateLimit
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::AuthenticationFailed => {
+                Self::AuthenticationFailed
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::BillingQuota => {
+                Self::BillingQuota
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::ContentPolicy => {
+                Self::ContentPolicy
+            }
+            refact_chat_history::retry_policy::UserErrorCategory::Unknown => Self::Unknown,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ModelUnavailable => "model_unavailable",
@@ -79,6 +128,58 @@ pub struct WorkflowFailureReport {
     pub summary: String,
     pub detail: String,
     pub chat_id: Option<String>,
+}
+
+pub fn workflow_failure_summary(category: &WorkflowFailureCategory, error: &str) -> String {
+    let detail = super::jobs::autonomous_chats::redact_and_cap_text(error, 240);
+    match category {
+        WorkflowFailureCategory::ModelUnavailable => format!(
+            "Model unavailable — check Buddy/default model settings. {}",
+            detail
+        ),
+        WorkflowFailureCategory::ContextTooLarge => {
+            "Context too large — Buddy needs a smaller prompt or compaction before retrying."
+                .to_string()
+        }
+        WorkflowFailureCategory::ToolUnavailable => format!(
+            "Tool unavailable — the workflow referenced a tool that is not registered. {}",
+            detail
+        ),
+        WorkflowFailureCategory::ToolFailed => format!("Tool failed during workflow. {}", detail),
+        WorkflowFailureCategory::InvalidRequest => format!("Invalid provider request. {}", detail),
+        WorkflowFailureCategory::ProviderTransient => {
+            format!("Provider temporarily unavailable. {}", detail)
+        }
+        WorkflowFailureCategory::ProviderRateLimit => {
+            format!("Provider rate limit reached. {}", detail)
+        }
+        WorkflowFailureCategory::AuthenticationFailed => {
+            format!("Authentication failed. {}", detail)
+        }
+        WorkflowFailureCategory::BillingQuota => {
+            format!("Billing or quota limit reached. {}", detail)
+        }
+        WorkflowFailureCategory::ContentPolicy => {
+            format!("Content policy blocked the request. {}", detail)
+        }
+        WorkflowFailureCategory::Cancelled => "Workflow cancelled before completion.".to_string(),
+        WorkflowFailureCategory::Unknown => format!("Workflow failed. {}", detail),
+    }
+}
+
+pub fn workflow_failure_report(
+    workflow_id: &str,
+    error: &str,
+    chat_id: Option<String>,
+) -> WorkflowFailureReport {
+    let category = WorkflowFailureCategory::classify(error);
+    WorkflowFailureReport {
+        workflow_id: workflow_id.to_string(),
+        summary: workflow_failure_summary(&category, error),
+        detail: super::jobs::autonomous_chats::redact_and_cap_text(error, 1_000),
+        category,
+        chat_id,
+    }
 }
 
 pub fn workflow_label(workflow_id: &str) -> &str {
@@ -167,6 +268,11 @@ where
         Err(e) => (false, e.clone()),
     };
 
+    let failure_report = result
+        .as_ref()
+        .err()
+        .map(|error| workflow_failure_report(workflow_id, error, None));
+
     let buddy_arc = gcx.buddy.buddy.clone();
     let voice_gcx = gcx.clone();
     let project_dirs = crate::files_correction::get_project_dirs(gcx.gcx.clone()).await;
@@ -188,6 +294,7 @@ where
 
         let mut completed_quest = None;
         let mut quest_voice_state = None;
+        let mut failure_write = None;
         {
             let mut buddy = buddy_arc.lock().await;
             if let Some(svc) = buddy.as_mut() {
@@ -206,6 +313,8 @@ where
                         ws.run_count = ws.run_count.saturating_add(1);
                         ws.last_run = Some(now.clone());
                         ws.last_outcome = Some("success".to_string());
+                        ws.failure_category = None;
+                        ws.failure_summary = None;
                     } else {
                         svc.state.workflow_summaries.push(
                             crate::buddy::types::BuddyWorkflowSummary {
@@ -247,14 +356,28 @@ where
                                     state: svc.state.clone(),
                                 });
                     }
+                } else if let Some(report) = failure_report {
+                    failure_write = svc.record_workflow_failure_report(report);
                 } else {
-                    svc.workflow_failed(&workflow_id_owned, activity);
-                }
-                if let Some(ref root) = project_root {
-                    svc.append_workflow_transcript(root, &workflow_id_owned, &summary, success)
-                        .await;
+                    tracing::warn!(
+                        "buddy: workflow {} failed without a failure report",
+                        workflow_id_owned
+                    );
                 }
             }
+        }
+
+        if let Some((path, report)) = failure_write {
+            crate::buddy::actor::BuddyService::append_workflow_failure_transcript(&path, &report)
+                .await;
+        } else if let Some(ref root) = project_root {
+            crate::buddy::actor::BuddyService::append_workflow_transcript_to_path(
+                root,
+                &workflow_id_owned,
+                &summary,
+                success,
+            )
+            .await;
         }
 
         if let (Some(quest), Some((persona, identity_name, pulse, reward))) =
@@ -327,6 +450,26 @@ pub async fn append_workflow_entry_with_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_failure_report_classifies_model_and_tool_errors() {
+        let report = workflow_failure_report(
+            "commit_msg",
+            "OpenAI 404: model refact/gpt-4.1-nano not found",
+            Some("chat-1".to_string()),
+        );
+        assert_eq!(report.category, WorkflowFailureCategory::ModelUnavailable);
+        assert!(report.summary.contains("Model unavailable"));
+        assert_eq!(report.chat_id.as_deref(), Some("chat-1"));
+
+        let report = workflow_failure_report(
+            "commit_msg",
+            "Error: tool 'buddy_log_activity' not found",
+            None,
+        );
+        assert_eq!(report.category, WorkflowFailureCategory::ToolUnavailable);
+        assert!(report.summary.contains("Tool unavailable"));
+    }
 
     #[tokio::test]
     async fn workflow_transcript_records_failure_category() {

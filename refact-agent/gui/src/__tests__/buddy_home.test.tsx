@@ -865,6 +865,68 @@ describe("BuddyHome_renders_all_sections", () => {
     expect(dismissedIds).toHaveLength(3);
   });
 
+  it("recent error grouping keeps distinct structured failure details", async () => {
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    const nowMs = Date.now();
+    const base = {
+      id: "structured-failure-model",
+      signal_type: "buddy_dependency_radar_failed",
+      title: "Dependency radar failed",
+      description: "Workflow failed",
+      source: "buddy",
+      status: "failed",
+      priority: "high",
+      created_at: new Date(nowMs - 1_000).toISOString(),
+    } satisfies BuddyRuntimeEvent;
+    const modelFailure = {
+      ...base,
+      failure_category: "model_unavailable",
+      failure_summary: "Model unavailable — switch model.",
+    } satisfies BuddyRuntimeEvent;
+    const contextFailure = {
+      ...base,
+      id: "structured-failure-context",
+      created_at: new Date(nowMs - 2_000).toISOString(),
+      failure_category: "context_too_large",
+      failure_summary: "Context too large — compact first.",
+    } satisfies BuddyRuntimeEvent;
+
+    server.use(
+      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        HttpResponse.json([]),
+      ),
+      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), {
+          runtime_queue: [modelFailure, contextFailure],
+        }),
+      ),
+    );
+
+    render(<BuddyHome />, { store });
+    const errorsPanel = await screen.findByTestId("buddy-recent-errors-panel");
+    expect(
+      within(errorsPanel).getByText("Model unavailable"),
+    ).toBeInTheDocument();
+    expect(
+      within(errorsPanel).getByText("Context too large"),
+    ).toBeInTheDocument();
+    expect(within(errorsPanel).queryByText("×2")).not.toBeInTheDocument();
+  });
+
   it("failed dashboard runtime dismiss remains local", async () => {
     vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     let dismissCalled = false;

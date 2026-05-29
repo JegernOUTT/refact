@@ -38,6 +38,8 @@ impl RuntimeQueue {
                 existing.source = event.source;
                 existing.progress = event.progress;
                 existing.status = event.status;
+                existing.failure_category = event.failure_category;
+                existing.failure_summary = event.failure_summary;
                 existing.priority = event.priority;
                 existing.ttl_ms = event.ttl_ms;
                 existing.speech_text = event.speech_text;
@@ -62,6 +64,8 @@ impl RuntimeQueue {
                 existing.source = event.source;
                 existing.progress = event.progress;
                 existing.status = event.status;
+                existing.failure_category = event.failure_category;
+                existing.failure_summary = event.failure_summary;
                 existing.priority = event.priority;
                 existing.ttl_ms = event.ttl_ms;
                 existing.speech_text = event.speech_text;
@@ -229,5 +233,28 @@ mod tests {
         assert_eq!(stored.status, "completed");
         assert_ne!(stored.created_at, "2020-01-01T00:00:00Z");
         assert!(chrono::DateTime::parse_from_rfc3339(&stored.created_at).is_ok());
+    }
+
+    #[test]
+    fn coalesced_event_updates_structured_failure_fields() {
+        let mut queue = RuntimeQueue::new();
+        queue.enqueue(make_event("ev1", "failure-key"));
+
+        let mut ev2 = make_event("ev2", "failure-key");
+        ev2.status = "failed".to_string();
+        ev2.failure_category = Some("model_unavailable".to_string());
+        ev2.failure_summary = Some("Model unavailable".to_string());
+        queue.enqueue(ev2);
+
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].status, "failed");
+        assert_eq!(
+            queue.items[0].failure_category.as_deref(),
+            Some("model_unavailable")
+        );
+        assert_eq!(
+            queue.items[0].failure_summary.as_deref(),
+            Some("Model unavailable")
+        );
     }
 }

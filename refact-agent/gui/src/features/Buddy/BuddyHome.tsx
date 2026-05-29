@@ -556,7 +556,7 @@ export const BuddyHome: React.FC = () => {
       ) {
         continue;
       }
-      const sig = `${e.source}|${e.title}|${e.description ?? ""}`;
+      const sig = `${e.source}|${e.signal_type}|${e.title}|${e.description ?? ""}|${e.failure_category ?? ""}|${e.failure_summary ?? ""}`;
       const existing = sigMap.get(sig);
       if (existing) {
         existing.occurrences = (existing.occurrences ?? 1) + 1;
@@ -567,6 +567,15 @@ export const BuddyHome: React.FC = () => {
         existing.relatedIds = Array.from(
           new Set([...(existing.relatedIds ?? [existing.id]), e.id]),
         );
+        existing.failure_category =
+          e.failure_category ?? existing.failure_category;
+        existing.failure_summary =
+          e.failure_summary ?? existing.failure_summary;
+        existing.description = e.description ?? existing.description;
+        existing.chat_id = e.chat_id ?? existing.chat_id;
+        existing.created_at = e.created_at;
+        existing.dismissed =
+          Boolean(existing.dismissed) || Boolean(e.dismissed);
       } else {
         sigMap.set(sig, {
           ...e,
@@ -587,7 +596,7 @@ export const BuddyHome: React.FC = () => {
         : event.title;
       const diagnostic =
         event.chat_id != null
-          ? diagnostics.find((d) => d.chat_id === event.chat_id) ?? null
+          ? (diagnostics.find((d) => d.chat_id === event.chat_id) ?? null)
           : null;
       void dispatch(
         startBuddyInvestigation({

@@ -544,96 +544,10 @@ fn last_assistant_text(messages: &[ChatMessage]) -> String {
         .unwrap_or_default()
 }
 
-fn workflow_failure_category(error: &str) -> WorkflowFailureCategory {
-    let lower = error.to_lowercase();
-    if lower.trim() == "aborted" || lower.contains("original error: aborted") {
-        return WorkflowFailureCategory::Cancelled;
-    }
-    if lower.contains("tool '") && lower.contains("not found")
-        || lower.contains("unknown tool")
-        || lower.contains("tool not found")
-    {
-        return WorkflowFailureCategory::ToolUnavailable;
-    }
-    if lower.contains("tool failed")
-        || lower.contains("tool execution failed")
-        || lower.contains("tool call failed")
-    {
-        return WorkflowFailureCategory::ToolFailed;
-    }
-    match crate::chat::retry_policy::classify_user_error(error) {
-        crate::chat::retry_policy::UserErrorCategory::ModelUnavailable => {
-            WorkflowFailureCategory::ModelUnavailable
-        }
-        crate::chat::retry_policy::UserErrorCategory::ContextTooLarge => {
-            WorkflowFailureCategory::ContextTooLarge
-        }
-        crate::chat::retry_policy::UserErrorCategory::InvalidRequest
-        | crate::chat::retry_policy::UserErrorCategory::ToolSchemaInvalid => {
-            WorkflowFailureCategory::InvalidRequest
-        }
-        crate::chat::retry_policy::UserErrorCategory::ProviderTransient
-        | crate::chat::retry_policy::UserErrorCategory::NetworkFailure
-        | crate::chat::retry_policy::UserErrorCategory::StreamCorrupted => {
-            WorkflowFailureCategory::ProviderTransient
-        }
-        crate::chat::retry_policy::UserErrorCategory::ProviderRateLimit => {
-            WorkflowFailureCategory::ProviderRateLimit
-        }
-        crate::chat::retry_policy::UserErrorCategory::AuthenticationFailed => {
-            WorkflowFailureCategory::AuthenticationFailed
-        }
-        crate::chat::retry_policy::UserErrorCategory::BillingQuota => {
-            WorkflowFailureCategory::BillingQuota
-        }
-        crate::chat::retry_policy::UserErrorCategory::ContentPolicy => {
-            WorkflowFailureCategory::ContentPolicy
-        }
-        crate::chat::retry_policy::UserErrorCategory::Unknown => WorkflowFailureCategory::Unknown,
-    }
-}
-
-fn workflow_failure_summary(category: &WorkflowFailureCategory, error: &str) -> String {
-    let detail = redact_and_cap_text(error, 240);
-    match category {
-        WorkflowFailureCategory::ModelUnavailable => format!(
-            "Model unavailable — check Buddy/default model settings. {}",
-            detail
-        ),
-        WorkflowFailureCategory::ContextTooLarge => {
-            "Context too large — Buddy needs a smaller prompt or compaction before retrying."
-                .to_string()
-        }
-        WorkflowFailureCategory::ToolUnavailable => format!(
-            "Tool unavailable — the workflow referenced a tool that is not registered. {}",
-            detail
-        ),
-        WorkflowFailureCategory::ToolFailed => format!("Tool failed during workflow. {}", detail),
-        WorkflowFailureCategory::InvalidRequest => format!("Invalid provider request. {}", detail),
-        WorkflowFailureCategory::ProviderTransient => {
-            format!("Provider temporarily unavailable. {}", detail)
-        }
-        WorkflowFailureCategory::ProviderRateLimit => {
-            format!("Provider rate limit reached. {}", detail)
-        }
-        WorkflowFailureCategory::AuthenticationFailed => {
-            format!("Authentication failed. {}", detail)
-        }
-        WorkflowFailureCategory::BillingQuota => {
-            format!("Billing or quota limit reached. {}", detail)
-        }
-        WorkflowFailureCategory::ContentPolicy => {
-            format!("Content policy blocked the request. {}", detail)
-        }
-        WorkflowFailureCategory::Cancelled => "Workflow cancelled before completion.".to_string(),
-        WorkflowFailureCategory::Unknown => format!("Workflow failed. {}", detail),
-    }
-}
-
 fn autonomous_failure_result(spec: &AutonomousBuddyChatSpec, error: String) -> BuddyJobResult {
-    let category = workflow_failure_category(&error);
+    let category = WorkflowFailureCategory::classify(&error);
     let detail = redact_and_cap_text(&error, 1_000);
-    let summary = workflow_failure_summary(&category, &error);
+    let summary = super::super::workflows::workflow_failure_summary(&category, &error);
     BuddyJobResult {
         workflow_failure: Some(WorkflowFailureReport {
             workflow_id: spec.workflow_id.clone(),

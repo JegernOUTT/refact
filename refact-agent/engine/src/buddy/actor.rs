@@ -1030,6 +1030,8 @@ impl BuddyService {
             ws.last_run = Some(now);
             ws.run_count += 1;
             ws.last_outcome = Some("success".to_string());
+            ws.failure_category = None;
+            ws.failure_summary = None;
         } else {
             self.state
                 .workflow_summaries
@@ -1084,6 +1086,13 @@ impl BuddyService {
         &mut self,
         report: super::workflows::WorkflowFailureReport,
     ) -> Option<(std::path::PathBuf, super::workflows::WorkflowFailureReport)> {
+        if !validate_workflow_id(&report.workflow_id) {
+            tracing::warn!(
+                "buddy: refusing to record failure report with invalid workflow_id '{}'",
+                report.workflow_id
+            );
+            return None;
+        }
         let title = format!(
             "{} failed: {}",
             super::workflows::workflow_label(&report.workflow_id),
@@ -1280,6 +1289,21 @@ impl BuddyService {
 
     pub async fn append_workflow_transcript(
         &self,
+        project_root: &std::path::Path,
+        workflow_id: &str,
+        output_summary: &str,
+        success: bool,
+    ) {
+        Self::append_workflow_transcript_to_path(
+            project_root,
+            workflow_id,
+            output_summary,
+            success,
+        )
+        .await;
+    }
+
+    pub async fn append_workflow_transcript_to_path(
         project_root: &std::path::Path,
         workflow_id: &str,
         output_summary: &str,

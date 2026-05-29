@@ -117,6 +117,62 @@ async fn workflow_failure_report_emits_runtime_event_activity_and_transcript() {
     );
 }
 
+#[test]
+fn workflow_success_clears_previous_failure_metadata() {
+    let mut svc = make_service();
+    let report = super::workflows::WorkflowFailureReport {
+        workflow_id: "buddy_dependency_radar".to_string(),
+        category: super::workflows::WorkflowFailureCategory::ModelUnavailable,
+        summary: "Model unavailable".to_string(),
+        detail: "model not found".to_string(),
+        chat_id: None,
+    };
+
+    svc.record_workflow_failure_report(report);
+    svc.workflow_completed(
+        "buddy_dependency_radar",
+        1,
+        BuddyActivity {
+            icon: "✅".to_string(),
+            title: "Dependency radar complete".to_string(),
+            description: String::new(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            activity_type: "workflow".to_string(),
+            chat_id: None,
+            failure_category: None,
+            failure_summary: None,
+        },
+    );
+
+    let summary = svc
+        .state
+        .workflow_summaries
+        .iter()
+        .find(|summary| summary.workflow_id == "buddy_dependency_radar")
+        .expect("workflow summary");
+    assert_eq!(summary.last_outcome.as_deref(), Some("success"));
+    assert!(summary.failure_category.is_none());
+    assert!(summary.failure_summary.is_none());
+}
+
+#[test]
+fn invalid_workflow_id_failure_report_is_rejected_before_state_or_event() {
+    let (mut svc, mut rx) = make_service_with_events();
+    let report = super::workflows::WorkflowFailureReport {
+        workflow_id: "../bad".to_string(),
+        category: super::workflows::WorkflowFailureCategory::ModelUnavailable,
+        summary: "Model unavailable".to_string(),
+        detail: "model not found".to_string(),
+        chat_id: None,
+    };
+
+    assert!(svc.record_workflow_failure_report(report).is_none());
+    assert!(svc.state.workflow_summaries.is_empty());
+    assert!(svc.state.recent_activities.is_empty());
+    assert!(svc.runtime_queue.items.is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
 fn make_suggestion(id: &str, stype: &str, created_at: &str) -> BuddySuggestion {
     BuddySuggestion {
         id: id.to_string(),
