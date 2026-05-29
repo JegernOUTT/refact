@@ -1397,7 +1397,7 @@ pub async fn get_or_create_session_with_trajectory(
 
     let trajectory_events_tx = app.chat.trajectory_events_tx.clone();
 
-    let (mut session, is_new) = if let Some(mut loaded) =
+    let (mut session, is_new, transition_identity_repaired) = if let Some(mut loaded) =
         super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id).await
     {
         info!(
@@ -1412,21 +1412,23 @@ pub async fn get_or_create_session_with_trajectory(
             loaded.auto_approve_dangerous_commands_present,
         )
         .await;
-        (
-            ChatSession::new_with_trajectory(
-                chat_id.to_string(),
-                loaded.messages,
-                loaded.thread,
-                loaded.created_at,
-                loaded.wake_up_at,
-                loaded.waiting_for_card_ids,
-            ),
-            false,
-        )
+        let transition_identity_repaired = loaded.transition_identity_repaired;
+        let mut session = ChatSession::new_with_trajectory(
+            chat_id.to_string(),
+            loaded.messages,
+            loaded.thread,
+            loaded.created_at,
+            loaded.wake_up_at,
+            loaded.waiting_for_card_ids,
+        );
+        if transition_identity_repaired {
+            session.increment_version();
+        }
+        (session, false, transition_identity_repaired)
     } else {
         let mut s = ChatSession::new(chat_id.to_string());
         s.increment_version();
-        (s, true)
+        (s, true, false)
     };
 
     let background_agents = app
@@ -1495,6 +1497,9 @@ pub async fn get_or_create_session_with_trajectory(
 
     if inserted && !is_new {
         migrate_legacy_frozen_prefix_on_open(app.clone(), session_arc.clone()).await;
+        if transition_identity_repaired {
+            super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+        }
     }
 
     session_arc
