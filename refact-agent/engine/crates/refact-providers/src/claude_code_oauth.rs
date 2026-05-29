@@ -66,6 +66,31 @@ struct TokenResponse {
     expires_in: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct RefreshTokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    expires_in: i64,
+}
+
+fn oauth_tokens_from_refresh_response(
+    token_resp: RefreshTokenResponse,
+    old_refresh_token: &str,
+    now_ms: i64,
+) -> OAuthTokens {
+    let refresh_token = token_resp
+        .refresh_token
+        .filter(|refresh_token| !refresh_token.is_empty())
+        .unwrap_or_else(|| old_refresh_token.to_string());
+
+    OAuthTokens {
+        access_token: token_resp.access_token,
+        refresh_token,
+        expires_at: now_ms + token_resp.expires_in * 1000,
+    }
+}
+
 fn token_request_headers() -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -255,18 +280,16 @@ pub async fn refresh_access_token(
         return Err(format!("Token refresh failed ({}): {}", status, text));
     }
 
-    let token_resp: TokenResponse = response
+    let token_resp: RefreshTokenResponse = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
 
-    let expires_at = chrono::Utc::now().timestamp_millis() + token_resp.expires_in * 1000;
-
-    Ok(OAuthTokens {
-        access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
-        expires_at,
-    })
+    Ok(oauth_tokens_from_refresh_response(
+        token_resp,
+        refresh_token,
+        chrono::Utc::now().timestamp_millis(),
+    ))
 }
 
 #[cfg(test)]
@@ -315,6 +338,53 @@ mod tests {
                 .unwrap(),
             "true"
         );
+    }
+
+    #[test]
+    fn refresh_response_without_refresh_token_preserves_old_token() {
+        let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "new-access-token",
+            "expires_in": 3600,
+        }))
+        .unwrap();
+
+        let tokens = oauth_tokens_from_refresh_response(token_resp, "old-refresh-token", 1000);
+
+        assert_eq!(tokens.access_token, "new-access-token");
+        assert_eq!(tokens.refresh_token, "old-refresh-token");
+        assert_eq!(tokens.expires_at, 3_601_000);
+    }
+
+    #[test]
+    fn refresh_response_with_empty_refresh_token_preserves_old_token() {
+        let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "new-access-token",
+            "refresh_token": "",
+            "expires_in": 3600,
+        }))
+        .unwrap();
+
+        let tokens = oauth_tokens_from_refresh_response(token_resp, "old-refresh-token", 1000);
+
+        assert_eq!(tokens.access_token, "new-access-token");
+        assert_eq!(tokens.refresh_token, "old-refresh-token");
+        assert_eq!(tokens.expires_at, 3_601_000);
+    }
+
+    #[test]
+    fn refresh_response_with_new_refresh_token_uses_new_token() {
+        let token_resp: RefreshTokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "expires_in": 3600,
+        }))
+        .unwrap();
+
+        let tokens = oauth_tokens_from_refresh_response(token_resp, "old-refresh-token", 1000);
+
+        assert_eq!(tokens.access_token, "new-access-token");
+        assert_eq!(tokens.refresh_token, "new-refresh-token");
+        assert_eq!(tokens.expires_at, 3_601_000);
     }
 
     #[tokio::test]
