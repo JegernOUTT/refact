@@ -11,10 +11,11 @@ pub fn is_ui_only_message(msg: &ChatMessage) -> bool {
 }
 
 pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
-    let extra = if is_ui_only_message(m) || matches!(m.role.as_str(), "plan" | "event") {
-        m.extra.clone()
-    } else {
-        serde_json::Map::new()
+    let extra = match m.role.as_str() {
+        _ if is_ui_only_message(m) => m.extra.clone(),
+        "plan" => preserve_extra_key(&m.extra, "plan"),
+        "event" => preserve_extra_key(&m.extra, "event"),
+        _ => serde_json::Map::new(),
     };
 
     ChatMessage {
@@ -38,6 +39,16 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
         extra,
         output_filter: None,
     }
+}
+
+fn preserve_extra_key(
+    extra: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    extra
+        .get(key)
+        .map(|value| serde_json::Map::from_iter([(key.to_string(), value.clone())]))
+        .unwrap_or_default()
 }
 
 pub fn sanitize_messages_for_new_thread(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -572,6 +583,7 @@ mod tests {
                 "supersedes": null,
             }),
         );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
         ChatMessage {
             role: "plan".to_string(),
             content: ChatContent::SimpleText("base plan".to_string()),
@@ -591,6 +603,7 @@ mod tests {
                 "payload": {"seq": 1},
             }),
         );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
         ChatMessage {
             role: "event".to_string(),
             content: ChatContent::SimpleText("delta".to_string()),
@@ -644,11 +657,27 @@ mod tests {
         assert_eq!(sanitized.len(), 2);
         assert_eq!(sanitized[0].role, "plan");
         assert_eq!(sanitized[0].extra["plan"]["version"], serde_json::json!(1));
+        assert_eq!(sanitized[0].extra.len(), 1);
+        assert!(!sanitized[0].extra.contains_key("unrelated"));
         assert_eq!(sanitized[1].role, "event");
         assert_eq!(
             sanitized[1].extra["event"]["subkind"],
             serde_json::json!("plan_delta")
         );
+        assert_eq!(sanitized[1].extra.len(), 1);
+        assert!(!sanitized[1].extra.contains_key("unrelated"));
+    }
+
+    #[test]
+    fn sanitize_message_for_new_thread_preserves_full_ui_only_extra() {
+        let mut message = make_ui_only_msg("diagnostic");
+        message
+            .extra
+            .insert("details".to_string(), serde_json::json!({"code": 1}));
+
+        let sanitized = sanitize_message_for_new_thread(&message);
+
+        assert_eq!(sanitized.extra, message.extra);
     }
 
     #[test]

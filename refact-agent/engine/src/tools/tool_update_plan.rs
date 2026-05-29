@@ -157,7 +157,10 @@ fn optional_string_arg(
 mod tests {
     use super::*;
     use crate::app_state::AppState;
+    use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use crate::chat::internal_roles::{EVENT_ROLE, PLAN_ROLE};
+    use crate::llm::adapter::{AdapterSettings, LlmWireAdapter};
+    use crate::llm::adapters::openai_chat::OpenAiChatAdapter;
     use crate::tools::tools_list::get_tools_for_mode;
 
     const CHAT_ID: &str = "update-plan-chat";
@@ -221,6 +224,61 @@ mod tests {
 
     fn plan_delta_payload(message: &ChatMessage) -> &Value {
         &message.extra["event"]["payload"]
+    }
+
+    fn assistant_tool_call(tool_call_id: &str, name: &str, arguments: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: tool_call_id.to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn default_settings() -> AdapterSettings {
+        AdapterSettings {
+            api_key: "test-key".to_string(),
+            auth_token: String::new(),
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            extra_headers: Default::default(),
+            model_name: "gpt-4.1".to_string(),
+            supports_tools: true,
+            supports_reasoning: true,
+            reasoning_type: None,
+            supports_temperature: true,
+            supports_max_completion_tokens: false,
+            eof_is_done: false,
+            supports_web_search: false,
+            supports_cache_control: false,
+        }
+    }
+
+    fn assert_openai_tool_result_not_preceded_by_hidden_role(messages: Vec<ChatMessage>) {
+        let req = crate::llm::canonical::LlmRequest::new("gpt-4.1".to_string(), messages);
+        let body = OpenAiChatAdapter
+            .build_http(&req, &default_settings())
+            .unwrap()
+            .body;
+        let wire_messages = body["messages"].as_array().unwrap();
+        let tool_index = wire_messages
+            .iter()
+            .position(|message| message["role"] == "tool")
+            .expect("tool result missing from wire messages");
+        let prior = &wire_messages[tool_index - 1];
+        assert_eq!(prior["role"], "assistant");
+        assert!(
+            prior.get("tool_calls").is_some(),
+            "prior message: {prior:?}"
+        );
     }
 
     #[tokio::test]
@@ -328,6 +386,152 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, "no plan to update; call set_plan first");
+    }
+
+    #[tokio::test]
+    async fn missing_note_errors() {
+        let session = ChatSession::new(CHAT_ID.to_string());
+        let (_gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &HashMap::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "argument `note` is missing");
+    }
+
+    #[tokio::test]
+    async fn non_string_note_errors() {
+        let session = ChatSession::new(CHAT_ID.to_string());
+        let (_gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([("note".to_string(), json!({"text": "new"}))]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "argument `note` is not a string: Object {\"text\": String(\"new\")}"
+        );
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_note_errors() {
+        let session = ChatSession::new(CHAT_ID.to_string());
+        let (_gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([("note".to_string(), json!("  \n\t"))]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "argument `note` must be non-empty");
+    }
+
+    #[tokio::test]
+    async fn non_string_summary_errors() {
+        let session = ChatSession::new(CHAT_ID.to_string());
+        let (_gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([
+            ("note".to_string(), json!("new direction")),
+            ("summary".to_string(), json!(false)),
+        ]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "argument `summary` is not a string: Bool(false)");
+    }
+
+    #[tokio::test]
+    async fn summary_over_120_chars_errors() {
+        let session = ChatSession::new(CHAT_ID.to_string());
+        let (_gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([
+            ("note".to_string(), json!("new direction")),
+            ("summary".to_string(), json!("x".repeat(121))),
+        ]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "argument `summary` must be at most 120 chars");
+    }
+
+    #[tokio::test]
+    async fn update_plan_side_effects_are_after_tool_result() {
+        let mut session = ChatSession::new(CHAT_ID.to_string());
+        session.install_plan("agent", "## Plan\n- base");
+        session.add_message(assistant_tool_call(
+            "call-plan",
+            "update_plan",
+            r#"{"note":"new"}"#,
+        ));
+        let (gcx, ccx) = ccx_for_session(session).await;
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([("note".to_string(), json!("new"))]);
+        let (_, results) = tool
+            .tool_execute(ccx, &"call-plan".to_string(), &args)
+            .await
+            .unwrap();
+
+        let mut session = session_arc.lock().await;
+        for message in results {
+            let ContextEnum::ChatMessage(message) = message else {
+                panic!("expected chat message")
+            };
+            session.add_message(message);
+        }
+        session.drain_post_tool_side_effects();
+
+        let roles: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(roles, vec!["plan", "assistant", "tool", "event", "event"]);
+        assert_eq!(
+            session.messages[3].extra["event"]["subkind"],
+            json!("plan_delta")
+        );
+        assert_eq!(
+            session.messages[4].extra["event"]["subkind"],
+            json!("system_notice")
+        );
+        assert_openai_tool_result_not_preceded_by_hidden_role(session.messages.clone());
     }
 
     #[test]

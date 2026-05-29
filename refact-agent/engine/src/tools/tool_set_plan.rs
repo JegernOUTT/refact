@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -142,6 +143,9 @@ async fn read_plan_from_path(
     gcx: Arc<crate::global_context::GlobalContext>,
     path: &str,
 ) -> Result<String, String> {
+    if !Path::new(path).is_absolute() {
+        return Err("argument `path` must be absolute".to_string());
+    }
     let path = crate::files_correction::canonical_path(path);
     if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
         return Err("argument `path` must point to a .md file".to_string());
@@ -533,6 +537,22 @@ mod tests {
             content_text(&session.post_tool_side_effects[0]),
             "## File plan\n- loaded"
         );
+    }
+
+    #[tokio::test]
+    async fn path_rejects_relative_paths() {
+        let (_gcx, ccx, _rx) = ccx_for_session("agent").await;
+        let mut tool = ToolSetPlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([("path".to_string(), json!("plans/current.md"))]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "argument `path` must be absolute");
     }
 
     #[tokio::test]
