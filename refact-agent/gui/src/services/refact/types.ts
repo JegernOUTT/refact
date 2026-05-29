@@ -351,6 +351,8 @@ export interface AssistantMessage extends BaseMessage, CostInfo {
   citations?: WebSearchCitation[] | null;
   finish_reason?: "stop" | "length" | "abort" | "tool_calls" | "error" | null;
   usage?: Usage | null;
+  summarized_token_estimate?: number;
+  summarization_tier?: string;
   extra?: Record<string, unknown>;
 }
 
@@ -543,6 +545,33 @@ export function isSummarizationMessage(
   message: ChatMessage,
 ): message is SummarizationMessage {
   return message.role === "summarization";
+}
+
+export function isCompressedAssistantMessage(
+  message: ChatMessage,
+): message is AssistantMessage {
+  if (message.role !== "assistant") return false;
+  const extra = message.extra;
+  if (!isRecord(extra)) return false;
+  const compression = extra.compression;
+  if (!isRecord(compression)) return false;
+  return compression.kind === "llm_segment_summary";
+}
+
+export function syntheticSummarizationMessage(
+  msg: AssistantMessage,
+): SummarizationMessage {
+  return {
+    role: "summarization",
+    content: typeof msg.content === "string" ? msg.content : "",
+    message_id: msg.message_id,
+    summarization_tier: "tier1_llm",
+    summarized_token_estimate:
+      typeof msg.summarized_token_estimate === "number"
+        ? msg.summarized_token_estimate
+        : undefined,
+    extra: msg.extra,
+  };
 }
 
 export function isEventMessage(message: ChatMessage): message is EventMessage {

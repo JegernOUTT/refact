@@ -15,6 +15,7 @@ import {
   ErrorMessage,
   isChatContextFileMessage,
   isDiffMessage,
+  isCompressedAssistantMessage,
   isAssistantMessage,
   isEventMessage,
   isErrorMessage,
@@ -22,6 +23,7 @@ import {
   isSystemMessage,
   isSummarizationMessage,
   SummarizationMessage,
+  syntheticSummarizationMessage,
   UserMessage,
 } from "../../services/refact";
 import { UserInput } from "./UserInput";
@@ -786,6 +788,19 @@ function buildDisplayItemsFromIndex(
       continue;
     }
 
+    const compressedAssistant = isCompressedAssistantMessage(head)
+      ? head
+      : null;
+    if (compressedAssistant) {
+      items.push({
+        type: "summarization",
+        key: getMessageKey(compressedAssistant, i),
+        messageIndex: i,
+        message: syntheticSummarizationMessage(compressedAssistant),
+      });
+      continue;
+    }
+
     if (head.role === "assistant") {
       const toolCalls = "tool_calls" in head ? head.tool_calls ?? [] : [];
       const isOnlyActivateSkill =
@@ -1142,6 +1157,19 @@ function buildDisplayItems(
         key: getMessageKey(head, i),
         messageIndex: i,
         content: head.content,
+      });
+      continue;
+    }
+
+    const compressedAssistant = isCompressedAssistantMessage(head)
+      ? head
+      : null;
+    if (compressedAssistant) {
+      items.push({
+        type: "summarization",
+        key: getMessageKey(compressedAssistant, i),
+        messageIndex: i,
+        message: syntheticSummarizationMessage(compressedAssistant),
       });
       continue;
     }

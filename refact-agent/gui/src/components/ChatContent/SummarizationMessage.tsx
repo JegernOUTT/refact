@@ -117,6 +117,17 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
       }`
     : null;
 
+  const compressionMeta = message.extra?.compression as
+    | Record<string, unknown>
+    | undefined;
+  const sourceCount = Array.isArray(compressionMeta?.source_message_ids)
+    ? (compressionMeta.source_message_ids as unknown[]).length
+    : null;
+  const summaryModel =
+    typeof compressionMeta?.summary_model === "string"
+      ? compressionMeta.summary_model
+      : null;
+
   const tokenLabel =
     typeof message.summarized_token_estimate === "number"
       ? tokenLabelFor(tier, message.summarized_token_estimate)
@@ -150,6 +161,12 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
           </span>
           {rangeLabel && (
             <span className={styles.rangeLabel}>{rangeLabel}</span>
+          )}
+          {sourceCount !== null && (
+            <span className={styles.rangeLabel}>{sourceCount} messages</span>
+          )}
+          {summaryModel && (
+            <span className={styles.tokenLabel}>· {summaryModel}</span>
           )}
           {tokenLabel && (
             <span className={styles.tokenLabel}>· {tokenLabel}</span>
