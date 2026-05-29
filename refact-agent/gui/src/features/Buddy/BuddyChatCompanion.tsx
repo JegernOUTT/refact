@@ -59,6 +59,7 @@ import {
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
 import {
+  isFreshErrorWithinGrace,
   isBuddyRuntimeEventVisible,
   isErrorRuntimeEvent,
 } from "./buddyRuntimeEvents";
@@ -372,18 +373,42 @@ function runtimeEventControls(
   return isErrorRuntimeEvent(event) ? errorControls : [];
 }
 
+function isPersistentActiveProgressEvent(event: BuddyRuntimeEvent): boolean {
+  if (isErrorRuntimeEvent(event)) return false;
+  if (event.persistent !== true) return false;
+  return (
+    event.status === "started" ||
+    event.status === "progress" ||
+    event.status === "streaming"
+  );
+}
+
+function isFreshRuntimeEventForBubble(event: BuddyRuntimeEvent): boolean {
+  const createdAtTime = validCreatedAtMs(event.created_at);
+  if (createdAtTime == null) return false;
+  const now = Date.now();
+  if (createdAtTime > now + 30_000) return false;
+  return now - createdAtTime <= eventFreshnessMs(event.ttl_ms);
+}
+
 function runtimeEventRank(event: BuddyRuntimeEvent, index: number): number {
-  if (event.priority === "critical" && isErrorRuntimeEvent(event)) {
+  if (event.priority === "critical" && isFreshErrorWithinGrace(event)) {
     return 10 + index;
   }
-  if (event.priority === "high" && isErrorRuntimeEvent(event)) {
+  if (
+    isPersistentActiveProgressEvent(event) &&
+    isFreshRuntimeEventForBubble(event)
+  ) {
     return 20 + index;
+  }
+  if (event.priority === "high" && isFreshErrorWithinGrace(event)) {
+    return 25 + index;
   }
   if (isLiveChatReactionEvent(event)) return 30 + index;
   if (isErrorRuntimeEvent(event)) return 40 + index;
-  if (event.priority === "critical") return 45 + index;
-  if (event.priority === "high") return 48 + index;
-  return 50 + index;
+  if (event.priority === "critical") return 50 + index;
+  if (event.priority === "high") return 55 + index;
+  return 60 + index;
 }
 
 function threadErrorKey(chatId: string, error: string): string {
@@ -550,7 +575,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       candidates.push({
         kind: classifyRuntimeEvent(event),
         rank: runtimeEventRank(event, index),
-        preventsAmbientOverride: isErrorRuntimeEvent(event),
+        preventsAmbientOverride:
+          isFreshErrorWithinGrace(event) ||
+          (isPersistentActiveProgressEvent(event) &&
+            isFreshRuntimeEventForBubble(event)),
         notification: {
           id,
           sourceId: event.id,

@@ -115,8 +115,10 @@ import {
   isBuddySpeechExpired,
 } from "../features/Buddy/buddySceneSpeech";
 import {
+  HIGH_ERROR_BUBBLE_GRACE_MS,
   isBuddyRuntimeEventVisible,
   isErrorRuntimeEvent,
+  isFreshErrorWithinGrace,
 } from "../features/Buddy/buddyRuntimeEvents";
 import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
 import { server } from "../utils/mockServer";
@@ -2391,6 +2393,40 @@ describe("runtime event new fields", () => {
     expect(isErrorRuntimeEvent(event)).toBe(true);
   });
 
+  test("error grace helper rejects old and invalid timestamps", () => {
+    const nowMs = new Date("2024-01-01T00:01:00Z").getTime();
+    expect(
+      isFreshErrorWithinGrace(
+        makeEvent({
+          signal_type: "provider_error",
+          priority: "high",
+          created_at: "2024-01-01T00:00:31Z",
+        }),
+        nowMs,
+      ),
+    ).toBe(true);
+    expect(
+      isFreshErrorWithinGrace(
+        makeEvent({
+          signal_type: "provider_error",
+          priority: "high",
+          created_at: "2024-01-01T00:00:29Z",
+        }),
+        nowMs,
+      ),
+    ).toBe(false);
+    expect(
+      isFreshErrorWithinGrace(
+        makeEvent({
+          signal_type: "provider_error",
+          priority: "high",
+          created_at: "not-a-date",
+        }),
+        nowMs,
+      ),
+    ).toBe(false);
+  });
+
   test.each(["error", "failure", "  Failed  ", "tool-failure"])(
     "status %s is classified as error-like",
     (status) => {
@@ -4286,16 +4322,15 @@ describe("buddy chat reactions settings and bubbles", () => {
 
   test.each<[string, Partial<BuddyRuntimeEvent>, string]>([
     [
-      "high-priority actual error",
+      "fresh high-priority actual error",
       { signal_type: "provider_error", status: "info", priority: "high" },
       "high-error",
     ],
     [
-      "critical actual error",
+      "fresh critical actual error",
       { signal_type: "chat_error", status: "info", priority: "critical" },
       "critical-error",
     ],
-    ["failed", { status: "failed", priority: "normal" }, "failed"],
   ])(
     "%s runtime event beats live ambient chat reaction",
     async (_label, overrides, eventId) => {
@@ -4351,6 +4386,202 @@ describe("buddy chat reactions settings and bubbles", () => {
       }
     },
   );
+
+  test("high-priority error older than grace loses to fresh chat reaction", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:01:00Z"));
+    try {
+      const store = setUpStore();
+      const staleRuntime = makeChatRuntimeEvent({
+        id: "stale-high-runtime-error",
+        signal_type: "provider_error",
+        title: "Stale provider error",
+        source: "provider",
+        status: "failed",
+        priority: "high",
+        controls: [],
+        ttl_ms: 90_000,
+        created_at: new Date(
+          Date.now() - HIGH_ERROR_BUBBLE_GRACE_MS - 1,
+        ).toISOString(),
+      });
+      const reaction = makeChatRuntimeEvent({
+        id: "fresh-reaction-over-stale-high",
+        signal_type: "speech_chat_reaction",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Pixel squeaks: fresh chat sparkle acquired.",
+        controls: [],
+        created_at: "2024-01-01T00:01:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot({ runtime_queue: [staleRuntime, reaction] }),
+        ),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotificationText(
+        container,
+        "runtime:fresh-reaction-over-stale-high",
+        "Pixel squeaks: fresh chat sparkle acquired.",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:stale-high-runtime-error",
+      );
+      expect(
+        screen.queryByRole("button", { name: "Investigate" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("fresh speech_chat_reaction is selected when only stale high errors exist", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+    try {
+      const store = setUpStore();
+      const stalePersistentError = makeChatRuntimeEvent({
+        id: "stale-persistent-high-error",
+        signal_type: "provider_error",
+        title: "Repeated provider error",
+        source: "provider",
+        status: "failed",
+        priority: "high",
+        persistent: true,
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const reaction = makeChatRuntimeEvent({
+        id: "fresh-speech-chat-reaction-over-stale-only",
+        signal_type: "speech_chat_reaction",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Tiny gremlin reaction survived the error pile.",
+        controls: [],
+        created_at: "2024-01-01T00:02:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot({ runtime_queue: [stalePersistentError, reaction] }),
+        ),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotificationText(
+        container,
+        "runtime:fresh-speech-chat-reaction-over-stale-only",
+        "Tiny gremlin reaction survived the error pile.",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:stale-persistent-high-error",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("fresh persistent active progress event beats fresh chat reaction", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const progress = makeChatRuntimeEvent({
+        id: "fresh-persistent-progress",
+        signal_type: "workflow_progress",
+        title: "Workflow running",
+        source: "workflow",
+        status: "progress",
+        priority: "normal",
+        persistent: true,
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const reaction = makeChatRuntimeEvent({
+        id: "reaction-under-progress",
+        signal_type: "speech_humor",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Tiny progress-adjacent gremlin joke.",
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [progress, reaction] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(
+        container,
+        "runtime:fresh-persistent-progress",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:reaction-under-progress",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("stale persistent active progress event loses to fresh chat reaction", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+    try {
+      const store = setUpStore();
+      const progress = makeChatRuntimeEvent({
+        id: "stale-persistent-progress",
+        signal_type: "workflow_progress",
+        title: "Workflow running",
+        source: "workflow",
+        status: "progress",
+        priority: "normal",
+        persistent: true,
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const reaction = makeChatRuntimeEvent({
+        id: "reaction-over-stale-progress",
+        signal_type: "speech_chat_reaction",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Tiny reaction slipped past stale progress dust.",
+        controls: [],
+        created_at: "2024-01-01T00:02:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [progress, reaction] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotificationText(
+        container,
+        "runtime:reaction-over-stale-progress",
+        "Tiny reaction slipped past stale progress dust.",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:stale-persistent-progress",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   test("chat reaction runtime event preserves explicit controls", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -4558,7 +4789,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     }
   });
 
-  test("persistent stale failed diagnostic can still beat fresh chat reaction", async () => {
+  test("persistent stale failed diagnostic loses to fresh chat reaction", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
     try {
@@ -4602,11 +4833,11 @@ describe("buddy chat reactions settings and bubbles", () => {
 
       await expectCompanionNotification(
         container,
-        "runtime:persistent-old-diagnostic-error",
+        "runtime:reaction-under-persistent-diagnostic",
       );
       expectNoCompanionNotificationNow(
         container,
-        "runtime:reaction-under-persistent-diagnostic",
+        "runtime:persistent-old-diagnostic-error",
       );
     } finally {
       vi.useRealTimers();

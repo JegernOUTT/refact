@@ -492,7 +492,7 @@ function normalizeBuddySnapshot(snapshot: BuddySnapshot): BuddySnapshot {
   const opportunities = snapshot.opportunities ?? normalizedState.opportunities;
   normalizedState.opportunities = opportunities;
   const normalizedSettings = normalizeBuddySettings(snapshot.settings);
-  const enabled = snapshot.enabled !== false && normalizedSettings.enabled;
+  const enabled = snapshot.enabled && normalizedSettings.enabled;
   if (!enabled) normalizedSettings.enabled = false;
   return {
     ...snapshot,
@@ -622,13 +622,13 @@ export const buddySlice = createSlice({
       state.snapshot = snapshot;
       applyPendingSettingsRequests(state);
       state.loaded = true;
-      state.recentDiagnostics = state.snapshot?.recent_diagnostics ?? [];
-      state.activeSpeech = state.snapshot?.active_speech ?? null;
-      state.runtimeQueue = state.snapshot?.runtime_queue ?? [];
-      state.nowPlaying = state.snapshot?.now_playing ?? null;
-      state.opportunities = state.snapshot?.state.opportunities ?? [];
-      state.pulse = state.snapshot?.pulse ?? defaultBuddyPulse();
-      state.activeDrafts = state.snapshot?.active_drafts ?? [];
+      state.recentDiagnostics = snapshot.recent_diagnostics ?? [];
+      state.activeSpeech = snapshot.active_speech ?? null;
+      state.runtimeQueue = snapshot.runtime_queue ?? [];
+      state.nowPlaying = snapshot.now_playing ?? null;
+      state.opportunities = snapshot.state.opportunities;
+      state.pulse = snapshot.pulse ?? defaultBuddyPulse();
+      state.activeDrafts = snapshot.active_drafts ?? [];
     },
     /** Called when SSE snapshot reports buddy as disabled/not-ready (no state). */
     setBuddyUnavailable: (state) => {

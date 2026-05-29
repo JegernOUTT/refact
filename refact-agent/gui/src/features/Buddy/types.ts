@@ -933,7 +933,7 @@ export interface BuddyStorageMetadata {
 export interface ChatReactionAttempt {
   attempted_at: string;
   chat_id: string;
-  result: "emitted" | "skipped" | string;
+  result: string;
   skip_reason?: string | null;
   signal_type?: string | null;
 }

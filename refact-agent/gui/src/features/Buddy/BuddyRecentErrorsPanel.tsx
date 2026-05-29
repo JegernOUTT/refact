@@ -52,7 +52,7 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
           .filter(Boolean)
           .join(" · ");
         const failureLabel = formatFailureLabel(e.failure_category);
-        const detail = e.failure_summary || e.description || subtitle;
+        const detail = e.failure_summary ?? e.description ?? subtitle;
         return (
           <div
             key={e.id}

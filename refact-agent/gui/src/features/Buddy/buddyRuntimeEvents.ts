@@ -14,6 +14,8 @@ const ERROR_RUNTIME_TOKENS = new Set([
 const RUNTIME_EVENT_FRESHNESS_MS = 75_000;
 const RUNTIME_EVENT_FUTURE_SKEW_MS = 30_000;
 const MIN_EPOCH_MS = 946_684_800_000;
+export const HIGH_ERROR_BUBBLE_GRACE_MS = 30_000;
+export const CRITICAL_ERROR_BUBBLE_GRACE_MS = 75_000;
 const DURABLE_RUNTIME_TOKENS = new Set([
   "speech_tour",
   "tour",
@@ -92,4 +94,23 @@ export function isErrorRuntimeEvent(event: BuddyRuntimeEvent): boolean {
     isErrorRuntimeToken(event.source) ||
     isErrorRuntimeToken(event.dedupe_key ?? undefined)
   );
+}
+
+export function isFreshErrorWithinGrace(
+  event: BuddyRuntimeEvent,
+  nowMs = Date.now(),
+): boolean {
+  if (!isErrorRuntimeEvent(event)) return false;
+  const graceMs = (() => {
+    if (event.priority === "critical") return CRITICAL_ERROR_BUBBLE_GRACE_MS;
+    if (event.priority === "high") return HIGH_ERROR_BUBBLE_GRACE_MS;
+    return null;
+  })();
+  if (graceMs == null) return false;
+  if (!Number.isFinite(nowMs)) return false;
+  const createdAtMs = Date.parse(event.created_at);
+  if (!Number.isFinite(createdAtMs)) return false;
+  const ageMs = nowMs - createdAtMs;
+  if (ageMs < 0) return false;
+  return ageMs <= graceMs;
 }

@@ -57,8 +57,8 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
         )}
         {filteredActivities.map((a, i) => {
           const failureLabel = formatFailureLabel(a.failure_category);
-          const detail = a.failure_summary || a.description;
-          const tooltip = detail || a.title;
+          const detail = a.failure_summary ?? a.description;
+          const tooltip = detail;
           const canOpen = Boolean(a.chat_id && onOpenChat);
           return (
             <Tooltip

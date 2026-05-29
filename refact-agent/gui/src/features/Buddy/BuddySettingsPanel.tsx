@@ -28,8 +28,8 @@ function formatChatReactionStatus(
   debug: ReturnType<typeof selectChatReactionDebug>,
 ): string {
   if (!debug) return "No chat reaction diagnostics yet.";
-  const emitted = debug.counts_by_result.emitted ?? 0;
-  const skipped = debug.counts_by_result.skipped ?? 0;
+  const emitted = debug.counts_by_result.emitted;
+  const skipped = debug.counts_by_result.skipped;
   const last = debug.recent_attempts.at(-1);
   if (last?.result === "emitted") {
     return `Last emitted ${last.signal_type ?? "chat reaction"}.`;

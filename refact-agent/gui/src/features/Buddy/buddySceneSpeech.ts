@@ -10,6 +10,7 @@ import {
   opportunitySpeechText,
 } from "./buddyOpportunityActions";
 import {
+  isFreshErrorWithinGrace,
   isBuddyRuntimeEventVisible,
   isErrorRuntimeEvent,
 } from "./buddyRuntimeEvents";
@@ -33,7 +34,6 @@ export interface BuddySceneSpeech {
 }
 
 const SPEECH_SILENCE_CHANCE = 0.35;
-const RUNTIME_EVENT_FRESHNESS_MS = 75_000;
 const LIVE_CHAT_REACTION_SIGNALS = new Set([
   "speech_humor",
   "speech_insight",
@@ -69,9 +69,11 @@ export function formatBuddyRuntimeEventText(event: BuddyRuntimeEvent): string {
 
   const description = event.description?.trim();
   const failureSummary = event.failure_summary?.trim();
+  const fallbackText = description
+    ? `${event.title}: ${description}`
+    : event.title;
   const rawText = stripNoisyRuntimePrefixes(
-    failureSummary ||
-      (description ? `${event.title}: ${description}` : event.title),
+    failureSummary?.length ? failureSummary : fallbackText,
   );
 
   if (
@@ -214,20 +216,36 @@ function isLiveChatReactionEvent(event: BuddyRuntimeEvent): boolean {
 }
 
 function isFreshRuntimeEvent(event: BuddyRuntimeEvent, nowMs = Date.now()) {
-  if (event.persistent === true) return true;
   const createdAtMs = runtimeCreatedAtMs(event);
   if (createdAtMs <= 0 || !Number.isFinite(nowMs)) return false;
   if (createdAtMs > nowMs + 30_000) return false;
   const freshnessMs =
     event.ttl_ms != null && Number.isFinite(event.ttl_ms) && event.ttl_ms > 0
-      ? Math.min(RUNTIME_EVENT_FRESHNESS_MS, event.ttl_ms)
-      : RUNTIME_EVENT_FRESHNESS_MS;
+      ? event.ttl_ms
+      : 75_000;
   return nowMs - createdAtMs <= freshnessMs;
 }
 
+function isPersistentActiveProgressEvent(event: BuddyRuntimeEvent): boolean {
+  if (isErrorRuntimeEvent(event)) return false;
+  if (event.persistent !== true) return false;
+  return (
+    event.status === "started" ||
+    event.status === "progress" ||
+    event.status === "streaming"
+  );
+}
+
 function runtimePriorityScore(event: BuddyRuntimeEvent): number {
-  if (isErrorRuntimeEvent(event) && event.persistent === true) return 875;
+  if (event.priority === "critical" && isFreshErrorWithinGrace(event)) {
+    return 900;
+  }
+  if (isPersistentActiveProgressEvent(event) && isFreshRuntimeEvent(event)) {
+    return 875;
+  }
+  if (event.priority === "high" && isFreshErrorWithinGrace(event)) return 860;
   if (isLiveChatReactionEvent(event) && isFreshRuntimeEvent(event)) return 850;
+  if (isErrorRuntimeEvent(event)) return 50;
 
   const priorityScore = (() => {
     switch (event.priority) {
