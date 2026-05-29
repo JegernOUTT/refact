@@ -232,7 +232,7 @@ override:
 
     ## Runtime & Process Tools
 
-    **Plan**: Use `set_plan` to update your working plan (persists across context compression). Use `get_plan` to read the current plan. Call `set_plan` when your approach changes significantly.
+    **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
 
     **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
 
@@ -285,6 +285,7 @@ override:
     - task_done
     - ask_questions
     - set_plan
+    - update_plan
     - get_plan
     - process_start
     - process_list
@@ -331,6 +332,8 @@ override:
       - match: "handoff_to_mode"
         action: auto
       - match: "set_plan"
+        action: auto
+      - match: "update_plan"
         action: auto
       - match: "get_plan"
         action: auto

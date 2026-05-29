@@ -308,6 +308,7 @@ prompt: |
   **Swarms:** swarm_investigate
   **Task Documents:** `doc_list`, `doc_get`, `doc_create`, `doc_update`, `doc_append`, `doc_delete`, `doc_pin`, `doc_history`
   **Chat Management:** `compress_chat_probe`, `compress_chat_apply`
+  **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
 
   ## When to Use Web Tools
   - Integrating external API → research docs, auth, rate limits

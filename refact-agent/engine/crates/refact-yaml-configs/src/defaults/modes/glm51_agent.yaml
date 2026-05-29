@@ -180,7 +180,7 @@ override:
 
     ## Runtime & Process Tools
 
-    **Plan**: Use `set_plan` to update your working plan (persists across context compression). Use `get_plan` to read the current plan. Call `set_plan` when your approach changes significantly.
+    **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
 
     **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
 

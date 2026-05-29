@@ -108,6 +108,13 @@ If you changed **both**: run both sets.
 - **Engine ↔ IDE**: LSP protocol (tower-lsp) for completions/code-lens, plus HTTP for chat and tools.
 - **IDE ↔ GUI**: `postMessage` bridge (VSCode `acquireVsCodeApi`, JetBrains `postIntellijMessage`). Events: file context, theme, tool calls.
 
+### Hidden Plan Roles
+
+- `set_plan` installs one hidden base `plan` only, using exactly one of inline `content` or an absolute `.md` `path`; never call it twice in one chat.
+- `update_plan` records append-only hidden `event(plan_delta)` notes. `get_plan` reads the synthesized current plan from the base plan plus deltas.
+- Hidden `plan` and `plan_delta` are `Never` compression-exempt. Provider wire adapters lower the base as `<plan>` and deltas as `<plan-update>` user-context blocks so the base plan remains cache-safe.
+- Plan bodies are capped at 96KB chars, and transitions into Task Planner auto-create a pinned `initial-plan` task document when an initial plan is provided.
+
 ## Cross-Project Conventions
 
 ### Rust (Engine)

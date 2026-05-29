@@ -75,7 +75,7 @@ impl Tool for ToolGetPlan {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Read the current plan installed on this chat. Returns the latest version's content, mode, version number, and creation timestamp.".to_string(),
+            description: "Read the current plan installed on this chat. Returns the merged current content, mode, base version, creation timestamp, and delta count.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},

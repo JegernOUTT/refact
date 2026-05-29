@@ -97,8 +97,8 @@ The chat thread can contain hidden internal roles that are stored in trajectorie
 
 | Role | Stored shape | Purpose | GUI default |
 |---|---|---|---|
-| `event` | `extra.event = { subkind, source, payload }` plus human-readable `content` | Internal facts such as mode switches, tool decisions, cron fires, process exits, ticks, verifier reports, and notices | Hidden from normal transcript; shown in EventLog |
-| `plan` | `extra.plan = { mode, version, created_at_ms, supersedes }` plus Markdown `content` | Current/previous agent plan versions | Hidden from normal transcript; latest shown in PlanBanner |
+| `event` | `extra.event = { subkind, source, payload }` plus human-readable `content` | Internal facts such as mode switches, tool decisions, plan deltas, cron fires, process exits, ticks, verifier reports, and notices | Hidden from normal transcript; shown in EventLog except `plan_delta` |
+| `plan` | `extra.plan = { mode, version, created_at_ms, supersedes, truncated?, original_chars? }` plus Markdown `content` | Single install-once base plan; body is capped at 96KB (`MAX_PLAN_BODY_CHARS`) | Hidden from normal transcript; latest shown in PlanBanner |
 
 `EventSubkind` serializes in snake_case. Current subkinds:
 
@@ -114,16 +114,17 @@ The chat thread can contain hidden internal roles that are stored in trajectorie
 | `verifier_report` | `chat.verifier` | PreserveWindow |
 | `cancellation_note` | cancellation paths | PreserveAnchor |
 | `system_notice` | assorted internal emitters | PreserveAnchor |
+| `plan_delta` | `tool.update_plan` | Never |
 
-Compression rules live in `crates/refact-chat-history/src/compression_exemption.rs`: `plan` is `Never` and must never be compressed, truncated, or dropped; non-event/non-plan roles are `PreserveAnchor`; unknown event subkinds default to `PreserveAnchor`. Keep the table above in sync when adding a subkind.
+Compression rules live in `crates/refact-chat-history/src/compression_exemption.rs`: `plan` and `event(plan_delta)` are `Never` and must never be compressed, truncated by compression, or dropped; non-event/non-plan roles are `PreserveAnchor`; unknown event subkinds default to `PreserveAnchor`. Keep the table above in sync when adding a subkind.
 
-Wire mapping rules: provider adapters must never send literal `event` or `plan` roles. `event` lowers to provider-visible user context with structured `<event subkind="..." source="...">` framing. The latest `plan` lowers into system/current-plan context; older plans can be summarized as plan history. `prepare.rs` also injects the current plan into the system prompt so older providers see it consistently. Preserve Anthropic thinking/signature block order across hidden-role lowering.
+Wire mapping rules: provider adapters must never send literal `event` or `plan` roles. Normal `event` lowers to provider-visible user context with structured `<event subkind="..." source="...">` framing. Base `plan` lowers as `<plan mode="..." version="...">...`; `event(plan_delta)` lowers as append-only `<plan-update seq="...">...` blocks. This keeps the cached base plan bytes stable while still exposing the synthesized current plan to the model. Preserve Anthropic thinking/signature block order across hidden-role lowering.
 
 ### Plan tools
 
 #### `set_plan`
 
-Model-facing prompt: "Update the agent's current plan. The new plan replaces the previous version visible to you and persists across compression. Use this when your understanding of the task evolves."
+Model-facing prompt: "Install the chat's single detailed implementation plan (Markdown). Provide exactly one of `content` (full plan body) or `path` (absolute path to a `.md` report). Fails if a plan already exists — use `update_plan` to evolve it."
 
 Schema:
 
@@ -131,14 +132,15 @@ Schema:
 {
   "type": "object",
   "properties": {
-    "content": { "type": "string", "description": "Markdown plan body. Required." },
+    "content": { "type": "string", "description": "Full Markdown plan body. Optional; provide exactly one of content or path." },
+    "path": { "type": "string", "description": "Absolute path to a .md report to install as the plan" },
     "summary": { "type": "string", "description": "Short description of what changed, ≤120 chars. Optional." }
   },
-  "required": ["content"]
+  "required": []
 }
 ```
 
-Returns `{ "version": number, "supersedes": string | null }`, installs a new hidden `plan`, and appends `event(system_notice, "tool.set_plan", {version, summary}, "Plan updated to vN")`. Rejects missing, non-string, or empty `content`; rejects `summary` longer than 120 chars. Available by default in `agent`, `task_planner`, and `task_agent` modes.
+Returns `{ "version": 1, "supersedes": null }`, queues one hidden `plan`, and appends `event(system_notice, "tool.set_plan", {version, summary}, "Plan updated to v1")`. It rejects missing/non-string arguments, rejects calls that provide both or neither of `content` and `path`, rejects empty content, rejects `summary` longer than 120 chars, and rejects any second install before queuing with `a plan already exists; use update_plan to change it`. The stored base plan is capped at 96KB chars and records truncation metadata when capped. Available by default in `agent`, `task_planner`, and `task_agent` modes.
 
 Example:
 
@@ -146,9 +148,28 @@ Example:
 {"content":"## Plan\n- Inspect scheduler docs\n- Update runbooks","summary":"Document scheduler surface"}
 ```
 
+#### `update_plan`
+
+Model-facing prompt: "Append an incremental update to the current plan (cache-safe delta merged into the current plan). Use when the plan evolves; it does not rewrite the original plan."
+
+Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "note": { "type": "string", "description": "Plan update note. Required." },
+    "summary": { "type": "string", "description": "Short description of what changed, ≤120 chars. Optional." }
+  },
+  "required": ["note"]
+}
+```
+
+Returns `{ "seq": number }`, queues one hidden `event(plan_delta, "tool.update_plan", {seq, summary}, note)`, and appends `event(system_notice, "tool.update_plan", {seq, summary}, "Plan updated (delta N)")`. It requires an existing or queued base plan, rejects empty `note`, and rejects `summary` longer than 120 chars. `plan_delta` is append-only, snake_case on the wire, `Never` compressed, hidden from the normal transcript and general EventLog, and merged with the base plan for current-plan consumers.
+
 #### `get_plan`
 
-Model-facing prompt: "Read the current plan installed on this chat. Returns the latest version's content, mode, version number, and creation timestamp."
+Model-facing prompt: "Read the current plan installed on this chat. Returns the merged current content, mode, base version, creation timestamp, and delta count."
 
 Schema:
 
@@ -156,7 +177,11 @@ Schema:
 { "type": "object", "properties": {}, "required": [] }
 ```
 
-Returns `{ "plan": null }` when no plan is installed or `{ "plan": { "content", "mode", "version", "created_at_ms" } }` for the latest version. It reads the live session snapshot through the chat facade so it sees the authoritative current plan.
+Returns `{ "plan": null }` when no plan is installed or `{ "plan": { "content", "mode", "version", "created_at_ms", "delta_count" } }`. `content` is synthesized from the base `plan` plus append-only `plan_delta` notes; the base plan bytes are not rewritten.
+
+### Plan transitions
+
+`handoff_to_mode` and mode-transition endpoints create a pinned `initial-plan` task document when transitioning into Task Planner with an `initial_plan`. The document is created with kind `plan`, role `planner`, and `pinned=true`; failures are non-blocking and reported/logged without mutating the source chat's cached provider state.
 
 ### Anthropic Thinking/Signatures
 
