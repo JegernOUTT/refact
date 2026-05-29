@@ -15,6 +15,10 @@ use refact_chat_history::compression_exemption::{exemption_for, CompressionExemp
 pub const MAX_SEGMENT_SUMMARY_ATTEMPTS: usize = 2;
 const SEGMENT_SUMMARY_OVERHEAD_TOKENS: usize = 1024;
 const TOOL_CALL_ARGUMENTS_MAX_CHARS: usize = 1000;
+const SEGMENT_MESSAGE_CONTENT_MAX_CHARS: usize = 6000;
+const SEGMENT_REDACTION_SCAN_EXTRA_CHARS: usize = 4096;
+const MESSAGE_CONTENT_TRUNCATED_MARKER: &str = "\n[... message content truncated ...]";
+const TOOL_CALL_ARGUMENTS_TRUNCATED_MARKER: &str = "…";
 const SUMMARY_KIND: &str = "llm_segment_summary";
 const SUMMARY_SCHEMA_VERSION: u64 = 1;
 
@@ -224,7 +228,94 @@ fn bounded_redacted_tool_arguments(arguments: &str) -> String {
     if truncated.len() == redacted.len() {
         truncated.to_string()
     } else {
-        format!("{}…", truncated)
+        format!("{}{}", truncated, TOOL_CALL_ARGUMENTS_TRUNCATED_MARKER)
+    }
+}
+
+fn is_redaction_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | ';' | ')' | ']' | '}' | '"' | '\'' | '`' | '<' | '>'
+        )
+}
+
+fn bounded_redaction_window(text: &str, scan_cap: usize) -> (&str, bool) {
+    if text.len() <= scan_cap {
+        return (text, false);
+    }
+
+    let prefix = refact_core::string_utils::safe_truncate(text, scan_cap);
+    if prefix
+        .chars()
+        .last()
+        .map(is_redaction_boundary)
+        .unwrap_or(true)
+        || text[prefix.len()..]
+            .chars()
+            .next()
+            .map(is_redaction_boundary)
+            .unwrap_or(false)
+    {
+        return (prefix, true);
+    }
+
+    let end = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| is_redaction_boundary(*ch))
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+
+    (&prefix[..end], true)
+}
+
+fn cap_redacted_message_content(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= MESSAGE_CONTENT_TRUNCATED_MARKER.len() {
+        return refact_core::string_utils::safe_truncate(
+            MESSAGE_CONTENT_TRUNCATED_MARKER,
+            max_chars,
+        )
+        .to_string();
+    }
+    let keep = max_chars - MESSAGE_CONTENT_TRUNCATED_MARKER.len();
+    let prefix = refact_core::string_utils::safe_truncate(text, keep)
+        .trim_end()
+        .to_string();
+    format!("{}{}", prefix, MESSAGE_CONTENT_TRUNCATED_MARKER)
+}
+
+fn redact_and_cap_message_content(text: &str) -> String {
+    let scan_cap = SEGMENT_MESSAGE_CONTENT_MAX_CHARS
+        .saturating_add(SEGMENT_REDACTION_SCAN_EXTRA_CHARS);
+    let (window, truncated) = bounded_redaction_window(text, scan_cap);
+    let mut redacted = refact_core::string_utils::redact_sensitive(window);
+    if truncated {
+        redacted.push_str(MESSAGE_CONTENT_TRUNCATED_MARKER);
+    }
+    cap_redacted_message_content(&redacted, SEGMENT_MESSAGE_CONTENT_MAX_CHARS)
+}
+
+fn segment_content_text(message: &ChatMessage) -> String {
+    match &message.content {
+        ChatContent::SimpleText(text) => redact_and_cap_message_content(text),
+        ChatContent::Multimodal(elements) => elements
+            .iter()
+            .filter(|element| element.m_type == "text")
+            .map(|element| redact_and_cap_message_content(&element.m_content))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        ChatContent::ContextFiles(files) => files
+            .iter()
+            .map(|file| {
+                let content = redact_and_cap_message_content(&file.file_content);
+                format!("{}:{}-{}\n{}", file.file_name, file.line1, file.line2, content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
     }
 }
 
@@ -232,7 +323,7 @@ fn segment_text(messages: &[ChatMessage]) -> String {
     messages
         .iter()
         .map(|message| {
-            let content = message.content.content_text_only();
+            let content = segment_content_text(message);
             let mut parts = vec![format!("[{}]", role_label(&message.role))];
             if !message.tool_call_id.is_empty() {
                 parts.push(format!("tool_call_id={}", message.tool_call_id));
@@ -622,7 +713,9 @@ pub async fn apply_segment_summarization(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+    use crate::call_validation::{
+        ChatContent, ChatToolCall, ChatToolFunction, ContextFile, MultimodalElement,
+    };
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
 
@@ -683,6 +776,22 @@ mod tests {
         }
     }
 
+    fn context_files(files: Vec<ContextFile>) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(files),
+            ..Default::default()
+        }
+    }
+
+    fn error_message(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "error".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
     fn event(text: &str) -> ChatMessage {
         crate::chat::internal_roles::event(
             crate::chat::internal_roles::EventSubkind::SystemNotice,
@@ -734,6 +843,11 @@ mod tests {
             }]),
             ..Default::default()
         }
+    }
+
+    fn assert_no_raw_secrets(text: &str) {
+        assert!(!text.contains("sk-abcdefghijklmnop"), "sk token leaked: {text}");
+        assert!(!text.contains("secret-bearer-value"), "bearer leaked: {text}");
     }
 
     #[test]
@@ -832,6 +946,80 @@ mod tests {
         assert!(!text.contains("sk-abcdefghijklmnop"));
         assert!(text.contains('…'));
         assert!(text.len() < args.len());
+    }
+
+    #[test]
+    fn message_content_is_redacted_for_segment_text_roles() {
+        let messages = vec![
+            assistant("assistant saw sk-abcdefghijklmnop and Bearer secret-bearer-value"),
+            tool("tool result returned Bearer sk-abcdefghijklmnop"),
+            context_file("context simple text has token=sk-abcdefghijklmnop"),
+            error_message("error included api_key=sk-abcdefghijklmnop"),
+        ];
+        let text = segment_text(&messages);
+
+        assert!(text.contains("[ASSISTANT]"));
+        assert!(text.contains("[TOOL] tool_call_id=call_1"));
+        assert!(text.contains("[CONTEXT_FILE]"));
+        assert!(text.contains("[ERROR]"));
+        assert!(text.contains("[REDACTED_SK_TOKEN]") || text.contains("[REDACTED]"));
+        assert_no_raw_secrets(&text);
+    }
+
+    #[test]
+    fn structured_context_file_content_is_redacted_and_bounded() {
+        let huge_tail = "x".repeat(SEGMENT_MESSAGE_CONTENT_MAX_CHARS * 2);
+        let messages = vec![context_files(vec![ContextFile {
+            file_name: "src/secret.rs".to_string(),
+            file_content: format!("prefix token=sk-abcdefghijklmnop\n{}", huge_tail),
+            line1: 10,
+            line2: 20,
+            ..Default::default()
+        }])];
+        let text = segment_text(&messages);
+
+        assert!(text.contains("src/secret.rs:10-20"));
+        assert!(text.contains(MESSAGE_CONTENT_TRUNCATED_MARKER));
+        assert!(text.contains("token=[REDACTED]") || text.contains("[REDACTED_SK_TOKEN]"));
+        assert!(!text.contains("sk-abcdefghijklmnop"));
+        assert!(text.len() < huge_tail.len());
+    }
+
+    #[test]
+    fn multimodal_text_content_is_redacted_and_image_content_is_ignored() {
+        let message = ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::Multimodal(vec![
+                MultimodalElement {
+                    m_type: "text".to_string(),
+                    m_content: "visible token=sk-abcdefghijklmnop".to_string(),
+                },
+                MultimodalElement {
+                    m_type: "image/png".to_string(),
+                    m_content: "sk-image-secret-should-not-appear".to_string(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let text = segment_text(&[message]);
+
+        assert!(text.contains("visible token=[REDACTED]") || text.contains("[REDACTED_SK_TOKEN]"));
+        assert!(!text.contains("sk-abcdefghijklmnop"));
+        assert!(!text.contains("sk-image-secret-should-not-appear"));
+    }
+
+    #[test]
+    fn large_message_content_is_capped_before_segment_concatenation() {
+        let huge = format!(
+            "start {} end",
+            "0123456789".repeat(SEGMENT_MESSAGE_CONTENT_MAX_CHARS)
+        );
+        let text = segment_text(&[assistant(&huge)]);
+
+        assert!(text.contains("start 0123456789"));
+        assert!(text.contains(MESSAGE_CONTENT_TRUNCATED_MARKER));
+        assert!(text.len() < huge.len());
+        assert!(text.len() <= SEGMENT_MESSAGE_CONTENT_MAX_CHARS + 64);
     }
 
     #[test]
