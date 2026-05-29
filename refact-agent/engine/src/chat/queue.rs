@@ -967,6 +967,7 @@ pub async fn process_command_queue(
                     session.emit(super::types::ChatEvent::RuntimeUpdated {
                         state: super::types::SessionState::Error,
                         error: Some(format!("Message blocked by hook: {}", reason)),
+                        is_compressing: false,
                     });
                     session.set_runtime_state(super::types::SessionState::Idle, None);
                     continue;
@@ -1223,6 +1224,7 @@ pub async fn process_command_queue(
                         session.emit(ChatEvent::RuntimeUpdated {
                             state: SessionState::Error,
                             error: Some(e),
+                            is_compressing: false,
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                         continue;
@@ -1308,6 +1310,7 @@ pub async fn process_command_queue(
                         session.emit(ChatEvent::RuntimeUpdated {
                             state: SessionState::Error,
                             error: Some(error),
+                            is_compressing: false,
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                     }

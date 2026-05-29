@@ -382,6 +382,7 @@ pub enum ChatEvent {
         state: SessionState,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        is_compressing: bool,
     },
     Ack {
         client_request_id: String,
@@ -1204,20 +1205,24 @@ mod tests {
         let event = ChatEvent::RuntimeUpdated {
             state: SessionState::Completed,
             error: None,
+            is_compressing: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "runtime_updated");
         assert_eq!(json["state"], "completed");
         assert!(json.get("error").is_none());
+        assert_eq!(json["is_compressing"], false);
 
         let event_with_error = ChatEvent::RuntimeUpdated {
             state: SessionState::Error,
             error: Some("test error".into()),
+            is_compressing: true,
         };
         let json2 = serde_json::to_value(&event_with_error).unwrap();
         assert_eq!(json2["type"], "runtime_updated");
         assert_eq!(json2["state"], "error");
         assert_eq!(json2["error"], "test error");
+        assert_eq!(json2["is_compressing"], true);
     }
 
     #[test]

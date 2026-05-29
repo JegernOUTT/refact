@@ -8,6 +8,8 @@ use uuid::Uuid;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::diagnostics::{filter_ui_only_messages, is_ui_only_message};
 use crate::chat::history_limit::{compute_context_budget, ContextPressure};
+use crate::chat::internal_roles::{event, EventSubkind};
+use crate::chat::types::{ChatEvent, ChatSession};
 use crate::global_context::GlobalContext;
 use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
 use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
@@ -656,6 +658,16 @@ fn should_attempt_segment_summarization(
     force || thread.auto_compact_enabled_effective()
 }
 
+fn emit_compression_runtime(session: &mut ChatSession, is_compressing: bool) {
+    let state = session.runtime.state;
+    let error = session.runtime.error.clone();
+    session.emit(ChatEvent::RuntimeUpdated {
+        state,
+        error,
+        is_compressing,
+    });
+}
+
 pub fn summarize_oldest_segment_with_static_summary(
     messages: &mut Vec<ChatMessage>,
     summary_text: &str,
@@ -724,6 +736,12 @@ pub async fn apply_segment_summarization(
         }
     };
 
+    {
+        let mut session = session_arc.lock().await;
+        session.is_compressing = true;
+        emit_compression_runtime(&mut session, true);
+    }
+
     let source_messages = raw_messages[segment.start..=segment.end].to_vec();
     let source_hash = source_hash_for_messages(&source_messages);
     info!(
@@ -738,19 +756,25 @@ pub async fn apply_segment_summarization(
         Ok(summary) => {
             let mut session = session_arc.lock().await;
             let Some(current_segment) = first_eligible_segment(&session.messages) else {
+                session.is_compressing = false;
+                emit_compression_runtime(&mut session, false);
                 return false;
             };
             let current_source =
                 session.messages[current_segment.start..=current_segment.end].to_vec();
             if source_hash_for_messages(&current_source) != source_hash {
                 warn!("Segment summarization skipped because source messages changed while summarizing");
+                session.is_compressing = false;
+                emit_compression_runtime(&mut session, false);
                 return false;
             }
             replace_segment(&mut session.messages, current_segment, summary);
+            session.is_compressing = false;
             session.tier1_compact_attempts += 1;
             session.tier1_compaction_disabled = false;
             session.thread.previous_response_id = None;
             session.cache_guard_force_next = true;
+            emit_compression_runtime(&mut session, false);
             session.increment_version();
             session.touch();
             info!(
@@ -771,6 +795,22 @@ pub async fn apply_segment_summarization(
                 session.tier1_compact_attempts += 1;
                 warn!("Segment summarization failed: {}", failure);
             }
+            session.is_compressing = false;
+            let fail_event = event(
+                EventSubkind::SystemNotice,
+                "chat.summarizer",
+                json!({ "failure": failure.to_string() }),
+                format!("Context compression failed: {}", failure),
+            );
+            let index = session.messages.len();
+            session.messages.push(fail_event);
+            let message = session.messages[index].clone();
+            session.emit(ChatEvent::MessageAdded {
+                message,
+                index,
+            });
+            emit_compression_runtime(&mut session, false);
+            session.increment_version();
             false
         }
     }

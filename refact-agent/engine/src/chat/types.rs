@@ -87,6 +87,7 @@ pub struct ChatSession {
     pub thread: ThreadParams,
     pub messages: Vec<ChatMessage>,
     pub runtime: RuntimeState,
+    pub is_compressing: bool,
     pub draft_message: Option<ChatMessage>,
     pub draft_usage: Option<ChatUsage>,
     pub command_queue: VecDeque<CommandRequest>,

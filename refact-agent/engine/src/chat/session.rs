@@ -168,6 +168,7 @@ impl ChatSession {
             },
             messages: Vec::new(),
             runtime: RuntimeState::default(),
+            is_compressing: false,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -231,6 +232,7 @@ impl ChatSession {
             thread,
             messages,
             runtime: RuntimeState::default(),
+            is_compressing: false,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -813,6 +815,7 @@ impl ChatSession {
         self.emit(ChatEvent::RuntimeUpdated {
             state,
             error: error.clone(),
+            is_compressing: self.is_compressing,
         });
         self.emit_trajectory_state_change();
     }
@@ -1327,6 +1330,7 @@ impl ChatSession {
                 self.emit(ChatEvent::RuntimeUpdated {
                     state: self.runtime.state,
                     error: self.runtime.error.clone(),
+                    is_compressing: self.is_compressing,
                 });
             }
         }
@@ -3112,7 +3116,7 @@ mod tests {
         while let Ok(json) = rx.try_recv() {
             let env: EventEnvelope = serde_json::from_str(&json).unwrap();
             match env.event {
-                ChatEvent::RuntimeUpdated { state, error } => {
+                ChatEvent::RuntimeUpdated { state, error, .. } => {
                     assert_eq!(state, SessionState::Paused);
                     assert_eq!(error, None);
                     saw_runtime_updated = true;
