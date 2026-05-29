@@ -92,15 +92,28 @@ async fn apply_subchat_reactive_compaction(
     } else {
         None
     };
+    if let Some(msg) = last {
+        messages.push(msg);
+        let compacted = crate::chat::summarization::summarize_oldest_segment_with_static_summary(
+            messages,
+            "Previous non-user subchat activity was summarized after a context-limit error.",
+            "subchat_reactive",
+        );
+        if let Some(msg) = messages.pop() {
+            messages.push(make_ui_only_error_message(error));
+            messages.push(msg);
+        } else {
+            messages.push(make_ui_only_error_message(error));
+        }
+        emit_parent_compaction_diagnostics(config, error, attempt, compacted).await;
+        return compacted;
+    }
     messages.push(make_ui_only_error_message(error));
     let compacted = crate::chat::summarization::summarize_oldest_segment_with_static_summary(
         messages,
         "Previous non-user subchat activity was summarized after a context-limit error.",
         "subchat_reactive",
     );
-    if let Some(msg) = last {
-        messages.push(msg);
-    }
     emit_parent_compaction_diagnostics(config, error, attempt, compacted).await;
     compacted
 }

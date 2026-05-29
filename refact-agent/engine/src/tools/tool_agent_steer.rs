@@ -770,6 +770,7 @@ mod tests {
                 ..Default::default()
             },
             tool_result,
+            ChatMessage::new("user".to_string(), "closed follow-up".to_string()),
         ];
         let mock = Arc::new(MockChatFacade::with_messages(
             SessionState::Completed,
@@ -794,6 +795,10 @@ mod tests {
         let updates = mock.updates();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].previous_response_id, None);
+        assert!(updates[0]
+            .messages
+            .iter()
+            .any(crate::chat::summarization::is_segment_summary));
         assert!(output.contains("Auto-compaction: applied before steering."));
         assert_eq!(mock.pushed_commands().len(), 1);
     }
@@ -843,6 +848,7 @@ mod tests {
                 ..Default::default()
             },
             tool_result,
+            ChatMessage::new("user".to_string(), "closed follow-up".to_string()),
         ];
         let mock = Arc::new(MockChatFacade::with_messages(
             SessionState::Completed,
@@ -869,6 +875,10 @@ mod tests {
         );
 
         assert_eq!(mock.updates().len(), 1);
+        assert!(mock.updates()[0]
+            .messages
+            .iter()
+            .any(crate::chat::summarization::is_segment_summary));
         assert!(output.contains("Auto-compaction: applied before steering."));
         assert_eq!(mock.pushed_commands().len(), 1);
     }
