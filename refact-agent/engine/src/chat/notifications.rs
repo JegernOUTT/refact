@@ -563,4 +563,87 @@ mod tests {
             other => panic!("expected process completed envelope, got {other:?}"),
         }
     }
+
+    #[test]
+    fn process_completion_event_appends_and_preserves_prefix() {
+        let mut session = ChatSession::new("append-only-process".to_string());
+        session.add_message(ChatMessage::new("user".to_string(), "hello".to_string()));
+        session.add_message(ChatMessage::new(
+            "assistant".to_string(),
+            "working".to_string(),
+        ));
+        session.add_message(ChatMessage {
+            role: "tool".to_string(),
+            tool_call_id: "call_1".to_string(),
+            content: crate::call_validation::ChatContent::SimpleText("tool result".to_string()),
+            ..Default::default()
+        });
+        let before = serde_json::to_value(&session.messages).unwrap();
+        let before_len = session.messages.len();
+        let chat_id = session.chat_id.clone();
+
+        inject_process_completion_message(
+            &mut session,
+            ProcessCompletionEvent {
+                process_id: ExecProcessId("exec_append".to_string()),
+                chat_id,
+                status: ExecStatus::Exited { exit_code: Some(0) },
+                exit_code: Some(0),
+                duration_ms: Some(7),
+                short_description: "append process".to_string(),
+                mode: ExecMode::Background,
+            },
+        );
+
+        assert_eq!(session.messages.len(), before_len + 1);
+        assert!(crate::chat::internal_roles::last_is_event(
+            &session.messages
+        ));
+        assert_eq!(
+            session.messages[before_len].extra["event"]["subkind"],
+            json!("process_completed")
+        );
+        let after_prefix = serde_json::to_value(&session.messages[..before_len]).unwrap();
+        assert_eq!(after_prefix, before);
+    }
+
+    #[test]
+    fn repeated_process_completion_status_appends_new_event() {
+        let mut session = ChatSession::new("append-only-status-repeat".to_string());
+        session.add_message(ChatMessage::new("user".to_string(), "hello".to_string()));
+        let first = ProcessCompletionEvent {
+            process_id: ExecProcessId("exec_repeat".to_string()),
+            chat_id: session.chat_id.clone(),
+            status: ExecStatus::Exited { exit_code: Some(1) },
+            exit_code: Some(1),
+            duration_ms: Some(3),
+            short_description: "repeat process".to_string(),
+            mode: ExecMode::Background,
+        };
+        inject_process_completion_message(&mut session, first.clone());
+        let first_event = session.messages.last().unwrap().clone();
+        let before_second = serde_json::to_value(&session.messages).unwrap();
+        let before_len = session.messages.len();
+
+        inject_process_completion_message(&mut session, first);
+
+        assert_eq!(session.messages.len(), before_len + 1);
+        assert!(crate::chat::internal_roles::last_is_event(
+            &session.messages
+        ));
+        assert_eq!(
+            serde_json::to_value(&session.messages[before_len - 1]).unwrap(),
+            serde_json::to_value(&first_event).unwrap()
+        );
+        let after_prefix = serde_json::to_value(&session.messages[..before_len]).unwrap();
+        assert_eq!(after_prefix, before_second);
+        assert_ne!(
+            session.messages[before_len - 1].message_id,
+            session.messages[before_len].message_id
+        );
+        assert_eq!(
+            session.messages[before_len].extra["event"]["subkind"],
+            json!("process_completed")
+        );
+    }
 }

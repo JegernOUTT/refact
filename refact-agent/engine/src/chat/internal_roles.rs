@@ -47,6 +47,12 @@ pub fn event(
     }
 }
 
+pub fn last_is_event(messages: &[ChatMessage]) -> bool {
+    messages
+        .last()
+        .is_some_and(|message| message.role == EVENT_ROLE)
+}
+
 pub fn mode_switch_event(
     source: impl Into<String>,
     from: impl AsRef<str>,
@@ -177,7 +183,10 @@ mod tests {
             ChatContent::SimpleText(s) => s.as_str(),
             _ => panic!("expected SimpleText"),
         };
-        assert!(body.contains("[truncated:"), "truncation marker should be present");
+        assert!(
+            body.contains("[truncated:"),
+            "truncation marker should be present"
+        );
         let plan_meta = msg.extra.get("plan").unwrap();
         assert_eq!(plan_meta["truncated"], json!(true));
         assert_eq!(

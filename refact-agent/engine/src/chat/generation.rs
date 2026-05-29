@@ -654,7 +654,6 @@ pub fn start_generation(
     Box::pin(async move {
         let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
-        let mut retry_status_message_id: Option<String> = None;
         loop {
             let (mut thread, chat_id) = {
                 let session = session_arc.lock().await;
@@ -821,15 +820,7 @@ pub fn start_generation(
                                 super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
                                 delay.as_secs(),
                             );
-                            let new_id = retry_msg.message_id.clone();
-                            let updated_in_place = retry_status_message_id
-                                .as_deref()
-                                .and_then(|id| session.update_message(id, retry_msg.clone()))
-                                .is_some();
-                            if !updated_in_place {
-                                retry_status_message_id = Some(new_id);
-                                session.add_message(retry_msg);
-                            }
+                            session.add_message(retry_msg);
                         }
                     }
                     {
@@ -1005,7 +996,6 @@ pub fn start_generation(
             }
 
             network_retry_attempt = 0;
-            retry_status_message_id = None;
 
             if abort_flag.load(Ordering::SeqCst) {
                 break;
