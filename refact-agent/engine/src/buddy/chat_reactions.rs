@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tracing::debug;
 use uuid::Uuid;
 
@@ -8,6 +8,7 @@ use crate::call_validation::ChatContent;
 use crate::chat::types::ThreadParams;
 
 use super::settings::{BuddySettings, HumorLevel};
+use super::snapshot::{ChatReactionAttempt, ChatReactionDebug};
 use super::types::{BuddyBubblePolicy, BuddyPersonalityProfile, BuddyRuntimeEvent};
 use super::voice_service::{voice_service, ChatReactionSpeechIntent, VoiceCtx};
 
@@ -16,6 +17,7 @@ pub const ANALYSIS_TEXT_MAX_CHARS: usize = 500;
 pub const CHAT_REACTION_SPEECH_MAX_CHARS: usize = 140;
 pub const PER_CHAT_COOLDOWN_SECS: i64 = 300;
 pub const GLOBAL_HOURLY_CAP: u32 = 10;
+pub const CHAT_REACTION_DEBUG_ATTEMPT_CAP: usize = 50;
 const HUMOR_BUCKET_PERCENT: u64 = 40;
 const CHAT_REACTION_ECHO_NGRAM_WORDS: usize = 3;
 const CHAT_REACTION_ECHO_NGRAM_MIN_CHARS: usize = 18;
@@ -291,6 +293,75 @@ impl ChatReactionSkipReason {
             ChatReactionSkipReason::NoReactionKind => "no_reaction_kind",
             ChatReactionSkipReason::RateLimited => "rate_limited",
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatReactionDebugState {
+    recent_attempts: VecDeque<ChatReactionAttempt>,
+    counts_by_result: HashMap<String, u64>,
+    last_skip_reason: Option<String>,
+    last_emitted_at: Option<String>,
+}
+
+impl ChatReactionDebugState {
+    pub fn new() -> Self {
+        Self {
+            recent_attempts: VecDeque::new(),
+            counts_by_result: HashMap::new(),
+            last_skip_reason: None,
+            last_emitted_at: None,
+        }
+    }
+
+    pub fn record_skipped(&mut self, chat_id: &str, reason: ChatReactionSkipReason) {
+        let skip_reason = reason.as_str().to_string();
+        self.record(ChatReactionAttempt {
+            attempted_at: Utc::now().to_rfc3339(),
+            chat_id: chat_id.to_string(),
+            result: "skipped".to_string(),
+            skip_reason: Some(skip_reason.clone()),
+            signal_type: None,
+        });
+        self.last_skip_reason = Some(skip_reason);
+    }
+
+    pub fn record_emitted(&mut self, chat_id: &str, signal_type: &str) {
+        let attempted_at = Utc::now().to_rfc3339();
+        self.record(ChatReactionAttempt {
+            attempted_at: attempted_at.clone(),
+            chat_id: chat_id.to_string(),
+            result: "emitted".to_string(),
+            skip_reason: None,
+            signal_type: Some(signal_type.to_string()),
+        });
+        self.last_emitted_at = Some(attempted_at);
+    }
+
+    pub fn snapshot(&self) -> ChatReactionDebug {
+        ChatReactionDebug {
+            recent_attempts: self.recent_attempts.iter().cloned().collect(),
+            counts_by_result: self.counts_by_result.clone(),
+            last_skip_reason: self.last_skip_reason.clone(),
+            last_emitted_at: self.last_emitted_at.clone(),
+        }
+    }
+
+    fn record(&mut self, attempt: ChatReactionAttempt) {
+        *self
+            .counts_by_result
+            .entry(attempt.result.clone())
+            .or_insert(0) += 1;
+        self.recent_attempts.push_back(attempt);
+        while self.recent_attempts.len() > CHAT_REACTION_DEBUG_ATTEMPT_CAP {
+            self.recent_attempts.pop_front();
+        }
+    }
+}
+
+impl Default for ChatReactionDebugState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -613,6 +684,14 @@ fn message_hash(text: &str) -> String {
     format!("{:016x}", stable_hash(text))
 }
 
+fn signal_type_for_kind(kind: &ChatReactionKind) -> &'static str {
+    match kind {
+        ChatReactionKind::Humor => "speech_humor",
+        ChatReactionKind::Insight => "speech_insight",
+        ChatReactionKind::BugCandidate => "chat_bug_candidate",
+    }
+}
+
 pub fn build_reaction_event(
     chat_id: &str,
     analysis_text: &str,
@@ -699,6 +778,9 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
         let candidate = match chat_reaction_candidate(&accepted.thread, &raw_text, settings) {
             Ok(candidate) => candidate,
             Err(reason) => {
+                if let Some(svc) = svc_guard.as_mut() {
+                    svc.chat_reaction_debug.record_skipped(&accepted.chat_id, reason);
+                }
                 debug!(
                     target: "buddy.chat_reactions",
                     chat_id = %accepted.chat_id,
@@ -717,6 +799,7 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
             svc.chat_reaction_limiter
                 .try_allow_kind(&accepted.chat_id, candidate.kind.clone(), now)
         {
+            svc.chat_reaction_debug.record_skipped(&accepted.chat_id, reason);
             debug!(
                 target: "buddy.chat_reactions",
                 chat_id = %accepted.chat_id,
@@ -742,6 +825,7 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
     let chat_id = accepted.chat_id.clone();
     tokio::spawn(async move {
         let (candidate, voice_inputs) = plan;
+        let signal_type = signal_type_for_kind(&candidate.kind).to_string();
         let speech = render_chat_reaction_text(
             &app2,
             &candidate.kind,
@@ -763,6 +847,8 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
         if let Some(svc) = svc_guard.as_mut() {
             if settings_allow_chat_reactions(&svc.settings) {
                 svc.enqueue_runtime_event(event);
+                svc.chat_reaction_debug
+                    .record_emitted(&chat_id, signal_type.as_str());
                 debug!(
                     target: "buddy.chat_reactions",
                     chat_id = %chat_id,
@@ -772,6 +858,8 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
                     "buddy chat reaction emitted"
                 );
             } else {
+                svc.chat_reaction_debug
+                    .record_skipped(&chat_id, ChatReactionSkipReason::SettingsDisabled);
                 debug!(
                     target: "buddy.chat_reactions",
                     chat_id = %chat_id,

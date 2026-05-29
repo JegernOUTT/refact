@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use crate::diagnostics::DiagnosticContext;
 use crate::settings::BuddySettings;
@@ -10,6 +12,29 @@ pub struct BuddyStorageMetadata {
     pub project_root: String,
     pub buddy_dir: String,
     pub settings_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatReactionAttempt {
+    pub attempted_at: String,
+    pub chat_id: String,
+    pub result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatReactionDebug {
+    #[serde(default)]
+    pub recent_attempts: Vec<ChatReactionAttempt>,
+    #[serde(default)]
+    pub counts_by_result: HashMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_skip_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_emitted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,4 +55,6 @@ pub struct BuddySnapshot {
     pub opportunities: Vec<BuddyOpportunity>,
     #[serde(default)]
     pub active_drafts: Vec<BuddyDraft>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_reaction_debug: Option<ChatReactionDebug>,
 }

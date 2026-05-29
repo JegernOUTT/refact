@@ -1096,3 +1096,6 @@ export const selectDraftById = (
   state: { buddy: BuddySliceState },
   id: string,
 ) => state.buddy.activeDrafts.find((d) => d.id === id);
+
+export const selectChatReactionDebug = (state: { buddy: BuddySliceState }) =>
+  state.buddy.snapshot?.chat_reaction_debug ?? null;

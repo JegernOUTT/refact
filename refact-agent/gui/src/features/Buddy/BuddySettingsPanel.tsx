@@ -2,7 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Switch, Text, TextArea } from "@radix-ui/themes";
 import classNames from "classnames";
 import { useAppSelector } from "../../hooks";
-import { selectBuddySettings, selectBuddyStorage } from "./buddySlice";
+import {
+  selectBuddySettings,
+  selectBuddyStorage,
+  selectChatReactionDebug,
+} from "./buddySlice";
 import { useUpdateBuddySettingsMutation } from "../../services/refact/buddy";
 import type { AutonomyLevel, BuddySettings, HumorLevel } from "./types";
 import styles from "./BuddySettingsPanel.module.css";
@@ -19,6 +23,22 @@ const buildPromptPatch = (value: string): BuddySettingsPatch => {
   if (value.trim() === "") return { clear_personality_prompt: true };
   return { personality_prompt: value };
 };
+
+function formatChatReactionStatus(
+  debug: ReturnType<typeof selectChatReactionDebug>,
+): string {
+  if (!debug) return "No chat reaction diagnostics yet.";
+  const emitted = debug.counts_by_result.emitted ?? 0;
+  const skipped = debug.counts_by_result.skipped ?? 0;
+  const last = debug.recent_attempts.at(-1);
+  if (last?.result === "emitted") {
+    return `Last emitted ${last.signal_type ?? "chat reaction"}.`;
+  }
+  if (debug.last_skip_reason) {
+    return `Last skipped: ${debug.last_skip_reason}.`;
+  }
+  return `Emitted ${emitted}, skipped ${skipped}.`;
+}
 
 const OBSERVER_LABELS: Record<keyof BuddySettings["observers"], string> = {
   task_health: "Task Health",
@@ -39,6 +59,7 @@ interface Props {
 export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
   const liveSettings = useAppSelector(selectBuddySettings);
   const storage = useAppSelector(selectBuddyStorage);
+  const chatReactionDebug = useAppSelector(selectChatReactionDebug);
   const [updateSettingsMutation] = useUpdateBuddySettingsMutation();
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [promptDraft, setPromptDraft] = useState<string>("");
@@ -464,6 +485,25 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             Storage metadata is unavailable from this engine response.
           </Text>
         )}
+        <div
+          className={styles.diagnosticsGrid}
+          data-testid="buddy-chat-reaction-diagnostics"
+        >
+          <Text size="1" color="gray">
+            Chat reactions
+          </Text>
+          <Text size="1">{formatChatReactionStatus(chatReactionDebug)}</Text>
+          {chatReactionDebug?.last_emitted_at ? (
+            <>
+              <Text size="1" color="gray">
+                Last emitted
+              </Text>
+              <code className={styles.pathValue}>
+                {chatReactionDebug.last_emitted_at}
+              </code>
+            </>
+          ) : null}
+        </div>
       </div>
 
       {onClose ? (

@@ -245,6 +245,7 @@ pub struct BuddyService {
     pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
     pub observers: Vec<Arc<dyn BuddyObserver>>,
     pub chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter,
+    pub chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState,
 }
 
 pub async fn render_buddy_speech(
@@ -397,6 +398,7 @@ impl BuddyService {
             last_observer_tick: HashMap::new(),
             observers: build_observer_registry(),
             chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter::new(),
+            chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState::new(),
         }
     }
 
@@ -440,6 +442,7 @@ impl BuddyService {
             pulse,
             opportunities,
             active_drafts: self.draft_store.snapshot(),
+            chat_reaction_debug: Some(self.chat_reaction_debug.snapshot()),
         }
     }
 

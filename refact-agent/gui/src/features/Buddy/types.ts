@@ -926,6 +926,21 @@ export interface BuddyStorageMetadata {
   settings_path: string;
 }
 
+export interface ChatReactionAttempt {
+  attempted_at: string;
+  chat_id: string;
+  result: "emitted" | "skipped" | string;
+  skip_reason?: string | null;
+  signal_type?: string | null;
+}
+
+export interface ChatReactionDebug {
+  recent_attempts: ChatReactionAttempt[];
+  counts_by_result: Record<string, number>;
+  last_skip_reason?: string | null;
+  last_emitted_at?: string | null;
+}
+
 export interface BuddySnapshot {
   state: BuddyState;
   settings: BuddySettings;
@@ -938,6 +953,7 @@ export interface BuddySnapshot {
   pulse?: BuddyPulse | null;
   opportunities?: BuddyOpportunity[];
   active_drafts?: BuddyDraft[];
+  chat_reaction_debug?: ChatReactionDebug | null;
 }
 
 export type BuddyCareAction = "feed" | "play" | "pet" | "sleep" | "clean";
