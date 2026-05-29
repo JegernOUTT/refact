@@ -662,13 +662,17 @@ fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
     }
 }
 
-pub async fn find_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Option<PathBuf> {
-    let traj_dirs = get_all_trajectories_dirs(gcx.clone()).await;
-    if let Some(path) = traj_dirs
+async fn find_normal_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Option<PathBuf> {
+    validate_trajectory_id(chat_id).ok()?;
+    get_all_trajectories_dirs(gcx)
+        .await
         .iter()
         .map(|dir| dir.join(format!("{}.json", chat_id)))
         .find(|p| p.exists())
-    {
+}
+
+pub async fn find_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Option<PathBuf> {
+    if let Some(path) = find_normal_trajectory_path(gcx.clone(), chat_id).await {
         return Some(path);
     }
 
@@ -1333,7 +1337,7 @@ pub async fn save_trajectory_snapshot(
 ) -> Result<(), String> {
     let app = AppState::from_gcx(gcx.clone()).await;
     let existing_no_meta_path = if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
-        find_trajectory_path(gcx.clone(), &snapshot.chat_id).await
+        find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id).await
     } else {
         None
     };
@@ -6197,6 +6201,60 @@ mod tests {
             find_trajectory_or_buddy_path(gcx, chat_id).await,
             Some(buddy_path)
         );
+    }
+
+    #[tokio::test]
+    async fn no_meta_snapshot_does_not_overwrite_task_trajectory_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "task-normal-collision";
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-collision")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-1")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &task_path,
+            chat_id,
+            "Keep Task Collision",
+            "2024-01-01T00:00:00Z",
+        )
+        .await;
+        let task_before = tokio::fs::read_to_string(&task_path).await.unwrap();
+
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                chat_id,
+                "Normal Chat",
+                vec![ChatMessage::new(
+                    "user".to_string(),
+                    "hello normal".to_string(),
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
+        assert_eq!(tokio::fs::read_to_string(&task_path).await.unwrap(), task_before);
+        let normal_raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&normal_path).await.unwrap()).unwrap();
+        assert_eq!(normal_raw["title"], "Normal Chat");
+        let task_raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&task_path).await.unwrap()).unwrap();
+        assert_eq!(task_raw["title"], "Keep Task Collision");
+        assert_eq!(find_trajectory_path(gcx.clone(), chat_id).await, Some(normal_path));
+        assert_ne!(find_trajectory_path(gcx, chat_id).await, Some(task_path));
     }
 
     #[tokio::test]
