@@ -9500,9 +9500,9 @@ fn broken_ref_per_field_distinct_opportunities() {
     assert_eq!(broken.len(), 2);
     assert!(broken
         .iter()
-        .any(|(opp, _)| opp.cooldown_key == "provider:broken_ref:chat_model:missing-default"));
+        .any(|(opp, _)| opp.cooldown_key == "provider:broken_ref:missing-default"));
     assert!(broken.iter().any(|(opp, _)| {
-        opp.cooldown_key == "provider:broken_ref:chat_thinking_model:missing-thinking"
+        opp.cooldown_key == "provider:broken_ref:missing-thinking"
     }));
 }
 
