@@ -1294,6 +1294,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           deleteTarget.worktree.record?.meta.source_workspace_root ??
           deleteTarget.worktree.meta?.source_workspace_root,
         delete_branch: deleteBranch,
+        force_referenced: true,
       }).unwrap();
       if (deleteTarget.card.agent_chat_id) {
         dispatch(

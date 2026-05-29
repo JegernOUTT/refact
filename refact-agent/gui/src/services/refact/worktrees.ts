@@ -187,6 +187,7 @@ export type DeleteWorktreeRequest = {
   id: string;
   source_workspace_root?: string;
   delete_branch?: boolean;
+  force_referenced?: boolean;
 };
 
 export type DeleteWorktreeResponse = {
@@ -536,7 +537,7 @@ export const worktreesApi = createApi({
       DeleteWorktreeRequest
     >({
       queryFn: async (
-        { id, source_workspace_root, delete_branch },
+        { id, source_workspace_root, delete_branch, force_referenced },
         api,
         _opts,
         baseQuery,
@@ -547,6 +548,7 @@ export const worktreesApi = createApi({
           url: buildWorktreeUrl(port, `/worktrees/${encodeURIComponent(id)}`, {
             source_workspace_root,
             delete_branch,
+            force_referenced,
           }),
           method: "DELETE",
         });

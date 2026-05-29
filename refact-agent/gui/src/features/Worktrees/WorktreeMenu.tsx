@@ -182,6 +182,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         id: currentWorktree.id,
         source_workspace_root: currentWorktree.source_workspace_root,
         delete_branch: deleteBranch,
+        force_referenced: true,
       }).unwrap();
       setDeleteOpen(false);
       setLocalFeedback("Worktree deleted.");
