@@ -660,9 +660,10 @@ fn contains_analysis_echo(generated: &str, analysis_text: &str) -> bool {
 }
 
 pub fn sanitize_chat_reaction_speech_text(generated: &str, analysis_text: &str) -> Option<String> {
-    let redacted = refact_core::string_utils::redact_sensitive(generated);
-    let normalized = normalize_chat_reaction_speech(&redacted);
+    let normalized = normalize_chat_reaction_speech(generated);
+    let redacted = refact_core::string_utils::redact_sensitive(&normalized);
     if normalized.is_empty()
+        || redacted != normalized
         || contains_redaction_marker(&normalized)
         || contains_analysis_echo(&normalized, analysis_text)
     {
@@ -1629,6 +1630,14 @@ mod tests {
         assert!(!text.contains("VERYSECRET"));
         assert!(!text.contains("[REDACTED"));
         assert!(text.chars().count() <= CHAT_REACTION_SPEECH_MAX_CHARS);
+    }
+
+    #[test]
+    fn generated_speech_with_credential_pattern_is_rejected() {
+        let analysis = "please debug auth flow without storing secret material";
+        let generated = "Bearer sk-VERYSECRET1234567890 while unrelated analysis continues";
+
+        assert!(sanitize_chat_reaction_speech_text(generated, analysis).is_none());
     }
 
     #[test]
