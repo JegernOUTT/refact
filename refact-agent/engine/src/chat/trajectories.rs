@@ -672,6 +672,7 @@ async fn find_normal_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> 
 }
 
 pub async fn find_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Option<PathBuf> {
+    validate_trajectory_id(chat_id).ok()?;
     if let Some(path) = find_normal_trajectory_path(gcx.clone(), chat_id).await {
         return Some(path);
     }
@@ -716,6 +717,7 @@ pub async fn find_trajectory_or_buddy_path(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Option<PathBuf> {
+    validate_trajectory_id(chat_id).ok()?;
     if let Some(path) = find_trajectory_path(gcx.clone(), chat_id).await {
         return Some(path);
     }
@@ -1335,6 +1337,7 @@ pub async fn save_trajectory_snapshot(
     gcx: Arc<GlobalContext>,
     snapshot: TrajectorySnapshot,
 ) -> Result<(), String> {
+    validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
     let app = AppState::from_gcx(gcx.clone()).await;
     let existing_no_meta_path = if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
         find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id).await
@@ -1614,6 +1617,58 @@ pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSe
     }
 }
 
+async fn persist_loaded_trajectory_repair_raw(
+    gcx: Arc<GlobalContext>,
+    loaded: &LoadedTrajectory,
+) -> Result<(), String> {
+    let chat_id = &loaded.thread.id;
+    validate_trajectory_id(chat_id).map_err(|e| e.message)?;
+    let file_path = find_trajectory_or_buddy_path(gcx, chat_id)
+        .await
+        .ok_or_else(|| "Trajectory not found".to_string())?;
+    let content = tokio::fs::read_to_string(&file_path)
+        .await
+        .map_err(|e| format!("Failed to read trajectory: {}", e))?;
+    let mut trajectory = serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|e| format!("Failed to parse trajectory: {}", e))?;
+    let trajectory_object = trajectory
+        .as_object_mut()
+        .ok_or_else(|| "Trajectory JSON root must be an object".to_string())?;
+
+    trajectory_object.remove("previous_response_id");
+    trajectory_object.remove("claude_code_identity");
+    match &loaded.thread.frozen_request_prefix {
+        Some(frozen_request_prefix) => {
+            trajectory_object.insert(
+                "frozen_request_prefix".to_string(),
+                serde_json::to_value(frozen_request_prefix).map_err(|e| e.to_string())?,
+            );
+        }
+        None => {
+            trajectory_object.remove("frozen_request_prefix");
+        }
+    }
+    trajectory_object.insert(
+        "created_at".to_string(),
+        serde_json::Value::String(loaded.created_at.clone()),
+    );
+    trajectory_object.insert(
+        "updated_at".to_string(),
+        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+
+    let tmp_path = unique_trajectory_tmp_path(&file_path);
+    let json_result = serde_json::to_string_pretty(&trajectory)
+        .map_err(|e| format!("Failed to serialize trajectory: {}", e));
+    atomic_write_json_with_tmp_path(
+        &file_path,
+        &tmp_path,
+        json_result,
+        Some("Failed to write trajectory"),
+    )
+    .await
+}
+
 async fn persist_loaded_trajectory_repair(gcx: Arc<GlobalContext>, mut loaded: LoadedTrajectory) {
     let chat_id = loaded.thread.id.clone();
     apply_mode_defaults_to_thread(
@@ -1623,16 +1678,7 @@ async fn persist_loaded_trajectory_repair(gcx: Arc<GlobalContext>, mut loaded: L
         loaded.auto_approve_dangerous_commands_present,
     )
     .await;
-    let mut snapshot = TrajectorySnapshot::from_thread_parts(
-        chat_id.clone(),
-        &loaded.thread,
-        loaded.messages,
-        loaded.created_at,
-        0,
-    );
-    snapshot.wake_up_at = loaded.wake_up_at;
-    snapshot.waiting_for_card_ids = loaded.waiting_for_card_ids;
-    if let Err(e) = save_trajectory_snapshot(gcx, snapshot).await {
+    if let Err(e) = persist_loaded_trajectory_repair_raw(gcx, &loaded).await {
         warn!(
             "Failed to persist repaired trajectory for {}: {}",
             chat_id, e
@@ -3805,6 +3851,59 @@ mod tests {
         assert!(validate_trajectory_id("../etc/passwd").is_err());
         assert!(validate_trajectory_id("..").is_err());
         assert!(validate_trajectory_id("a/../b").is_err());
+    }
+
+    #[tokio::test]
+    async fn trajectory_path_helpers_and_save_reject_malformed_chat_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        tokio::fs::create_dir_all(dir.path().join(".refact").join("trajectories"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(
+            dir.path()
+                .join(".refact")
+                .join("buddy")
+                .join("chats")
+                .join("conversations"),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(dir.path().join(".refact").join("bad.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            dir.path()
+                .join(".refact")
+                .join("buddy")
+                .join("chats")
+                .join("bad.json"),
+            "{}",
+        )
+        .await
+        .unwrap();
+
+        assert!(find_trajectory_path(gcx.clone(), "../bad").await.is_none());
+        assert!(find_trajectory_or_buddy_path(gcx.clone(), "../bad")
+            .await
+            .is_none());
+
+        let err = save_trajectory_snapshot(
+            gcx,
+            test_snapshot(
+                "../save-bad",
+                "Bad",
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "Invalid trajectory id");
+        assert!(
+            !tokio::fs::try_exists(dir.path().join(".refact").join("save-bad.json"))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -6246,14 +6345,20 @@ mod tests {
             .join("trajectories")
             .join(format!("{chat_id}.json"));
         assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
-        assert_eq!(tokio::fs::read_to_string(&task_path).await.unwrap(), task_before);
+        assert_eq!(
+            tokio::fs::read_to_string(&task_path).await.unwrap(),
+            task_before
+        );
         let normal_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&normal_path).await.unwrap()).unwrap();
         assert_eq!(normal_raw["title"], "Normal Chat");
         let task_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&task_path).await.unwrap()).unwrap();
         assert_eq!(task_raw["title"], "Keep Task Collision");
-        assert_eq!(find_trajectory_path(gcx.clone(), chat_id).await, Some(normal_path));
+        assert_eq!(
+            find_trajectory_path(gcx.clone(), chat_id).await,
+            Some(normal_path)
+        );
         assert_ne!(find_trajectory_path(gcx, chat_id).await, Some(task_path));
     }
 
@@ -6462,7 +6567,17 @@ mod tests {
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:00:00Z",
                 "include_project_info": true,
-                "checkpoints_enabled": true
+                "checkpoints_enabled": true,
+                "browser_meta": {
+                    "browser_runtime_id": "browser-1",
+                    "tab_urls": ["https://example.com"],
+                    "active_tab_id": "tab-1",
+                    "attach_screenshot_on_send": true
+                },
+                "custom_future_field": {
+                    "keep": true,
+                    "nested": {"value": 42}
+                }
             }))
             .unwrap(),
         )
@@ -6480,6 +6595,12 @@ mod tests {
         assert!(raw["frozen_request_prefix"]["tools_canonical"].is_null());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-1");
+        assert_eq!(
+            raw["browser_meta"]["tab_urls"],
+            json!(["https://example.com"])
+        );
+        assert_eq!(raw["custom_future_field"]["nested"]["value"], 42);
     }
 
     #[tokio::test]
