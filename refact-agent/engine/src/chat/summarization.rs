@@ -565,17 +565,34 @@ pub async fn maybe_apply_tier1(
     session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     thread: &crate::chat::types::ThreadParams,
 ) {
+    let _ = apply_tier1(gcx, session_arc, thread, false).await;
+}
+
+pub async fn force_apply_tier1(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    thread: &crate::chat::types::ThreadParams,
+) -> bool {
+    apply_tier1(gcx, session_arc, thread, true).await
+}
+
+async fn apply_tier1(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    thread: &crate::chat::types::ThreadParams,
+    force_full_recompact: bool,
+) -> bool {
     if !thread.auto_compact_enabled_effective() {
-        return;
+        return false;
     }
 
     let raw_messages = {
         let session = session_arc.lock().await;
-        if session.tier1_compaction_disabled {
-            return;
+        if session.tier1_compaction_disabled && !force_full_recompact {
+            return false;
         }
-        if session.tier1_compact_attempts >= MAX_TIER1_COMPACT_ATTEMPTS {
-            return;
+        if session.tier1_compact_attempts >= MAX_TIER1_COMPACT_ATTEMPTS && !force_full_recompact {
+            return false;
         }
         let last_visible_has_pending_tool_calls = session
             .messages
@@ -588,7 +605,7 @@ pub async fn maybe_apply_tier1(
             })
             .unwrap_or(false);
         if last_visible_has_pending_tool_calls {
-            return;
+            return false;
         }
         session.messages.clone()
     };
@@ -613,13 +630,13 @@ pub async fn maybe_apply_tier1(
 
     let effective_n_ctx = match effective_n_ctx_opt {
         Some(v) => v,
-        None => return,
+        None => return false,
     };
 
     let (visible_messages, original_indices) =
         visible_tier1_messages_with_original_indices(&raw_messages);
     if visible_messages.is_empty() {
-        return;
+        return false;
     }
 
     let raw_budget = compute_context_budget(&visible_messages, effective_n_ctx);
@@ -629,18 +646,19 @@ pub async fn maybe_apply_tier1(
         .iter()
         .filter(|m| is_real_summarization_anchor(m))
         .count();
-    let force_full_recompact = anchor_count >= MAX_TIER1_ANCHORS_BEFORE_MERGE
+    let should_merge_anchors = anchor_count >= MAX_TIER1_ANCHORS_BEFORE_MERGE
         && matches!(
             linearized_pressure,
             ContextPressure::High | ContextPressure::Critical
         );
+    let force_full_recompact = force_full_recompact || should_merge_anchors;
 
     if !matches!(
         linearized_pressure,
         ContextPressure::High | ContextPressure::Critical
     ) && !force_full_recompact
     {
-        return;
+        return false;
     }
 
     let next_attempt = {
@@ -720,6 +738,7 @@ pub async fn maybe_apply_tier1(
                 "Tier1 summarization applied, messages count now {}",
                 session.messages.len()
             );
+            return true;
         }
         Err(failure) => {
             let mut session = session_arc.lock().await;
@@ -735,6 +754,8 @@ pub async fn maybe_apply_tier1(
             }
         }
     }
+
+    false
 }
 
 #[cfg(test)]

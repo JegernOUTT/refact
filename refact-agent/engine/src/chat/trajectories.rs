@@ -14,7 +14,6 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::call_validation::{ChatMessage, ChatContent};
-use crate::chat::history_limit::CompactAggression;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
@@ -867,7 +866,7 @@ pub async fn load_trajectory_for_chat(
         reactive_compact_attempts: t
             .get("reactive_compact_attempts")
             .and_then(|v| v.as_u64())
-            .map(|n| (n as usize).min(CompactAggression::max_reactive_attempts())),
+            .map(|n| (n as usize).min(1)),
     };
 
     let auto_approve_editing_tools_present = t
@@ -4795,7 +4794,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             loaded.thread.reactive_compact_attempts,
-            Some(CompactAggression::max_reactive_attempts())
+            Some(1)
         );
     }
 

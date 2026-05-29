@@ -29,18 +29,6 @@ pub enum CompactAggression {
 }
 
 impl CompactAggression {
-    pub const fn max_reactive_attempts() -> usize {
-        3
-    }
-
-    pub fn for_reactive_attempt(attempt: usize) -> Self {
-        match attempt.max(1) {
-            1 => CompactAggression::Standard,
-            2 => CompactAggression::Aggressive,
-            _ => CompactAggression::Maximum,
-        }
-    }
-
     fn keep_recent_event_count(self) -> usize {
         match self {
             CompactAggression::Standard => 3,
@@ -1135,30 +1123,6 @@ mod tests {
             .contains("lines elided under aggressive compaction"));
         assert!(files[0].file_content.contains("line 0"));
         assert!(files[0].file_content.contains("line 99"));
-    }
-
-    #[test]
-    fn test_reactive_attempts_escalate_to_maximum() {
-        assert_eq!(
-            CompactAggression::for_reactive_attempt(1),
-            CompactAggression::Standard
-        );
-        assert_eq!(
-            CompactAggression::for_reactive_attempt(0),
-            CompactAggression::Standard
-        );
-        assert_eq!(
-            CompactAggression::for_reactive_attempt(2),
-            CompactAggression::Aggressive
-        );
-        assert_eq!(
-            CompactAggression::for_reactive_attempt(3),
-            CompactAggression::Maximum
-        );
-        assert_eq!(
-            CompactAggression::for_reactive_attempt(99),
-            CompactAggression::Maximum
-        );
     }
 
     #[test]

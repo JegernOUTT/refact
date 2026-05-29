@@ -12,7 +12,6 @@ import {
   ChatMessages,
   DiffChunk,
   DiffMessage,
-  EventMessage,
   ErrorMessage,
   isChatContextFileMessage,
   isDiffMessage,
@@ -74,7 +73,6 @@ import { CollapsibleStoreProvider } from "./useStoredOpen";
 import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
-import { EventLog } from "./EventLog";
 import { PlanBanner } from "./PlanBanner";
 
 export type ChatContentProps = {
@@ -185,19 +183,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     [renderChatId, lspPort, apiKey],
   );
 
-  const handleProcessCompletedClick = useCallback((processId: string) => {
-    const cards = document.querySelectorAll("[data-exec-process-id]");
-    const card = Array.from(cards).find(
-      (item) => item.getAttribute("data-exec-process-id") === processId,
-    );
-    if (!card) {
-      // eslint-disable-next-line no-console
-      console.warn(`ExecToolCard not found for process ${processId}`);
-      return;
-    }
-    card.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, []);
-
   const onRetryWrapper = useCallback(
     (index: number, question: UserMessage["content"]) => {
       onRetry(index, question);
@@ -258,11 +243,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return nextItems;
   }, [messages, isStreaming]);
 
-  const eventFilterEvents = useMemo(
-    () => messages.filter(isEventMessage),
-    [messages],
-  );
-
   const initialScrollIndex = useMemo(() => {
     return displayItems.length > 0 ? displayItems.length - 1 : undefined;
   }, [displayItems]);
@@ -298,30 +278,22 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
         case "assistant":
           return (
-            <>
-              <EventLog
-                events={item.events}
-                threadId={renderChatId}
-                filterEvents={eventFilterEvents}
-                onProcessCompletedClick={handleProcessCompletedClick}
-              />
-              <AssistantInput
-                message={item.message.content}
-                reasoningContent={item.message.reasoning_content}
-                thinkingBlocks={item.message.thinking_blocks}
-                toolCalls={item.message.tool_calls}
-                serverExecutedTools={item.message.server_executed_tools}
-                serverContentBlocks={item.message.server_content_blocks}
-                citations={item.message.citations}
-                messageId={item.message.message_id}
-                onBranch={handleBranch}
-                onDelete={handleDelete}
-                contextFilesByToolId={item.contextFilesByToolId}
-                diffsByToolId={item.diffsByToolId}
-                usage={item.message.usage}
-                isStreaming={item.isStreaming}
-              />
-            </>
+            <AssistantInput
+              message={item.message.content}
+              reasoningContent={item.message.reasoning_content}
+              thinkingBlocks={item.message.thinking_blocks}
+              toolCalls={item.message.tool_calls}
+              serverExecutedTools={item.message.server_executed_tools}
+              serverContentBlocks={item.message.server_content_blocks}
+              citations={item.message.citations}
+              messageId={item.message.message_id}
+              onBranch={handleBranch}
+              onDelete={handleDelete}
+              contextFilesByToolId={item.contextFilesByToolId}
+              diffsByToolId={item.diffsByToolId}
+              usage={item.message.usage}
+              isStreaming={item.isStreaming}
+            />
           );
 
         case "user":
@@ -396,16 +368,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             <SummarizationMessageCard key={item.key} message={item.message} />
           );
 
-        case "event_log":
-          return (
-            <EventLog
-              events={item.events}
-              threadId={renderChatId}
-              filterEvents={eventFilterEvents}
-              onProcessCompletedClick={handleProcessCompletedClick}
-            />
-          );
-
         default:
           return null;
       }
@@ -415,9 +377,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       handleDelete,
       onRetryWrapper,
       collapsibleState,
-      renderChatId,
-      handleProcessCompletedClick,
-      eventFilterEvents,
     ],
   );
 
@@ -573,7 +532,6 @@ type DisplayItemAssistant = {
   message: AssistantMessage;
   contextFilesByToolId: Record<string, ChatContextFile[]>;
   diffsByToolId: Record<string, DiffChunk[]>;
-  events: EventMessage[];
   isStreaming: boolean;
 };
 
@@ -648,13 +606,6 @@ type DisplayItemSummarization = {
   message: SummarizationMessage;
 };
 
-type DisplayItemEventLog = {
-  type: "event_log";
-  key: string;
-  messageIndex: number;
-  events: EventMessage[];
-};
-
 type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
@@ -665,8 +616,7 @@ type DisplayItem =
   | DisplayItemError
   | DisplayItemSkillActivated
   | DisplayItemSkillReport
-  | DisplayItemSummarization
-  | DisplayItemEventLog;
+  | DisplayItemSummarization;
 
 function updateAssistantStreamingFlags(
   items: DisplayItem[],
@@ -765,33 +715,6 @@ function assistantGroupingSignature(message: AssistantMessage): string {
       return `${id}:${name}`;
     })
     .join("|");
-}
-
-function collectPrecedingEvents(
-  messages: ChatMessages,
-  assistantIndex: number,
-): EventMessage[] {
-  const events: EventMessage[] = [];
-  for (let i = assistantIndex - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role === "assistant") break;
-    if (isEventMessage(message)) {
-      events.unshift(message);
-    }
-  }
-  return events;
-}
-
-function collectTrailingEvents(messages: ChatMessages): EventMessage[] {
-  const events: EventMessage[] = [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role === "assistant") break;
-    if (isEventMessage(message)) {
-      events.unshift(message);
-    }
-  }
-  return events;
 }
 
 function buildDisplayItemsFromIndex(
@@ -990,7 +913,6 @@ function buildDisplayItemsFromIndex(
           ChatContextFile[]
         >,
         diffsByToolId: diffsByToolId as Record<string, DiffChunk[]>,
-        events: collectPrecedingEvents(messages, i),
         isStreaming: isStreaming && i === lastAssistantIdx,
       });
 
@@ -1099,16 +1021,6 @@ function buildDisplayItemsFromIndex(
       i = j - 1;
       continue;
     }
-  }
-
-  const trailingEvents = collectTrailingEvents(messages);
-  if (trailingEvents.length > 0) {
-    items.push({
-      type: "event_log",
-      key: "trailing-events",
-      messageIndex: messages.length,
-      events: trailingEvents,
-    });
   }
 
   return items;
@@ -1359,7 +1271,6 @@ function buildDisplayItems(
         message: head,
         contextFilesByToolId,
         diffsByToolId,
-        events: collectPrecedingEvents(messages, i),
         isStreaming: isStreaming && i === lastAssistantIdx,
       });
 
@@ -1468,16 +1379,6 @@ function buildDisplayItems(
       i = j - 1;
       continue;
     }
-  }
-
-  const trailingEvents = collectTrailingEvents(messages);
-  if (trailingEvents.length > 0) {
-    items.push({
-      type: "event_log",
-      key: "trailing-events",
-      messageIndex: messages.length,
-      events: trailingEvents,
-    });
   }
 
   return items;

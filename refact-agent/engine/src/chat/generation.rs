@@ -44,7 +44,6 @@ use crate::chat::history_limit::{tier0_deterministic_compact_with, CompactAggres
 use crate::chat::trajectory_ops::approx_token_count;
 
 const TOKEN_BUDGET_CADENCE: usize = 6;
-const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = CompactAggression::max_reactive_attempts();
 const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
@@ -791,7 +790,7 @@ pub fn start_generation(
             let generation_result = run_llm_generation(
                 app.clone(),
                 session_arc.clone(),
-                thread,
+                thread.clone(),
                 chat_id.clone(),
                 abort_flag.clone(),
                 abort_notify.clone(),
@@ -877,16 +876,11 @@ pub fn start_generation(
                             let session = session_arc.lock().await;
                             session.thread.reactive_compact_attempts.unwrap_or(0)
                         };
-                        if previous_reactive_attempts < MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS {
+                        if previous_reactive_attempts == 0 {
                             let original_error = error.message.clone();
-                            let reactive_attempt = previous_reactive_attempts + 1;
-                            let aggression =
-                                CompactAggression::for_reactive_attempt(reactive_attempt);
+                            let reactive_attempt = 1;
                             warn!(
-                                "Context limit error, applying Tier 0 ({:?}) compact attempt {}/{}: {}",
-                                aggression,
-                                reactive_attempt,
-                                MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
+                                "Context limit error, applying one-shot Tier 0 compact: {}",
                                 original_error,
                             );
                             {
@@ -896,7 +890,7 @@ pub fn start_generation(
                                 let report = tier0_deterministic_compact_with(
                                     &mut session.messages,
                                     2,
-                                    aggression,
+                                    CompactAggression::Standard,
                                 );
                                 session.add_message(make_ui_only_compaction_report_message(
                                     &report,
@@ -908,12 +902,31 @@ pub fn start_generation(
                                 session.cache_guard_force_next = true;
                             }
                             continue;
-                        } else {
-                            error.message = format!(
-                                "Context too large after {} compaction attempts. Original error: {}",
-                                previous_reactive_attempts, error.message
-                            );
                         }
+
+                        warn!(
+                            "Context limit error after one-shot reactive compact; applying normal compaction: {}",
+                            error.message,
+                        );
+                        let compacted = crate::chat::summarization::force_apply_tier1(
+                            gcx.clone(),
+                            &session_arc,
+                            &thread,
+                        )
+                        .await;
+                        if compacted {
+                            {
+                                let mut session = session_arc.lock().await;
+                                session.clear_stream_for_retry();
+                                session.thread.previous_response_id = None;
+                                session.cache_guard_force_next = true;
+                            }
+                            continue;
+                        }
+                        error.message = format!(
+                            "Context too large after one-shot reactive compact and normal compactification failed. Original error: {}",
+                            error.message
+                        );
                     }
                 }
 
@@ -2372,21 +2385,17 @@ mod tests {
     }
 
     #[test]
-    fn test_context_limit_compact_circuit_breaker_stops_at_three() {
-        let max = MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS;
-        assert_eq!(max, 3);
-        let mut count = 0usize;
-        let mut stopped_by_breaker = false;
-        for _ in 0..10 {
-            if count < max {
-                count += 1;
-            } else {
-                stopped_by_breaker = true;
-                break;
-            }
+    fn test_context_limit_reactive_compact_is_one_shot() {
+        let mut reactive_attempts = 0usize;
+        let first_overflow_uses_reactive = reactive_attempts == 0;
+        if first_overflow_uses_reactive {
+            reactive_attempts = 1;
         }
-        assert!(stopped_by_breaker);
-        assert_eq!(count, max);
+        let second_overflow_uses_normal_compaction = reactive_attempts > 0;
+
+        assert!(first_overflow_uses_reactive);
+        assert!(second_overflow_uses_normal_compaction);
+        assert_eq!(reactive_attempts, 1);
     }
 
     #[test]

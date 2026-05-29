@@ -38,7 +38,7 @@ use crate::stats::event::{canonicalize_mode_for_stats, split_model_provider, Llm
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
 
-const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = CompactAggression::max_reactive_attempts();
+const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 1;
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
 
@@ -93,7 +93,7 @@ async fn apply_subchat_reactive_compaction(
     let report = tier0_deterministic_compact_with(
         messages,
         0,
-        CompactAggression::for_reactive_attempt(attempt),
+        CompactAggression::Standard,
     );
     append_ui_only_reactive_compaction_diagnostics(messages, error, &report, attempt);
     if let Some(msg) = last {
@@ -1147,7 +1147,7 @@ async fn run_subchat_loop(
                     let original_error = err.clone();
                     context_limit_compact_count += 1;
                     warn!(
-                        "Subchat context limit, applying Tier 0 compact attempt {}/{}: {}",
+                        "Subchat context limit, applying one-shot Tier 0 compact attempt {}/{}: {}",
                         context_limit_compact_count,
                         MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
                         original_error,
@@ -1265,7 +1265,7 @@ async fn run_subchat_with_wrap_up(
                     let original_error = err.clone();
                     context_limit_compact_count += 1;
                     warn!(
-                        "Subchat wrap-up context limit, applying Tier 0 compact attempt {}/{}: {}",
+                        "Subchat wrap-up context limit, applying one-shot Tier 0 compact attempt {}/{}: {}",
                         context_limit_compact_count,
                         MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
                         original_error,
@@ -1356,7 +1356,7 @@ async fn run_subchat_with_wrap_up(
                 let original_error = err.clone();
                 context_limit_compact_count += 1;
                 warn!(
-                    "Subchat wrap-up final context limit, applying Tier 0 compact attempt {}/{}: {}",
+                    "Subchat wrap-up final context limit, applying one-shot Tier 0 compact attempt {}/{}: {}",
                     context_limit_compact_count,
                     MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
                     original_error,
