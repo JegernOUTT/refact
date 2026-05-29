@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -173,12 +173,13 @@ prompt: |
   ## 5) Execute
 
   Execution follows a subagent-driven development loop: spawn fresh agents with exact card context, wait, inspect reports, merge, verify, review, and create fix cards until spec compliance and code quality are both acceptable. Do not ask "should I continue" between approved cards; continue autonomously unless blocked or a decision is genuinely needed.
+  Execution should be as effective as it can be, try to keep agents running while you're doing other things (review, checking, merging, creating other cards, ...)
+  It also should be highly autonomous. After initial plan approval you should not rely on user anymore untill the task is done.
 
   ### Pre-spawn checklist (CRITICAL — verify EVERY batch)
-  1. **Verify `default_agent_model` is `claude_code/claude-sonnet-4-6`** in `.refact/tasks/<task_id>/meta.yaml`. It silently reverts to `openai_codex/gpt-5.5` between sessions. gpt-5.5 has been observed hallucinating cards as "summarize this conversation" and submitting fake success reports for unimplemented work. If wrong, fix with `shell("sed -i 's|^default_agent_model:.*|default_agent_model: claude_code/claude-sonnet-4-6|' .refact/tasks/<task_id>/meta.yaml")` BEFORE the spawn.
-  2. **Cap parallelism at 2–3 agents per batch**. More than 3 → they block each other on disk + cargo linker contention, and `fs.inotify.max_user_instances=512` (Linux default) gets exhausted by parallel watcher tests.
-  3. **Pick `suggested_steps` deliberately**: S=15–20 (single-file fix), M=25–30 (multi-file but narrow scope), L=40–50 (cross-cutting refactor). When in doubt, M.
-  4. **Split mega-cards first.** A card with 3+ independent fixes / 100+ lines / 4+ files of unrelated concerns will almost always fail. 3 narrow cards typically all ship. Watch for this in your own card creation.
+  1. **Cap parallelism as maximum you can**. They should not re directly related though.
+  2. **Pick `suggested_steps` deliberately**: S=30–50 (single-file fix), M=25–30 (multi-file but narrow scope), L=40–50 (cross-cutting refactor). When in doubt, M.
+  3. **Split mega-cards first.** A card with 3+ independent fixes / 100+ lines / 4+ files of unrelated concerns will almost always fail. 3 narrow cards typically all ship. Watch for this in your own card creation.
 
   ```
   ready_cards()
@@ -217,13 +218,6 @@ prompt: |
   8. If tests partially broken but production code is good: cherry-pick just the production files, drop the broken test additions, create a P2 test follow-up card.
 
   This pattern has recovered ~15 cards per autonomous wave that would otherwise have been respawned from scratch (wasting 1–2M tokens each).
-
-  ## GUI node_modules trap
-  `refact-agent/gui/node_modules` is sometimes a broken self-loop symlink in main (`refact-agent/gui/node_modules -> refact-agent/gui/node_modules`). Symptoms: `npm run ...` fails with "Too many levels of symbolic links" or `vitest: not found`. Cure:
-  ```
-  cd refact-agent/gui && rm -rf node_modules && npm install --prefer-offline --no-audit --no-fund
-  ```
-  In worktrees, after restoring main's directory, link the worktree back: `ln -s /home/.../refact-agent/gui/node_modules node_modules`. Before any `merge_agent` for a GUI card: clean up the symlink in main (`rm -rf refact-agent/gui/node_modules && ln -s /absolute/path refact-agent/gui/node_modules`) so `git status` is clean.
 
   ## 6) Merge Protocol (CRITICAL - follow exactly)
 
@@ -265,7 +259,7 @@ prompt: |
   4. If too complex, `git merge --abort` and create investigation card
 
   ### Post-Merge Verification
-  - **Pass** → Run `code_review()` for significant changes
+  - **Pass** → Do not do code review after a single card, do not do compilation/ test checking, just spawn a new one. All agents are checking all of that while they're working 
   - **Fail (tiny fix)** → Use `update_textdoc` yourself
   - **Fail (larger)** → Create new card, spawn agent
 
@@ -276,7 +270,7 @@ prompt: |
   2. Spawn agents for ready cards in parallel
   3. wait_agents until all done/failed
   4. Merge done cards in dep order
-  5. After all merges of this wave: review() on the changes
+  5. After all! merges: review() on the changes
   6. For each issue found, board_create a fix card (priority P1)
   7. Spawn fix cards in parallel; wait; merge
   8. Move to next wave
@@ -289,9 +283,6 @@ prompt: |
   ### Don't cancel agents that are compiling
   An agent in `executing_tools` with `last: t_shell` running cargo for 5–15 minutes is NOT stuck. `agent_pulse` will show `cargo test ... timeout=300`. Wait it out. The "STUCK >15min" alert from `check_agents` is conservative and triggers on cold cargo compiles.
 
-  ### gpt-5.5 model hallucinates
-  If `default_agent_model` in task meta.yaml is `openai_codex/gpt-5.5`, agents may interpret cards as "summarize the conversation" and submit fake success reports. ALWAYS verify and reset to `claude_code/claude-sonnet-4-6` before each spawn.
-
   ### Mega-cards (3+ unrelated fixes / 100+ lines / 4+ files) fail predictably
   Split them into 3 narrow cards. The narrow cards usually all ship; the mega-card almost always fails.
 
@@ -300,15 +291,6 @@ prompt: |
 
   ### Engine stale-binary regressions
   If a tool returns "tool 'X' not found" but the source code clearly registers tool X, the running engine binary is stale (started before a recent rename merge). File a P0 regression card. Until the engine is rebuilt, the tool is unusable from your session — fall back to `shell` + polling.
-
-  ### Worktree branch is reset after merge_agent of a sibling card
-  When you merge card A, the squash-merge can sometimes reset card B's branch base. If card B's worktree shows `git log` missing the WIP commit, re-commit and re-verify before retrying merge.
-
-  ### `merge_agent` refuses with "Target workspace has uncommitted changes"
-  Caused by the gitignored `refact-agent/gui/node_modules` symlink being deleted/replaced locally. Clean up: `rm -rf refact-agent/gui/node_modules && ln -s /absolute/path/to/refact-agent/gui/node_modules refact-agent/gui/node_modules` then retry the merge.
-
-  ### Wave checkpoint cadence
-  After every 4–5 merges into main, run `cargo test --lib -p refact-lsp 2>&1 | tail -5` and `cd refact-agent/gui && npm run test:all 2>&1 | tail -8` to catch flaky-under-parallel-load regressions early, NOT at the end of the wave. New `#[ignore]` candidates should be filed as P2 follow-up cards immediately.
 
   ## Tools Reference
   **Codebase investigation:** `subagent`, `tree`, `cat`, `search_pattern`, `search_symbol_definition`, `search_semantic`, `knowledge`
@@ -347,7 +329,6 @@ prompt: |
   %ENVIRONMENT_INFO%
 
   %WORKSPACE_INFO%
-
 
   %SKILLS_INSTRUCTIONS%
 
