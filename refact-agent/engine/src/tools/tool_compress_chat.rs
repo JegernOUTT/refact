@@ -23,6 +23,7 @@ const TOOL_OUTPUT_TRUNCATE_LIMIT: usize = 200;
 const MAX_PER_MESSAGE_ENTRIES: usize = 200;
 const MAX_CONTEXT_ENTRIES: usize = 200;
 const MAX_TOOL_OUTPUT_ENTRIES: usize = 200;
+const AGGRESSIVE_SUMMARY_SKIPPED_REASON: &str = "llm_segment_summarization_required";
 
 fn find_preserve_cutoff(messages: &[crate::call_validation::ChatMessage], turns: usize) -> usize {
     if turns == 0 {
@@ -47,23 +48,22 @@ fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
 }
 
-fn summarize_modifiable_prefix(
-    messages: &mut Vec<ChatMessage>,
+fn preserve_cutoff_for(messages: &[ChatMessage], preserve_last_turns: Option<usize>) -> usize {
+    preserve_last_turns
+        .map(|turns| find_preserve_cutoff(messages, turns))
+        .unwrap_or(messages.len())
+}
+
+fn aggressive_summary_required_reason(
+    messages: &[ChatMessage],
     preserve_cutoff: usize,
-    summary_text: &str,
-    summary_model: &str,
-) -> bool {
+) -> Option<&'static str> {
     let cutoff = preserve_cutoff.min(messages.len());
-    let mut modifiable = messages[..cutoff].to_vec();
-    if !crate::chat::summarization::summarize_oldest_segment_with_static_summary(
-        &mut modifiable,
-        summary_text,
-        summary_model,
-    ) {
-        return false;
+    if crate::chat::summarization::closed_non_user_segments(&messages[..cutoff]).is_empty() {
+        None
+    } else {
+        Some(AGGRESSIVE_SUMMARY_SKIPPED_REASON)
     }
-    messages.splice(..cutoff, modifiable);
-    true
 }
 
 #[cfg(test)]
@@ -142,8 +142,8 @@ mod tests {
     }
 
     #[test]
-    fn aggressive_static_summary_preserves_tail_after_cutoff() {
-        let mut messages = vec![
+    fn aggressive_summary_required_detects_only_modifiable_segments() {
+        let messages = vec![
             user_message("old user"),
             assistant_message("old assistant"),
             user_message("tail user"),
@@ -154,25 +154,20 @@ mod tests {
         let preserved_tail_count = messages.len() - preserve_cutoff;
         let preserved_tail_before = serde_json::to_string(&messages[preserve_cutoff..]).unwrap();
 
-        assert!(summarize_modifiable_prefix(
-            &mut messages,
-            preserve_cutoff,
-            "summary",
-            "test-model",
-        ));
+        assert_eq!(
+            aggressive_summary_required_reason(&messages, preserve_cutoff),
+            Some(AGGRESSIVE_SUMMARY_SKIPPED_REASON),
+        );
 
         let preserved_tail_start = messages.len() - preserved_tail_count;
         let preserved_tail_after =
             serde_json::to_string(&messages[preserved_tail_start..]).unwrap();
         assert_eq!(preserved_tail_after, preserved_tail_before);
-        assert!(messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
     }
 
     #[test]
-    fn aggressive_static_summary_ignores_eligible_segment_only_in_preserved_tail() {
-        let mut messages = vec![
+    fn aggressive_summary_required_ignores_eligible_segment_only_in_preserved_tail() {
+        let messages = vec![
             user_message("old user"),
             user_message("tail user"),
             assistant_message("tail assistant"),
@@ -181,14 +176,41 @@ mod tests {
         let preserve_cutoff = find_preserve_cutoff(&messages, 1);
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(!summarize_modifiable_prefix(
-            &mut messages,
-            preserve_cutoff,
-            "summary",
-            "test-model",
-        ));
+        assert_eq!(
+            aggressive_summary_required_reason(&messages, preserve_cutoff),
+            None
+        );
 
         assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn aggressive_summary_skip_does_not_create_static_placeholder() {
+        let messages = vec![
+            user_message("old user"),
+            assistant_message("old assistant"),
+            user_message("middle user"),
+            user_message("tail user"),
+        ];
+        let preserve_cutoff = find_preserve_cutoff(&messages, 1);
+
+        assert_eq!(
+            aggressive_summary_required_reason(&messages, preserve_cutoff),
+            Some(AGGRESSIVE_SUMMARY_SKIPPED_REASON),
+        );
+        let removed_placeholder = [
+            "Previous non-user chat activity",
+            "was summarized by",
+            "compress_chat_apply",
+        ]
+        .join(" ");
+        assert!(!messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains(&removed_placeholder)));
+        assert!(!messages
+            .iter()
+            .any(crate::chat::summarization::is_segment_summary));
     }
 }
 
@@ -572,7 +594,7 @@ impl Tool for ToolCompressChatApply {
                 "strength": {
                     "type": "string",
                     "enum": ["conservative", "balanced", "aggressive"],
-                    "description": "conservative=explicit ops only, balanced=+auto dedup, aggressive=+dedup+segment summary"
+                    "description": "conservative=explicit ops only, balanced=+auto dedup, aggressive=+dedup and reports when LLM segment summarization is required"
                 },
                 "preserve_last_turns": {
                     "type": "integer",
@@ -686,6 +708,7 @@ impl Tool for ToolCompressChatApply {
         let mut tool_dropped = 0usize;
         let mut project_info_dropped = 0usize;
         let mut dedup_count = 0usize;
+        let mut aggressive_summary_skipped_reason: Option<&'static str> = None;
 
         if drop_project_information {
             let first_system_idx = head_messages.iter().position(|m| m.role == "system");
@@ -826,14 +849,11 @@ impl Tool for ToolCompressChatApply {
             }
         }
 
-        let preserve_cutoff = preserve_last_turns
-            .map(|t| find_preserve_cutoff(&head_messages, t))
-            .unwrap_or(head_messages.len());
-
         if (strength == "balanced" || strength == "aggressive") && !dedup_context_files {
             let cur_tokens: usize = head_messages.iter().map(approx_tokens_for_message).sum();
             let needs_more = target_tokens.map_or(true, |t| cur_tokens > t);
             if needs_more {
+                let preserve_cutoff = preserve_cutoff_for(&head_messages, preserve_last_turns);
                 let mut modifiable =
                     head_messages[..preserve_cutoff.min(head_messages.len())].to_vec();
                 if let Ok((count, _)) = compress_duplicate_context_files(&mut modifiable) {
@@ -850,18 +870,9 @@ impl Tool for ToolCompressChatApply {
             let cur_tokens: usize = head_messages.iter().map(approx_tokens_for_message).sum();
             let needs_more = target_tokens.map_or(true, |t| cur_tokens > t);
             if needs_more {
-                let before = serde_json::to_string(&head_messages).ok();
-                if summarize_modifiable_prefix(
-                    &mut head_messages,
-                    preserve_cutoff,
-                    "Previous non-user chat activity was summarized by compress_chat_apply.",
-                    "compress_chat_apply",
-                ) {
-                    let after = serde_json::to_string(&head_messages).ok();
-                    if after != before {
-                        dedup_count += 1;
-                    }
-                }
+                let preserve_cutoff = preserve_cutoff_for(&head_messages, preserve_last_turns);
+                aggressive_summary_skipped_reason =
+                    aggressive_summary_required_reason(&head_messages, preserve_cutoff);
             }
         }
 
@@ -911,6 +922,7 @@ impl Tool for ToolCompressChatApply {
             "tool_outputs_dropped": tool_dropped,
             "project_info_dropped": project_info_dropped,
             "dedup_context_files": dedup_count,
+            "aggressive_summary_skipped_reason": aggressive_summary_skipped_reason,
             "active_tail_start": active_start,
         });
 
