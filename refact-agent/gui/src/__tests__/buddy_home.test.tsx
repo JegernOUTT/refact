@@ -47,6 +47,7 @@ import {
   formatBuddyRuntimeEventText,
   isBuddySpeechExpired,
   pickBuddySceneSpeechCandidate,
+  type BuddySceneSpeech,
 } from "../features/Buddy/buddySceneSpeech";
 import { formatFailureLabel } from "../features/Buddy/buddyUtils";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
@@ -2671,6 +2672,80 @@ describe("buildBuddySceneSpeech", () => {
 
     expect(speech).not.toBeNull();
     expect(pickBuddySceneSpeechCandidate(speech ? [speech] : [])).toBe(speech);
+  });
+
+  it("can silence suggestion speech with controls", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("1970-01-01T00:00:00Z"));
+    try {
+      const speech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: null,
+        runtimeQueue: [],
+        activeSuggestion: makeSuggestion({
+          controls: [
+            {
+              id: "dismiss-controlled-suggestion",
+              label: "Dismiss",
+              action: "dismiss",
+              style: "secondary",
+            },
+          ],
+        }),
+      });
+
+      expect(speech?.source).toBe("suggestion");
+      expect(speech?.controls).toHaveLength(1);
+      expect(pickBuddySceneSpeechCandidate(speech ? [speech] : [])).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prefers actionable runtime speech over suggestion speech with controls", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("1970-01-01T00:00:00Z"));
+    try {
+      const runtimeSpeech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: makeRuntimeEvent({
+          id: "actionable-runtime-mixed",
+          title: "Runtime needs action",
+          status: "failed",
+          priority: "high",
+          created_at: new Date().toISOString(),
+        }),
+        runtimeQueue: [],
+        activeSuggestion: null,
+      });
+      const suggestionSpeech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: null,
+        runtimeQueue: [],
+        activeSuggestion: makeSuggestion({
+          controls: [
+            {
+              id: "dismiss-controlled-suggestion-mixed",
+              label: "Dismiss",
+              action: "dismiss",
+              style: "secondary",
+            },
+          ],
+        }),
+      });
+
+      expect(runtimeSpeech?.source).toBe("runtime");
+      expect(suggestionSpeech?.source).toBe("suggestion");
+      expect(
+        pickBuddySceneSpeechCandidate(
+          [suggestionSpeech, runtimeSpeech].filter(
+            (speech): speech is BuddySceneSpeech => speech != null,
+          ),
+        ),
+      ).toBe(runtimeSpeech);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
