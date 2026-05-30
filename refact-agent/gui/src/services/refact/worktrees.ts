@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { RootState } from "../../app/store";
+import { buildApiUrlFromState, type QueryParams } from "./apiUrl";
 
 export type WorktreeLifecycleState =
   | "active"
@@ -328,26 +329,12 @@ export type WorktreeCleanupResult = {
   warnings: string[];
 };
 
-type WorktreeQueryParams = Record<
-  string,
-  string | number | boolean | null | undefined
->;
-
 function buildWorktreeUrl(
-  port: number,
+  state: RootState,
   path: string,
-  query?: WorktreeQueryParams,
+  query?: QueryParams,
 ): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query ?? {})) {
-    if (value !== undefined && value !== null) {
-      params.set(key, String(value));
-    }
-  }
-  const queryString = params.toString();
-  return `http://127.0.0.1:${port}/v1${path}${
-    queryString ? `?${queryString}` : ""
-  }`;
+  return buildApiUrlFromState(state, `/v1${path}`, query);
 }
 
 export const worktreesApi = createApi({
@@ -369,9 +356,8 @@ export const worktreesApi = createApi({
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: buildWorktreeUrl(port, "/worktrees", {
+          url: buildWorktreeUrl(state, "/worktrees", {
             source_workspace_root: args?.source_workspace_root,
           }),
         });
@@ -396,9 +382,8 @@ export const worktreesApi = createApi({
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: buildWorktreeUrl(port, "/worktrees/summary", {
+          url: buildWorktreeUrl(state, "/worktrees/summary", {
             source_workspace_root: args?.source_workspace_root,
           }),
         });
@@ -413,9 +398,8 @@ export const worktreesApi = createApi({
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: buildWorktreeUrl(port, "/worktrees/cleanup-dry-run"),
+          url: buildWorktreeUrl(state, "/worktrees/cleanup-dry-run"),
           method: "POST",
           body,
         });
@@ -429,9 +413,8 @@ export const worktreesApi = createApi({
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: buildWorktreeUrl(port, "/worktrees/cleanup"),
+          url: buildWorktreeUrl(state, "/worktrees/cleanup"),
           method: "POST",
           body,
         });
@@ -449,9 +432,8 @@ export const worktreesApi = createApi({
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: buildWorktreeUrl(port, "/worktrees"),
+          url: buildWorktreeUrl(state, "/worktrees"),
           method: "POST",
           body: args,
         });
@@ -463,9 +445,8 @@ export const worktreesApi = createApi({
     getWorktree: builder.query<WorktreeRecordView, GetWorktreeRequest>({
       queryFn: async ({ id, source_workspace_root }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: buildWorktreeUrl(port, `/worktrees/${encodeURIComponent(id)}`, {
+          url: buildWorktreeUrl(state, `/worktrees/${encodeURIComponent(id)}`, {
             source_workspace_root,
           }),
         });
@@ -485,10 +466,9 @@ export const worktreesApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
           url: buildWorktreeUrl(
-            port,
+            state,
             `/worktrees/${encodeURIComponent(id)}/diff`,
             {
               source_workspace_root,
@@ -512,10 +492,9 @@ export const worktreesApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
           url: buildWorktreeUrl(
-            port,
+            state,
             `/worktrees/${encodeURIComponent(id)}/merge`,
             {
               source_workspace_root,
@@ -543,9 +522,8 @@ export const worktreesApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: buildWorktreeUrl(port, `/worktrees/${encodeURIComponent(id)}`, {
+          url: buildWorktreeUrl(state, `/worktrees/${encodeURIComponent(id)}`, {
             source_workspace_root,
             delete_branch,
             force_referenced,
@@ -563,10 +541,9 @@ export const worktreesApi = createApi({
     openWorktree: builder.mutation<OpenWorktreeResponse, OpenWorktreeRequest>({
       queryFn: async ({ id, source_workspace_root }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
           url: buildWorktreeUrl(
-            port,
+            state,
             `/worktrees/${encodeURIComponent(id)}/open`,
             {
               source_workspace_root,

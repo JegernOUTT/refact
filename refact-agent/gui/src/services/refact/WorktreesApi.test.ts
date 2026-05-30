@@ -1,5 +1,6 @@
 import { configureStore } from "@reduxjs/toolkit";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { EngineApiConfig } from "./apiUrl";
 import {
   worktreesApi,
   type WorktreeDiffResponse,
@@ -11,8 +12,7 @@ type FetchLike = (
   init?: RequestInit,
 ) => Promise<Response>;
 
-type TestConfigState = {
-  lspPort: number;
+type TestConfigState = EngineApiConfig & {
   apiKey: string | null;
 };
 
@@ -93,12 +93,30 @@ function firstRequest(fetchMock: ReturnType<typeof vi.fn<FetchLike>>): Request {
   return input instanceof Request ? input : new Request(input, init);
 }
 
+function firstRequestUrl(
+  fetchMock: ReturnType<typeof vi.fn<FetchLike>>,
+): string {
+  expect(fetchMock).toHaveBeenCalled();
+  const [input] = fetchMock.mock.calls[0];
+  return input instanceof Request ? input.url : String(input);
+}
+
+function relativeUrlPath(url: string): string {
+  return url.startsWith("http") ? new URL(url).pathname : url.split("?")[0];
+}
+
+function relativeUrlSearchParams(url: string): URLSearchParams {
+  if (url.startsWith("http")) return new URL(url).searchParams;
+  const queryString = url.split("?")[1] ?? "";
+  return new URLSearchParams(queryString);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("Worktrees RTK Query API", () => {
-  test("createWorktree uses dynamic port auth and request body", async () => {
+  test("createWorktree uses local IDE fallback auth and request body", async () => {
     const fetchMock = vi.fn<FetchLike>();
     vi.stubGlobal("fetch", fetchMock);
     fetchMock.mockResolvedValueOnce(
@@ -109,7 +127,11 @@ describe("Worktrees RTK Query API", () => {
         warnings: [],
       }),
     );
-    const store = createTestStore({ lspPort: 8123, apiKey: "test-token" });
+    const store = createTestStore({
+      host: "ide",
+      lspPort: 8123,
+      apiKey: "test-token",
+    });
 
     const request = store.dispatch(
       worktreesApi.endpoints.createWorktree.initiate({
@@ -133,11 +155,48 @@ describe("Worktrees RTK Query API", () => {
     });
   });
 
+  test("listWorktrees uses relative URL in Vite dev web mode", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        project_hash: "abc",
+        source_workspace_root: "/repo",
+        worktrees: [],
+      }),
+    );
+    const store = createTestStore({
+      host: "web",
+      dev: true,
+      lspPort: 8123,
+      lspUrl: "http://127.0.0.1:8123",
+      apiKey: null,
+    });
+
+    const request = store.dispatch(
+      worktreesApi.endpoints.listWorktrees.initiate({
+        source_workspace_root: "/repo",
+      }),
+    );
+    await request;
+    request.unsubscribe();
+
+    const url = firstRequestUrl(fetchMock);
+    expect(relativeUrlPath(url)).toBe("/v1/worktrees");
+    expect(relativeUrlSearchParams(url).get("source_workspace_root")).toBe(
+      "/repo",
+    );
+  });
+
   test("getWorktreeDiff encodes id and query parameters", async () => {
     const fetchMock = vi.fn<FetchLike>();
     vi.stubGlobal("fetch", fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(makeDiffResponse("wt/1")));
-    const store = createTestStore({ lspPort: 8123, apiKey: null });
+    const store = createTestStore({
+      host: "ide",
+      lspPort: 8123,
+      apiKey: null,
+    });
 
     const request = store.dispatch(
       worktreesApi.endpoints.getWorktreeDiff.initiate({
@@ -155,5 +214,111 @@ describe("Worktrees RTK Query API", () => {
     expect(url.pathname).toBe("/v1/worktrees/wt%2F1/diff");
     expect(url.searchParams.get("source_workspace_root")).toBe("/repo");
     expect(url.searchParams.get("max_patch_bytes")).toBe("4096");
+  });
+
+  test("mergeWorktree uses remote configured origin and preserves body", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ id: "wt-remote", status: "merged", merged: true }),
+    );
+    const store = createTestStore({
+      host: "web",
+      lspPort: 8123,
+      lspUrl: "https://remote.example.com:9443/proxy/v1/ping?stale=true",
+      apiKey: null,
+    });
+
+    const request = store.dispatch(
+      worktreesApi.endpoints.mergeWorktree.initiate({
+        id: "wt-remote",
+        source_workspace_root: "/repo",
+        strategy: "squash",
+        target_branch: "main",
+        delete_after_merge: true,
+        include_uncommitted: false,
+        commit_message: "merge worktree",
+        generate_commit_message: false,
+      }),
+    );
+    await request;
+
+    const fetchRequest = firstRequest(fetchMock);
+    const url = new URL(fetchRequest.url);
+    expect(fetchRequest.url).toBe(
+      "https://remote.example.com:9443/proxy/v1/worktrees/wt-remote/merge?source_workspace_root=%2Frepo",
+    );
+    expect(url.origin).toBe("https://remote.example.com:9443");
+    expect(url.pathname).toBe("/proxy/v1/worktrees/wt-remote/merge");
+    expect(fetchRequest.method).toBe("POST");
+    await expect(fetchRequest.clone().json()).resolves.toEqual({
+      strategy: "squash",
+      target_branch: "main",
+      delete_after_merge: true,
+      include_uncommitted: false,
+      commit_message: "merge worktree",
+      generate_commit_message: false,
+    });
+  });
+
+  test("mergeWorktree uses relative URL in engine-served web mode", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: "wt-1", merged: true }));
+    const store = createTestStore({
+      host: "web",
+      engineServed: true,
+      lspPort: 8123,
+      lspUrl: "http://127.0.0.1:8123",
+      apiKey: null,
+    });
+
+    const request = store.dispatch(
+      worktreesApi.endpoints.mergeWorktree.initiate({
+        id: "wt-1",
+        source_workspace_root: "/repo",
+        strategy: "merge",
+      }),
+    );
+    await request;
+
+    const url = firstRequestUrl(fetchMock);
+    expect(relativeUrlPath(url)).toBe("/v1/worktrees/wt-1/merge");
+    expect(relativeUrlSearchParams(url).get("source_workspace_root")).toBe(
+      "/repo",
+    );
+  });
+
+  test("openWorktree sanitizes stale lspUrl before building URL", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        id: "wt-1",
+        path: "/repo-wt",
+        can_open_folder: true,
+      }),
+    );
+    const store = createTestStore({
+      host: "web",
+      lspPort: 8123,
+      lspUrl:
+        "https://remote.example.com/root/v1/worktrees/stale/open?old=true",
+      apiKey: null,
+    });
+
+    const request = store.dispatch(
+      worktreesApi.endpoints.openWorktree.initiate({
+        id: "wt-1",
+        source_workspace_root: "/repo",
+      }),
+    );
+    await request;
+
+    const fetchRequest = firstRequest(fetchMock);
+    expect(fetchRequest.url).toBe(
+      "https://remote.example.com/root/v1/worktrees/wt-1/open?source_workspace_root=%2Frepo",
+    );
+    expect(fetchRequest.method).toBe("POST");
   });
 });
