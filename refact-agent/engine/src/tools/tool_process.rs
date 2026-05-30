@@ -1879,6 +1879,7 @@ mod tests {
         assert_eq!(exec(&killed)["status"], "killed");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_start_tty_true_uses_pty() {
         let (gcx, ccx) = test_ccx().await;

@@ -1216,6 +1216,7 @@ mod tests {
             .is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn tty_true_uses_pty() {
         let message = run_shell(args(vec![
