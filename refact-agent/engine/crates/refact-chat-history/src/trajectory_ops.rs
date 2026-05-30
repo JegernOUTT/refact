@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile};
+use refact_core::string_utils::redact_sensitive;
 
 const UI_ONLY_MARKER: &str = "_ui_only";
 const LLM_SEGMENT_SUMMARY_KIND: &str = "llm_segment_summary";
@@ -378,6 +379,16 @@ fn filter_memory_context_files(files: &[ContextFile]) -> (Vec<ContextFile>, usiz
     (remaining, removed)
 }
 
+fn context_file_count(content: &ChatContent) -> usize {
+    match content {
+        ChatContent::ContextFiles(files) => files.len(),
+        ChatContent::SimpleText(text) => serde_json::from_str::<Vec<ContextFile>>(text)
+            .map(|files| files.len())
+            .unwrap_or(1),
+        ChatContent::Multimodal(_) => 1,
+    }
+}
+
 fn simple_text_contains_memory_context_path(text: &str) -> bool {
     if let Ok(files) = serde_json::from_str::<Vec<ContextFile>>(text) {
         return files.iter().any(|cf| is_memory_path(&cf.file_name));
@@ -489,7 +500,7 @@ pub fn compress_in_place(
         let mut kept_before = 0usize;
         messages.retain(|m| {
             if m.role == "context_file" {
-                context_modified += 1;
+                context_modified += context_file_count(&m.content);
                 context_messages_dropped += 1;
                 note_affected_boundary(&mut affected_boundary, kept_before);
                 false
@@ -629,6 +640,7 @@ pub fn compress_in_place(
                 let content_text = msg.content.content_text_only();
                 if content_text.len() > 500 {
                     let preview: String = content_text.chars().take(200).collect();
+                    let preview = redact_sensitive(&preview);
                     msg.content =
                         ChatContent::SimpleText(format!("Tool result compressed: {}...", preview));
                     tool_modified += 1;
@@ -730,6 +742,14 @@ mod tests {
         ChatMessage {
             role: "context_file".to_string(),
             content: ChatContent::SimpleText(serde_json::to_string(&files).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    fn make_multi_context_file_msg(files: Vec<ContextFile>) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(files),
             ..Default::default()
         }
     }
@@ -1179,6 +1199,54 @@ mod tests {
     }
 
     #[test]
+    fn test_compress_non_agentic_tool_preview_redacts_bearer_token() {
+        let secret = "super-secret-token-123";
+        let long_content = format!("request failed with Bearer {} {}", secret, "x".repeat(1000));
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            make_tool_msg("tc1", &long_content),
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        let text = tool_msg.content.content_text_only();
+        assert!(text.contains("Bearer [REDACTED]"));
+        assert!(!text.contains(secret));
+    }
+
+    #[test]
+    fn test_compress_non_agentic_tool_preview_redacts_api_key() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz";
+        let long_content = format!(
+            "request failed with api_key={} {}",
+            secret,
+            "x".repeat(1000)
+        );
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            make_tool_msg("tc1", &long_content),
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        let text = tool_msg.content.content_text_only();
+        assert!(text.contains("api_key=[REDACTED]"));
+        assert!(!text.contains(secret));
+    }
+
+    #[test]
     fn test_compress_preserves_agentic_tools() {
         let long_content = "x".repeat(1000);
         for tool_name in &["research", "delegate", "plan", "review"] {
@@ -1341,6 +1409,51 @@ mod tests {
                 .as_u64()
                 .map(|value| value as usize)
         );
+    }
+
+    #[test]
+    fn test_compression_report_drop_all_context_counts_files_and_messages() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_multi_context_file_msg(vec![
+                make_context_file("src/a.rs", "a"),
+                make_context_file("src/b.rs", "b"),
+                make_context_file("src/c.rs", "c"),
+            ]),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let metadata = &compression_report(&messages).extra["compression_report"];
+        assert_eq!(metadata["context_files_removed"], serde_json::json!(3));
+        assert_eq!(metadata["context_messages_dropped"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn test_compression_report_drop_all_context_counts_json_context_file_arrays() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_context_file_simple_text_msg(vec![
+                make_context_file("src/a.rs", "a"),
+                make_context_file("src/b.rs", "b"),
+            ]),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let metadata = &compression_report(&messages).extra["compression_report"];
+        assert_eq!(metadata["context_files_removed"], serde_json::json!(2));
+        assert_eq!(metadata["context_messages_dropped"], serde_json::json!(1));
     }
 
     #[test]
