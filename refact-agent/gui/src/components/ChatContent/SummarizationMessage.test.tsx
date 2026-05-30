@@ -189,6 +189,97 @@ describe("SummarizationMessage", () => {
     expect(stats).toHaveTextContent("30%");
   });
 
+  it("renders compression report metadata stats when content wording changes", async () => {
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier2_reactive",
+          content: "Compaction happened. Details moved to metadata.",
+          extra: {
+            compression_report: {
+              kind: "chat_compression_report",
+              context_files_removed: 2,
+              tool_results_truncated: 4,
+              tokens_before: 10000,
+              tokens_after: 7000,
+              estimated_tokens_saved: 3000,
+              reduction_percent: 30,
+            },
+          },
+        })}
+      />,
+    );
+
+    await user.click(screen.getByTestId("summarization-card-header"));
+    const stats = screen.getByTestId("summarization-card-stats");
+    expect(stats).toHaveTextContent("Context files removed");
+    expect(stats).toHaveTextContent("2");
+    expect(stats).toHaveTextContent("Tool outputs truncated");
+    expect(stats).toHaveTextContent("4");
+    expect(stats).toHaveTextContent("Tokens before");
+    expect(stats).toHaveTextContent("10,000");
+    expect(stats).toHaveTextContent("Tokens after");
+    expect(stats).toHaveTextContent("7,000");
+    expect(stats).toHaveTextContent("Tokens saved");
+    expect(stats).toHaveTextContent("3,000");
+    expect(stats).toHaveTextContent("Reduction");
+    expect(stats).toHaveTextContent("30%");
+  });
+
+  it("renders context messages dropped from compression report metadata", async () => {
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier2_reactive",
+          content: "No parseable stat lines here.",
+          extra: {
+            compression_report: {
+              kind: "chat_compression_report",
+              context_messages_dropped: 3,
+            },
+          },
+        })}
+      />,
+    );
+
+    await user.click(screen.getByTestId("summarization-card-header"));
+    const stats = screen.getByTestId("summarization-card-stats");
+    expect(stats).toHaveTextContent("Context messages dropped");
+    expect(stats).toHaveTextContent("3");
+  });
+
+  it("prefers compression report metadata over legacy markdown stats", async () => {
+    const reportContent = [
+      "## Chat compression report",
+      "",
+      "- Context files removed: 99",
+      "- Estimated tokens saved: 99",
+    ].join("\n");
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier2_reactive",
+          content: reportContent,
+          extra: {
+            compression_report: {
+              kind: "chat_compression_report",
+              context_files_removed: 1,
+              estimated_tokens_saved: 10,
+            },
+          },
+        })}
+      />,
+    );
+
+    await user.click(screen.getByTestId("summarization-card-header"));
+    const stats = screen.getByTestId("summarization-card-stats");
+    expect(stats).toHaveTextContent("Context files removed");
+    expect(stats).toHaveTextContent("1");
+    expect(stats).toHaveTextContent("Tokens saved");
+    expect(stats).toHaveTextContent("10");
+    expect(stats).not.toHaveTextContent("99");
+  });
+
   it("does not render a stats grid for non-reactive tiers", async () => {
     const { user } = render(
       <SummarizationMessage

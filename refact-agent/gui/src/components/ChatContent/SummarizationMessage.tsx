@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Flex } from "@radix-ui/themes";
 import type {
+  ChatCompressionReportMetadata,
   SummarizationMessage as SummarizationMessageType,
   SummarizationTier,
 } from "../../services/refact/types";
@@ -68,9 +69,56 @@ function tokenLabelFor(
   }
 }
 
-function parseReactiveStats(
-  content: string,
-): { label: string; value: string }[] | null {
+type StatCell = { label: string; value: string };
+
+type MetadataStat = {
+  key: keyof Omit<ChatCompressionReportMetadata, "kind">;
+  label: string;
+  suffix?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseNumberStat(value: unknown, suffix = ""): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return `${value.toLocaleString()}${suffix}`;
+}
+
+function parseCompressionReportMetadata(
+  extra: Record<string, unknown> | undefined,
+): ChatCompressionReportMetadata | null {
+  const report = extra?.compression_report;
+  if (!isRecord(report)) return null;
+  if (report.kind !== "chat_compression_report") return null;
+  return report as ChatCompressionReportMetadata;
+}
+
+function statsFromCompressionReportMetadata(
+  extra: Record<string, unknown> | undefined,
+): StatCell[] | null {
+  const report = parseCompressionReportMetadata(extra);
+  if (!report) return null;
+
+  const STAT_FIELDS: MetadataStat[] = [
+    { key: "context_files_removed", label: "Context files removed" },
+    { key: "context_messages_dropped", label: "Context messages dropped" },
+    { key: "tool_results_truncated", label: "Tool outputs truncated" },
+    { key: "tokens_before", label: "Tokens before" },
+    { key: "tokens_after", label: "Tokens after" },
+    { key: "estimated_tokens_saved", label: "Tokens saved" },
+    { key: "reduction_percent", label: "Reduction", suffix: "%" },
+  ];
+
+  const stats = STAT_FIELDS.flatMap(({ key, label, suffix }) => {
+    const value = parseNumberStat(report[key], suffix);
+    return value ? [{ label, value }] : [];
+  });
+  return stats.length > 0 ? stats : null;
+}
+
+function parseReactiveStats(content: string): StatCell[] | null {
   const STAT_PATTERNS: { key: string; label: string }[] = [
     { key: "Attempt", label: "Attempt" },
     {
@@ -85,7 +133,7 @@ function parseReactiveStats(
     { key: "Reduction", label: "Reduction" },
   ];
   const lines = content.split("\n");
-  const stats: { label: string; value: string }[] = [];
+  const stats: StatCell[] = [];
   for (const { key, label } of STAT_PATTERNS) {
     const re = new RegExp(`^\\s*-\\s*${key}:\\s*(.+?)\\s*$`);
     for (const line of lines) {
@@ -110,8 +158,11 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
 
   const reactiveStats = useMemo(() => {
     if (tier !== "tier2_reactive") return null;
-    return parseReactiveStats(contentText);
-  }, [tier, contentText]);
+    return (
+      statsFromCompressionReportMetadata(message.extra) ??
+      parseReactiveStats(contentText)
+    );
+  }, [tier, contentText, message.extra]);
 
   const meta = metaForTier(tier);
 

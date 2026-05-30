@@ -486,12 +486,27 @@ export interface SummarizationMessage extends BaseMessage {
   summarized_token_estimate?: number;
 }
 
+export type ChatCompressionReportMetadata = {
+  kind: "chat_compression_report";
+  context_files_removed?: number;
+  context_messages_dropped?: number;
+  tool_results_truncated?: number;
+  tokens_before?: number;
+  tokens_after?: number;
+  estimated_tokens_saved?: number;
+  reduction_percent?: number;
+};
+
+export type CompressionReportExtra = Record<string, unknown> & {
+  compression_report?: ChatCompressionReportMetadata;
+};
+
 export interface CompressionReportMessage extends BaseMessage {
   role: "compression_report";
   content: string;
   summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;
-  extra?: Record<string, unknown>;
+  extra?: CompressionReportExtra;
 }
 
 export type EventSubkind =
