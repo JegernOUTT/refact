@@ -27,9 +27,7 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
   );
 
   const currentChatId = useAppSelector(selectChatId);
-  const port = useAppSelector(
-    (state) => state.config.lspPort,
-  ) as unknown as number;
+  const config = useAppSelector((state) => state.config);
   const apiKey = useAppSelector((state) => state.config.apiKey);
 
   const [includeActions, setIncludeActions] = useState(true);
@@ -70,10 +68,10 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
   ]);
 
   const handleIncludeAll = useCallback(async () => {
-    if (!info || !port) return;
+    if (!info) return;
     await sendBrowserContextDecision(
       chatId,
-      port,
+      config,
       {
         pending_message_id: info.pending_message_id,
         include_actions: true,
@@ -88,13 +86,13 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
       apiKey ?? undefined,
     );
     dispatch(clearBrowserContextOversize({ chatId }));
-  }, [chatId, port, apiKey, info, dispatch]);
+  }, [chatId, config, apiKey, info, dispatch]);
 
   const handleIncludeSelected = useCallback(async () => {
-    if (!info || !port) return;
+    if (!info) return;
     await sendBrowserContextDecision(
       chatId,
-      port,
+      config,
       {
         pending_message_id: info.pending_message_id,
         include_actions: includeActions,
@@ -111,7 +109,7 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
     dispatch(clearBrowserContextOversize({ chatId }));
   }, [
     chatId,
-    port,
+    config,
     apiKey,
     info,
     includeActions,
@@ -126,10 +124,10 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
   ]);
 
   const handleSkipContext = useCallback(async () => {
-    if (!info || !port) return;
+    if (!info) return;
     await sendBrowserContextDecision(
       chatId,
-      port,
+      config,
       {
         pending_message_id: info.pending_message_id,
         include_actions: false,
@@ -144,13 +142,12 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
       apiKey ?? undefined,
     );
     dispatch(clearBrowserContextOversize({ chatId }));
-  }, [chatId, port, apiKey, info, dispatch]);
+  }, [chatId, config, apiKey, info, dispatch]);
 
   const handleCancelSend = useCallback(async () => {
-    if (!port) return;
-    await abortGeneration(chatId, port, apiKey ?? undefined);
+    await abortGeneration(chatId, config, apiKey ?? undefined);
     dispatch(clearBrowserContextOversize({ chatId }));
-  }, [chatId, port, apiKey, dispatch]);
+  }, [chatId, config, apiKey, dispatch]);
 
   if (!info || chatId !== currentChatId) return null;
 

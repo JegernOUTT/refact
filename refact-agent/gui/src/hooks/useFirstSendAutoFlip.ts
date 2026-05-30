@@ -8,12 +8,12 @@ import {
 } from "../features/Chat";
 import { selectChatId } from "../features/Chat/Thread/selectors";
 import { updateChatParams } from "../services/refact/chatCommands";
-import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../features/Config/configSlice";
 
 export function useFirstSendAutoFlip() {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
   const messages = useAppSelector(selectMessages);
   const autoEnabled = useAppSelector(selectAutoEnrichmentEnabled);
@@ -29,18 +29,17 @@ export function useFirstSendAutoFlip() {
       userCount === 1 &&
       autoEnabled &&
       !userTouched &&
-      chatId &&
-      port
+      chatId
     ) {
       dispatch(setAutoEnrichmentEnabled({ chatId, value: false }));
       void updateChatParams(
         chatId,
         { auto_enrichment_enabled: false },
-        port,
+        config,
         apiKey ?? undefined,
       ).catch(() => undefined);
     }
 
     prevUserCountRef.current = userCount;
-  }, [messages, autoEnabled, userTouched, chatId, port, apiKey, dispatch]);
+  }, [messages, autoEnabled, userTouched, chatId, config, apiKey, dispatch]);
 }

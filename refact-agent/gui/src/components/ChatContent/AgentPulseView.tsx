@@ -19,7 +19,7 @@ import {
   selectIsWaiting,
   selectToolResultById,
 } from "../../features/Chat/Thread/selectors";
-import { selectApiKey, selectLspPort } from "../../features/Config/configSlice";
+import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
 import type { ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
@@ -349,7 +349,7 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
   const chatId = useAppSelector(selectChatId);
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
   const maybeResult = useAppSelector((state) =>
@@ -374,13 +374,13 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
     async (command: string) => {
       await sendChatCommand(
         chatId,
-        port,
+        config,
         apiKey ?? undefined,
         { type: "user_message", content: command },
         true,
       );
     },
-    [apiKey, chatId, port],
+    [apiKey, chatId, config],
   );
 
   return (
@@ -399,7 +399,7 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
           <AgentPulseContent
             report={report}
             onSubmitCommand={handleSubmitCommand}
-            actionsDisabled={!chatId || !port}
+            actionsDisabled={!chatId}
           />
         ) : content ? (
           <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>

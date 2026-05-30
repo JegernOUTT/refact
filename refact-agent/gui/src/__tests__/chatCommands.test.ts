@@ -8,8 +8,11 @@ import {
   respondToToolConfirmations,
   updateMessage,
   removeMessage,
+  cancelQueuedItem,
+  normalizeConnection,
   type ChatCommand,
 } from "../services/refact/chatCommands";
+import type { EngineApiConfig } from "../services/refact/apiUrl";
 
 type MockRequestInit = { body?: string; headers?: Record<string, string> };
 type MockCall = [string, MockRequestInit];
@@ -19,6 +22,10 @@ const mockFetch =
 
 function getRequestBody(call: MockCall): Record<string, unknown> {
   return JSON.parse(call[1].body ?? "{}") as Record<string, unknown>;
+}
+
+function getRequestUrl(): string {
+  return (mockFetch.mock.calls[0] as MockCall)[0];
 }
 
 describe("chatCommands", () => {
@@ -31,8 +38,64 @@ describe("chatCommands", () => {
     vi.restoreAllMocks();
   });
 
+  describe("normalizeConnection", () => {
+    it("maps numeric legacy input to local IDE mode", () => {
+      expect(normalizeConnection(8123)).toEqual({ host: "ide", lspPort: 8123 });
+    });
+  });
+
   describe("sendChatCommand", () => {
-    it("should send POST request to correct URL", async () => {
+    it("uses Vite relative command URL in relative mode", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      await sendChatCommand(
+        "chat/with spaces",
+        { host: "web", dev: true, lspPort: 8001 },
+        undefined,
+        { type: "abort" },
+      );
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/v1/chats/chat%2Fwith%20spaces/commands",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+
+    it("uses engine-served relative command URL", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      await sendChatCommand(
+        "engine-chat",
+        { host: "web", engineServed: true, lspUrl: "https://ignored.test" },
+        undefined,
+        { type: "abort" },
+      );
+
+      expect(getRequestUrl()).toBe("/v1/chats/engine-chat/commands");
+    });
+
+    it("uses configured remote origin in remote web mode", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      await sendChatCommand(
+        "remote-chat",
+        {
+          host: "web",
+          lspUrl: "https://engine.example.com/proxy/v1/ping/Refact?stale=1",
+        },
+        undefined,
+        { type: "abort" },
+      );
+
+      expect(getRequestUrl()).toBe(
+        "https://engine.example.com/proxy/v1/chats/remote-chat/commands",
+      );
+    });
+
+    it("keeps numeric legacy local fallback for compatibility", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       const chatId = "test-chat-123";
@@ -50,12 +113,10 @@ describe("chatCommands", () => {
       );
     });
 
-    it("should include client_request_id in request body", async () => {
+    it("includes client_request_id in request body", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
-      const command = { type: "abort" as const };
-
-      await sendChatCommand("test", 8001, undefined, command);
+      await sendChatCommand("test", 8001, undefined, { type: "abort" });
 
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody).toHaveProperty("client_request_id");
@@ -63,11 +124,11 @@ describe("chatCommands", () => {
       expect(calledBody.type).toBe("abort");
     });
 
-    it("should include authorization header when apiKey provided", async () => {
+    it("includes authorization header when apiKey provided", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await sendChatCommand("test", 8001, "test-key", {
-        type: "abort" as const,
+        type: "abort",
       });
 
       const call = mockFetch.mock.calls[0] as MockCall;
@@ -77,7 +138,7 @@ describe("chatCommands", () => {
       );
     });
 
-    it("should throw on HTTP error", async () => {
+    it("throws on HTTP error", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 500,
@@ -86,13 +147,48 @@ describe("chatCommands", () => {
       } as Response);
 
       await expect(
-        sendChatCommand("test", 8001, undefined, { type: "abort" as const }),
+        sendChatCommand("test", 8001, undefined, { type: "abort" }),
       ).rejects.toThrow("Failed to send command");
     });
   });
 
+  describe("cancelQueuedItem", () => {
+    it("uses configured base and encodes queue cancellation IDs", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      const result = await cancelQueuedItem(
+        "chat/id",
+        "request/id with spaces",
+        { host: "web", dev: true },
+        "test-key",
+      );
+
+      expect(result).toBe(true);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/v1/chats/chat%2Fid/queue/request%2Fid%20with%20spaces",
+        {
+          method: "DELETE",
+          headers: { Authorization: "Bearer test-key" },
+        },
+      );
+    });
+
+    it("uses remote URL for queue cancellation", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      await cancelQueuedItem("chat", "request", {
+        host: "web",
+        lspUrl: "https://remote.example.com/base",
+      });
+
+      expect(getRequestUrl()).toBe(
+        "https://remote.example.com/base/v1/chats/chat/queue/request",
+      );
+    });
+  });
+
   describe("sendUserMessage", () => {
-    it("should send user_message command with string content", async () => {
+    it("sends user_message command with string content", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await sendUserMessage("test-chat", "Hello world", 8001);
@@ -102,7 +198,7 @@ describe("chatCommands", () => {
       expect(calledBody.content).toBe("Hello world");
     });
 
-    it("should send user_message command with multi-modal content", async () => {
+    it("sends user_message command with multi-modal content", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       const content = [
@@ -123,7 +219,7 @@ describe("chatCommands", () => {
   });
 
   describe("updateChatParams", () => {
-    it("should send set_params command", async () => {
+    it("sends set_params command", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await updateChatParams(
@@ -137,11 +233,13 @@ describe("chatCommands", () => {
       expect(calledBody.patch).toEqual({ model: "gpt-4", mode: "AGENT" });
     });
 
-    it("should send partial params update", async () => {
+    it("accepts full EngineApiConfig for params updates", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+      const config: EngineApiConfig = { host: "web", dev: true };
 
-      await updateChatParams("test-chat", { boost_reasoning: true }, 8001);
+      await updateChatParams("test-chat", { boost_reasoning: true }, config);
 
+      expect(getRequestUrl()).toBe("/v1/chats/test-chat/commands");
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody.type).toBe("set_params");
       expect(calledBody.patch).toEqual({ boost_reasoning: true });
@@ -149,7 +247,7 @@ describe("chatCommands", () => {
   });
 
   describe("abortGeneration", () => {
-    it("should send abort command", async () => {
+    it("sends abort command", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await abortGeneration("test-chat", 8001);
@@ -160,7 +258,7 @@ describe("chatCommands", () => {
   });
 
   describe("respondToToolConfirmation", () => {
-    it("should send tool_decision command with accepted=true", async () => {
+    it("sends tool_decision command with accepted=true", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await respondToToolConfirmation("test-chat", "call_123", true, 8001);
@@ -171,7 +269,7 @@ describe("chatCommands", () => {
       expect(calledBody.accepted).toBe(true);
     });
 
-    it("should send tool_decision command with accepted=false", async () => {
+    it("sends tool_decision command with accepted=false", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await respondToToolConfirmation("test-chat", "call_456", false, 8001);
@@ -184,7 +282,7 @@ describe("chatCommands", () => {
   });
 
   describe("respondToToolConfirmations", () => {
-    it("should send tool_decisions command with object array", async () => {
+    it("sends tool_decisions command with object array", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       const decisions = [
@@ -202,7 +300,7 @@ describe("chatCommands", () => {
   });
 
   describe("updateMessage", () => {
-    it("should send update_message command", async () => {
+    it("sends update_message command", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await updateMessage("test-chat", "msg_5", "Updated text", 8001);
@@ -213,7 +311,7 @@ describe("chatCommands", () => {
       expect(calledBody.content).toBe("Updated text");
     });
 
-    it("should send update_message with regenerate flag", async () => {
+    it("sends update_message with regenerate flag", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await updateMessage(
@@ -232,7 +330,7 @@ describe("chatCommands", () => {
   });
 
   describe("removeMessage", () => {
-    it("should send remove_message command", async () => {
+    it("sends remove_message command", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await removeMessage("test-chat", "msg_5", 8001);
@@ -242,7 +340,7 @@ describe("chatCommands", () => {
       expect(calledBody.message_id).toBe("msg_5");
     });
 
-    it("should send remove_message with regenerate flag", async () => {
+    it("sends remove_message with regenerate flag", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true } as Response);
 
       await removeMessage("test-chat", "msg_5", 8001, undefined, true);
@@ -255,7 +353,7 @@ describe("chatCommands", () => {
 });
 
 describe("Command Types", () => {
-  it("should correctly type user_message command with string", () => {
+  it("correctly types user_message command with string", () => {
     const command: ChatCommand = {
       type: "user_message",
       content: "Hello",
@@ -266,7 +364,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("user_message");
   });
 
-  it("should correctly type user_message command with multimodal array", () => {
+  it("correctly types user_message command with multimodal array", () => {
     const command: ChatCommand = {
       type: "user_message",
       content: [
@@ -280,7 +378,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("user_message");
   });
 
-  it("should correctly type set_params command", () => {
+  it("correctly types set_params command", () => {
     const command: ChatCommand = {
       type: "set_params",
       patch: {
@@ -294,7 +392,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("set_params");
   });
 
-  it("should correctly type abort command", () => {
+  it("correctly types abort command", () => {
     const command: ChatCommand = {
       type: "abort",
       client_request_id: "test-id",
@@ -302,7 +400,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("abort");
   });
 
-  it("should correctly type tool_decision command", () => {
+  it("correctly types tool_decision command", () => {
     const command: ChatCommand = {
       type: "tool_decision",
       tool_call_id: "call_123",
@@ -313,7 +411,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("tool_decision");
   });
 
-  it("should correctly type ide_tool_result command", () => {
+  it("correctly types ide_tool_result command", () => {
     const command: ChatCommand = {
       type: "ide_tool_result",
       tool_call_id: "call_123",
@@ -325,7 +423,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("ide_tool_result");
   });
 
-  it("should correctly type tool_decisions command", () => {
+  it("correctly types tool_decisions command", () => {
     const command: ChatCommand = {
       type: "tool_decisions",
       decisions: [
@@ -338,7 +436,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("tool_decisions");
   });
 
-  it("should correctly type update_message command", () => {
+  it("correctly types update_message command", () => {
     const command: ChatCommand = {
       type: "update_message",
       message_id: "msg_5",
@@ -350,7 +448,7 @@ describe("Command Types", () => {
     expect(command.type).toBe("update_message");
   });
 
-  it("should correctly type remove_message command", () => {
+  it("correctly types remove_message command", () => {
     const command: ChatCommand = {
       type: "remove_message",
       message_id: "msg_5",

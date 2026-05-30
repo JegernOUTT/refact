@@ -187,10 +187,9 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
         "../../services/refact/chatCommands"
       );
       const state = (await import("../../app/store")).store.getState();
-      const port = state.config.lspPort;
       const apiKey = state.config.apiKey;
-      if (port && chatId) {
-        await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      if (chatId) {
+        await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
           type: "set_params",
           patch: { auto_approve_editing_tools: true },
         });

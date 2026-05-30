@@ -20,7 +20,7 @@ import {
 } from "../../features/Tasks/tasksSlice";
 import { push } from "../../features/Pages/pagesSlice";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import {
   selectMessages,
   selectCurrentThreadId,
@@ -67,7 +67,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
   targetModeDescription,
 }) => {
   const dispatch = useAppDispatch();
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
   const messages = useAppSelector(selectMessages);
   const sourceChatId = useAppSelector(selectCurrentThreadId);
@@ -170,7 +170,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
 
       // Kick off generation if context was transferred
       if (hasMessages && sourceChatId) {
-        void regenerate(newChatId, port, apiKey ?? undefined);
+        void regenerate(newChatId, config, apiKey ?? undefined);
       }
     } catch (err) {
       setError(extractErrorMessage(err));
@@ -187,7 +187,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
     createFromTransition,
     dispatch,
     onOpenChange,
-    port,
+    config,
     apiKey,
     sourceWorktree,
   ]);

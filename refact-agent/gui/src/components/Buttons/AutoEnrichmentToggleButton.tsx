@@ -11,7 +11,7 @@ import {
   markMemoryEnrichmentUserTouched,
 } from "../../features/Chat";
 import { updateChatParams } from "../../services/refact/chatCommands";
-import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 
 type AutoEnrichmentToggleButtonProps = {
   disabled?: boolean;
@@ -24,7 +24,7 @@ export const AutoEnrichmentToggleButton = ({
   const chatId = useAppSelector(selectCurrentThreadId);
   const isEnabled = useAppSelector(selectAutoEnrichmentEnabled);
   const userTouched = useAppSelector(selectMemoryEnrichmentUserTouched);
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
   const handleClick = useCallback(() => {
@@ -34,15 +34,13 @@ export const AutoEnrichmentToggleButton = ({
       dispatch(markMemoryEnrichmentUserTouched({ chatId }));
     }
     dispatch(setAutoEnrichmentEnabled({ chatId, value: next }));
-    if (port) {
-      void updateChatParams(
-        chatId,
-        { auto_enrichment_enabled: next },
-        port,
-        apiKey ?? undefined,
-      ).catch(() => undefined);
-    }
-  }, [chatId, isEnabled, userTouched, disabled, port, apiKey, dispatch]);
+    void updateChatParams(
+      chatId,
+      { auto_enrichment_enabled: next },
+      config,
+      apiKey ?? undefined,
+    ).catch(() => undefined);
+  }, [chatId, isEnabled, userTouched, disabled, config, apiKey, dispatch]);
 
   const label = isEnabled
     ? "Auto-enrichment ON — click to disable"

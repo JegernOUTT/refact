@@ -31,7 +31,11 @@ import {
   type MessageContent,
   updateChatParams,
 } from "../../../services/refact/chatCommands";
-import { selectLspPort, selectApiKey } from "../../Config/configSlice";
+import {
+  selectConfig,
+  selectLspPort,
+  selectApiKey,
+} from "../../Config/configSlice";
 import { selectCurrentThreadId, selectMessagesById } from "./selectors";
 import { push } from "../../Pages/pagesSlice";
 import type {
@@ -139,9 +143,9 @@ export const sendIdeMessagesToCurrentChat = createAsyncThunk(
   async (arg: { messages: ChatMessages; priority?: boolean }, api) => {
     const state = api.getState() as RootState;
     const chatId = selectCurrentThreadId(state);
-    const port = selectLspPort(state);
+    const connection = selectConfig(state);
     const apiKey = selectApiKey(state) ?? undefined;
-    if (!chatId || !port) return;
+    if (!chatId || !connection) return;
 
     const runtime = state.chat.threads[chatId];
     if (!runtime) return;
@@ -150,7 +154,7 @@ export const sendIdeMessagesToCurrentChat = createAsyncThunk(
 
     const patch = buildThreadParamsPatch(runtime.thread, isNewChat);
     if (Object.keys(patch).length > 0) {
-      await sendChatCommand(chatId, port, apiKey, {
+      await sendChatCommand(chatId, connection, apiKey, {
         type: "set_params",
         patch,
       });
@@ -164,7 +168,7 @@ export const sendIdeMessagesToCurrentChat = createAsyncThunk(
           ? content.trim().length === 0
           : content.length === 0;
       if (empty) continue;
-      await sendUserMessage(chatId, content, port, apiKey, arg.priority);
+      await sendUserMessage(chatId, content, connection, apiKey, arg.priority);
     }
   },
 );
@@ -204,13 +208,14 @@ export const openChatInModeAndStart = createAsyncThunk<
     const state = api.getState();
     const port = selectLspPort(state);
     if (!port) return undefined;
+    const connection = selectConfig(state);
 
     const apiKey = selectApiKey(state) ?? undefined;
     const startMessage =
       initialMessage ?? (SETUP_START_MESSAGES[mode] || "Start setup.");
 
-    await updateChatParams(chatId, { mode }, port, apiKey);
-    await sendUserMessage(chatId, startMessage, port, apiKey);
+    await updateChatParams(chatId, { mode }, connection, apiKey);
+    await sendUserMessage(chatId, startMessage, connection, apiKey);
   },
 );
 
@@ -223,15 +228,15 @@ export const newChatWithInitialMessages = createAsyncThunk(
     api.dispatch(newChatAction({ title: arg.title }));
     const state = api.getState() as RootState;
     const chatId = state.chat.current_thread_id;
-    const port = selectLspPort(state);
+    const connection = selectConfig(state);
     const apiKey = selectApiKey(state) ?? undefined;
-    if (!chatId || !port) return;
+    if (!chatId || !connection) return;
 
     const runtime = state.chat.threads[chatId];
     if (runtime && runtime.thread.messages.length === 0) {
       const patch = buildThreadParamsPatch(runtime.thread, true);
       if (Object.keys(patch).length > 0) {
-        await sendChatCommand(chatId, port, apiKey, {
+        await sendChatCommand(chatId, connection, apiKey, {
           type: "set_params",
           patch,
         });
@@ -246,7 +251,7 @@ export const newChatWithInitialMessages = createAsyncThunk(
           ? content.trim().length === 0
           : content.length === 0;
       if (empty) continue;
-      await sendUserMessage(chatId, content, port, apiKey, arg.priority);
+      await sendUserMessage(chatId, content, connection, apiKey, arg.priority);
     }
   },
 );
@@ -710,6 +715,7 @@ export const startBuddyInvestigation = createAsyncThunk<
     const state = api.getState();
     const port = selectLspPort(state);
     if (!port) return undefined;
+    const connection = selectConfig(state);
 
     const apiKey = selectApiKey(state) ?? undefined;
     const messages = sourceChatId
@@ -751,7 +757,7 @@ export const startBuddyInvestigation = createAsyncThunk<
           },
           include_project_info: true,
         },
-        port,
+        connection,
         apiKey,
       );
 
@@ -770,7 +776,7 @@ export const startBuddyInvestigation = createAsyncThunk<
       await sendUserMessage(
         meta.chat_id,
         prompt,
-        port,
+        connection,
         apiKey,
         undefined,
         undefined,

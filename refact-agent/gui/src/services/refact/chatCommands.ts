@@ -1,4 +1,15 @@
 import { v4 as uuidv4 } from "uuid";
+import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
+
+export type EngineApiConnection = EngineApiConfig;
+export type PortOrConnection = number | EngineApiConnection;
+
+export function normalizeConnection(input: PortOrConnection): EngineApiConfig {
+  if (typeof input === "number") {
+    return { host: "ide", lspPort: input };
+  }
+  return input;
+}
 
 export type MessageContent =
   | string
@@ -79,9 +90,29 @@ export type ChatCommand = ChatCommandBase & {
   priority?: boolean;
 };
 
+function commandUrl(connection: PortOrConnection, chatId: string): string {
+  return buildApiUrl(
+    normalizeConnection(connection),
+    `/v1/chats/${encodeURIComponent(chatId)}/commands`,
+  );
+}
+
+function queueItemUrl(
+  connection: PortOrConnection,
+  chatId: string,
+  clientRequestId: string,
+): string {
+  return buildApiUrl(
+    normalizeConnection(connection),
+    `/v1/chats/${encodeURIComponent(chatId)}/queue/${encodeURIComponent(
+      clientRequestId,
+    )}`,
+  );
+}
+
 export async function sendChatCommand(
   chatId: string,
-  port: number,
+  connection: PortOrConnection,
   apiKey: string | undefined,
   command: ChatCommandBase,
   priority?: boolean,
@@ -92,10 +123,6 @@ export async function sendChatCommand(
     priority,
   };
 
-  const url = `http://127.0.0.1:${port}/v1/chats/${encodeURIComponent(
-    chatId,
-  )}/commands`;
-
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -104,7 +131,7 @@ export async function sendChatCommand(
     headers.Authorization = `Bearer ${apiKey}`;
   }
 
-  const response = await fetch(url, {
+  const response = await fetch(commandUrl(connection, chatId), {
     method: "POST",
     headers,
     body: JSON.stringify(commandWithId),
@@ -121,7 +148,7 @@ export async function sendChatCommand(
 export async function sendUserMessage(
   chatId: string,
   content: MessageContent,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
   priority?: boolean,
   contextFiles?: unknown[],
@@ -134,17 +161,23 @@ export async function sendUserMessage(
   if (suppressAutoEnrichment) {
     cmd.suppress_auto_enrichment = true;
   }
-  await sendChatCommand(chatId, port, apiKey, cmd as ChatCommandBase, priority);
+  await sendChatCommand(
+    chatId,
+    connection,
+    apiKey,
+    cmd as ChatCommandBase,
+    priority,
+  );
 }
 
 export async function retryFromIndex(
   chatId: string,
   index: number,
   content: MessageContent,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "retry_from_index",
     index,
     content,
@@ -153,10 +186,10 @@ export async function retryFromIndex(
 
 export async function regenerate(
   chatId: string,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "regenerate",
   } as ChatCommandBase);
 }
@@ -164,10 +197,10 @@ export async function regenerate(
 export async function updateChatParams(
   chatId: string,
   params: Record<string, unknown>,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "set_params",
     patch: params,
   } as ChatCommandBase);
@@ -175,10 +208,10 @@ export async function updateChatParams(
 
 export async function abortGeneration(
   chatId: string,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "abort",
   } as ChatCommandBase);
 }
@@ -187,10 +220,10 @@ export async function respondToToolConfirmation(
   chatId: string,
   toolCallId: string,
   accepted: boolean,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "tool_decision",
     tool_call_id: toolCallId,
     accepted,
@@ -200,10 +233,10 @@ export async function respondToToolConfirmation(
 export async function respondToToolConfirmations(
   chatId: string,
   decisions: { tool_call_id: string; accepted: boolean }[],
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "tool_decisions",
     decisions,
   } as ChatCommandBase);
@@ -213,11 +246,11 @@ export async function updateMessage(
   chatId: string,
   messageId: string,
   content: MessageContent,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
   regenerate?: boolean,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "update_message",
     message_id: messageId,
     content,
@@ -228,11 +261,11 @@ export async function updateMessage(
 export async function removeMessage(
   chatId: string,
   messageId: string,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
   regenerate?: boolean,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "remove_message",
     message_id: messageId,
     regenerate,
@@ -243,10 +276,10 @@ export async function branchFromChat(
   targetChatId: string,
   sourceChatId: string,
   upToMessageId: string,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(targetChatId, port, apiKey, {
+  await sendChatCommand(targetChatId, connection, apiKey, {
     type: "branch_from_chat",
     source_chat_id: sourceChatId,
     up_to_message_id: upToMessageId,
@@ -255,7 +288,7 @@ export async function branchFromChat(
 
 export async function sendBrowserContextDecision(
   chatId: string,
-  port: number,
+  connection: PortOrConnection,
   decision: {
     pending_message_id: string;
     include_actions: boolean;
@@ -269,7 +302,7 @@ export async function sendBrowserContextDecision(
   },
   apiKey?: string,
 ): Promise<void> {
-  await sendChatCommand(chatId, port, apiKey, {
+  await sendChatCommand(chatId, connection, apiKey, {
     type: "browser_context_decision",
     ...decision,
   });
@@ -278,16 +311,16 @@ export async function sendBrowserContextDecision(
 export async function cancelQueuedItem(
   chatId: string,
   clientRequestId: string,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<boolean> {
-  const url = `http://127.0.0.1:${port}/v1/chats/${encodeURIComponent(
-    chatId,
-  )}/queue/${encodeURIComponent(clientRequestId)}`;
   const headers: Record<string, string> = {};
   if (apiKey) {
     headers.Authorization = `Bearer ${apiKey}`;
   }
-  const response = await fetch(url, { method: "DELETE", headers });
+  const response = await fetch(queueItemUrl(connection, chatId, clientRequestId), {
+    method: "DELETE",
+    headers,
+  });
   return response.ok;
 }

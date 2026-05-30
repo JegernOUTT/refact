@@ -8,7 +8,7 @@ import {
 import type { QueuedItem } from "../../features/Chat";
 import { useChatActions } from "../../hooks";
 import { useAppSelector } from "../../hooks";
-import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { selectChatId } from "../../features/Chat/Thread/selectors";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { setInputValue } from "../ChatForm/actions";
@@ -32,7 +32,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
   position,
 }) => {
   const { cancelQueued } = useChatActions();
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
   const chatId = useAppSelector(selectChatId);
   const [isWorking, setIsWorking] = useState(false);
@@ -85,7 +85,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
   );
 
   const handleTogglePriority = useCallback(async () => {
-    if (isWorking || !isEditable || !chatId || !port) return;
+    if (isWorking || !isEditable || !chatId) return;
     setIsWorking(true);
     try {
       const ok = await cancelQueued(queuedItem.client_request_id);
@@ -94,7 +94,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
         await sendUserMessage(
           chatId,
           content,
-          port,
+          config,
           apiKey ?? undefined,
           !queuedItem.priority,
         );
@@ -110,7 +110,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
     isWorking,
     isEditable,
     chatId,
-    port,
+    config,
     apiKey,
     cancelQueued,
     queuedItem.client_request_id,

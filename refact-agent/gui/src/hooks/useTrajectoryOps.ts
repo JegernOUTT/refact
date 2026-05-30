@@ -23,7 +23,7 @@ import {
   removeBrowserRuntime,
 } from "../features/Browser/browserSlice";
 import { push } from "../features/Pages/pagesSlice";
-import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../features/Config/configSlice";
 import { regenerate } from "../services/refact/chatCommands";
 
 export type TrajectoryTab = "compress" | "handoff";
@@ -35,7 +35,7 @@ export function useTrajectoryOps() {
   const browserRuntime = useAppSelector((state) =>
     chatId ? selectBrowserRuntime(state, chatId) : undefined,
   );
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
   const [activeTab, setActiveTab] = useState<TrajectoryTab>("compress");
@@ -192,7 +192,7 @@ export function useTrajectoryOps() {
         dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
         setHandoffPreview(null);
         try {
-          await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+          await regenerate(result.new_chat_id, config, apiKey ?? undefined);
         } catch {
           // regenerate failure is non-critical; handoff was applied successfully
         }
@@ -210,7 +210,7 @@ export function useTrajectoryOps() {
         dispatch(push({ name: "chat" }));
         setHandoffPreview(null);
         try {
-          await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+          await regenerate(result.new_chat_id, config, apiKey ?? undefined);
         } catch {
           // regenerate failure is non-critical; handoff was applied successfully
         }
@@ -229,7 +229,7 @@ export function useTrajectoryOps() {
     handoffOptions,
     applyHandoff,
     dispatch,
-    port,
+    config,
     apiKey,
   ]);
 

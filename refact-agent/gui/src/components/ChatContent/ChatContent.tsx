@@ -52,7 +52,7 @@ import {
   removeMessage,
   branchFromChat,
 } from "../../services/refact/chatCommands";
-import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { VirtualizedChatList } from "./VirtualizedChatList";
 import { useCollapsibleState } from "./useCollapsibleState";
 import { useCollapsibleStoreProvider } from "./useCollapsibleStoreProvider";
@@ -111,7 +111,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const isWaitingForConfirmation = useAppSelector((s) =>
     selectThreadPauseById(s, renderChatId),
   );
-  const lspPort = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
   const collapsibleState = useCollapsibleState(false);
@@ -185,14 +185,14 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         newChatId,
         renderChatId,
         messageId,
-        lspPort,
+        config,
         apiKey ?? undefined,
       ).catch((err) => {
         // eslint-disable-next-line no-console
         console.error("Failed to branch chat:", err);
       });
     },
-    [dispatch, thread?.title, thread?.worktree, renderChatId, lspPort, apiKey],
+    [dispatch, thread?.title, thread?.worktree, renderChatId, config, apiKey],
   );
 
   const handleDelete = useCallback(
@@ -200,14 +200,14 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       void removeMessage(
         renderChatId,
         messageId,
-        lspPort,
+        config,
         apiKey ?? undefined,
       ).catch((err) => {
         // eslint-disable-next-line no-console
         console.error("Failed to delete message:", err);
       });
     },
-    [renderChatId, lspPort, apiKey],
+    [renderChatId, config, apiKey],
   );
 
   const onRetryWrapper = useCallback(

@@ -13,7 +13,7 @@ import {
   selectThreadWorktree,
   setThreadWorktree,
 } from "../Chat/Thread";
-import { selectApiKey, selectHost, selectLspPort } from "../Config/configSlice";
+import { selectApiKey, selectConfig, selectHost } from "../Config/configSlice";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
@@ -94,7 +94,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const chatId = useAppSelector(selectChatId);
   const currentWorktree = useAppSelector(selectThreadWorktree);
   const host = useAppSelector(selectHost);
-  const lspPort = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
   const [menuOpen, setMenuOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -180,7 +180,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
       worktree: WorktreeMeta | null,
       { optimistic = true }: AttachWorktreeOptions = {},
     ): Promise<boolean> => {
-      if (!chatId || !lspPort) return false;
+      if (!chatId) return false;
       const previousWorktree = currentWorktree;
       if (optimistic) {
         dispatch(setThreadWorktree({ chatId, worktree }));
@@ -190,7 +190,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
         await updateChatParams(
           chatId,
           worktree ? { worktree_id: worktree.id } : { worktree: null },
-          lspPort,
+          config,
           apiKey,
         );
         if (!optimistic) {
@@ -208,7 +208,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
         return false;
       }
     },
-    [apiKey, chatId, currentWorktree, dispatch, lspPort],
+    [apiKey, chatId, config, currentWorktree, dispatch],
   );
 
   useEffect(() => {

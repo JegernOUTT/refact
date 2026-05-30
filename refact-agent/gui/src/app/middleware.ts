@@ -115,7 +115,10 @@ function syncProjectStorageNamespace(state: RootState): boolean {
   return getProjectStorageNamespace() !== previous;
 }
 
-function endpointConfigChanged(previous: RootState["config"], next: RootState["config"]): boolean {
+function endpointConfigChanged(
+  previous: RootState["config"],
+  next: RootState["config"],
+): boolean {
   return (
     getEngineEndpointIdentity(previous) !== getEngineEndpointIdentity(next) ||
     previous.host !== next.host ||
@@ -234,7 +237,7 @@ startListening({
       }
 
       if (Object.keys(patch).length > 0) {
-        await sendChatCommand(chatId, port, state.config.apiKey ?? undefined, {
+        await sendChatCommand(chatId, state.config, state.config.apiKey ?? undefined, {
           type: "set_params",
           patch,
         });
@@ -546,7 +549,7 @@ startListening({
           : "The user applied the changes with modifications.";
 
     try {
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "ide_tool_result",
         tool_call_id: toolCallId,
         content,
@@ -602,7 +605,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { title, is_title_generated: isTitleGenerated },
       });
@@ -875,7 +878,7 @@ startListening({
       const { regenerate } = await import("../services/refact/chatCommands");
       inFlightHandoffs.add(key);
       try {
-        await regenerate(new_chat_id, port, apiKey ?? undefined);
+        await regenerate(new_chat_id, state.config, apiKey ?? undefined);
         if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
           const arr = Array.from(processedHandoffIds);
           arr
@@ -917,7 +920,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { boost_reasoning: action.payload.value },
       });
@@ -925,7 +928,7 @@ startListening({
       // When reasoning is enabled, temperature must be unset.
       // This avoids provider-side validation errors.
       if (action.payload.value) {
-        await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
           type: "set_params",
           patch: { temperature: null },
         });
@@ -950,14 +953,14 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { reasoning_effort: action.payload.value },
       });
 
       // Any explicit reasoning effort implies reasoning mode: unset temperature.
       if (action.payload.value != null) {
-        await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
           type: "set_params",
           patch: { temperature: null },
         });
@@ -982,14 +985,14 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { thinking_budget: action.payload.value },
       });
 
       // Any explicit thinking budget implies reasoning mode: unset temperature.
       if (action.payload.value != null) {
-        await sendChatCommand(chatId, port, apiKey ?? undefined, {
+        await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
           type: "set_params",
           patch: { temperature: null },
         });
@@ -1014,7 +1017,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { temperature: action.payload.value },
       });
@@ -1038,7 +1041,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { max_tokens: action.payload.value },
       });
@@ -1062,7 +1065,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { auto_approve_editing_tools: action.payload.value },
       });
@@ -1086,7 +1089,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { auto_approve_dangerous_commands: action.payload.value },
       });
@@ -1110,7 +1113,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { include_project_info: action.payload.value },
       });
@@ -1134,7 +1137,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { checkpoints_enabled: action.payload },
       });
@@ -1160,7 +1163,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: {
           tool_use: runtime.thread.tool_use,
@@ -1188,7 +1191,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: {
           mode: action.payload,
@@ -1217,7 +1220,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: {
           mode: action.payload.mode,
@@ -1244,7 +1247,7 @@ startListening({
       const { sendChatCommand } = await import(
         "../services/refact/chatCommands"
       );
-      await sendChatCommand(chatId, port, apiKey ?? undefined, {
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
         patch: { model: action.payload },
       });

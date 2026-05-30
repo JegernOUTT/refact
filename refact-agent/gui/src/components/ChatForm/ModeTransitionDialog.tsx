@@ -19,7 +19,7 @@ import {
 import { selectThreadById } from "../../features/Chat/Thread/selectors";
 import { push } from "../../features/Pages/pagesSlice";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { regenerate } from "../../services/refact/chatCommands";
 import styles from "./ModeTransitionDialog.module.css";
 
@@ -61,7 +61,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   targetModeDescription,
 }) => {
   const dispatch = useAppDispatch();
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
   const sourceThread = useAppSelector((state) =>
     selectThreadById(state, chatId),
@@ -102,7 +102,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
       dispatch(requestSseRefresh({ chatId: result.new_chat_id }));
       dispatch(push({ name: "chat" }));
 
-      await regenerate(result.new_chat_id, port, apiKey ?? undefined);
+      await regenerate(result.new_chat_id, config, apiKey ?? undefined);
     } catch (err) {
       const errorMessage = extractErrorMessage(err);
       setError(errorMessage);
@@ -114,7 +114,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
     applyMutation,
     dispatch,
     onOpenChange,
-    port,
+    config,
     apiKey,
     sourceWorktree,
   ]);

@@ -1353,7 +1353,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           : plannerChats[0]?.id;
       const chatId = mergeTarget.card.agent_chat_id ?? fallbackPlannerId;
       if (!chatId) throw new Error("No agent or planner chat is available.");
-      if (!config.lspPort) throw new Error("LSP port is unavailable.");
       const apiKey = config.apiKey ?? undefined;
       const prompt = buildWorktreeConflictPrompt({
         worktree: mergeTarget.worktree.meta,
@@ -1409,17 +1408,17 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       await updateChatParams(
         chatId,
         { worktree_id: mergeTarget.worktree.id },
-        config.lspPort,
+        config,
         apiKey,
       );
-      await sendUserMessage(chatId, prompt, config.lspPort, apiKey, true);
+      await sendUserMessage(chatId, prompt, config, apiKey, true);
       showNotification("Conflict resolution request sent to Refact.");
     },
     [
       activeChat,
       plannerChats,
       config.apiKey,
-      config.lspPort,
+      config,
       dispatch,
       mergeTarget,
       showNotification,

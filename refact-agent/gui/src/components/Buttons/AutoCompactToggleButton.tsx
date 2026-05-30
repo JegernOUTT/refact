@@ -9,7 +9,7 @@ import {
   setAutoCompactEnabled,
 } from "../../features/Chat";
 import { updateChatParams } from "../../services/refact/chatCommands";
-import { selectLspPort, selectApiKey } from "../../features/Config/configSlice";
+import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 
 type AutoCompactToggleButtonProps = {
   disabled?: boolean;
@@ -21,22 +21,20 @@ export const AutoCompactToggleButton = ({
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectCurrentThreadId);
   const isEnabled = useAppSelector(selectAutoCompactEnabled);
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
   const handleClick = useCallback(() => {
     if (!chatId || disabled) return;
     const next = !isEnabled;
     dispatch(setAutoCompactEnabled({ chatId, value: next }));
-    if (port) {
-      void updateChatParams(
-        chatId,
-        { auto_compact_enabled: next },
-        port,
-        apiKey ?? undefined,
-      ).catch(() => undefined);
-    }
-  }, [chatId, isEnabled, disabled, port, apiKey, dispatch]);
+    void updateChatParams(
+      chatId,
+      { auto_compact_enabled: next },
+      config,
+      apiKey ?? undefined,
+    ).catch(() => undefined);
+  }, [chatId, isEnabled, disabled, config, apiKey, dispatch]);
 
   const label = isEnabled
     ? "Auto-compression enabled"

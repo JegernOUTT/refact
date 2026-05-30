@@ -25,7 +25,7 @@ import {
 } from "../../services/refact";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { selectApiKey, selectLspPort } from "../Config/configSlice";
+import { selectApiKey, selectConfig } from "../Config/configSlice";
 import { selectChatId, setThreadWorktree } from "../Chat/Thread";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
 import { WorktreeDiffPanel } from "./WorktreeDiffPanel";
@@ -140,7 +140,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
-  const lspPort = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
   const [diffOpen, setDiffOpen] = useState(false);
   const [mergeOpen, setMergeOpen] = useState(false);
@@ -159,7 +159,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
 
   const handleAskRefact = useCallback(
     async (files: string[], response: MergeWorktreeResponse) => {
-      if (!currentWorktree || !chatId || !lspPort) {
+      if (!currentWorktree || !chatId) {
         throw new Error("No active worktree chat is available.");
       }
       const prompt = buildWorktreeConflictPrompt({
@@ -168,10 +168,10 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         response,
         files,
       });
-      await sendUserMessage(chatId, prompt, lspPort, apiKey, true);
+      await sendUserMessage(chatId, prompt, config, apiKey, true);
       setLocalFeedback("Conflict resolution request sent to Refact.");
     },
-    [apiKey, chatId, currentRecord, currentWorktree, lspPort],
+    [apiKey, chatId, config, currentRecord, currentWorktree],
   );
 
   const handleDelete = useCallback(async () => {
