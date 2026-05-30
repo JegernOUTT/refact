@@ -797,23 +797,30 @@ async fn resolve_summary_model(
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0)
         .await
         .map_err(|e| SegmentSummaryFailure::Transient(e.message.clone()))?;
-    let model = if !thread_model.is_empty() {
-        thread_model.to_string()
-    } else if !caps.defaults.chat_light_model.is_empty() {
-        caps.defaults.chat_light_model.clone()
-    } else if !caps.defaults.chat_default_model.is_empty() {
-        caps.defaults.chat_default_model.clone()
-    } else {
-        return Err(SegmentSummaryFailure::NoModelAvailable);
-    };
-    let model_rec = crate::caps::resolve_chat_model(caps, &model)
-        .map_err(|_| SegmentSummaryFailure::NoModelAvailable)?;
-    let model_n_ctx = if model_rec.base.n_ctx > 0 {
-        model_rec.base.n_ctx
-    } else {
-        crate::chat::config::tokens().default_n_ctx
-    };
-    Ok((model, model_n_ctx))
+    let mut candidates = Vec::new();
+    for candidate in [
+        thread_model,
+        &caps.defaults.chat_light_model,
+        &caps.defaults.chat_default_model,
+    ] {
+        if !candidate.is_empty() && !candidates.iter().any(|model| model == candidate) {
+            candidates.push(candidate.to_string());
+        }
+    }
+
+    for model in candidates {
+        let Ok(model_rec) = crate::caps::resolve_chat_model(caps.clone(), &model) else {
+            continue;
+        };
+        let model_n_ctx = if model_rec.base.n_ctx > 0 {
+            model_rec.base.n_ctx
+        } else {
+            crate::chat::config::tokens().default_n_ctx
+        };
+        return Ok((model, model_n_ctx));
+    }
+
+    Err(SegmentSummaryFailure::NoModelAvailable)
 }
 
 async fn effective_n_ctx_for_thread(
@@ -1933,6 +1940,68 @@ mod tests {
 
         assert_eq!(model, thread_model);
         assert_eq!(n_ctx, 12_345);
+    }
+
+    #[tokio::test]
+    async fn resolve_summary_model_falls_back_to_light_when_thread_model_is_stale() {
+        let gcx = make_test_gcx().await;
+        let light_model = "global-light-model";
+        let default_model = "global-default-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            light_model.to_string(),
+            chat_model_record(light_model, 65_536),
+        );
+        caps.chat_models.insert(
+            default_model.to_string(),
+            chat_model_record(default_model, 131_072),
+        );
+        caps.defaults.chat_light_model = light_model.to_string();
+        caps.defaults.chat_default_model = default_model.to_string();
+        install_caps(gcx.clone(), caps).await;
+
+        let (model, n_ctx) = resolve_summary_model(gcx, "stale-thread-model")
+            .await
+            .unwrap();
+
+        assert_eq!(model, light_model);
+        assert_eq!(n_ctx, 65_536);
+    }
+
+    #[tokio::test]
+    async fn resolve_summary_model_falls_back_to_default_when_thread_and_light_are_stale() {
+        let gcx = make_test_gcx().await;
+        let default_model = "global-default-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            default_model.to_string(),
+            chat_model_record(default_model, 0),
+        );
+        caps.defaults.chat_light_model = "stale-light-model".to_string();
+        caps.defaults.chat_default_model = default_model.to_string();
+        install_caps(gcx.clone(), caps).await;
+
+        let (model, n_ctx) = resolve_summary_model(gcx, "stale-thread-model")
+            .await
+            .unwrap();
+
+        assert_eq!(model, default_model);
+        assert_eq!(n_ctx, crate::chat::config::tokens().default_n_ctx);
+    }
+
+    #[tokio::test]
+    async fn resolve_summary_model_returns_no_model_when_all_candidates_are_invalid() {
+        let gcx = make_test_gcx().await;
+        let mut caps = CodeAssistantCaps::default();
+        caps.defaults.chat_light_model = "stale-light-model".to_string();
+        caps.defaults.chat_default_model = "stale-default-model".to_string();
+        install_caps(gcx.clone(), caps).await;
+
+        let failure = resolve_summary_model(gcx, "stale-thread-model")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(failure, SegmentSummaryFailure::NoModelAvailable));
     }
 
     #[test]
