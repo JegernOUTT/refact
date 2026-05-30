@@ -208,6 +208,27 @@ mod tests {
     }
 
     #[test]
+    fn synthesize_current_plan_uses_truncated_delta_content() {
+        let mut session = make_session();
+        install_plan(&mut session, "agent", "base plan");
+        let oversized = "x".repeat(internal_roles::MAX_PLAN_DELTA_CHARS + 100);
+        session.add_message(internal_roles::plan_delta(
+            "tool.update_plan",
+            serde_json::json!({"seq": 1}),
+            oversized,
+        ));
+
+        let delta = plan_delta_events(&session)[0];
+        let delta_content = delta.content.content_text_only();
+        let synthesized = synthesize_current_plan(&session).unwrap();
+
+        assert!(delta_content.chars().count() <= internal_roles::MAX_PLAN_DELTA_CHARS);
+        assert!(delta_content.contains("[truncated:"));
+        assert!(synthesized.ends_with(&delta_content));
+        assert!(synthesized.chars().count() < internal_roles::MAX_PLAN_DELTA_CHARS + 200);
+    }
+
+    #[test]
     fn plan_history_desc_by_version() {
         let mut session = make_session();
 

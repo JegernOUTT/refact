@@ -372,6 +372,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_note_is_truncated_with_metadata() {
+        let mut session = ChatSession::new(CHAT_ID.to_string());
+        session.install_plan("agent", "## Plan\n- base");
+        let (gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let note = "a".repeat(internal_roles::MAX_PLAN_DELTA_CHARS + 100);
+        let original_chars = note.chars().count();
+        let args = HashMap::from([("note".to_string(), json!(note))]);
+
+        let (_, messages) = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert_eq!(tool_result_json(&messages), json!({"seq": 1}));
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        let delta = &session.post_tool_side_effects[0];
+        let content = content_text(delta);
+        assert!(content.chars().count() <= internal_roles::MAX_PLAN_DELTA_CHARS);
+        assert!(content.chars().count() < original_chars);
+        assert!(content.contains("[truncated:"));
+        assert_eq!(plan_delta_payload(delta)["truncated"], json!(true));
+        assert_eq!(
+            plan_delta_payload(delta)["original_chars"],
+            json!(original_chars)
+        );
+        let kept_chars = plan_delta_payload(delta)["kept_chars"].as_u64().unwrap() as usize;
+        assert!(kept_chars < internal_roles::MAX_PLAN_DELTA_CHARS);
+    }
+
+    #[tokio::test]
+    async fn oversized_utf8_note_is_truncated_on_char_boundary() {
+        let mut session = ChatSession::new(CHAT_ID.to_string());
+        session.install_plan("agent", "## Plan\n- base");
+        let (gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let note = "✓".repeat(internal_roles::MAX_PLAN_DELTA_CHARS + 100);
+        let original_chars = note.chars().count();
+        let args = HashMap::from([("note".to_string(), json!(note))]);
+
+        tool.tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        let delta = &session.post_tool_side_effects[0];
+        let content = content_text(delta);
+        assert!(std::str::from_utf8(content.as_bytes()).is_ok());
+        assert!(content.chars().count() <= internal_roles::MAX_PLAN_DELTA_CHARS);
+        assert!(content.contains("[truncated:"));
+        assert_eq!(
+            plan_delta_payload(delta)["original_chars"],
+            json!(original_chars)
+        );
+    }
+
+    #[tokio::test]
     async fn errors_when_no_plan() {
         let session = ChatSession::new(CHAT_ID.to_string());
         let (_gcx, ccx) = ccx_for_session(session).await;

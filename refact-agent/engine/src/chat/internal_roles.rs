@@ -7,6 +7,13 @@ use crate::call_validation::{ChatContent, ChatMessage};
 pub const EVENT_ROLE: &str = "event";
 pub const PLAN_ROLE: &str = "plan";
 pub const MAX_PLAN_BODY_CHARS: usize = 96 * 1024;
+pub const MAX_PLAN_DELTA_CHARS: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanDeltaTruncation {
+    pub original_chars: usize,
+    pub kept_chars: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,7 +66,60 @@ pub fn plan_delta(
     payload: serde_json::Value,
     content: impl Into<String>,
 ) -> ChatMessage {
+    let (content, truncation) = bounded_plan_delta_note(content);
+    let payload = plan_delta_payload_with_truncation(payload, truncation);
     event(EventSubkind::PlanDelta, source, payload, content)
+}
+
+pub fn bounded_plan_delta_note(
+    content: impl Into<String>,
+) -> (String, Option<PlanDeltaTruncation>) {
+    let content_str: String = content.into();
+    let original_chars = content_str.chars().count();
+    if original_chars <= MAX_PLAN_DELTA_CHARS {
+        return (content_str, None);
+    }
+
+    let mut kept_chars = MAX_PLAN_DELTA_CHARS;
+    loop {
+        let marker = truncation_marker(kept_chars, original_chars);
+        let total_chars = kept_chars + marker.chars().count();
+        if total_chars <= MAX_PLAN_DELTA_CHARS || kept_chars == 0 {
+            let kept: String = content_str.chars().take(kept_chars).collect();
+            return (
+                kept + &marker,
+                Some(PlanDeltaTruncation {
+                    original_chars,
+                    kept_chars,
+                }),
+            );
+        }
+        kept_chars = kept_chars.saturating_sub(total_chars - MAX_PLAN_DELTA_CHARS);
+    }
+}
+
+fn plan_delta_payload_with_truncation(
+    payload: serde_json::Value,
+    truncation: Option<PlanDeltaTruncation>,
+) -> serde_json::Value {
+    let Some(truncation) = truncation else {
+        return payload;
+    };
+    let mut payload = match payload {
+        serde_json::Value::Object(map) => map,
+        value => serde_json::Map::from_iter([("value".to_string(), value)]),
+    };
+    payload.insert("truncated".to_string(), json!(true));
+    payload.insert(
+        "original_chars".to_string(),
+        json!(truncation.original_chars),
+    );
+    payload.insert("kept_chars".to_string(), json!(truncation.kept_chars));
+    serde_json::Value::Object(payload)
+}
+
+fn truncation_marker(kept_chars: usize, original_chars: usize) -> String {
+    format!("\n\n[truncated: kept {kept_chars} of {original_chars} chars]")
 }
 
 pub fn mode_switch_event(
@@ -261,5 +321,35 @@ mod tests {
         assert_eq!(event_meta["subkind"], json!("plan_delta"));
         assert_eq!(event_meta["source"], json!("tool.set_plan"));
         assert_eq!(event_meta["payload"]["seq"], json!(7));
+    }
+
+    #[test]
+    fn plan_delta_helper_truncates_oversized_content() {
+        let oversized = "a".repeat(MAX_PLAN_DELTA_CHARS + 100);
+        let msg = plan_delta("tool.update_plan", json!({"seq": 1}), oversized);
+        let body = match &msg.content {
+            ChatContent::SimpleText(s) => s.as_str(),
+            _ => panic!("expected SimpleText"),
+        };
+
+        assert!(body.chars().count() <= MAX_PLAN_DELTA_CHARS);
+        assert!(body.contains("[truncated:"));
+        let payload = &msg.extra["event"]["payload"];
+        assert_eq!(payload["seq"], json!(1));
+        assert_eq!(payload["truncated"], json!(true));
+        assert_eq!(payload["original_chars"], json!(MAX_PLAN_DELTA_CHARS + 100));
+        assert!(payload["kept_chars"].as_u64().unwrap() < MAX_PLAN_DELTA_CHARS as u64);
+    }
+
+    #[test]
+    fn plan_delta_helper_leaves_small_content_unchanged() {
+        let msg = plan_delta("tool.update_plan", json!({"seq": 1}), "small note");
+        let body = match &msg.content {
+            ChatContent::SimpleText(s) => s.as_str(),
+            _ => panic!("expected SimpleText"),
+        };
+
+        assert_eq!(body, "small note");
+        assert!(msg.extra["event"]["payload"].get("truncated").is_none());
     }
 }

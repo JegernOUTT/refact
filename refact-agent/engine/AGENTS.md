@@ -99,6 +99,7 @@ The chat thread can contain hidden internal roles that are stored in trajectorie
 |---|---|---|---|
 | `event` | `extra.event = { subkind, source, payload }` plus human-readable `content` | Internal facts such as mode switches, tool decisions, plan deltas, cron fires, process exits, ticks, verifier reports, and notices | Hidden from normal transcript; shown in EventLog except `plan_delta` |
 | `plan` | `extra.plan = { mode, version, created_at_ms, supersedes, truncated?, original_chars? }` plus Markdown `content` | Single install-once base plan; body is capped at 96KB (`MAX_PLAN_BODY_CHARS`) | Hidden from normal transcript; latest shown in PlanBanner |
+| `event(plan_delta)` | `extra.event = { subkind: "plan_delta", source, payload: { seq, summary?, truncated?, original_chars?, kept_chars? } }` plus Markdown `content` | Append-only plan updates; note content is capped at 16KB (`MAX_PLAN_DELTA_CHARS`) | Hidden from normal transcript and general EventLog; merged into PlanBanner/get_plan |
 
 `EventSubkind` serializes in snake_case. Current subkinds:
 
