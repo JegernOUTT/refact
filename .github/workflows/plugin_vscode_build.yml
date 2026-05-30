@@ -35,9 +35,12 @@ jobs:
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             code-target: linux-arm64
-          - os: macos-15
-            target: x86_64-apple-darwin
-            code-target: darwin-x64
+          # x86_64-apple-darwin (macOS Intel) is disabled — GitHub-hosted macOS runners
+          # incur significant costs and Intel Mac support is being phased out. Re-enable only if
+          # explicitly needed and billing is confirmed.
+          #- os: macos-15
+          #  target: x86_64-apple-darwin
+          #  code-target: darwin-x64
           - os: macos-15
             target: aarch64-apple-darwin
             code-target: darwin-arm64
