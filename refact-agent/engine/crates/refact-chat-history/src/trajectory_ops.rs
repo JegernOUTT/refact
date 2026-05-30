@@ -172,6 +172,7 @@ pub const COMPRESSION_REPORT_KIND: &str = "chat_compression_report";
 
 pub fn build_compression_report_message(
     context_files_removed: usize,
+    context_messages_dropped: usize,
     tool_results_truncated: usize,
     tokens_before: usize,
     tokens_after: usize,
@@ -188,6 +189,7 @@ pub fn build_compression_report_message(
         serde_json::json!({
             "kind": COMPRESSION_REPORT_KIND,
             "context_files_removed": context_files_removed,
+            "context_messages_dropped": context_messages_dropped,
             "tool_results_truncated": tool_results_truncated,
             "tokens_before": tokens_before,
             "tokens_after": tokens_after,
@@ -198,8 +200,9 @@ pub fn build_compression_report_message(
     ChatMessage {
         role: COMPRESSION_REPORT_ROLE.to_string(),
         content: ChatContent::SimpleText(format!(
-            "## Chat compression report\n\n- Context files removed: {}\n- Tool outputs truncated: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%",
+            "## Chat compression report\n\n- Context files removed: {}\n- Context messages dropped: {}\n- Tool outputs truncated: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%",
             context_files_removed,
+            context_messages_dropped,
             tool_results_truncated,
             tokens_before,
             tokens_after,
@@ -213,18 +216,40 @@ pub fn build_compression_report_message(
     }
 }
 
-fn compression_report_insert_index(messages: &[ChatMessage]) -> usize {
-    messages
+fn compression_report_insert_index(messages: &[ChatMessage], affected_boundary: usize) -> usize {
+    let mut insert_idx = affected_boundary.min(messages.len());
+    let leading_system_prefix_len = messages
         .iter()
-        .position(|m| matches!(m.role.as_str(), "system" | "user"))
-        .map(|idx| idx + 1)
-        .or_else(|| {
-            messages
-                .first()
-                .filter(|m| matches!(m.role.as_str(), "event" | "plan"))
-                .map(|_| 1)
-        })
-        .unwrap_or(0)
+        .take_while(|message| message.role == "system")
+        .count();
+    insert_idx = insert_idx.max(leading_system_prefix_len);
+
+    if let Some(first_user_idx) = messages.iter().position(|message| message.role == "user") {
+        insert_idx = insert_idx.max(first_user_idx + 1);
+    } else if insert_idx == 0 {
+        if let Some(first_anchor_idx) = messages
+            .iter()
+            .position(|message| matches!(message.role.as_str(), "system" | "event" | "plan"))
+        {
+            insert_idx = first_anchor_idx + 1;
+        }
+    }
+
+    insert_idx.min(messages.len())
+}
+
+fn note_affected_boundary(boundary: &mut Option<usize>, candidate: usize) {
+    *boundary = Some(boundary.map_or(candidate, |current| current.min(candidate)));
+}
+
+fn first_changed_boundary(before: &[ChatMessage], after: &[ChatMessage]) -> Option<usize> {
+    let common_len = before.len().min(after.len());
+    for idx in 0..common_len {
+        if serde_json::to_value(&before[idx]).ok() != serde_json::to_value(&after[idx]).ok() {
+            return Some(idx);
+        }
+    }
+    (before.len() != after.len()).then_some(common_len)
 }
 
 pub const TOOLS_TO_PRESERVE: &[&str] = &["research", "delegate", "plan", "review"];
@@ -383,26 +408,38 @@ pub fn compress_in_place(
     let before_count = messages.len();
     let before_tokens = approx_token_count(messages);
     let mut context_modified = 0;
+    let mut context_messages_dropped = 0;
     let mut tool_modified = 0;
+    let mut affected_boundary = None;
 
     if opts.drop_all_context {
+        let mut kept_before = 0usize;
         messages.retain(|m| {
             if m.role == "context_file" {
                 context_modified += 1;
+                context_messages_dropped += 1;
+                note_affected_boundary(&mut affected_boundary, kept_before);
                 false
             } else {
+                kept_before += 1;
                 true
             }
         });
     } else if opts.dedup_and_compress_context {
+        let before_dedup = messages.clone();
         let result = crate::history_limit::compress_duplicate_context_files(messages);
         if let Ok((count, _)) = result {
             context_modified = count;
+            if count > 0 {
+                if let Some(boundary) = first_changed_boundary(&before_dedup, messages) {
+                    note_affected_boundary(&mut affected_boundary, boundary);
+                }
+            }
         }
     }
 
     if opts.drop_all_memories {
-        for msg in messages.iter_mut() {
+        for (idx, msg) in messages.iter_mut().enumerate() {
             if msg.role != "context_file" {
                 continue;
             }
@@ -411,6 +448,7 @@ pub fn compress_in_place(
                     let (remaining, removed) = filter_memory_context_files(files);
                     if removed > 0 {
                         context_modified += removed;
+                        note_affected_boundary(&mut affected_boundary, idx);
                         msg.content = ChatContent::ContextFiles(remaining);
                     }
                 }
@@ -419,6 +457,7 @@ pub fn compress_in_place(
                         let (remaining, removed) = filter_memory_context_files(&files);
                         if removed > 0 {
                             context_modified += removed;
+                            note_affected_boundary(&mut affected_boundary, idx);
                             msg.content = ChatContent::SimpleText(
                                 serde_json::to_string(&remaining).map_err(|e| {
                                     format!("Failed to serialize context files: {}", e)
@@ -430,29 +469,54 @@ pub fn compress_in_place(
                 _ => {}
             }
         }
+        let mut kept_before = 0usize;
         messages.retain(|m| {
             if m.role != "context_file" {
+                kept_before += 1;
                 return true;
             }
             match &m.content {
-                ChatContent::ContextFiles(files) => !files.is_empty(),
-                ChatContent::SimpleText(text) => {
-                    if let Ok(files) = serde_json::from_str::<Vec<ContextFile>>(text) {
-                        !files.is_empty()
-                    } else if simple_text_contains_memory_context_path(text) {
-                        context_modified += 1;
+                ChatContent::ContextFiles(files) => {
+                    if files.is_empty() {
+                        context_messages_dropped += 1;
+                        note_affected_boundary(&mut affected_boundary, kept_before);
                         false
                     } else {
+                        kept_before += 1;
                         true
                     }
                 }
-                _ => true,
+                ChatContent::SimpleText(text) => {
+                    if let Ok(files) = serde_json::from_str::<Vec<ContextFile>>(text) {
+                        if files.is_empty() {
+                            context_messages_dropped += 1;
+                            note_affected_boundary(&mut affected_boundary, kept_before);
+                            false
+                        } else {
+                            kept_before += 1;
+                            true
+                        }
+                    } else if simple_text_contains_memory_context_path(text) {
+                        context_modified += 1;
+                        context_messages_dropped += 1;
+                        note_affected_boundary(&mut affected_boundary, kept_before);
+                        false
+                    } else {
+                        kept_before += 1;
+                        true
+                    }
+                }
+                _ => {
+                    kept_before += 1;
+                    true
+                }
             }
         });
     }
     if opts.drop_project_information {
         let first_system_idx = messages.iter().position(|m| m.role == "system");
         let mut idx = 0usize;
+        let mut kept_before = 0usize;
         messages.retain(|msg| {
             let keep = if msg.role != "system" {
                 true
@@ -462,12 +526,16 @@ pub fn compress_in_place(
                 let text = msg.content.content_text_only().to_lowercase();
                 if text.contains("project") || text.contains("workspace") {
                     context_modified += 1;
+                    note_affected_boundary(&mut affected_boundary, kept_before);
                     false
                 } else {
                     true
                 }
             };
             idx += 1;
+            if keep {
+                kept_before += 1;
+            }
             keep
         });
     }
@@ -480,7 +548,7 @@ pub fn compress_in_place(
             .map(|tc| (tc.id.clone(), tc.function.name.clone()))
             .collect();
 
-        for msg in messages.iter_mut() {
+        for (idx, msg) in messages.iter_mut().enumerate() {
             if msg.role == "tool" && !msg.tool_call_id.is_empty() {
                 if should_preserve_message(msg, &tool_call_names) {
                     continue;
@@ -491,6 +559,7 @@ pub fn compress_in_place(
                     msg.content =
                         ChatContent::SimpleText(format!("Tool result compressed: {}...", preview));
                     tool_modified += 1;
+                    note_affected_boundary(&mut affected_boundary, idx);
                 }
             }
         }
@@ -508,13 +577,17 @@ pub fn compress_in_place(
 
     let after_tokens_pre = approx_token_count(messages);
 
-    let report = build_compression_report_message(
-        context_modified,
-        tool_modified,
-        before_tokens,
-        after_tokens_pre,
-    );
-    messages.insert(compression_report_insert_index(messages), report);
+    if let Some(boundary) = affected_boundary {
+        let report = build_compression_report_message(
+            context_modified,
+            context_messages_dropped,
+            tool_modified,
+            before_tokens,
+            after_tokens_pre,
+        );
+        let insert_idx = compression_report_insert_index(messages, boundary);
+        messages.insert(insert_idx, report);
+    }
 
     let after_tokens = approx_token_count(messages);
     Ok(TransformStats {
@@ -691,6 +764,20 @@ mod tests {
             .iter()
             .find(|msg| msg.role == COMPRESSION_REPORT_ROLE)
             .expect("expected compression_report message")
+    }
+
+    fn compression_report_index(messages: &[ChatMessage]) -> usize {
+        messages
+            .iter()
+            .position(|msg| msg.role == COMPRESSION_REPORT_ROLE)
+            .expect("expected compression_report message")
+    }
+
+    fn compression_report_count(messages: &[ChatMessage]) -> usize {
+        messages
+            .iter()
+            .filter(|msg| msg.role == COMPRESSION_REPORT_ROLE)
+            .count()
     }
 
     #[test]
@@ -997,15 +1084,14 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_report_added_after_compress() {
+    fn test_compression_report_not_added_for_noop_compress() {
         let mut messages = vec![make_user_msg("hello"), make_assistant_msg("response")];
         let opts = CompressOptions::default();
-        compress_in_place(&mut messages, &opts).unwrap();
-        let report = compression_report(&messages);
-        assert!(report
-            .content
-            .content_text_only()
-            .contains("Chat compression report"));
+        let stats = compress_in_place(&mut messages, &opts).unwrap();
+
+        assert_eq!(stats.before_message_count, 2);
+        assert_eq!(stats.after_message_count, 2);
+        assert_eq!(compression_report_count(&messages), 0);
         assert!(messages.iter().all(|msg| msg.role != "cd_instruction"));
     }
 
@@ -1030,7 +1116,12 @@ mod tests {
         let metadata = &report.extra["compression_report"];
         assert_eq!(metadata["kind"], serde_json::json!(COMPRESSION_REPORT_KIND));
         assert_eq!(metadata["context_files_removed"], serde_json::json!(1));
+        assert_eq!(metadata["context_messages_dropped"], serde_json::json!(1));
         assert_eq!(metadata["tool_results_truncated"], serde_json::json!(1));
+        assert!(report
+            .content
+            .content_text_only()
+            .contains("- Context messages dropped: 1"));
         assert!(metadata["tokens_before"].as_u64().unwrap() > 0);
         assert!(metadata["tokens_after"].as_u64().unwrap() > 0);
         assert!(metadata["reduction_percent"].as_u64().unwrap() <= 100);
@@ -1058,6 +1149,84 @@ mod tests {
 
         let roles: Vec<_> = messages.iter().map(|msg| msg.role.as_str()).collect();
         assert_eq!(roles, vec!["user", COMPRESSION_REPORT_ROLE, "assistant"]);
+    }
+
+    #[test]
+    fn test_compression_report_does_not_split_leading_system_messages() {
+        let mut messages = vec![
+            make_system_msg("root prompt"),
+            make_system_msg("workspace details"),
+            make_user_msg("hello"),
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let report_idx = compression_report_index(&messages);
+        assert_eq!(report_idx, 3);
+        let roles: Vec<_> = messages.iter().map(|msg| msg.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec![
+                "system",
+                "system",
+                "user",
+                COMPRESSION_REPORT_ROLE,
+                "assistant"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compression_report_is_not_before_first_user() {
+        let mut messages = vec![
+            make_system_msg("root prompt"),
+            make_user_msg("hello"),
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let report_idx = compression_report_index(&messages);
+        let first_user_idx = messages.iter().position(|msg| msg.role == "user").unwrap();
+        assert!(report_idx > first_user_idx);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+    }
+
+    #[test]
+    fn test_compression_report_inserted_near_removed_context_not_tail() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("first response"),
+            make_user_msg("second request"),
+            make_assistant_msg("second response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let report_idx = compression_report_index(&messages);
+        assert_eq!(report_idx, 1);
+        assert!(report_idx < messages.len() - 1);
+        assert_eq!(
+            messages.last().unwrap().content.content_text_only(),
+            "second response"
+        );
     }
 
     #[test]
@@ -1346,27 +1515,27 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_preserves_user_assistant() {
+    fn test_compress_preserves_user_assistant_without_noop_report() {
         let mut messages = vec![make_user_msg("hello"), make_assistant_msg("response")];
         let opts = CompressOptions {
             drop_all_context: true,
             ..Default::default()
         };
         let stats = compress_in_place(&mut messages, &opts).unwrap();
-        assert_eq!(stats.after_message_count, 3);
+        assert_eq!(stats.after_message_count, 2);
         assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, COMPRESSION_REPORT_ROLE);
-        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(compression_report_count(&messages), 0);
     }
 
     #[test]
-    fn test_compress_empty_messages() {
+    fn test_compress_empty_messages_is_noop_without_report() {
         let mut messages: Vec<ChatMessage> = vec![];
         let opts = CompressOptions::default();
         let stats = compress_in_place(&mut messages, &opts).unwrap();
         assert_eq!(stats.before_message_count, 0);
-        assert_eq!(stats.after_message_count, 1);
-        assert_eq!(messages[0].role, COMPRESSION_REPORT_ROLE);
+        assert_eq!(stats.after_message_count, 0);
+        assert!(messages.is_empty());
     }
 
     #[test]

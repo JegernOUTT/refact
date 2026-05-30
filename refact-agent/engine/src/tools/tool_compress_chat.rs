@@ -82,6 +82,16 @@ impl CompressChatApplyStats {
             + self.project_info_dropped
             + self.dedup_count
     }
+
+    fn has_meaningful_mutation(&self) -> bool {
+        self.context_files_dropped > 0
+            || self.context_messages_dropped > 0
+            || self.memory_dropped > 0
+            || self.tool_truncated > 0
+            || self.tool_dropped > 0
+            || self.project_info_dropped > 0
+            || self.dedup_count > 0
+    }
 }
 
 struct CompressChatApplyRequest<'a> {
@@ -115,7 +125,8 @@ fn tokens_with_tail(
 fn remove_invalid_tool_calls_and_tool_calls_results_before(
     modifiable_prefix: &mut Vec<ChatMessage>,
     immutable_tail: &[ChatMessage],
-) {
+) -> bool {
+    let before = serde_json::to_value(&*modifiable_prefix).ok();
     let tool_call_ids: HashSet<String> = modifiable_prefix
         .iter()
         .chain(immutable_tail.iter())
@@ -165,6 +176,7 @@ fn remove_invalid_tool_calls_and_tool_calls_results_before(
         let is_tool_result = m.role == "tool" || m.role == "diff";
         m.tool_call_id.is_empty() || !is_tool_result || indices_to_keep.contains(&idx)
     });
+    before != serde_json::to_value(&*modifiable_prefix).ok()
 }
 
 fn compress_chat_apply_head_messages(
@@ -285,7 +297,9 @@ fn compress_chat_apply_head_messages(
     let mut cleanup_tail = Vec::with_capacity(preserved_tail.len() + immutable_tail.len());
     cleanup_tail.extend_from_slice(&preserved_tail);
     cleanup_tail.extend_from_slice(immutable_tail);
-    remove_invalid_tool_calls_and_tool_calls_results_before(&mut head_messages, &cleanup_tail);
+    if remove_invalid_tool_calls_and_tool_calls_results_before(&mut head_messages, &cleanup_tail) {
+        stats.tool_dropped += 1;
+    }
 
     if (request.strength == "balanced" || request.strength == "aggressive")
         && !request.dedup_context_files
@@ -308,13 +322,17 @@ fn compress_chat_apply_head_messages(
         }
     }
 
-    let after_tokens_pre_report = tokens_with_tail(&head_messages, &preserved_tail, immutable_tail);
-    head_messages.push(build_compression_report_message(
-        stats.context_files_removed(),
-        stats.tool_truncated + stats.tool_dropped,
-        before_tokens,
-        after_tokens_pre_report,
-    ));
+    if stats.has_meaningful_mutation() {
+        let after_tokens_pre_report =
+            tokens_with_tail(&head_messages, &preserved_tail, immutable_tail);
+        head_messages.push(build_compression_report_message(
+            stats.context_files_removed(),
+            stats.context_messages_dropped,
+            stats.tool_truncated + stats.tool_dropped,
+            before_tokens,
+            after_tokens_pre_report,
+        ));
+    }
     head_messages.append(&mut preserved_tail);
     (head_messages, stats, before_tokens)
 }
@@ -444,6 +462,13 @@ mod tests {
             .iter()
             .position(|message| message.role == "compression_report")
             .expect("expected compression_report message")
+    }
+
+    fn compression_report_count(messages: &[ChatMessage]) -> usize {
+        messages
+            .iter()
+            .filter(|message| message.role == "compression_report")
+            .count()
     }
 
     #[test]
@@ -635,6 +660,69 @@ mod tests {
     }
 
     #[test]
+    fn apply_all_preserved_noop_does_not_prepend_report_before_tail() {
+        let messages = vec![
+            user_message("tail user"),
+            assistant_message("tail assistant"),
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
+
+        assert!(!stats.has_meaningful_mutation());
+        assert_eq!(compression_report_count(&after), 0);
+        assert_eq!(
+            serde_json::to_string(&after).unwrap(),
+            serde_json::to_string(&messages).unwrap()
+        );
+    }
+
+    #[test]
+    fn apply_noop_modifiable_head_does_not_add_report() {
+        let messages = vec![
+            user_message("old user"),
+            assistant_message("old assistant"),
+            user_message("tail user"),
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
+
+        assert!(!stats.has_meaningful_mutation());
+        assert_eq!(compression_report_count(&after), 0);
+        assert_eq!(
+            serde_json::to_string(&after).unwrap(),
+            serde_json::to_string(&messages).unwrap()
+        );
+    }
+
+    #[test]
     fn apply_tool_drop_and_truncate_preserve_tail_tool_results() {
         let long_old = "old tool output ".repeat(30);
         let long_tail = "tail tool output ".repeat(30);
@@ -715,7 +803,12 @@ mod tests {
         let metadata = &after[report_idx].extra["compression_report"];
         assert_eq!(metadata["kind"], json!("chat_compression_report"));
         assert_eq!(metadata["context_files_removed"], json!(1));
+        assert_eq!(metadata["context_messages_dropped"], json!(1));
         assert_eq!(metadata["tool_results_truncated"], json!(0));
+        assert!(after[report_idx]
+            .content
+            .content_text_only()
+            .contains("- Context messages dropped: 1"));
         assert_eq!(metadata["tokens_before"], json!(before_tokens));
         assert!(metadata["tokens_after"].as_u64().unwrap() <= before_tokens as u64);
     }
@@ -1322,12 +1415,9 @@ impl Tool for ToolCompressChatApply {
         let target_met = target_tokens.map_or(true, |t| report_after_tokens <= t);
 
         let first_role = head_messages.first().map(|m| m.role.as_str()).unwrap_or("");
-        if !matches!(
-            first_role,
-            "system" | "user" | "event" | "plan" | "compression_report"
-        ) {
+        if !matches!(first_role, "system" | "user" | "event" | "plan") {
             return Err(format!(
-                "ctx_apply would produce an invalid chat history: first message has role '{}', expected 'system', 'user', 'event', 'plan', or 'compression_report'. Compression aborted.",
+                "ctx_apply would produce an invalid chat history: first message has role '{}', expected 'system', 'user', 'event', or 'plan'. Compression aborted.",
                 if first_role.is_empty() { "(empty)" } else { first_role }
             ));
         }
@@ -1366,6 +1456,7 @@ impl Tool for ToolCompressChatApply {
             "compression_report": {
                 "role": "compression_report",
                 "context_files_removed": stats.context_files_removed(),
+                "context_messages_dropped": stats.context_messages_dropped,
                 "tool_results_truncated": stats.tool_truncated + stats.tool_dropped,
                 "tokens_before": before_tokens,
                 "tokens_after": report_after_tokens,
