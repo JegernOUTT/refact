@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::diagnostics::DiagnosticContext;
 use crate::settings::BuddySettings;
 use crate::types::{
-    BuddyDraft, BuddyOpportunity, BuddyPulse, BuddyRuntimeEvent, BuddySpeechItem, BuddyState,
+    BuddyBubblePolicy, BuddyDraft, BuddyOpportunity, BuddyPulse, BuddyRuntimeEvent,
+    BuddySpeechItem, BuddyState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,14 @@ pub struct ChatReactionAttempt {
     pub skip_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_policy: Option<BuddyBubblePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
