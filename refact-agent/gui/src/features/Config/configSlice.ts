@@ -8,6 +8,7 @@ export type Config = {
   tabbed?: boolean;
   lspUrl?: string;
   dev?: boolean;
+  engineServed?: boolean;
   // todo: handle light / darkmode
   themeProps: Omit<ThemeProps, "children">;
   features?: {
@@ -56,6 +57,7 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
   // TODO: toggle darkmode for web host?
   builder.addCase(updateConfig, (state, action) => {
     state.dev = action.payload.dev ?? state.dev;
+    state.engineServed = action.payload.engineServed ?? state.engineServed;
 
     state.features = action.payload.features
       ? { ...state.features, ...action.payload.features }

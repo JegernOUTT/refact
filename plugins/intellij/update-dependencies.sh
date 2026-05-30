@@ -15,12 +15,10 @@ if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$LSP_BINARY" ]]; then
-  echo "=== Building debug LSP binary for local Linux x86_64 development ==="
-  (cd "$REFACT_AGENT_DIR/engine" && cargo build)
-fi
+echo "=== Building debug LSP binary with embedded engine-served GUI assets ==="
+(cd "$REFACT_AGENT_DIR/engine" && cargo build)
 
-echo "=== Building GUI ==="
+echo "=== Building GUI for IntelliJ webview resources ==="
 cd "$GUI_DIR"
 npm install
 npm run build

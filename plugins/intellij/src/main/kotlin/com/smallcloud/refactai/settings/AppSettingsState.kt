@@ -47,6 +47,8 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
     var insecureSSL: Boolean = false
     var isFirstStart: Boolean = true
     var experimentalLspFlagEnabled: Boolean = false
+    var httpHost: String = "0.0.0.0"
+    var browserHost: String = ""
 
     @Transient
     private val messageBus: MessageBus = ApplicationManager.getApplication().messageBus
@@ -106,6 +108,12 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
                     }
                     override fun experimentalLspFlagEnabledChanged(newValue: Boolean) {
                         instance.experimentalLspFlagEnabled = newValue
+                    }
+                    override fun httpHostChanged(newValue: String) {
+                        instance.httpHost = newValue
+                    }
+                    override fun browserHostChanged(newValue: String) {
+                        instance.browserHost = newValue
                     }
                 })
         messageBus

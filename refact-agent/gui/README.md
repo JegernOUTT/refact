@@ -37,6 +37,18 @@ REFACT_LSP_URL="http://127.0.0.1:8001" npm run dev
 
 Open the Vite URL printed by the dev command. The default host mode is `web`.
 
+## Engine-served standalone UI
+
+The Rust engine now also serves the chat UI at its HTTP root, for example:
+
+```bash
+cd refact-agent/engine
+cargo run -- --http-port 8001 --logs-stderr
+# open http://127.0.0.1:8001/
+```
+
+Engine builds automatically run the GUI build and embed `dist/chat` into `refact-lsp`, so a separate Vite server is not required for the standalone engine-served UI. The standalone HTML initializes `host: "web"` with `lspUrl: window.location.origin`, which keeps API and SSE calls same-origin.
+
 ## Scripts
 
 Scripts come from `package.json`:

@@ -11,17 +11,22 @@ const POLL_INTERVAL_ERROR = 2000;
 
 export const useGetPing = () => {
   const dispatch = useAppDispatch();
-  const currentLspPort = useAppSelector(selectConfig).lspPort;
+  const config = useAppSelector(selectConfig);
+  const currentLspPort = config.lspPort;
+  const currentLspUrl = config.lspUrl;
   const canPing = Number.isFinite(currentLspPort) && currentLspPort > 0;
 
   const [pollingInterval, setPollingInterval] = useState(POLL_INTERVAL_ERROR);
   const [queryStarted, setQueryStarted] = useState(false);
 
-  const result = pingApi.endpoints.ping.useQuery(currentLspPort, {
-    pollingInterval,
-    refetchOnMountOrArgChange: true,
-    skip: !canPing,
-  });
+  const result = pingApi.endpoints.ping.useQuery(
+    { port: currentLspPort, lspUrl: currentLspUrl },
+    {
+      pollingInterval,
+      refetchOnMountOrArgChange: true,
+      skip: !canPing,
+    },
+  );
 
   useEffect(() => {
     if (canPing) return;

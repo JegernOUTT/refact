@@ -19,6 +19,8 @@ interface InferenceGlobalContextChangedNotifier {
     fun insecureSSLChanged(newValue: Boolean) {}
     fun completionMaxTokensChanged(newMaxTokens: Int) {}
     fun experimentalLspFlagEnabledChanged(newValue: Boolean) {}
+    fun httpHostChanged(newValue: String) {}
+    fun browserHostChanged(newValue: String) {}
 
     companion object {
         val TOPIC = Topic.create(

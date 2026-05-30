@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <title>Refact.ai Chat</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/dist/chat/style.css" />
+  </head>
+  <body>
+    <div id="refact-chat"></div>
+    <script>
+      (function () {
+        const origin = window.location.origin;
+        const port =
+          Number(window.location.port) ||
+          (window.location.protocol === "https:" ? 443 : 80);
+        try {
+          window.localStorage.removeItem("lspUrl");
+        } catch (_error) {}
+
+        const loopbackOrigin = "http://127.0.0.1:" + port;
+        const rewriteEngineUrl = function (value) {
+          if (typeof value === "string" && value.startsWith(loopbackOrigin)) {
+            return origin + value.slice(loopbackOrigin.length);
+          }
+          if (value instanceof URL && value.origin === loopbackOrigin) {
+            return new URL(origin + value.pathname + value.search + value.hash);
+          }
+          if (value instanceof Request && value.url.startsWith(loopbackOrigin)) {
+            return new Request(origin + value.url.slice(loopbackOrigin.length), value);
+          }
+          return value;
+        };
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = function (input, init) {
+          return originalFetch(rewriteEngineUrl(input), init);
+        };
+
+        const initialState = {
+          config: {
+            host: "web",
+            lspUrl: origin,
+            lspPort: port,
+            apiKey: null,
+            engineServed: true,
+            shiftEnterToSubmit: false,
+            themeProps: {
+              appearance: "dark",
+            },
+            features: {
+              statistics: true,
+              vecdb: true,
+              ast: true,
+              images: true,
+            },
+          },
+        };
+
+        window.__INITIAL_STATE__ = initialState;
+
+        window.addEventListener("load", function () {
+          const root = document.getElementById("refact-chat");
+          if (!root) return;
+
+          if (!window.RefactChat || typeof window.RefactChat.render !== "function") {
+            root.textContent = "Refact GUI bundle failed to load.";
+            return;
+          }
+
+          window.RefactChat.render(root, initialState.config);
+        });
+      })();
+    </script>
+    <script src="/dist/chat/index.umd.cjs"></script>
+  </body>
+</html>

@@ -83,6 +83,13 @@ jobs:
           rustup target add ${{ matrix.target }}
           rustup component add rust-src
 
+      - name: Install Node.js for engine-served GUI bundle
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: refact-agent/gui/package-lock.json
+
       - name: Install LLVM (Windows)
         if: startsWith(matrix.os, 'windows')
         run: choco install llvm -y

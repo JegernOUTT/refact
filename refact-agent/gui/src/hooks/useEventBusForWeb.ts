@@ -40,6 +40,28 @@ export function useEventBusForWeb() {
     if (config.host !== "web") {
       return;
     }
-    dispatch(updateConfig({ lspUrl, apiKey }));
-  }, [apiKey, lspUrl, dispatch, config.host]);
+
+    const origin = window.location.origin;
+    const nextLspUrl = config.engineServed ? origin : lspUrl || config.lspUrl;
+    const nextPort = config.engineServed
+      ? Number(window.location.port) ||
+        (window.location.protocol === "https:" ? 443 : 80)
+      : config.lspPort;
+
+    dispatch(
+      updateConfig({
+        lspUrl: nextLspUrl,
+        lspPort: nextPort,
+        apiKey,
+      }),
+    );
+  }, [
+    apiKey,
+    lspUrl,
+    dispatch,
+    config.host,
+    config.lspUrl,
+    config.lspPort,
+    config.engineServed,
+  ]);
 }

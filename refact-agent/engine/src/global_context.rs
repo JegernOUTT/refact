@@ -62,9 +62,14 @@ pub struct CommandLine {
         long,
         short = "p",
         default_value = "0",
-        help = "Bind 127.0.0.1:<port> to listen for HTTP requests, such as /v1/code-completion, /v1/chat, /v1/caps."
+        help = "Bind <host>:<port> to listen for HTTP requests, such as /v1/code-completion, /v1/chat, /v1/caps."
     )]
     pub http_port: u16,
+    #[structopt(
+        long,
+        help = "Host/address for the HTTP server. Defaults to 127.0.0.1, or 0.0.0.0 with --inside-container. Use 0.0.0.0 only on trusted networks."
+    )]
+    pub http_host: Option<String>,
     #[structopt(
         long,
         default_value = "0",
@@ -849,6 +854,7 @@ pub mod tests {
             logs_to_file: String::new(),
             insecure: true,
             http_port: 0,
+            http_host: None,
             lsp_port: 0,
             lsp_stdin_stdout: 0,
             verbose: false,

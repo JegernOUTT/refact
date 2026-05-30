@@ -19,7 +19,6 @@ import com.intellij.openapi.fileEditor.*
 import com.intellij.openapi.keymap.impl.ui.KeymapPanel
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.roots.ModuleRootEvent
 import com.intellij.openapi.roots.ModuleRootListener
 import com.intellij.openapi.roots.ProjectRootManager
@@ -27,10 +26,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.StandardFileSystems
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.testFramework.LightVirtualFile
-import com.intellij.ui.content.Content
-import com.intellij.ui.content.ContentFactory
 import com.intellij.util.Alarm
 import com.intellij.util.SystemProperties
 import com.intellij.util.concurrency.AppExecutorUtil
@@ -87,9 +83,6 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
         flushDebounceMs = 16L,
         parentDisposable = this
     )
-
-    private var browserContent: Content? = null
-    private var browserContentWebView: ChatWebView? = null
 
     private val selectionDebouncer = EventDebouncer<Unit>(150L, this) {
         if (isPanelVisible) {
@@ -303,36 +296,13 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
 
     private fun handleOpenChatInBrowser() {
         ApplicationManager.getApplication().invokeLater {
-            val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Refact") ?: return@invokeLater
-            browserContent?.let { content ->
-                if (!Disposer.isDisposed(content) && browserContentWebView?.webView?.isDisposed == false) {
-                    toolWindow.contentManager.setSelectedContent(content, true)
-                    return@invokeLater
-                }
-                browserContent = null
-                browserContentWebView = null
+            val holder = project.service<com.smallcloud.refactai.lsp.LSPProcessHolder>()
+            val url = holder.browserUrlOrNull()
+            if (url == null) {
+                holder.ensureStartedAsync("open-chat-in-browser")
+                return@invokeLater
             }
-
-            val chatWebView = ChatWebView(this.editor) { event ->
-                paneScope.launch { handleEvent(event) }
-            }
-            val content = ContentFactory.getInstance().createContent(
-                chatWebView.webView.component,
-                "Browser",
-                true
-            )
-            Disposer.register(content, chatWebView)
-            Disposer.register(content) {
-                if (browserContent === content) {
-                    browserContent = null
-                    browserContentWebView = null
-                }
-            }
-            content.isCloseable = true
-            browserContent = content
-            browserContentWebView = chatWebView
-            toolWindow.contentManager.addContent(content)
-            toolWindow.contentManager.setSelectedContent(content, true)
+            BrowserUtil.browse(url)
         }
     }
 
@@ -1081,13 +1051,6 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
         selectionDebouncer.cancel()
         configDebouncer.cancel()
         messageQueue.dispose()
-        browserContent?.let { content ->
-            if (!Disposer.isDisposed(content)) {
-                Disposer.dispose(content)
-            }
-        }
-        browserContent = null
-        browserContentWebView = null
         if (browserLazy.isInitialized()) {
             browser.dispose()
         }

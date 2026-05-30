@@ -205,6 +205,18 @@
 					"description": "Enable experimental features.",
 					"default": false,
 					"order": 14
+				},
+				"refactai.httpHost": {
+					"type": "string",
+					"markdownDescription": "Host/address the local Refact engine HTTP server binds to. Use `0.0.0.0` to allow access from your local network. This exposes local Refact APIs to your network; only use on trusted networks.",
+					"default": "0.0.0.0",
+					"order": 15
+				},
+				"refactai.browserHost": {
+					"type": "string",
+					"markdownDescription": "Host/IP to open for the engine-served Refact UI. Leave empty to open `127.0.0.1`. For LAN access, set this to this machine's LAN IP, for example `192.168.1.20`.",
+					"default": "",
+					"order": 16
 				}
 			}
 		},

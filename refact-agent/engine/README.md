@@ -40,7 +40,8 @@ cargo run -- --http-port 8001 --logs-stderr --workspace-folder /path/to/project 
 
 Useful flags:
 
-- `--http-port <port>` binds the HTTP API to `127.0.0.1:<port>`.
+- `--http-port <port>` binds the HTTP API and embedded GUI to `127.0.0.1:<port>` by default.
+- `--http-host <ip>` changes the HTTP bind address. Use `0.0.0.0` only on trusted networks because chat/tool APIs are reachable from the LAN when firewall rules allow it. When HTTP starts, the engine advertises the GUI over mDNS as `http://<hostname>.local:<port>/` where the local network supports mDNS.
 - `--lsp-stdin-stdout 1` runs the LSP transport over stdio.
 - `--lsp-port <port>` runs LSP over TCP.
 - `--workspace-folder <path>` seeds workspace indexing before an IDE connects.
@@ -50,6 +51,18 @@ Useful flags:
 - `--only-create-yaml-configs` creates default YAML configuration files and exits.
 
 Run `cargo run -- --help` for the full option list.
+
+## Embedded standalone GUI
+
+The engine serves the standalone chat UI from the same HTTP origin:
+
+```text
+http://127.0.0.1:<http-port>/
+```
+
+`cargo build`, `cargo run`, and release builds automatically run the GUI build from `refact-agent/gui`, copy `dist/chat` into `refact-agent/engine/assets/chat/dist/chat`, and embed those assets into `refact-lsp`. Node.js and npm must be available for normal engine builds. Set `REFACT_SKIP_GUI_BUILD=1` only for API-only developer builds that intentionally do not refresh the embedded GUI assets.
+
+The embedded page uses `window.location.origin` for `/v1` API and SSE calls, so browser clients and LAN clients use the same engine origin that served the page. The engine also advertises a DNS-SD service named `_refact-lsp._tcp.local.` and logs the `http://<hostname>.local:<port>/` URL when mDNS starts successfully.
 
 ## Tests
 
@@ -93,6 +106,7 @@ Selected HTTP endpoints under `/v1`:
 | `/knowledge/*`, `/knowledge-graph` | Memory and knowledge graph operations |
 | `/tasks/*` | Task board operations |
 | `/checkpoints-preview`, `/checkpoints-restore` | Workspace rollback preview and restore |
+| `/`, `/index.html`, `/favicon.ico`, `/dist/chat/*` | Embedded chat GUI assets served by the HTTP server |
 
 Chat clients use the commands API plus `/v1/chats/subscribe` SSE events rather than the legacy one-shot chat endpoint.
 

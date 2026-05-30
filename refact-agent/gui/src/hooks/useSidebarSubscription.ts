@@ -891,14 +891,20 @@ export function useSidebarSubscription() {
       scheduleReconnect();
     };
 
-    disconnectRef.current = subscribeToSidebarEvents(port, apiKey, {
-      onEvent,
-      onError,
-      onDisconnected,
-    });
+    disconnectRef.current = subscribeToSidebarEvents(
+      port,
+      apiKey,
+      {
+        onEvent,
+        onError,
+        onDisconnected,
+      },
+      config.lspUrl,
+    );
   }, [
     config.lspPort,
     config.apiKey,
+    config.lspUrl,
     dispatch,
     prepareInitialHistory,
     processNotification,

@@ -60,6 +60,25 @@ export class RustBinaryBlob {
         return "http2://127.0.0.1:" + port.toString() + "/";
     }
 
+    public browser_url(): string {
+        const port = this.get_port();
+        if (!port) {
+            return "";
+        }
+        const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
+        const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_mdns_host();
+        return `http://${host}:${port}/`;
+    }
+
+    private default_mdns_host(): string {
+        const hostname = require("os").hostname() as string;
+        const label = hostname
+            .toLowerCase()
+            .replace(/[^a-z0-9-]/g, "-")
+            .replace(/^-+|-+$/g, "");
+        return label ? `${label}.local` : "refact.local";
+    }
+
     public attemping_to_reach(): string {
         let xdebug = this.x_debug();
         if (xdebug) {
@@ -96,10 +115,12 @@ export class RustBinaryBlob {
                 await this.start_lsp_socket();
                 return;
             }
+            const httpHost = vscode.workspace.getConfiguration().get<string>("refactai.httpHost")?.trim() || "0.0.0.0";
             let new_cmdline: string[] = [
                 join(this.asset_path, "refact-lsp"),
                 "--ping-message", ping_response,
                 "--http-port", port.toString(),
+                "--http-host", httpHost,
                 "--lsp-stdin-stdout", "1",
             ];
 

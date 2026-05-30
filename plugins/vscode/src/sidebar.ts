@@ -168,7 +168,9 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 event.affectsConfiguration("refactai.vecdb") ||
                 event.affectsConfiguration("refactai.ast") ||
                 event.affectsConfiguration("refactai.submitChatWithShiftEnter") ||
-                event.affectsConfiguration("refactai.xperimental")
+                event.affectsConfiguration("refactai.xperimental") ||
+                event.affectsConfiguration("refactai.httpHost") ||
+                event.affectsConfiguration("refactai.browserHost")
             ) {
                 this.handleSettingsChange();
             }
@@ -339,7 +341,8 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             lspPort: port,
             shiftEnterToSubmit: submitChatWithShiftEnter,
             features: {vecdb, ast},
-            currentWorkspaceName: currentActiveWorkspaceName
+            currentWorkspaceName: currentActiveWorkspaceName,
+            lspUrl: global.rust_binary_blob?.browser_url?.() || undefined,
         });
 
         this._view?.webview.postMessage(message);
@@ -520,18 +523,12 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     }
 
     private async openChatInBrowser() {
-        const panel = vscode.window.createWebviewPanel(
-            "refact-chat-browser",
-            "Refact.ai Chat",
-            vscode.ViewColumn.One,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true,
-                localResourceRoots: [this.context.extensionUri],
-            }
-        );
-        panel.webview.html = await this.html_main_screen(panel.webview, undefined, true);
-        panel.webview.onDidReceiveMessage(this.handleEvents);
+        const url = global.rust_binary_blob?.browser_url?.() ?? "";
+        if (!url) {
+            vscode.window.showWarningMessage("Refact engine is not running yet.");
+            return;
+        }
+        await vscode.env.openExternal(vscode.Uri.parse(url));
     }
 
     private async handleEvents(e: any) {
@@ -1017,6 +1014,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 completeManual,
             },
             lspPort: port,
+            lspUrl: global.rust_binary_blob?.browser_url?.() || undefined,
             currentWorkspaceName: currentActiveWorkspaceName,
         };
 

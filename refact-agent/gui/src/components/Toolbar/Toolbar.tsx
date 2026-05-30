@@ -32,6 +32,7 @@ import {
   MouseEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -125,6 +126,12 @@ const ToolbarIconButton = ({
   </HoverCard.Root>
 );
 
+function normalizeEngineUrl(lspUrl: string | undefined, lspPort: number): string {
+  const fallback = `http://127.0.0.1:${lspPort}`;
+  const value = lspUrl?.trim() ? lspUrl.trim() : fallback;
+  return value.replace(/\/+$/, "");
+}
+
 export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const dispatch = useAppDispatch();
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -132,6 +139,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
   const { host, lspPort, lspUrl } = useConfig();
   const openUrl = useOpenUrl();
+  const engineUrl = useMemo(
+    () => normalizeEngineUrl(lspUrl, lspPort),
+    [lspPort, lspUrl],
+  );
 
   const tabs = useAppSelector(selectTabsDisplayData);
   const allThreads = useAppSelector(selectAllThreads);
@@ -218,8 +229,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   }, [createTask, dispatch]);
 
   const onOpenChatInBrowser = useCallback(() => {
-    openUrl(lspUrl ?? `http://127.0.0.1:${lspPort}`);
-  }, [lspPort, lspUrl, openUrl]);
+    openUrl(engineUrl);
+  }, [engineUrl, openUrl]);
 
   const goToTab = useCallback(
     (tab: Tab) => {
@@ -537,6 +548,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       <div className={styles.toolbarSection}>
         <ConnectionStatusIndicator />
+        <span className={styles.engineUrl} title={engineUrl} aria-label={`Engine URL ${engineUrl}`}>
+          {engineUrl}
+        </span>
       </div>
 
       <div className={styles.toolbarDivider} />

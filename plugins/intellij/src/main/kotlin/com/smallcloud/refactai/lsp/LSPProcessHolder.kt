@@ -106,6 +106,28 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         }
     }
 
+    private fun defaultMdnsHost(): String {
+        val label = runCatching { java.net.InetAddress.getLocalHost().hostName }
+            .getOrNull()
+            ?.lowercase()
+            ?.replace(Regex("[^a-z0-9-]"), "-")
+            ?.trim('-')
+            ?.takeIf { it.isNotEmpty() }
+            ?: "refact"
+        return "$label.local"
+    }
+
+    open fun browserUrlOrNull(): URI? {
+        val base = baseUrlOrNull() ?: return null
+        val configuredHost = InferenceGlobalContext.browserHost.trim()
+        val host = if (configuredHost.isNotEmpty() && configuredHost != "0.0.0.0") {
+            configuredHost
+        } else {
+            defaultMdnsHost()
+        }
+        return URI("http://$host:${base.port}/")
+    }
+
     private fun isCustomPortConfigured(): Boolean {
         return InferenceGlobalContext.xDebugLSPPort != null
     }
@@ -279,6 +301,10 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 override fun experimentalLspFlagEnabledChanged(newValue: Boolean) {
                     settingsChanged("experimental-flag-changed")
                 }
+
+                override fun httpHostChanged(newValue: String) {
+                    settingsChanged("http-host-changed")
+                }
             })
 
         Runtime.getRuntime().addShutdownHook(exitThread)
@@ -337,6 +363,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
             vecdbFileLimit = InferenceGlobalContext.vecdbFileLimit,
             insecureSSL = InferenceGlobalContext.insecureSSL,
             experimental = InferenceGlobalContext.experimentalLspFlagEnabled,
+            httpHost = InferenceGlobalContext.httpHost.trim().ifEmpty { "0.0.0.0" },
         )
 
         val processIsAlive = process?.isAlive == true

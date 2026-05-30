@@ -394,12 +394,18 @@ function parseSseBlock(block: string): string | null {
   return dataStr === "[DONE]" ? null : dataStr;
 }
 
+function lspBaseUrl(port: number, lspUrl?: string): string {
+  const trimmed = lspUrl?.trim();
+  return (trimmed ? trimmed : `http://127.0.0.1:${port}`).replace(/\/+$/, "");
+}
+
 export function subscribeToSidebarEvents(
   port: number,
   apiKey: string | null,
   callbacks: SidebarSubscriptionCallbacks,
+  lspUrl?: string,
 ): () => void {
-  const url = `http://127.0.0.1:${port}/v1/sidebar/subscribe`;
+  const url = `${lspBaseUrl(port, lspUrl)}/v1/sidebar/subscribe`;
   const abortController = new AbortController();
   const state = { connected: false, lastSeq: -1, aborted: false };
   let idleTimer: ReturnType<typeof setTimeout> | null = null;

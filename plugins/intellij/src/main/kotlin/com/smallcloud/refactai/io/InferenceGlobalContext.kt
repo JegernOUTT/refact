@@ -147,6 +147,26 @@ class InferenceGlobalContext : Disposable {
               .experimentalLspFlagEnabledChanged(newValue)
         }
 
+    var httpHost: String
+        get() = AppSettingsState.httpHost
+        set(newValue) {
+            val normalized = newValue.trim().ifEmpty { "0.0.0.0" }
+            if (normalized == httpHost) return
+            messageBus
+                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
+                .httpHostChanged(normalized)
+        }
+
+    var browserHost: String
+        get() = AppSettingsState.browserHost
+        set(newValue) {
+            val normalized = newValue.trim()
+            if (normalized == browserHost) return
+            messageBus
+                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
+                .browserHostChanged(normalized)
+        }
+
     var xDebugLSPPort: Int?
         get() { return AppSettingsState.xDebugLSPPort }
         set(newValue) {
