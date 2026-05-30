@@ -15,6 +15,7 @@ import {
   isToolMessage,
   isSystemMessage,
   isSummarizationMessage,
+  isVisibleCompressionFailureEvent,
   SummarizationMessage,
   syntheticCompressionReportMessage,
   syntheticSummarizationMessage,
@@ -157,6 +158,17 @@ type DisplayItemSummarization = {
   message: SummarizationMessage;
 };
 
+function syntheticCompressionFailureError(
+  message: ChatMessages[number],
+): ErrorMessage {
+  return {
+    role: "error",
+    content: typeof message.content === "string" ? message.content : "",
+    message_id: message.message_id,
+    extra: message.extra,
+  };
+}
+
 export type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
@@ -294,6 +306,15 @@ function buildDisplayItemsFromIndex(
     const head = messages[i];
 
     if (isToolMessage(head)) continue;
+    if (isVisibleCompressionFailureEvent(head)) {
+      items.push({
+        type: "error",
+        key: getMessageKey(head, i),
+        messageIndex: i,
+        errors: [syntheticCompressionFailureError(head)],
+      });
+      continue;
+    }
     if (isEventMessage(head)) continue;
     if (head.role === "plan") continue;
 
@@ -677,6 +698,15 @@ export function buildDisplayItems(
     const head = messages[i];
 
     if (isToolMessage(head)) continue;
+    if (isVisibleCompressionFailureEvent(head)) {
+      items.push({
+        type: "error",
+        key: getMessageKey(head, i),
+        messageIndex: i,
+        errors: [syntheticCompressionFailureError(head)],
+      });
+      continue;
+    }
     if (isEventMessage(head)) continue;
     if (head.role === "plan") continue;
 

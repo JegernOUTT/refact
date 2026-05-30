@@ -685,6 +685,18 @@ export function isEventMessage(message: ChatMessage): message is EventMessage {
   return message.role === "event" && getEventMetadata(message) !== null;
 }
 
+export function isVisibleCompressionFailureEvent(
+  message: ChatMessage,
+): message is EventMessage {
+  if (!isEventMessage(message)) return false;
+  const metadata = getEventMetadata(message);
+  return (
+    metadata?.subkind === "system_notice" &&
+    metadata.source === "chat.summarizer" &&
+    message.content.startsWith("Context compression failed:")
+  );
+}
+
 export function isPlanMessage(message: ChatMessage): message is PlanMessage {
   return message.role === "plan";
 }
