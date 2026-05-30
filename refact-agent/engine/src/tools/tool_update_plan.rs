@@ -75,26 +75,25 @@ impl Tool for ToolUpdatePlan {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
-        let result_truncation = internal_roles::bounded_plan_delta_note(note.clone()).1;
-
-        let seq = {
+        let (seq, result_truncation) = {
             let mut session = session_arc.lock().await;
             if !has_base_plan_including_queued(&session) {
                 return Err("no plan to update; call set_plan first".to_string());
             }
             let seq = plan_delta_count_including_queued(&session) + 1;
-            session.queue_post_tool_side_effect(internal_roles::plan_delta(
+            let (delta, result_truncation) = internal_roles::plan_delta_with_truncation(
                 "tool.update_plan",
                 json!({"seq": seq, "summary": summary}),
                 note,
-            ));
+            );
+            session.queue_post_tool_side_effect(delta);
             session.queue_post_tool_side_effect(internal_roles::event(
                 EventSubkind::SystemNotice,
                 "tool.update_plan",
                 json!({"seq": seq, "summary": summary}),
                 format!("Plan updated (delta {seq})"),
             ));
-            seq
+            (seq, result_truncation)
         };
 
         Ok((
@@ -490,6 +489,33 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, "no plan to update; call set_plan first");
+    }
+
+    #[tokio::test]
+    async fn oversized_note_without_base_plan_rejects_without_side_effects() {
+        let session = ChatSession::new(CHAT_ID.to_string());
+        let (gcx, ccx) = ccx_for_session(session).await;
+        let mut tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let note = "a".repeat(internal_roles::MAX_PLAN_DELTA_CHARS + 100);
+        let args = HashMap::from([("note".to_string(), json!(note))]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "no plan to update; call set_plan first");
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        assert!(session.post_tool_side_effects.is_empty());
     }
 
     #[tokio::test]

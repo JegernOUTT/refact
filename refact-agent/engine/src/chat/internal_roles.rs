@@ -66,9 +66,20 @@ pub fn plan_delta(
     payload: serde_json::Value,
     content: impl Into<String>,
 ) -> ChatMessage {
+    plan_delta_with_truncation(source, payload, content).0
+}
+
+pub fn plan_delta_with_truncation(
+    source: impl Into<String>,
+    payload: serde_json::Value,
+    content: impl Into<String>,
+) -> (ChatMessage, Option<PlanDeltaTruncation>) {
     let (content, truncation) = bounded_plan_delta_note(content);
     let payload = plan_delta_payload_with_truncation(payload, truncation);
-    event(EventSubkind::PlanDelta, source, payload, content)
+    (
+        event(EventSubkind::PlanDelta, source, payload, content),
+        truncation,
+    )
 }
 
 pub fn bounded_plan_delta_note(
@@ -342,6 +353,25 @@ mod tests {
     }
 
     #[test]
+    fn plan_delta_with_truncation_returns_message_and_metadata() {
+        let oversized = "a".repeat(MAX_PLAN_DELTA_CHARS + 100);
+        let (msg, truncation) =
+            plan_delta_with_truncation("tool.update_plan", json!({"seq": 1}), oversized);
+        let truncation = truncation.expect("expected truncation metadata");
+        let body = match &msg.content {
+            ChatContent::SimpleText(s) => s.as_str(),
+            _ => panic!("expected SimpleText"),
+        };
+
+        assert!(body.chars().count() <= MAX_PLAN_DELTA_CHARS);
+        assert_eq!(truncation.original_chars, MAX_PLAN_DELTA_CHARS + 100);
+        assert!(truncation.kept_chars < MAX_PLAN_DELTA_CHARS);
+        let payload = &msg.extra["event"]["payload"];
+        assert_eq!(payload["original_chars"], json!(truncation.original_chars));
+        assert_eq!(payload["kept_chars"], json!(truncation.kept_chars));
+    }
+
+    #[test]
     fn plan_delta_helper_leaves_small_content_unchanged() {
         let msg = plan_delta("tool.update_plan", json!({"seq": 1}), "small note");
         let body = match &msg.content {
@@ -350,6 +380,20 @@ mod tests {
         };
 
         assert_eq!(body, "small note");
+        assert!(msg.extra["event"]["payload"].get("truncated").is_none());
+    }
+
+    #[test]
+    fn plan_delta_with_truncation_leaves_small_content_unchanged() {
+        let (msg, truncation) =
+            plan_delta_with_truncation("tool.update_plan", json!({"seq": 1}), "small note");
+        let body = match &msg.content {
+            ChatContent::SimpleText(s) => s.as_str(),
+            _ => panic!("expected SimpleText"),
+        };
+
+        assert_eq!(body, "small note");
+        assert_eq!(truncation, None);
         assert!(msg.extra["event"]["payload"].get("truncated").is_none());
     }
 }
