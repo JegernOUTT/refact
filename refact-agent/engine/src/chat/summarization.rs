@@ -9,7 +9,7 @@ use crate::call_validation::{ChatContent, ChatMessage, DiffChunk};
 use crate::chat::diagnostics::{filter_ui_only_messages, is_ui_only_message};
 use crate::chat::history_limit::{compute_context_budget, ContextPressure};
 use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason};
+use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason, SessionState};
 use crate::global_context::GlobalContext;
 use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
 use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
@@ -245,10 +245,81 @@ fn segment_is_matching_summary(messages: &[ChatMessage], segment: SummarySegment
         && segment_summary_source_hash(&messages[segment.start]).is_some()
 }
 
+fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
+    matches!(
+        message.finish_reason.as_deref(),
+        Some("tool_calls" | "function_call" | "tool_use")
+    )
+}
+
+fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
+    let result_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|message| matches!(message.role.as_str(), "tool" | "diff"))
+        .filter_map(|message| {
+            (!message.tool_call_id.is_empty()).then_some(message.tool_call_id.as_str())
+        })
+        .collect();
+
+    messages.iter().any(|message| {
+        if message.role != "assistant" {
+            return false;
+        }
+        let Some(tool_calls) = message.tool_calls.as_ref() else {
+            return assistant_finish_reason_requests_tools(message);
+        };
+        tool_calls
+            .iter()
+            .any(|tool_call| !result_ids.contains(tool_call.id.as_str()))
+    })
+}
+
+fn tail_has_meaningful_non_error_content(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        !is_ui_only_message(message)
+            && !matches!(message.role.as_str(), "event" | "error")
+            && !message.content.content_text_only().trim().is_empty()
+    })
+}
+
+pub fn eligible_tail_non_user_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
+    let last_user = messages
+        .iter()
+        .rposition(|message| message.role == "user")?;
+    let mut start = last_user + 1;
+    while start < messages.len() && is_excluded_from_segment(&messages[start]) {
+        start += 1;
+    }
+    if start >= messages.len() {
+        return None;
+    }
+
+    let tail = &messages[start..];
+    if tail.iter().any(is_excluded_from_segment) {
+        return None;
+    }
+    if !tail_has_meaningful_non_error_content(tail) {
+        return None;
+    }
+    if tail_has_pending_tool_calls(tail) {
+        return None;
+    }
+
+    let segment = SummarySegment {
+        start,
+        end: messages.len() - 1,
+    };
+    if segment_is_matching_summary(messages, segment) {
+        return None;
+    }
+    Some(segment)
+}
+
 fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
     closed_non_user_segments(messages)
         .into_iter()
         .find(|segment| !segment_is_matching_summary(messages, *segment))
+        .or_else(|| eligible_tail_non_user_segment(messages))
 }
 
 fn estimated_context_pressure(messages: &[ChatMessage], effective_n_ctx: usize) -> ContextPressure {
@@ -1040,6 +1111,14 @@ pub async fn apply_segment_summarization(
             emit_compression_skipped(&mut session, CompressionReason::MaxAttemptsReached);
             return false;
         }
+        if matches!(
+            session.runtime.state,
+            SessionState::Generating | SessionState::ExecutingTools
+        ) || session.draft_message.is_some()
+        {
+            emit_compression_skipped(&mut session, CompressionReason::NoEligibleSegment);
+            return false;
+        }
         if last_visible_has_pending_tool_calls(&session.messages) {
             emit_compression_skipped(&mut session, CompressionReason::PendingToolCalls);
             return false;
@@ -1443,6 +1522,116 @@ mod tests {
                 SummarySegment { start: 3, end: 3 },
             ]
         );
+    }
+
+    #[test]
+    fn tail_segment_one_user_huge_assistant_is_eligible() {
+        let huge = "assistant output ".repeat(1000);
+        let mut messages = vec![user("summarize this"), assistant(&huge)];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed tail",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(messages[1].content.content_text_only(), "compressed tail");
+    }
+
+    #[test]
+    fn tail_segment_pending_assistant_tool_call_is_not_eligible() {
+        let mut pending = assistant_with_tool_call();
+        pending.finish_reason = Some("tool_calls".to_string());
+        let mut messages = vec![user("run tool"), pending];
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+    }
+
+    #[test]
+    fn tail_segment_completed_tool_call_is_eligible() {
+        let mut assistant_call = assistant_with_tool_call();
+        assistant_call.finish_reason = Some("tool_calls".to_string());
+        let mut messages = vec![user("run tool"), assistant_call, tool("result")];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 1, end: 2 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "tool turn summary",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 2);
+        assert!(is_segment_summary(&messages[1]));
+    }
+
+    #[test]
+    fn tail_segment_ui_only_event_is_not_eligible() {
+        let mut messages = vec![user("hello"), event("just ui")];
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+    }
+
+    #[test]
+    fn closed_segment_is_preferred_before_tail_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant("tail new"),
+        ];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 3, end: 3 })
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "closed summary",
+            "test-model",
+        ));
+        assert_eq!(messages[1].content.content_text_only(), "closed summary");
+        assert_eq!(messages[3].content.content_text_only(), "tail new");
+    }
+
+    #[test]
+    fn tail_segment_existing_summary_is_not_summarized_again() {
+        let mut messages = vec![user("first"), assistant("tail")];
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "tail summary",
+            "test-model",
+        ));
+        let once = serde_json::to_string(&messages).unwrap();
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "tail summary changed",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), once);
     }
 
     #[test]
