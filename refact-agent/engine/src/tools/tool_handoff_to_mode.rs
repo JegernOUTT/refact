@@ -307,7 +307,9 @@ impl Tool for ToolHandoffToMode {
                 .collect();
             let result_ids: std::collections::HashSet<&str> = messages
                 .iter()
-                .filter(|m| m.role == "tool")
+                .filter(|m| {
+                    (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty()
+                })
                 .map(|m| m.tool_call_id.as_str())
                 .collect();
             let mut missing_ids: Vec<&str> = call_ids.difference(&result_ids).copied().collect();
@@ -813,6 +815,37 @@ mod tests {
         ];
         let err = tool_with_snapshot(snap).await.unwrap_err();
         assert!(err.contains("tool calls without results"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn handoff_accepts_diff_messages_as_tool_call_results() {
+        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+        let mut snap = source_snapshot();
+        snap.messages = vec![
+            ChatMessage::new("user".to_string(), "Please help.".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call-diff".to_string(),
+                    index: Some(0),
+                    function: ChatToolFunction {
+                        name: "apply_patch".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    tool_type: "function".to_string(),
+                    extra_content: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "diff".to_string(),
+                content: ChatContent::SimpleText("diff accepted".to_string()),
+                tool_call_id: "call-diff".to_string(),
+                ..Default::default()
+            },
+        ];
+        tool_with_snapshot(snap).await.unwrap();
     }
 
     #[tokio::test]
