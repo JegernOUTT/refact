@@ -112,7 +112,7 @@ describe("ChatForm", () => {
   test("dedupes preview tile when attached file is returned with a shortened path", async () => {
     const previewSpy = vi.fn();
     server.use(
-      http.post("http://127.0.0.1:8001/v1/at-command-preview", () => {
+      http.post("*/v1/at-command-preview", () => {
         previewSpy();
         return HttpResponse.json({
           messages: [

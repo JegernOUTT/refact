@@ -135,7 +135,7 @@ describe("MarketplacePluginCard", () => {
 
   it("renders plugin name, description, version and tags from engine payload", () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/plugins/install", () => {
+      http.post("*/v1/plugins/install", () => {
         return HttpResponse.json({ ok: true });
       }),
     );
@@ -163,7 +163,7 @@ describe("MarketplacePluginCard", () => {
   it("shows Installed and Uninstall button when isInstalled", () => {
     server.use(
       http.delete(
-        "http://127.0.0.1:8001/v1/plugins/installed/my-plugin",
+        "*/v1/plugins/installed/my-plugin",
         () => {
           return HttpResponse.json({ deleted: true });
         },
@@ -190,7 +190,7 @@ describe("MarketplacePluginCard", () => {
 describe("SkillEditor", () => {
   it("renders form fields reflecting loaded skill data", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/skills/my_skill", () => {
+      http.get("*/v1/ext/skills/my_skill", () => {
         return HttpResponse.json({
           name: "my_skill",
           description: "A test skill",
@@ -241,7 +241,7 @@ const CONFIG_STATE = {
 describe("Extensions", () => {
   it("shows error state when registry fails to load", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/registry", () => {
+      http.get("*/v1/ext/registry", () => {
         return new HttpResponse(null, { status: 500 });
       }),
     );
@@ -264,7 +264,7 @@ describe("Extensions", () => {
 
   it("shows delete confirmation dialog and can be cancelled", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/registry", () => {
+      http.get("*/v1/ext/registry", () => {
         return HttpResponse.json({
           skills: [
             {
@@ -310,7 +310,7 @@ describe("Extensions", () => {
 
   it("opens dedicated skills marketplace from skills tab", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/registry", () => {
+      http.get("*/v1/ext/registry", () => {
         return HttpResponse.json({
           skills: [],
           slash_commands: [],
@@ -338,7 +338,7 @@ describe("Extensions", () => {
 
   it("opens dedicated commands marketplace from commands tab", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/registry", () => {
+      http.get("*/v1/ext/registry", () => {
         return HttpResponse.json({
           skills: [],
           slash_commands: [],

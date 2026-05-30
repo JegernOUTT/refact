@@ -16,7 +16,7 @@ const CONFIG_STATE = {
 describe("TaskCreate", () => {
   it("task_create_form_accepts_target_files_input", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks", () => HttpResponse.json([])),
+      http.get("*/v1/tasks", () => HttpResponse.json([])),
     );
 
     const { user } = render(<TaskList />, { preloadedState: CONFIG_STATE });
@@ -31,8 +31,8 @@ describe("TaskCreate", () => {
   it("task_create_form_posts_target_files_array", async () => {
     let postedBody: unknown;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks", () => HttpResponse.json([])),
-      http.post("http://127.0.0.1:8001/v1/tasks", async ({ request }) => {
+      http.get("*/v1/tasks", () => HttpResponse.json([])),
+      http.post("*/v1/tasks", async ({ request }) => {
         postedBody = await request.json();
         return HttpResponse.json({
           id: "task-1",

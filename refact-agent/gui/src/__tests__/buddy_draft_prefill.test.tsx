@@ -43,10 +43,10 @@ const MOCK_SKILL_DETAIL = {
 describe("SkillEditor_kind_mismatch_shows_error", () => {
   it("shows kind mismatch when command draft given to skill editor", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/skills/my_skill", () =>
+      http.get("*/v1/ext/skills/my_skill", () =>
         HttpResponse.json(MOCK_SKILL_DETAIL),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/drafts/draft-cmd-1", () =>
+      http.get("*/v1/buddy/drafts/draft-cmd-1", () =>
         HttpResponse.json(COMMAND_DRAFT),
       ),
     );

@@ -32,10 +32,10 @@ describe("useGetCapsQuery", () => {
   it("keeps retrying when caps loads before chat models are ready", async () => {
     let capsRequests = 0;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ping", () => {
+      http.get("*/v1/ping", () => {
         return HttpResponse.text("pong");
       }),
-      http.get("http://127.0.0.1:8001/v1/caps", () => {
+      http.get("*/v1/caps", () => {
         capsRequests += 1;
         if (capsRequests === 1) {
           return HttpResponse.json(EMPTY_CAPS_RESPONSE);
@@ -66,7 +66,7 @@ describe("useGetCapsQuery", () => {
         return HttpResponse.text("pong");
       }),
       http.get("/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
-      http.get("http://127.0.0.1:8001/v1/caps", () =>
+      http.get("*/v1/caps", () =>
         HttpResponse.json(STUB_CAPS_RESPONSE),
       ),
     );
@@ -103,11 +103,11 @@ describe("useGetCapsQuery", () => {
   it("sanitizes stale ping paths when building local fallback ping URLs", async () => {
     let pingUrl = "";
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ping", ({ request }) => {
+      http.get("*/v1/ping", ({ request }) => {
         pingUrl = request.url;
         return HttpResponse.text("pong");
       }),
-      http.get("http://127.0.0.1:8001/v1/caps", () =>
+      http.get("*/v1/caps", () =>
         HttpResponse.json(STUB_CAPS_RESPONSE),
       ),
     );

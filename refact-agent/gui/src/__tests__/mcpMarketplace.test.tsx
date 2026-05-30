@@ -325,10 +325,10 @@ describe("SourceSelector", () => {
 describe("MCPMarketplace", () => {
   it("renders marketplace page with server cards from API", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+      http.get("*/v1/mcp/marketplace", () => {
         return HttpResponse.json(MOCK_RESPONSE);
       }),
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+      http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
       }),
     );
@@ -348,10 +348,10 @@ describe("MCPMarketplace", () => {
 
   it("renders source selector tabs when sources are returned", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+      http.get("*/v1/mcp/marketplace", () => {
         return HttpResponse.json(MOCK_RESPONSE);
       }),
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+      http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
       }),
     );
@@ -379,13 +379,13 @@ describe("MCPMarketplace", () => {
       tags: ["database"],
     };
     server.use(
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+      http.get("*/v1/mcp/marketplace", () => {
         return HttpResponse.json({
           servers: [MOCK_SERVER, secondServer],
           sources: MOCK_SOURCES,
         });
       }),
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+      http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
       }),
     );
@@ -411,10 +411,10 @@ describe("MCPMarketplace", () => {
 
   it("shows installed indicator for installed servers", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+      http.get("*/v1/mcp/marketplace", () => {
         return HttpResponse.json(MOCK_RESPONSE);
       }),
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+      http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({
           installed: [
             {
@@ -442,7 +442,7 @@ describe("MCPMarketplace", () => {
 
   it("shows Smithery configure callout when Smithery source lacks API key", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+      http.get("*/v1/mcp/marketplace", () => {
         return HttpResponse.json({
           servers: [MOCK_SERVER],
           sources: [
@@ -451,7 +451,7 @@ describe("MCPMarketplace", () => {
           ],
         });
       }),
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+      http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
       }),
     );
@@ -473,10 +473,10 @@ describe("MCPMarketplace", () => {
 
   it("source settings dialog opens and closes", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace", () => {
+      http.get("*/v1/mcp/marketplace", () => {
         return HttpResponse.json(MOCK_RESPONSE);
       }),
-      http.get("http://127.0.0.1:8001/v1/mcp/marketplace/installed", () => {
+      http.get("*/v1/mcp/marketplace/installed", () => {
         return HttpResponse.json({ installed: [] });
       }),
     );

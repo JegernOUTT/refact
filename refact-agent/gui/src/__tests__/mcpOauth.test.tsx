@@ -20,7 +20,7 @@ const PRELOADED_STATE = {
 
 function mockStatus(body: object) {
   server.use(
-    http.get("http://127.0.0.1:8001/v1/mcp/oauth/status", () => {
+    http.get("*/v1/mcp/oauth/status", () => {
       return HttpResponse.json(body);
     }),
   );
@@ -80,7 +80,7 @@ describe("MCPOAuth", () => {
   test("shows waiting state after login click", async () => {
     mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/oauth/start", () => {
+      http.post("*/v1/mcp/oauth/start", () => {
         return HttpResponse.json({
           session_id: "test-session-123",
           authorize_url:
@@ -149,7 +149,7 @@ describe("MCPOAuth", () => {
   test("manual code entry shows Submit Code button in waiting state", async () => {
     mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/oauth/start", () => {
+      http.post("*/v1/mcp/oauth/start", () => {
         return HttpResponse.json({
           session_id: "test-session-456",
           authorize_url: "https://auth.example.com/authorize",
@@ -192,7 +192,7 @@ describe("MCPOAuth", () => {
       authenticated: true,
     });
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/oauth/logout", () => {
+      http.post("*/v1/mcp/oauth/logout", () => {
         logoutCalled = true;
         return HttpResponse.json({ success: true });
       }),
@@ -218,7 +218,7 @@ describe("MCPOAuth", () => {
   test("shows error message on failed login start", async () => {
     mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/oauth/start", () => {
+      http.post("*/v1/mcp/oauth/start", () => {
         return HttpResponse.json(
           { detail: "Server unreachable" },
           { status: 500 },
@@ -246,7 +246,7 @@ describe("MCPOAuth", () => {
   test("cancel button shown during waiting state", async () => {
     mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/oauth/start", () => {
+      http.post("*/v1/mcp/oauth/start", () => {
         return HttpResponse.json({
           session_id: "test-session-cancel-show",
           authorize_url: "https://auth.example.com/authorize",
@@ -278,14 +278,14 @@ describe("MCPOAuth", () => {
 
     mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/oauth/start", () => {
+      http.post("*/v1/mcp/oauth/start", () => {
         return HttpResponse.json({
           session_id: "test-session-to-cancel",
           authorize_url: "https://auth.example.com/authorize",
         });
       }),
       http.post(
-        "http://127.0.0.1:8001/v1/mcp/oauth/cancel",
+        "*/v1/mcp/oauth/cancel",
         async ({ request }) => {
           const body = (await request.json()) as { session_id: string };
           cancelledSessionId = body.session_id;
@@ -327,7 +327,7 @@ describe("MCPOAuth", () => {
     let callCount = 0;
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/mcp/oauth/status", () => {
+      http.get("*/v1/mcp/oauth/status", () => {
         callCount++;
         return HttpResponse.json({
           auth_type: "oauth2_pkce",

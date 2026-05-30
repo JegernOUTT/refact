@@ -389,18 +389,18 @@ describe("buddy UI polish", () => {
 
   it("BuddyHome_container_renders_split_subcomponents", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 1, successful_calls: 1, total_tokens: 10 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true }),
       ),
     );
@@ -427,7 +427,7 @@ describe("buddy UI polish", () => {
 
   it("BuddyDashboardScene_renders_shared_canvas_scene", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true }),
       ),
     );
@@ -528,7 +528,7 @@ describe("buddy UI polish", () => {
 
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           const body = (await request.json()) as Partial<
             BuddySnapshot["settings"]

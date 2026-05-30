@@ -36,7 +36,7 @@ describe("usePostUserAction", () => {
     let requestBody: unknown;
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/user_action",
+        "*/v1/buddy/user_action",
         async ({ request }) => {
           requestBody = await request.json();
           return HttpResponse.text("OK");
@@ -68,7 +68,7 @@ describe("usePostUserAction", () => {
     let requestBody: unknown;
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/user_action",
+        "*/v1/buddy/user_action",
         async ({ request }) => {
           requestBody = await request.json();
           return HttpResponse.text("OK");
@@ -101,7 +101,7 @@ describe("usePostUserAction", () => {
     cleanup();
     let called = false;
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/user_action", () => {
+      http.post("*/v1/buddy/user_action", () => {
         called = true;
         return HttpResponse.error();
       }),

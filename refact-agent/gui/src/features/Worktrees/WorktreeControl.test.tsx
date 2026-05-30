@@ -75,7 +75,7 @@ function worktreesList(
   sourceCurrentBranch: string | null = "dev",
   sourceBranches?: string[],
 ) {
-  return http.get("http://127.0.0.1:8001/v1/worktrees", () =>
+  return http.get("*/v1/worktrees", () =>
     HttpResponse.json(
       makeWorktreeList(records, sourceCurrentBranch, sourceBranches),
     ),
@@ -84,7 +84,7 @@ function worktreesList(
 
 function worktreeDiff() {
   return http.get(
-    "http://127.0.0.1:8001/v1/worktrees/:id/diff",
+    "*/v1/worktrees/:id/diff",
     ({ params }) => {
       const id = String(params.id);
       const response: WorktreeDiffResponse = {
@@ -121,7 +121,7 @@ function worktreeDiff() {
 }
 
 function chatModes() {
-  return http.get("http://127.0.0.1:8001/v1/chat-modes", () =>
+  return http.get("*/v1/chat-modes", () =>
     HttpResponse.json({
       modes: [
         {
@@ -145,7 +145,7 @@ function chatModes() {
 
 function commandCapture(calls: JsonObject[]) {
   return http.post(
-    "http://127.0.0.1:8001/v1/chats/:id/commands",
+    "*/v1/chats/:id/commands",
     async ({ request }) => {
       calls.push((await request.json()) as JsonObject);
       return HttpResponse.json({ status: "queued" });
@@ -158,7 +158,7 @@ function createWorktreeHandler(
   calls: JsonObject[],
 ) {
   return http.post(
-    "http://127.0.0.1:8001/v1/worktrees",
+    "*/v1/worktrees",
     async ({ request }) => {
       calls.push((await request.json()) as JsonObject);
       return HttpResponse.json({
@@ -177,7 +177,7 @@ function openWorktreeHandler(
   calls?: string[],
 ) {
   return http.post(
-    `http://127.0.0.1:8001/v1/worktrees/${record.meta.id}/open`,
+    `*/v1/worktrees/${record.meta.id}/open`,
     () => {
       calls?.push(record.meta.id);
       return HttpResponse.json({
@@ -191,7 +191,7 @@ function openWorktreeHandler(
 }
 
 function deleteWorktreeHandler(calls: string[]) {
-  return http.delete("http://127.0.0.1:8001/v1/worktrees/:id", ({ params }) => {
+  return http.delete("*/v1/worktrees/:id", ({ params }) => {
     calls.push(String(params.id));
     return HttpResponse.json({
       deleted: true,
@@ -441,7 +441,7 @@ describe("WorktreeControl", () => {
       worktreesList([]),
       createWorktreeHandler(created, createCalls),
       deleteWorktreeHandler(deleteCalls),
-      http.post("http://127.0.0.1:8001/v1/chats/:id/commands", () =>
+      http.post("*/v1/chats/:id/commands", () =>
         HttpResponse.json(
           { code: "bad_request", error: "attach failed" },
           { status: 400 },
@@ -503,7 +503,7 @@ describe("WorktreeControl", () => {
     const record = makeWorktreeRecord("wt-error", "refact/chat/error");
     server.use(
       worktreesList([record]),
-      http.post("http://127.0.0.1:8001/v1/chats/:id/commands", () =>
+      http.post("*/v1/chats/:id/commands", () =>
         HttpResponse.json(
           { code: "bad_request", error: "Worktree 'wt-error' not found" },
           { status: 400 },

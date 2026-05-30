@@ -16,7 +16,7 @@ const CONFIG_STATE = {
 describe("ArtifactsPanel", () => {
   it("renders_table_with_artifacts", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/artifacts", () =>
+      http.get("*/v1/buddy/artifacts", () =>
         HttpResponse.json({
           ops: [
             {
@@ -50,7 +50,7 @@ describe("ArtifactsPanel", () => {
   it("approve_button_calls_mutation_with_op_id", async () => {
     let requestBody: unknown;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/artifacts", () =>
+      http.get("*/v1/buddy/artifacts", () =>
         HttpResponse.json({
           ops: [
             {
@@ -64,7 +64,7 @@ describe("ArtifactsPanel", () => {
         }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/artifact_approve",
+        "*/v1/buddy/artifact_approve",
         async ({ request }) => {
           requestBody = await request.json();
           return HttpResponse.text("OK");

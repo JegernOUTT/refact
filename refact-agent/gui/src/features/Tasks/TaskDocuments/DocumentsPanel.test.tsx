@@ -70,11 +70,11 @@ const historicalDetailResponse: TaskDocumentDetail = {
 
 function mockDocuments(response: TaskDocumentListResponse = listResponse) {
   server.use(
-    http.get("http://127.0.0.1:8001/v1/task/:taskId/documents", () =>
+    http.get("*/v1/task/:taskId/documents", () =>
       HttpResponse.json(response),
     ),
     http.get(
-      "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug",
+      "*/v1/task/:taskId/documents/:slug",
       ({ request, params }) => {
         const slug = String(params.slug);
         const version = new URL(request.url).searchParams.get("version");
@@ -89,7 +89,7 @@ function mockDocuments(response: TaskDocumentListResponse = listResponse) {
       },
     ),
     http.get(
-      "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/history",
+      "*/v1/task/:taskId/documents/:slug/history",
       ({ params }) =>
         HttpResponse.json({
           task_id: String(params.taskId),
@@ -124,7 +124,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug",
+        "*/v1/task/:taskId/documents/:slug",
         ({ params }) => {
           if (params.slug === "initial-plan") {
             return HttpResponse.json(detailResponse);
@@ -153,7 +153,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/pin",
+        "*/v1/task/:taskId/documents/:slug/pin",
         async ({ request }) => {
           pinRequests.push(await request.json());
           return HttpResponse.json({
@@ -197,7 +197,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents",
+        "*/v1/task/:taskId/documents",
         async ({ request }) => {
           const body = await request.json();
           createRequests.push(body);
@@ -246,7 +246,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug",
+        "*/v1/task/:taskId/documents/:slug",
         ({ params }) => {
           if (params.slug === "initial-plan") {
             return HttpResponse.json(detailResponse);
@@ -278,7 +278,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.delete(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug",
+        "*/v1/task/:taskId/documents/:slug",
         ({ params }) => {
           deleteRequests.push(String(params.slug));
           return new HttpResponse(null, { status: 204 });
@@ -310,7 +310,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/history",
+        "*/v1/task/:taskId/documents/:slug/history",
         ({ params }) => {
           if (params.slug === "initial-plan") {
             return HttpResponse.json({
@@ -330,7 +330,7 @@ describe("DocumentsPanel", () => {
         },
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug",
+        "*/v1/task/:taskId/documents/:slug",
         ({ request, params }) => {
           const version = new URL(request.url).searchParams.get("version");
           if (params.slug === "initial-plan" && version === "1") {
@@ -364,7 +364,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/history",
+        "*/v1/task/:taskId/documents/:slug/history",
         () =>
           HttpResponse.json({
             task_id: "task-1",
@@ -398,7 +398,7 @@ describe("DocumentsPanel", () => {
     mockDocuments();
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/history",
+        "*/v1/task/:taskId/documents/:slug/history",
         () =>
           HttpResponse.json({
             task_id: "task-1",
@@ -533,7 +533,7 @@ describe("DocumentsPanel", () => {
     });
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/pin",
+        "*/v1/task/:taskId/documents/:slug/pin",
         () =>
           HttpResponse.json({
             slug: "api-design",
@@ -548,7 +548,7 @@ describe("DocumentsPanel", () => {
             relevant_cards: [],
           }),
       ),
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/documents", () =>
+      http.get("*/v1/task/:taskId/documents", () =>
         HttpResponse.json({
           task_id: "task-1",
           documents: [
@@ -650,7 +650,7 @@ describe("DocumentsPanel", () => {
     });
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/documents/:slug/pin",
+        "*/v1/task/:taskId/documents/:slug/pin",
         () => HttpResponse.json({ error: "fail" }, { status: 500 }),
       ),
     );

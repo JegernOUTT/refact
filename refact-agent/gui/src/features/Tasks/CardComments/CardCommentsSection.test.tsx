@@ -79,7 +79,7 @@ describe("CardCommentsSection", () => {
     const requests: unknown[] = [];
     server.use(
       http.post(
-        `http://127.0.0.1:8001/v1/tasks/${TASK_ID}/board`,
+        `*/v1/tasks/${TASK_ID}/board`,
         async ({ request }) => {
           requests.push(await request.json());
           return HttpResponse.json(emptyBoardResponse);
@@ -126,7 +126,7 @@ describe("CardCommentsSection", () => {
 
   it("submit_failure_shows_notification", async () => {
     server.use(
-      http.post(`http://127.0.0.1:8001/v1/tasks/${TASK_ID}/board`, () =>
+      http.post(`*/v1/tasks/${TASK_ID}/board`, () =>
         HttpResponse.json({ error: "Server error" }, { status: 500 }),
       ),
     );

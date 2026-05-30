@@ -67,11 +67,11 @@ function mockMemories(response: TaskMemoriesResponse = memoriesResponse) {
   const kinds = [...new Set(response.memories.map((m) => m.kind))].sort();
   const pinned_count = response.memories.filter((m) => m.pinned).length;
   server.use(
-    http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+    http.get("*/v1/task/:taskId/memories", () =>
       HttpResponse.json(response),
     ),
     http.get(
-      "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+      "*/v1/task/:taskId/memories/facets",
       ({ params }) =>
         HttpResponse.json({
           task_id: String(params.taskId),
@@ -173,7 +173,7 @@ describe("MemoryInboxPanel", () => {
     mockMemories();
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        "*/v1/task/:taskId/memories/:filename/pin",
         async ({ request }) => {
           pinRequests.push(await request.json());
           return HttpResponse.json({
@@ -185,7 +185,7 @@ describe("MemoryInboxPanel", () => {
         },
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/archive",
+        "*/v1/task/:taskId/memories/:filename/archive",
         ({ params }) => {
           archiveRequests.push(String(params.filename));
           return HttpResponse.json({
@@ -216,7 +216,7 @@ describe("MemoryInboxPanel", () => {
     mockMemories();
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories",
+        "*/v1/task/:taskId/memories",
         ({ request }) => {
           queryStrings.push(new URL(request.url).search);
           return HttpResponse.json(memoriesResponse);
@@ -257,7 +257,7 @@ describe("MemoryInboxPanel", () => {
   it("memory_inbox_filter_options_persist_under_active_filters", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories",
+        "*/v1/task/:taskId/memories",
         ({ request }) => {
           const url = new URL(request.url);
           const response =
@@ -271,7 +271,7 @@ describe("MemoryInboxPanel", () => {
         },
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+        "*/v1/task/:taskId/memories/facets",
         ({ params }) =>
           HttpResponse.json({
             task_id: String(params.taskId),
@@ -380,7 +380,7 @@ describe("MemoryInboxPanel", () => {
 
   it("isolates optimistic pin state across task ids", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", ({ params }) =>
+      http.get("*/v1/task/:taskId/memories", ({ params }) =>
         HttpResponse.json({
           ...memoriesResponse,
           task_id: String(params.taskId),
@@ -393,7 +393,7 @@ describe("MemoryInboxPanel", () => {
         }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        "*/v1/task/:taskId/memories/:filename/pin",
         () => new Promise<HttpResponse>(() => undefined),
       ),
     );
@@ -426,7 +426,7 @@ describe("MemoryInboxPanel", () => {
     });
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        "*/v1/task/:taskId/memories/:filename/pin",
         async ({ request }) => {
           pinRequests.push(await request.json());
           return new Promise<HttpResponse>((resolve) => {
@@ -467,7 +467,7 @@ describe("MemoryInboxPanel", () => {
 
   it("header does not show Memories label when on memories tab", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks/:taskId", () =>
+      http.get("*/v1/tasks/:taskId", () =>
         HttpResponse.json({
           id: "task-1",
           name: "Test Task",
@@ -480,7 +480,7 @@ describe("MemoryInboxPanel", () => {
           agents_active: 0,
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/tasks/:taskId/board", () =>
+      http.get("*/v1/tasks/:taskId/board", () =>
         HttpResponse.json({
           schema_version: 1,
           rev: 1,
@@ -488,23 +488,23 @@ describe("MemoryInboxPanel", () => {
           cards: [],
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/worktrees", () =>
+      http.get("*/v1/worktrees", () =>
         HttpResponse.json({ worktrees: [] }),
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/tasks/:taskId/trajectories/:role",
+        "*/v1/tasks/:taskId/trajectories/:role",
         () => HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/ping", () =>
+      http.get("*/v1/ping", () =>
         HttpResponse.json({ pong: "pong" }),
       ),
-      http.get("http://127.0.0.1:8001/v1/chat-modes", () =>
+      http.get("*/v1/chat-modes", () =>
         HttpResponse.json({ chat_modes: [], error: null }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/diagnostics/collect", () =>
+      http.post("*/v1/buddy/diagnostics/collect", () =>
         HttpResponse.json({ ok: true }),
       ),
-      http.post("http://127.0.0.1:8001/v1/chats/:chatId/commands", () =>
+      http.post("*/v1/chats/:chatId/commands", () =>
         HttpResponse.json({ status: "queued" }),
       ),
       goodCaps,
@@ -556,14 +556,14 @@ describe("MemoryInboxPanel", () => {
 
   it("pin_success_does_not_leave_stale_optimistic_override", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+      http.get("*/v1/task/:taskId/memories", () =>
         HttpResponse.json({
           ...memoriesResponse,
           memories: [{ ...memoriesResponse.memories[0], pinned: false }],
         }),
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+        "*/v1/task/:taskId/memories/facets",
         ({ params }) =>
           HttpResponse.json({
             task_id: String(params.taskId),
@@ -575,7 +575,7 @@ describe("MemoryInboxPanel", () => {
           }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        "*/v1/task/:taskId/memories/:filename/pin",
         () =>
           HttpResponse.json({
             ok: true,
@@ -600,14 +600,14 @@ describe("MemoryInboxPanel", () => {
 
   it("pin_failure_rolls_back_to_previous_value", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+      http.get("*/v1/task/:taskId/memories", () =>
         HttpResponse.json({
           ...memoriesResponse,
           memories: [{ ...memoriesResponse.memories[1] }],
         }),
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+        "*/v1/task/:taskId/memories/facets",
         ({ params }) =>
           HttpResponse.json({
             task_id: String(params.taskId),
@@ -619,7 +619,7 @@ describe("MemoryInboxPanel", () => {
           }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        "*/v1/task/:taskId/memories/:filename/pin",
         () => HttpResponse.json({ error: "server error" }, { status: 500 }),
       ),
     );
@@ -640,14 +640,14 @@ describe("MemoryInboxPanel", () => {
 
   it("archive_success_removes_entry_until_server_resurrects", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+      http.get("*/v1/task/:taskId/memories", () =>
         HttpResponse.json({
           ...memoriesResponse,
           memories: [{ ...memoriesResponse.memories[0], pinned: false }],
         }),
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+        "*/v1/task/:taskId/memories/facets",
         ({ params }) =>
           HttpResponse.json({
             task_id: String(params.taskId),
@@ -659,7 +659,7 @@ describe("MemoryInboxPanel", () => {
           }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/archive",
+        "*/v1/task/:taskId/memories/:filename/archive",
         () =>
           HttpResponse.json({
             ok: true,
@@ -687,14 +687,14 @@ describe("MemoryInboxPanel", () => {
 
   it("archive_failure_rolls_back", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/task/:taskId/memories", () =>
+      http.get("*/v1/task/:taskId/memories", () =>
         HttpResponse.json({
           ...memoriesResponse,
           memories: [{ ...memoriesResponse.memories[0], pinned: false }],
         }),
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/facets",
+        "*/v1/task/:taskId/memories/facets",
         ({ params }) =>
           HttpResponse.json({
             task_id: String(params.taskId),
@@ -706,7 +706,7 @@ describe("MemoryInboxPanel", () => {
           }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/archive",
+        "*/v1/task/:taskId/memories/:filename/archive",
         () => HttpResponse.json({ error: "server error" }, { status: 500 }),
       ),
     );
@@ -735,7 +735,7 @@ describe("MemoryInboxPanel", () => {
     });
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/:filename/pin",
+        "*/v1/task/:taskId/memories/:filename/pin",
         () =>
           new Promise<HttpResponse>((resolve) => {
             resolvePin = resolve;
@@ -772,7 +772,7 @@ describe("MemoryInboxPanel", () => {
     mockMemories();
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/task/:taskId/memories/triage-done",
+        "*/v1/task/:taskId/memories/triage-done",
         async ({ request }) => {
           triageRequests.push(await request.json());
           return HttpResponse.json({

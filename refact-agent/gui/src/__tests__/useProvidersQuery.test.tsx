@@ -33,7 +33,7 @@ describe("useGetConfiguredProvidersQuery", () => {
   it("skips providers while backend is offline and fetches after it becomes online", async () => {
     let providersRequests = 0;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/providers", () => {
+      http.get("*/v1/providers", () => {
         providersRequests += 1;
         return HttpResponse.json({ providers: [] });
       }),

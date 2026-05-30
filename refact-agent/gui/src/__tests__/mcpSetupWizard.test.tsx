@@ -62,7 +62,7 @@ describe("MCPSetupWizard", () => {
 
   it("name auto-populated from auto-name API response", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/auto-name", () => {
+      http.post("*/v1/mcp/auto-name", () => {
         return HttpResponse.json({
           suggested_name: "notion_mcp_server",
           transport: "stdio",
@@ -95,7 +95,7 @@ describe("MCPSetupWizard", () => {
 
   it("name validation rejects invalid snake_case", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/auto-name", () => {
+      http.post("*/v1/mcp/auto-name", () => {
         return HttpResponse.json({
           suggested_name: "notion_mcp_server",
           transport: "stdio",
@@ -129,7 +129,7 @@ describe("MCPSetupWizard", () => {
     }[] = [];
 
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/auto-name", () => {
+      http.post("*/v1/mcp/auto-name", () => {
         return HttpResponse.json({
           suggested_name: "notion_server",
           transport: "stdio",
@@ -172,7 +172,7 @@ describe("MCPSetupWizard", () => {
     }[] = [];
 
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/auto-name", () => {
+      http.post("*/v1/mcp/auto-name", () => {
         return HttpResponse.json({
           suggested_name: "example_mcp",
           transport: "http",
@@ -209,7 +209,7 @@ describe("MCPSetupWizard", () => {
 
   it("fallback name used when auto-name API unavailable", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/mcp/auto-name", () => {
+      http.post("*/v1/mcp/auto-name", () => {
         return HttpResponse.error();
       }),
     );

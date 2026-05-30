@@ -160,7 +160,7 @@ describe("Providers provider instances", () => {
     let requestBody: unknown;
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/providers/openai_work", () =>
+      http.get("*/v1/providers/openai_work", () =>
         HttpResponse.json({
           ...aliasProvider,
           selected_models_count: 1,
@@ -173,7 +173,7 @@ describe("Providers provider instances", () => {
         }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/providers/openai_work",
+        "*/v1/providers/openai_work",
         async ({ request }) => {
           requestBody = await request.json();
           return HttpResponse.json({ success: true });
@@ -220,7 +220,7 @@ describe("Providers provider instances", () => {
 
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/providers/openai_work/available-models",
+        "*/v1/providers/openai_work/available-models",
         () => {
           availableModelsRequests += 1;
           return HttpResponse.json({
@@ -229,7 +229,7 @@ describe("Providers provider instances", () => {
           });
         },
       ),
-      http.post("http://127.0.0.1:8001/v1/providers/openai_work", () =>
+      http.post("*/v1/providers/openai_work", () =>
         HttpResponse.json({ success: true }),
       ),
     );
@@ -270,35 +270,35 @@ describe("Providers provider instances", () => {
 
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/providers/openrouter_work/account-info",
+        "*/v1/providers/openrouter_work/account-info",
         ({ request }) => {
           requests.push(new URL(request.url).pathname);
           return HttpResponse.json({ data: {} });
         },
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/providers/openrouter_work/health",
+        "*/v1/providers/openrouter_work/health",
         ({ request }) => {
           requests.push(new URL(request.url).pathname);
           return HttpResponse.json({ ok: true });
         },
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/providers/claude_code_work/usage",
+        "*/v1/providers/claude_code_work/usage",
         ({ request }) => {
           requests.push(new URL(request.url).pathname);
           return HttpResponse.json({ data: {} });
         },
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/providers/openai_codex_work/usage",
+        "*/v1/providers/openai_codex_work/usage",
         ({ request }) => {
           requests.push(new URL(request.url).pathname);
           return HttpResponse.json({ data: {} });
         },
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/providers/openrouter_work/models/openai%2Fgpt-4.1/endpoints",
+        "*/v1/providers/openrouter_work/models/openai%2Fgpt-4.1/endpoints",
         ({ request }) => {
           requests.push(new URL(request.url).pathname);
           return HttpResponse.json({
@@ -371,7 +371,7 @@ describe("Providers provider instances", () => {
 
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/providers/openai_2",
+        "*/v1/providers/openai_2",
         async ({ request }) => {
           requestBody = await request.json();
           return HttpResponse.json({ success: true });

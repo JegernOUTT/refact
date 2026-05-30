@@ -29,7 +29,7 @@ function renderProviderOAuth(providerName: string) {
 function mockProviderOauthStart(providerName: string, body: object) {
   server.use(
     http.post(
-      `http://127.0.0.1:8001/v1/providers/${providerName}/oauth/start`,
+      `*/v1/providers/${providerName}/oauth/start`,
       () => HttpResponse.json(body),
     ),
   );

@@ -116,7 +116,7 @@ describe("Dashboard progressive sidebar readiness", () => {
   beforeEach(() => {
     server.use(
       emptyTasks,
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true }),
       ),
     );
@@ -181,7 +181,7 @@ describe("Dashboard progressive sidebar readiness", () => {
     );
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sidebarSseStream([
@@ -401,7 +401,7 @@ describe("Dashboard progressive sidebar readiness", () => {
         total_count: 2,
       }),
     );
-    server.use(http.get("http://127.0.0.1:8001/v1/trajectories", listHandler));
+    server.use(http.get("*/v1/trajectories", listHandler));
 
     render(<Dashboard />, {
       preloadedState: {

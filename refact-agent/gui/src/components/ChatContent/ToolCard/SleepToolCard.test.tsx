@@ -139,7 +139,7 @@ describe("SleepToolCard", () => {
     await user.click(screen.getByRole("button", { name: /wake up/i }));
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:4321/v1/chats/sleep-chat/commands",
+      "/v1/chats/sleep-chat/commands",
       expect.objectContaining({ method: "POST" }),
     );
     const init = firstFetchInit(fetchMock);

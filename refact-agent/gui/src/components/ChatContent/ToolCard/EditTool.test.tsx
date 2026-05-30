@@ -21,7 +21,7 @@ function makeToolCall(id: string): ToolCall {
 }
 
 server.use(
-  http.post("http://127.0.0.1:8001/v1/fullpath", async ({ request }) => {
+  http.post("*/v1/fullpath", async ({ request }) => {
     const body = (await request.json()) as { path?: string };
     return HttpResponse.json({
       fullpath: body.path ?? "",

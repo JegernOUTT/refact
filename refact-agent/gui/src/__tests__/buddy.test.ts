@@ -432,7 +432,7 @@ function setupBuddyCompanionHandlers() {
         repo_name: "refact",
       }),
     ),
-    http.post("http://127.0.0.1:8001/v1/chats/:id/commands", () =>
+    http.post("*/v1/chats/:id/commands", () =>
       HttpResponse.json({ ok: true }),
     ),
   );
@@ -5723,7 +5723,7 @@ describe("restoreChat buddy_meta handling", () => {
       config: { apiKey: "test", lspPort: 8001, themeProps: {}, host: "vscode" },
     });
     server.use(
-      http.get("http://127.0.0.1:8001/v1/trajectories/failing-buddy-chat", () =>
+      http.get("*/v1/trajectories/failing-buddy-chat", () =>
         HttpResponse.json({ detail: "missing trajectory" }, { status: 404 }),
       ),
     );
@@ -5778,7 +5778,7 @@ describe("restoreChat buddy_meta handling", () => {
           repo_name: "refact",
         }),
       ),
-      http.post("http://127.0.0.1:8001/v1/chats/:id/commands", () =>
+      http.post("*/v1/chats/:id/commands", () =>
         HttpResponse.json({ detail: "command failed" }, { status: 500 }),
       ),
     );

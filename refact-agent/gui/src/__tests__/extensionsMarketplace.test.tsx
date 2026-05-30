@@ -50,10 +50,10 @@ const SOURCES = [
 describe("SkillsMarketplace", () => {
   it("renders marketplace items from API", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/registry", () =>
+      http.get("*/v1/ext/registry", () =>
         HttpResponse.json(REGISTRY),
       ),
-      http.get("http://127.0.0.1:8001/v1/skills/marketplace", () =>
+      http.get("*/v1/skills/marketplace", () =>
         HttpResponse.json({
           items: [
             {
@@ -90,10 +90,10 @@ describe("SkillsMarketplace", () => {
 
   it("opens source settings dialog", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/registry", () =>
+      http.get("*/v1/ext/registry", () =>
         HttpResponse.json(REGISTRY),
       ),
-      http.get("http://127.0.0.1:8001/v1/skills/marketplace", () =>
+      http.get("*/v1/skills/marketplace", () =>
         HttpResponse.json({ items: [], sources: SOURCES }),
       ),
     );
@@ -116,10 +116,10 @@ describe("SkillsMarketplace", () => {
 describe("CommandsMarketplace", () => {
   it("renders commands from API", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/ext/registry", () =>
+      http.get("*/v1/ext/registry", () =>
         HttpResponse.json(REGISTRY),
       ),
-      http.get("http://127.0.0.1:8001/v1/commands/marketplace", () =>
+      http.get("*/v1/commands/marketplace", () =>
         HttpResponse.json({
           items: [
             {
@@ -171,7 +171,7 @@ describe("CommandsMarketplace", () => {
 describe("SubagentsMarketplace", () => {
   it("renders subagents from API", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/customization/registry", () =>
+      http.get("*/v1/customization/registry", () =>
         HttpResponse.json({
           modes: [],
           subagents: [],
@@ -181,7 +181,7 @@ describe("SubagentsMarketplace", () => {
           has_project_root: true,
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/subagents/marketplace", () =>
+      http.get("*/v1/subagents/marketplace", () =>
         HttpResponse.json({
           items: [
             {

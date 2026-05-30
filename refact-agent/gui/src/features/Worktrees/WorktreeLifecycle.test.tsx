@@ -175,20 +175,20 @@ function makeChatState(chatId: string, worktree?: WorktreeMeta | null): Chat {
 }
 
 function worktreesList(records: WorktreeRecordView[]) {
-  return http.get("http://127.0.0.1:8001/v1/worktrees", () =>
+  return http.get("*/v1/worktrees", () =>
     HttpResponse.json(makeWorktreeList(records)),
   );
 }
 
 function diffHandler(diff = makeDiff()) {
-  return http.get("http://127.0.0.1:8001/v1/worktrees/:id/diff", () =>
+  return http.get("*/v1/worktrees/:id/diff", () =>
     HttpResponse.json(diff),
   );
 }
 
 function mergeHandler(response: MergeWorktreeResponse, calls: JsonObject[]) {
   return http.post(
-    "http://127.0.0.1:8001/v1/worktrees/:id/merge",
+    "*/v1/worktrees/:id/merge",
     async ({ request }) => {
       calls.push((await request.json()) as JsonObject);
       return HttpResponse.json(response);
@@ -241,16 +241,16 @@ function taskHandlers(record: WorktreeRecordView) {
     ],
   };
   return [
-    http.get("http://127.0.0.1:8001/v1/tasks/task-1", () =>
+    http.get("*/v1/tasks/task-1", () =>
       HttpResponse.json({ meta: task }),
     ),
-    http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () =>
+    http.get("*/v1/tasks/task-1/board", () =>
       HttpResponse.json(board),
     ),
-    http.get("http://127.0.0.1:8001/v1/tasks/task-1/trajectories/planner", () =>
+    http.get("*/v1/tasks/task-1/trajectories/planner", () =>
       HttpResponse.json([]),
     ),
-    http.get("http://127.0.0.1:8001/v1/task/task-1/memories", () =>
+    http.get("*/v1/task/task-1/memories", () =>
       HttpResponse.json({
         task_id: "task-1",
         since: "",
@@ -259,16 +259,16 @@ function taskHandlers(record: WorktreeRecordView) {
         warnings: [],
       }),
     ),
-    http.get("http://127.0.0.1:8001/v1/ping", () =>
+    http.get("*/v1/ping", () =>
       HttpResponse.json({ status: "ok" }),
     ),
-    http.get("http://127.0.0.1:8001/v1/chat-modes", () =>
+    http.get("*/v1/chat-modes", () =>
       HttpResponse.json({ modes: [], errors: [] }),
     ),
-    http.get("http://127.0.0.1:8001/v1/caps", () =>
+    http.get("*/v1/caps", () =>
       HttpResponse.json({ chat_models: [], completion_models: [] }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/diagnostics/collect", () =>
+    http.post("*/v1/buddy/diagnostics/collect", () =>
       HttpResponse.json({}),
     ),
     worktreesList([record]),
@@ -355,7 +355,7 @@ describe("Worktree lifecycle GUI", () => {
   test("merge modal displays structured backend error text", async () => {
     const record = makeRecord();
     server.use(
-      http.post("http://127.0.0.1:8001/v1/worktrees/:id/merge", () =>
+      http.post("*/v1/worktrees/:id/merge", () =>
         HttpResponse.json(
           {
             code: "conflict",
@@ -511,7 +511,7 @@ describe("Worktree lifecycle GUI", () => {
     const deleteCalls: string[] = [];
     const onDetach = vi.fn();
     server.use(
-      http.delete("http://127.0.0.1:8001/v1/worktrees/:id", ({ params }) => {
+      http.delete("*/v1/worktrees/:id", ({ params }) => {
         deleteCalls.push(String(params.id));
         return HttpResponse.json({
           deleted: true,

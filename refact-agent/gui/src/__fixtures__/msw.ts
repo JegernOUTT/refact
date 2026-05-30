@@ -8,21 +8,21 @@ import type { LinksForChatResponse } from "../services/refact/links";
 import { ToolConfirmationResponse } from "../services/refact";
 
 export const goodPing: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/ping",
+  "*/v1/ping",
   () => {
     return HttpResponse.text("pong");
   },
 );
 
 export const goodCaps: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/caps",
+  "*/v1/caps",
   () => {
     return HttpResponse.json(STUB_CAPS_RESPONSE);
   },
 );
 
 export const goodCapsWithKnowledgeFeature: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/caps",
+  "*/v1/caps",
   () => {
     return HttpResponse.json({
       ...STUB_CAPS_RESPONSE,
@@ -32,28 +32,28 @@ export const goodCapsWithKnowledgeFeature: HttpHandler = http.get(
 );
 
 export const emptyCaps: HttpHandler = http.get(
-  `http://127.0.0.1:8001/v1/caps`,
+  `*/v1/caps`,
   () => {
     return HttpResponse.json(EMPTY_CAPS_RESPONSE);
   },
 );
 
 export const noTools: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/tools",
+  "*/v1/tools",
   () => {
     return HttpResponse.json([]);
   },
 );
 
 export const goodPrompts: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/customization",
+  "*/v1/customization",
   () => {
     return HttpResponse.json({ system_prompts: SYSTEM_PROMPTS });
   },
 );
 
 export const noCompletions: HttpHandler = http.post(
-  "http://127.0.0.1:8001/v1/at-command-completion",
+  "*/v1/at-command-completion",
   () => {
     return HttpResponse.json({
       completions: [],
@@ -64,7 +64,7 @@ export const noCompletions: HttpHandler = http.post(
 );
 
 export const noCommandPreview: HttpHandler = http.post(
-  "http://127.0.0.1:8001/v1/at-command-preview",
+  "*/v1/at-command-preview",
   () => {
     return HttpResponse.json({
       messages: [],
@@ -73,7 +73,7 @@ export const noCommandPreview: HttpHandler = http.post(
 );
 
 export const goodUser: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/providers",
+  "*/v1/providers",
   () =>
     HttpResponse.json({
       providers: [
@@ -92,14 +92,14 @@ export const goodUser: HttpHandler = http.get(
 );
 
 export const chatLinks: HttpHandler = http.post(
-  `http://127.0.0.1:8001${CHAT_LINKS_URL}`,
+  `*${CHAT_LINKS_URL}`,
   () => {
     return HttpResponse.json(STUB_LINKS_FOR_CHAT_RESPONSE);
   },
 );
 
 export const noChatLinks: HttpHandler = http.post(
-  `http://127.0.0.1:8001${CHAT_LINKS_URL}`,
+  `*${CHAT_LINKS_URL}`,
   () => {
     const res: LinksForChatResponse = {
       uncommited_changes_warning: "",
@@ -111,14 +111,14 @@ export const noChatLinks: HttpHandler = http.post(
 );
 
 export const goodTools: HttpHandler = http.get(
-  `http://127.0.0.1:8001${TOOLS}`,
+  `*${TOOLS}`,
   () => {
     return HttpResponse.json(STUB_TOOL_RESPONSE);
   },
 );
 
 export const ToolConfirmation = http.post(
-  "http://127.0.0.1:8001/v1/tools-check-if-confirmation-needed",
+  "*/v1/tools-check-if-confirmation-needed",
   () => {
     const response: ToolConfirmationResponse = {
       pause: false,
@@ -130,28 +130,28 @@ export const ToolConfirmation = http.post(
 );
 
 export const emptyTrajectories: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/trajectories",
+  "*/v1/trajectories",
   () => {
     return HttpResponse.json([]);
   },
 );
 
 export const trajectoryGet: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/trajectories/:id",
+  "*/v1/trajectories/:id",
   () => {
     return HttpResponse.json({ status: "not_found" }, { status: 404 });
   },
 );
 
 export const trajectorySave: HttpHandler = http.put(
-  "http://127.0.0.1:8001/v1/trajectories/:id",
+  "*/v1/trajectories/:id",
   () => {
     return HttpResponse.json({ status: "ok" });
   },
 );
 
 export const trajectoryDelete: HttpHandler = http.delete(
-  "http://127.0.0.1:8001/v1/trajectories/:id",
+  "*/v1/trajectories/:id",
   () => {
     return HttpResponse.json({ status: "ok" });
   },
@@ -159,7 +159,7 @@ export const trajectoryDelete: HttpHandler = http.delete(
 
 // Chat Session (Stateless Trajectory UI) handlers
 export const chatSessionSubscribe: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/chats/subscribe",
+  "*/v1/chats/subscribe",
   () => {
     // Return an SSE stream that immediately closes (no events)
     const encoder = new TextEncoder();
@@ -181,14 +181,14 @@ export const chatSessionSubscribe: HttpHandler = http.get(
 );
 
 export const chatSessionCommand: HttpHandler = http.post(
-  "http://127.0.0.1:8001/v1/chats/:id/commands",
+  "*/v1/chats/:id/commands",
   () => {
     return HttpResponse.json({ status: "queued" });
   },
 );
 
 export const chatSessionAbort: HttpHandler = http.post(
-  "http://127.0.0.1:8001/v1/chats/:id/abort",
+  "*/v1/chats/:id/abort",
   () => {
     return HttpResponse.json({ status: "ok" });
   },
@@ -196,7 +196,7 @@ export const chatSessionAbort: HttpHandler = http.post(
 
 // Sidebar subscription endpoint (SSE)
 export const sidebarSubscribe: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/sidebar/subscribe",
+  "*/v1/sidebar/subscribe",
   () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -266,7 +266,7 @@ export const sidebarSubscribe: HttpHandler = http.get(
 
 // Tasks list endpoint
 export const emptyTasks: HttpHandler = http.get(
-  "http://127.0.0.1:8001/v1/tasks",
+  "*/v1/tasks",
   () => {
     return HttpResponse.json([]);
   },

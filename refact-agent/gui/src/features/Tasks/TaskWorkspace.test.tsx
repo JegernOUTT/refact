@@ -279,31 +279,31 @@ function taskWorkspaceHandlers(
   deleteCalls: string[] = [],
 ) {
   return [
-    http.get("http://127.0.0.1:8001/v1/tasks/task-1", () =>
+    http.get("*/v1/tasks/task-1", () =>
       HttpResponse.json({ meta: makeTask() }),
     ),
-    http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () =>
+    http.get("*/v1/tasks/task-1/board", () =>
       HttpResponse.json(makeBoard(card)),
     ),
-    http.get("http://127.0.0.1:8001/v1/tasks/task-1/trajectories/planner", () =>
+    http.get("*/v1/tasks/task-1/trajectories/planner", () =>
       HttpResponse.json([]),
     ),
-    http.get("http://127.0.0.1:8001/v1/worktrees", () =>
+    http.get("*/v1/worktrees", () =>
       HttpResponse.json(makeWorktreeList(records)),
     ),
-    http.get("http://127.0.0.1:8001/v1/ping", () =>
+    http.get("*/v1/ping", () =>
       HttpResponse.json({ status: "ok" }),
     ),
-    http.get("http://127.0.0.1:8001/v1/chat-modes", () =>
+    http.get("*/v1/chat-modes", () =>
       HttpResponse.json({ modes: [], errors: [] }),
     ),
-    http.get("http://127.0.0.1:8001/v1/caps", () =>
+    http.get("*/v1/caps", () =>
       HttpResponse.json({ chat_models: [], completion_models: [] }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/diagnostics/collect", () =>
+    http.post("*/v1/buddy/diagnostics/collect", () =>
       HttpResponse.json({}),
     ),
-    http.get("http://127.0.0.1:8001/v1/worktrees/:id/diff", ({ params }) => {
+    http.get("*/v1/worktrees/:id/diff", ({ params }) => {
       const id = String(params.id);
       return HttpResponse.json({
         id,
@@ -331,7 +331,7 @@ function taskWorkspaceHandlers(
         patch_truncated: false,
       });
     }),
-    http.post("http://127.0.0.1:8001/v1/worktrees/:id/open", ({ params }) => {
+    http.post("*/v1/worktrees/:id/open", ({ params }) => {
       const id = String(params.id);
       openCalls.push(id);
       return HttpResponse.json({
@@ -341,7 +341,7 @@ function taskWorkspaceHandlers(
         can_open_folder: false,
       });
     }),
-    http.delete("http://127.0.0.1:8001/v1/worktrees/:id", ({ params }) => {
+    http.delete("*/v1/worktrees/:id", ({ params }) => {
       deleteCalls.push(String(params.id));
       return HttpResponse.json({
         deleted: true,
@@ -784,7 +784,7 @@ describe("TaskWorkspace SSE invalidation", () => {
     let boardFetchCount = 0;
     server.use(...taskWorkspaceHandlers(card, []));
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () => {
+      http.get("*/v1/tasks/task-1/board", () => {
         boardFetchCount++;
         return HttpResponse.json(makeBoard(card));
       }),
@@ -820,7 +820,7 @@ describe("TaskWorkspace SSE invalidation", () => {
     let returnUpdated = false;
     server.use(...taskWorkspaceHandlers(card, []));
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () =>
+      http.get("*/v1/tasks/task-1/board", () =>
         HttpResponse.json(makeBoard(returnUpdated ? updatedCard : card)),
       ),
     );
@@ -861,7 +861,7 @@ describe("TaskWorkspace SSE invalidation", () => {
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () =>
+      http.get("*/v1/tasks/task-1/board", () =>
         HttpResponse.json({ ...makeBoard(card), cards: [] }),
       ),
     );
@@ -890,7 +890,7 @@ describe("TaskWorkspace SSE invalidation", () => {
     let returnActive = false;
     server.use(...taskWorkspaceHandlers(card, []));
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks/task-1", () =>
+      http.get("*/v1/tasks/task-1", () =>
         HttpResponse.json({
           meta: {
             ...makeTask(),
@@ -923,7 +923,7 @@ describe("TaskWorkspace SSE invalidation", () => {
     let boardFetchCount = 0;
     server.use(...taskWorkspaceHandlers(card, []));
     server.use(
-      http.get("http://127.0.0.1:8001/v1/tasks/task-1/board", () => {
+      http.get("*/v1/tasks/task-1/board", () => {
         boardFetchCount++;
         return HttpResponse.json(makeBoard(card));
       }),
@@ -956,11 +956,11 @@ describe("TaskWorkspace planner CRUD", () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/tasks/task-1/trajectories/planner",
+        "*/v1/tasks/task-1/trajectories/planner",
         () => HttpResponse.json([makePlannerTrajectory()]),
       ),
       http.delete(
-        `http://127.0.0.1:8001/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
+        `*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
         () => HttpResponse.json({ error: "Internal error" }, { status: 500 }),
       ),
     );
@@ -987,11 +987,11 @@ describe("TaskWorkspace planner CRUD", () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/tasks/task-1/trajectories/planner",
+        "*/v1/tasks/task-1/trajectories/planner",
         () => HttpResponse.json([makePlannerTrajectory()]),
       ),
       http.delete(
-        `http://127.0.0.1:8001/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
+        `*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
         () =>
           HttpResponse.json(
             {
@@ -1020,7 +1020,7 @@ describe("TaskWorkspace planner CRUD", () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/tasks/task-1/trajectories/planner",
+        "*/v1/tasks/task-1/trajectories/planner",
         () => HttpResponse.json([]),
       ),
     );
@@ -1046,10 +1046,10 @@ describe("TaskWorkspace planner CRUD", () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/tasks/task-1/trajectories/planner",
+        "*/v1/tasks/task-1/trajectories/planner",
         () => HttpResponse.json([]),
       ),
-      http.post(`http://127.0.0.1:8001/v1/tasks/${TASK_ID}/planner-chats`, () =>
+      http.post(`*/v1/tasks/${TASK_ID}/planner-chats`, () =>
         HttpResponse.json({ error: "Server error" }, { status: 500 }),
       ),
     );

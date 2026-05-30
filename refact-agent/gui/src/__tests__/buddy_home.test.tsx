@@ -611,7 +611,7 @@ describe("BuddyPulseCard_renders_pulse", () => {
     store.dispatch(setPulse(pulse));
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
     );
@@ -635,11 +635,11 @@ describe("BuddyOpportunityCard_dismiss_calls_mutation", () => {
   it("clicking Dismiss calls dismiss mutation", async () => {
     let dismissed = false;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/dismiss",
+        "*/v1/buddy/opportunities/:id/dismiss",
         () => {
           dismissed = true;
           return HttpResponse.json({ snapshot: makeSnapshot() });
@@ -672,7 +672,7 @@ describe("BuddyHome_renders_all_sections", () => {
     store.dispatch(setBuddySnapshot(makeSnapshot(pulse)));
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
     );
@@ -709,21 +709,21 @@ describe("BuddyHome_renders_all_sections", () => {
       created_at: new Date().toISOString(),
     } satisfies BuddyRuntimeEvent;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () => {
+      http.post("*/v1/buddy/runtime/:id/dismiss", () => {
         dismissCalled = true;
         return HttpResponse.json({ detail: "offline" }, { status: 503 });
       }),
@@ -790,28 +790,28 @@ describe("BuddyHome_renders_all_sections", () => {
     } satisfies BuddyRuntimeEvent;
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss",
+        "*/v1/buddy/runtime/:id/dismiss",
         ({ params }) => {
           dismissedIds.push(String(params.id));
           return HttpResponse.json({ detail: "offline" }, { status: 503 });
         },
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () => {
+      http.post("*/v1/buddy/conversations", () => {
         conversationStarted = true;
         return HttpResponse.json({
           chat_id: "buddy-investigation-chat",
@@ -821,7 +821,7 @@ describe("BuddyHome_renders_all_sections", () => {
           message_count: 0,
         });
       }),
-      http.post("http://127.0.0.1:8001/v1/buddy/investigation-context", () =>
+      http.post("*/v1/buddy/investigation-context", () =>
         HttpResponse.json({
           logs: "logs",
           internal_context: "context",
@@ -829,7 +829,7 @@ describe("BuddyHome_renders_all_sections", () => {
           repo_name: "refact",
         }),
       ),
-      http.post("http://127.0.0.1:8001/v1/chats/:id/commands", () =>
+      http.post("*/v1/chats/:id/commands", () =>
         HttpResponse.json({ ok: true }),
       ),
     );
@@ -901,18 +901,18 @@ describe("BuddyHome_renders_all_sections", () => {
     } satisfies BuddyRuntimeEvent;
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
     );
@@ -948,13 +948,13 @@ describe("BuddyHome_renders_all_sections", () => {
       created_at: new Date().toISOString(),
     } satisfies BuddyRuntimeEvent;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () => {
+      http.post("*/v1/buddy/runtime/:id/dismiss", () => {
         dismissCalled = true;
         return HttpResponse.json({ detail: "offline" }, { status: 503 });
       }),
@@ -1022,18 +1022,18 @@ describe("BuddyHome_renders_all_sections", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
     );
@@ -1047,18 +1047,18 @@ describe("BuddyHome_renders_all_sections", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
     );
@@ -2816,7 +2816,7 @@ describe("BuddySettingsPanel_autosave", () => {
     let capturedBody: unknown;
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json({
@@ -2849,7 +2849,7 @@ describe("BuddySettingsPanel_autosave", () => {
       [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBodies.push(await request.json());
           const settings = await new Promise<BuddySnapshot["settings"]>(
@@ -2900,7 +2900,7 @@ describe("BuddySettingsPanel_autosave", () => {
     let capturedBody: unknown;
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json({
@@ -2929,7 +2929,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const capturedBodies: unknown[] = [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           const body = (await request.json()) as {
             daily_digest_hour?: number | null;
@@ -3010,7 +3010,7 @@ describe("BuddySettingsPanel_autosave", () => {
       humor_level: "normal" as const,
     };
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/settings", () =>
+      http.post("*/v1/buddy/settings", () =>
         HttpResponse.json(updatedSettings),
       ),
     );
@@ -3034,7 +3034,7 @@ describe("BuddySettingsPanel_autosave", () => {
     let capturedBody: unknown;
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json(makeSnapshot().settings);
@@ -3071,7 +3071,7 @@ describe("BuddySettingsPanel_autosave", () => {
     let capturedBody: unknown;
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json(makeSnapshot().settings);
@@ -3100,7 +3100,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const capturedBodies: unknown[] = [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBodies.push(await request.json());
           return HttpResponse.json({
@@ -3147,7 +3147,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const capturedBodies: unknown[] = [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBodies.push(await request.json());
           return HttpResponse.json({
@@ -3188,7 +3188,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const capturedBodies: unknown[] = [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBodies.push(await request.json());
           return HttpResponse.json({
@@ -3251,7 +3251,7 @@ describe("BuddySettingsPanel_autosave", () => {
     let capturedBody: unknown;
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json({
@@ -3286,7 +3286,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
   it("shows Saved status after successful mutation", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/settings", () =>
+      http.post("*/v1/buddy/settings", () =>
         HttpResponse.json(makeSnapshot().settings),
       ),
     );
@@ -3344,7 +3344,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
   it("shows Failed status on save error without unhandled rejections", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/settings", () =>
+      http.post("*/v1/buddy/settings", () =>
         HttpResponse.json({ error: "nope" }, { status: 500 }),
       ),
     );
@@ -3375,7 +3375,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const responseResolvers: ((response: Response) => void)[] = [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         () =>
           new Promise<Response>((resolve) => {
             responseResolvers.push(resolve);
@@ -3414,21 +3414,21 @@ describe("BuddySettingsPanel_autosave", () => {
 
   it("failed enabled autosave restores Buddy Home instead of trapping disabled UI", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/settings", () =>
+      http.post("*/v1/buddy/settings", () =>
         HttpResponse.json({ error: "nope" }, { status: 500 }),
       ),
     );
@@ -3457,7 +3457,7 @@ describe("BuddySettingsPanel_autosave", () => {
       [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         () =>
           new Promise<Response>((resolve) => {
             responseResolvers.push((settings) =>
@@ -3502,7 +3502,7 @@ describe("BuddySettingsPanel_autosave", () => {
       [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBodies.push(await request.json());
           const settings = await new Promise<BuddySnapshot["settings"]>(
@@ -3569,7 +3569,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const responseResolvers: ((response: Response) => void)[] = [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         () =>
           new Promise<Response>((resolve) => responseResolvers.push(resolve)),
       ),
@@ -3615,7 +3615,7 @@ describe("BuddySettingsPanel_autosave", () => {
     const capturedBodies: unknown[] = [];
     server.use(
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBodies.push(await request.json());
           return HttpResponse.json(makeSnapshot().settings);
@@ -3821,7 +3821,7 @@ describe("useExecuteBuddyAction_open_page", () => {
 
   it("useExecuteBuddyAction hook pushes page via buddy navigation", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
     );
@@ -3850,7 +3850,7 @@ describe("useExecuteBuddyAction_open_page", () => {
 describe("BuddyPanel_opportunity_notifications", () => {
   it("renders unread opportunities as Buddy speech controls without a badge", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
     );
@@ -3878,7 +3878,7 @@ describe("BuddyPanel_opportunity_notifications", () => {
 
   it("does not render badge chrome when no unread opportunities", () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
     );
@@ -3896,11 +3896,11 @@ describe("BuddyPanel_opportunity_notifications", () => {
   it("renders disabled state instead of disappearing and sends enabled patch", async () => {
     let capturedBody: unknown;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json(defaultBuddySettings());
@@ -3936,7 +3936,7 @@ describe("BuddyPanel_opportunity_notifications", () => {
 describe("BuddyOpportunitiesFeed_suggestions", () => {
   it("shows active Buddy suggestions when detector opportunities are empty", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
     );
@@ -3968,18 +3968,18 @@ describe("BuddyHome_disabled_state", () => {
     );
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
     );
@@ -4019,22 +4019,22 @@ describe("BuddyHome_disabled_state", () => {
     );
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
       http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
+        "*/v1/buddy/settings",
         async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json(defaultBuddySettings());
@@ -4066,12 +4066,12 @@ describe("BuddyHome_disabled_state", () => {
     );
 
     server.use(
-      http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+      http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
         }),
       ),
-      http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+      http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
     );
@@ -4096,7 +4096,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
   it("system recent rows are not enabled focusable no-op buttons", async () => {
     let trajectoryCalled = false;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([
           makeConversation({
             id: "system-row",
@@ -4107,7 +4107,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
           }),
         ]),
       ),
-      http.get("http://127.0.0.1:8001/v1/trajectories/:id", () => {
+      http.get("*/v1/trajectories/:id", () => {
         trajectoryCalled = true;
         return HttpResponse.json({});
       }),
@@ -4130,7 +4130,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
 
   it("hides stale empty placeholders ahead of real Buddy chats", async () => {
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([
           makeConversation({
             id: "old-empty-placeholder",
@@ -4165,7 +4165,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
   it("clicking an existing chat row calls trajectory API and navigates to chat with buddy_meta", async () => {
     let trajectoryCalled = false;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([
           makeConversation({
             id: "existing-buddy-chat",
@@ -4176,7 +4176,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
         ]),
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/trajectories/existing-buddy-chat",
+        "*/v1/trajectories/existing-buddy-chat",
         () => {
           trajectoryCalled = true;
           return HttpResponse.json({
@@ -4218,7 +4218,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
   it("clicking a workflow recent row opens the Buddy workflow trajectory", async () => {
     let trajectoryCalled = false;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([
           makeConversation({
             id: "workflow-buddy-chat",
@@ -4231,7 +4231,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
         ]),
       ),
       http.get(
-        "http://127.0.0.1:8001/v1/trajectories/workflow-buddy-chat",
+        "*/v1/trajectories/workflow-buddy-chat",
         () => {
           trajectoryCalled = true;
           return HttpResponse.json({
@@ -4283,10 +4283,10 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
     let createConversationCalled = false;
     let trajectoryCalled = false;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.get("*/v1/buddy/conversations", () =>
         HttpResponse.json([]),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () => {
+      http.post("*/v1/buddy/conversations", () => {
         createConversationCalled = true;
         return HttpResponse.json({
           chat_id: "buddy-new-chat",
@@ -4296,7 +4296,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
           message_count: 0,
         });
       }),
-      http.get("http://127.0.0.1:8001/v1/trajectories/:id", () => {
+      http.get("*/v1/trajectories/:id", () => {
         trajectoryCalled = true;
         return HttpResponse.json({});
       }),
@@ -4317,18 +4317,18 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
 
 describe("BuddyHome_bottom_row_bounded_scroll", () => {
   const commonHandlers = [
-    http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+    http.get("*/v1/buddy/opportunities", () =>
       HttpResponse.json({ opportunities: [] }),
     ),
-    http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+    http.get("*/v1/buddy/conversations", () =>
       HttpResponse.json([]),
     ),
-    http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+    http.get("*/v1/stats/llm/summary", () =>
       HttpResponse.json({
         totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
       }),
     ),
-    http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+    http.get("*/v1/setup/status", () =>
       HttpResponse.json({ configured: true, reasons: [], detail: {} }),
     ),
   ];
