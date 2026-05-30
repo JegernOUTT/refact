@@ -768,7 +768,7 @@ async fn read_valid_trajectory_candidate(
             return None;
         }
     };
-    if !trajectory_root_id_matches(&json, chat_id, &path) {
+    if !trajectory_candidate_has_minimum_schema(&json, chat_id, &path) {
         return None;
     }
     Some(ValidTrajectoryCandidate {
@@ -1097,6 +1097,36 @@ fn trajectory_root_id_matches(t: &serde_json::Value, chat_id: &str, path: &Path)
             false
         }
     }
+}
+
+fn trajectory_candidate_has_minimum_schema(
+    t: &serde_json::Value,
+    chat_id: &str,
+    path: &Path,
+) -> bool {
+    let Some(root) = t.as_object() else {
+        warn!(
+            "Rejecting trajectory {}: JSON root must be an object for requested chat {}",
+            path.display(),
+            chat_id
+        );
+        return false;
+    };
+    if !trajectory_root_id_matches(t, chat_id, path) {
+        return false;
+    }
+    if root
+        .get("messages")
+        .is_some_and(|messages| messages.is_array())
+    {
+        return true;
+    }
+    warn!(
+        "Rejecting trajectory {}: missing or non-array JSON messages for requested chat {}",
+        path.display(),
+        chat_id
+    );
+    false
 }
 
 fn trajectory_path_stem_matches_id(path: &Path, id: &str) -> bool {
@@ -3275,6 +3305,44 @@ fn trajectory_list_candidate_matches_hydrated_data(
     false
 }
 
+async fn hydrate_trajectory_list_candidate(
+    app: AppState,
+    candidate: &TrajectoryListCandidate,
+    task_roots: &[PathBuf],
+) -> Option<TrajectoryMeta> {
+    let content = fs::read_to_string(&candidate.path).await.ok()?;
+    let data = serde_json::from_str::<TrajectoryData>(&content).ok()?;
+    if !trajectory_list_candidate_matches_hydrated_data(candidate, &data) {
+        return None;
+    }
+    let mut meta = trajectory_data_to_meta_validated(app, &data).await;
+    apply_task_trajectory_context(&candidate.path, task_roots, &mut meta);
+    Some(meta)
+}
+
+async fn hydrate_trajectory_list_page(
+    app: AppState,
+    candidates: Vec<TrajectoryListCandidate>,
+    limit: usize,
+    task_roots: &[PathBuf],
+) -> (Vec<TrajectoryMeta>, bool) {
+    let mut items = Vec::with_capacity(limit);
+    let mut has_more = false;
+    for candidate in candidates {
+        let Some(meta) =
+            hydrate_trajectory_list_candidate(app.clone(), &candidate, task_roots).await
+        else {
+            continue;
+        };
+        if items.len() == limit {
+            has_more = true;
+            break;
+        }
+        items.push(meta);
+    }
+    (items, has_more)
+}
+
 async fn collect_trajectory_list_candidates(
     gcx: &Arc<GlobalContext>,
     cursor_filter: Option<&(String, String)>,
@@ -3362,27 +3430,9 @@ pub async fn list_trajectories_page(
         other => other,
     });
 
-    let has_more = candidates.len() > limit;
-    let page_candidates: Vec<TrajectoryListCandidate> =
-        candidates.into_iter().take(limit).collect();
     let task_roots = get_all_task_roots(gcx.clone()).await;
-    let mut items = Vec::with_capacity(page_candidates.len());
-
-    for candidate in page_candidates {
-        let Ok(content) = fs::read_to_string(&candidate.path).await else {
-            continue;
-        };
-        let Ok(data) = serde_json::from_str::<TrajectoryData>(&content) else {
-            continue;
-        };
-        if !trajectory_list_candidate_matches_hydrated_data(&candidate, &data) {
-            continue;
-        }
-        let mut meta = trajectory_data_to_meta_validated(app.clone(), &data).await;
-        apply_task_trajectory_context(&candidate.path, &task_roots, &mut meta);
-        items.push(meta);
-    }
-
+    let (mut items, has_more) =
+        hydrate_trajectory_list_page(app.clone(), candidates, limit, &task_roots).await;
     enrich_with_session_state(app, &mut items).await;
 
     let next_cursor = if has_more {
@@ -3816,6 +3866,15 @@ mod tests {
         .unwrap();
     }
 
+    async fn write_schema_incomplete_trajectory_file(path: &Path, id: &str) {
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, serde_json::to_string(&json!({"id": id})).unwrap())
+            .await
+            .unwrap();
+    }
+
     async fn write_buddy_conversation_file(path: &Path, id: &str, title: &str) {
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
@@ -4100,6 +4159,70 @@ mod tests {
         assert_eq!(agent["agent_id"].as_str(), Some("agent-1"));
     }
 
+    #[tokio::test]
+    async fn paginated_list_backfills_when_hydration_skips_changed_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let root = dir.path().join(".refact").join("trajectories");
+        write_trajectory_file(
+            &root.join("top-chat.json"),
+            "top-chat",
+            "Top Chat",
+            "2024-01-01T00:00:03Z",
+        )
+        .await;
+        write_trajectory_file(
+            &root.join("skip-chat.json"),
+            "skip-chat",
+            "Skip Chat",
+            "2024-01-01T00:00:02Z",
+        )
+        .await;
+        write_trajectory_file(
+            &root.join("backfill-chat.json"),
+            "backfill-chat",
+            "Backfill Chat",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        tokio::fs::write(
+            root.join("skip-chat.json"),
+            serde_json::to_string(&sample_trajectory(
+                "other-chat",
+                "Changed",
+                "2024-01-01T00:00:02Z",
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let candidates = vec![
+            TrajectoryListCandidate {
+                id: "top-chat".to_string(),
+                updated_at: "2024-01-01T00:00:03Z".to_string(),
+                path: root.join("top-chat.json"),
+            },
+            TrajectoryListCandidate {
+                id: "skip-chat".to_string(),
+                updated_at: "2024-01-01T00:00:02Z".to_string(),
+                path: root.join("skip-chat.json"),
+            },
+            TrajectoryListCandidate {
+                id: "backfill-chat".to_string(),
+                updated_at: "2024-01-01T00:00:01Z".to_string(),
+                path: root.join("backfill-chat.json"),
+            },
+        ];
+        let task_roots = Vec::new();
+
+        let (items, has_more) = hydrate_trajectory_list_page(app, candidates, 2, &task_roots).await;
+        let ids: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["top-chat", "backfill-chat"]);
+        assert!(!has_more);
+    }
+
     #[test]
     fn test_validate_trajectory_id_rejects_path_traversal() {
         assert!(validate_trajectory_id("../etc/passwd").is_err());
@@ -4258,6 +4381,51 @@ mod tests {
         );
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
         assert_eq!(loaded.thread.title, "Valid Task");
+    }
+
+    #[tokio::test]
+    async fn schema_incomplete_normal_candidate_does_not_shadow_task_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "schema-task-shadow";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-schema-shadow")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        write_schema_incomplete_trajectory_file(&normal_path, chat_id).await;
+        write_trajectory_file(&task_path, chat_id, "Valid Task", "2024-01-01T00:00:01Z").await;
+
+        assert_eq!(
+            find_trajectory_path(gcx.clone(), chat_id).await,
+            Some(task_path)
+        );
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.thread.title, "Valid Task");
+    }
+
+    #[tokio::test]
+    async fn schema_incomplete_candidate_only_is_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "schema-incomplete-only";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_schema_incomplete_trajectory_file(&path, chat_id).await;
+
+        assert!(find_trajectory_path(gcx.clone(), chat_id).await.is_none());
+        assert!(load_trajectory_for_chat(gcx, chat_id).await.is_none());
     }
 
     #[tokio::test]
