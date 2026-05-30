@@ -94,6 +94,7 @@ import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import { isToolMessage, modelsApi, providersApi } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { schedulerApi } from "../services/refact/schedulerApi";
+import { getEngineEndpointIdentity } from "../services/refact/apiUrl";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -112,6 +113,17 @@ function syncProjectStorageNamespace(state: RootState): boolean {
     workspaceName: state.config.currentWorkspaceName,
   });
   return getProjectStorageNamespace() !== previous;
+}
+
+function endpointConfigChanged(previous: RootState["config"], next: RootState["config"]): boolean {
+  return (
+    getEngineEndpointIdentity(previous) !== getEngineEndpointIdentity(next) ||
+    previous.host !== next.host ||
+    previous.dev !== next.dev ||
+    previous.engineServed !== next.engineServed ||
+    previous.lspPort !== next.lspPort ||
+    previous.lspUrl !== next.lspUrl
+  );
 }
 
 function persistOpenChatTabs(state: RootState): void {
@@ -459,7 +471,7 @@ startListening({
 
 startListening({
   actionCreator: updateConfig,
-  effect: (action, listenerApi) => {
+  effect: (_action, listenerApi) => {
     listenerApi.dispatch(pingApi.util.resetApiState());
     const namespaceChanged = syncProjectStorageNamespace(
       listenerApi.getState(),
@@ -467,15 +479,14 @@ startListening({
     if (namespaceChanged) {
       listenerApi.dispatch(hydratePersistedChatTabs());
     }
-    const previousConfig = listenerApi.getOriginalState().config;
-    const nextPort = action.payload.lspPort;
-    const portChanged =
-      nextPort !== undefined && nextPort !== previousConfig.lspPort;
 
-    if (portChanged) {
+    const previousConfig = listenerApi.getOriginalState().config;
+    const nextConfig = listenerApi.getState().config;
+    if (endpointConfigChanged(previousConfig, nextConfig)) {
+      listenerApi.dispatch(capsApi.util.resetApiState());
       listenerApi.dispatch(providersApi.util.resetApiState());
       listenerApi.dispatch(modelsApi.util.resetApiState());
-      listenerApi.dispatch(resetSidebarState({ lspPort: nextPort }));
+      listenerApi.dispatch(resetSidebarState({ lspPort: nextConfig.lspPort }));
     }
   },
 });

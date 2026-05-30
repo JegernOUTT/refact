@@ -12,6 +12,9 @@ const POLL_INTERVAL_ERROR = 2000;
 export const useGetPing = () => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
+  const currentHost = config.host;
+  const currentDev = config.dev;
+  const currentEngineServed = config.engineServed;
   const currentLspPort = config.lspPort;
   const currentLspUrl = config.lspUrl;
   const canPing = Number.isFinite(currentLspPort) && currentLspPort > 0;
@@ -20,7 +23,13 @@ export const useGetPing = () => {
   const [queryStarted, setQueryStarted] = useState(false);
 
   const result = pingApi.endpoints.ping.useQuery(
-    { port: currentLspPort, lspUrl: currentLspUrl },
+    {
+      host: currentHost,
+      dev: currentDev,
+      engineServed: currentEngineServed,
+      lspPort: currentLspPort,
+      lspUrl: currentLspUrl,
+    },
     {
       pollingInterval,
       refetchOnMountOrArgChange: true,
@@ -75,7 +84,13 @@ export const useGetPing = () => {
   useEffect(() => {
     setPollingInterval(POLL_INTERVAL_ERROR);
     setQueryStarted(false);
-  }, [currentLspPort]);
+  }, [
+    currentHost,
+    currentDev,
+    currentEngineServed,
+    currentLspPort,
+    currentLspUrl,
+  ]);
 
   return result;
 };

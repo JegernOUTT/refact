@@ -207,4 +207,10 @@ describe("legacy and state adapters", () => {
 
     expect(getEngineEndpointIdentity(config)).toBe("https://example.com/base");
   });
+
+  test("getEngineEndpointIdentity reflects IDE fallback port changes", () => {
+    expect(getEngineEndpointIdentity({ host: "vscode", lspPort: 8123 })).toBe(
+      "http://127.0.0.1:8123",
+    );
+  });
 });
