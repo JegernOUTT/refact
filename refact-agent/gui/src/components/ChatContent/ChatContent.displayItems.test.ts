@@ -190,10 +190,11 @@ describe("ChatContent display items", () => {
     );
 
     expect(items).not.toBeNull();
-    const matchingErrors = (items ?? [])
-      .filter((item) => item.type === "error")
-      .flatMap((item) => (item.type === "error" ? item.errors : []))
-      .filter((error) => error.content === failure.content);
+    const matchingErrors = (items ?? []).flatMap((item) =>
+      item.type === "error"
+        ? item.errors.filter((error) => error.content === failure.content)
+        : [],
+    );
     expect(matchingErrors).toHaveLength(1);
   });
 

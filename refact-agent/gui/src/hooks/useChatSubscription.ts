@@ -454,7 +454,6 @@ export function useChatSubscription(
     chatId,
     config.apiKey,
     config.lspPort,
-    endpointIdentity,
     enabled,
     subscriptionConfig,
     cleanup,

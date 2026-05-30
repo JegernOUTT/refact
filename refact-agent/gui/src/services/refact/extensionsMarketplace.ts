@@ -1,6 +1,7 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { RootState } from "../../app/store";
 import { extensionsApi } from "./extensions";
+import { buildApiUrlFromState, type QueryParams } from "./apiUrl";
 
 export type MarketplaceKind = "skill" | "command" | "subagent";
 
@@ -63,6 +64,14 @@ export type ExtensionMarketplaceInstallResponse = {
   name: string;
 };
 
+function extensionsMarketplaceUrl(
+  state: RootState,
+  path: string,
+  query?: QueryParams,
+): string {
+  return buildApiUrlFromState(state, path, query);
+}
+
 export const extensionsMarketplaceApi = createApi({
   reducerPath: "extensionsMarketplaceApi",
   tagTypes: [
@@ -86,9 +95,9 @@ export const extensionsMarketplaceApi = createApi({
       undefined
     >({
       queryFn: async (_arg, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/ext/marketplace/sources`,
+          url: extensionsMarketplaceUrl(state, "/v1/ext/marketplace/sources"),
         });
         if (result.error) return { error: result.error };
         return {
@@ -103,9 +112,9 @@ export const extensionsMarketplaceApi = createApi({
       { url: string; enabled: boolean }
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/ext/marketplace/sources`,
+          url: extensionsMarketplaceUrl(state, "/v1/ext/marketplace/sources"),
           method: "POST",
           body,
         });
@@ -130,11 +139,12 @@ export const extensionsMarketplaceApi = createApi({
       { id: string }
     >({
       queryFn: async ({ id }, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/ext/marketplace/sources/${encodeURIComponent(
-            id,
-          )}`,
+          url: extensionsMarketplaceUrl(
+            state,
+            `/v1/ext/marketplace/sources/${encodeURIComponent(id)}`,
+          ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
@@ -153,11 +163,12 @@ export const extensionsMarketplaceApi = createApi({
       { id: string; enabled?: boolean }
     >({
       queryFn: async ({ id, ...body }, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/ext/marketplace/sources/${encodeURIComponent(
-            id,
-          )}/configure`,
+          url: extensionsMarketplaceUrl(
+            state,
+            `/v1/ext/marketplace/sources/${encodeURIComponent(id)}/configure`,
+          ),
           method: "POST",
           body,
         });
@@ -177,15 +188,12 @@ export const extensionsMarketplaceApi = createApi({
       { source?: string; q?: string } | undefined
     >({
       queryFn: async (params, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
-        const search = new URLSearchParams();
-        if (params?.source) search.set("source", params.source);
-        if (params?.q) search.set("q", params.q);
-        const qs = search.toString();
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/subagents/marketplace${
-            qs ? `?${qs}` : ""
-          }`,
+          url: extensionsMarketplaceUrl(state, "/v1/subagents/marketplace", {
+            source: params?.source,
+            q: params?.q,
+          }),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as ExtensionMarketplaceResponse };
@@ -198,15 +206,12 @@ export const extensionsMarketplaceApi = createApi({
       { source?: string; q?: string } | undefined
     >({
       queryFn: async (params, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
-        const search = new URLSearchParams();
-        if (params?.source) search.set("source", params.source);
-        if (params?.q) search.set("q", params.q);
-        const qs = search.toString();
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/skills/marketplace${
-            qs ? `?${qs}` : ""
-          }`,
+          url: extensionsMarketplaceUrl(state, "/v1/skills/marketplace", {
+            source: params?.source,
+            q: params?.q,
+          }),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as ExtensionMarketplaceResponse };
@@ -219,15 +224,12 @@ export const extensionsMarketplaceApi = createApi({
       { source?: string; q?: string } | undefined
     >({
       queryFn: async (params, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
-        const search = new URLSearchParams();
-        if (params?.source) search.set("source", params.source);
-        if (params?.q) search.set("q", params.q);
-        const qs = search.toString();
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/commands/marketplace${
-            qs ? `?${qs}` : ""
-          }`,
+          url: extensionsMarketplaceUrl(state, "/v1/commands/marketplace", {
+            source: params?.source,
+            q: params?.q,
+          }),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as ExtensionMarketplaceResponse };
@@ -240,11 +242,12 @@ export const extensionsMarketplaceApi = createApi({
       { id: string }
     >({
       queryFn: async ({ id }, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/ext/marketplace/sources/${encodeURIComponent(
-            id,
-          )}/refresh`,
+          url: extensionsMarketplaceUrl(
+            state,
+            `/v1/ext/marketplace/sources/${encodeURIComponent(id)}/refresh`,
+          ),
           method: "POST",
           body: {},
         });
@@ -270,9 +273,12 @@ export const extensionsMarketplaceApi = createApi({
       }
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/skills/marketplace/install`,
+          url: extensionsMarketplaceUrl(
+            state,
+            "/v1/skills/marketplace/install",
+          ),
           method: "POST",
           body,
         });
@@ -297,9 +303,12 @@ export const extensionsMarketplaceApi = createApi({
       }
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/commands/marketplace/install`,
+          url: extensionsMarketplaceUrl(
+            state,
+            "/v1/commands/marketplace/install",
+          ),
           method: "POST",
           body,
         });
@@ -324,9 +333,12 @@ export const extensionsMarketplaceApi = createApi({
       }
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
-        const port = (api.getState() as RootState).config.lspPort;
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/subagents/marketplace/install`,
+          url: extensionsMarketplaceUrl(
+            state,
+            "/v1/subagents/marketplace/install",
+          ),
           method: "POST",
           body,
         });

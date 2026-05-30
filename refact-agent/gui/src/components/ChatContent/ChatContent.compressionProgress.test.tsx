@@ -174,7 +174,7 @@ describe("ChatContent compression progress", () => {
     ).toBeNull();
   });
 
-  it("does not add a transient compression item to virtualized rows", async () => {
+  it("does not add a transient compression item to virtualized rows", () => {
     renderChatContent(
       makeChatState({
         messages: [userMessage("hello")],
@@ -232,7 +232,7 @@ describe("ChatContent compression progress", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows switching loading instead of old compressing chat progress", async () => {
+  it("shows switching loading instead of old compressing chat progress", () => {
     const oldRuntime = makeRuntime({
       messages: [userMessage("old chat content")],
       isCompressing: true,

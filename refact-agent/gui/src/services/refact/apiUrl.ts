@@ -58,7 +58,7 @@ export function resolveEngineBaseUrl(config: EngineApiConfig): string {
   const host = config.host ?? "web";
 
   if (host === "web") {
-    if (config.dev || config.engineServed) return "";
+    if ((config.dev ?? false) || (config.engineServed ?? false)) return "";
     return sanitizeEngineBaseUrl(config.lspUrl) ?? "";
   }
 

@@ -115,7 +115,7 @@ export function useChatActions() {
 
   const submit = useCallback(
     async (question: string, priority?: boolean) => {
-      if (!chatId || !config) return;
+      if (!chatId) return;
 
       const content = buildMessageContent(question);
       const isEmpty =
@@ -174,7 +174,7 @@ export function useChatActions() {
    * Abort the current generation.
    */
   const abort = useCallback(async () => {
-    if (!chatId || !config) return;
+    if (!chatId) return;
     await abortGeneration(chatId, config, apiKey ?? undefined);
   }, [chatId, config, apiKey]);
 
@@ -187,7 +187,7 @@ export function useChatActions() {
       mode?: string;
       boost_reasoning?: boolean;
     }) => {
-      if (!chatId || !config) return;
+      if (!chatId) return;
       await updateChatParams(chatId, params, config, apiKey ?? undefined);
     },
     [chatId, config, apiKey],
@@ -198,7 +198,7 @@ export function useChatActions() {
    */
   const respondToTool = useCallback(
     async (toolCallId: string, accepted: boolean) => {
-      if (!chatId || !config) return;
+      if (!chatId) return;
       await respondToToolConfirmation(
         chatId,
         toolCallId,
@@ -215,7 +215,7 @@ export function useChatActions() {
    */
   const respondToTools = useCallback(
     async (decisions: { tool_call_id: string; accepted: boolean }[]) => {
-      if (!chatId || !config || decisions.length === 0) return;
+      if (!chatId || decisions.length === 0) return;
       await respondToToolConfirmations(
         chatId,
         decisions,
@@ -232,7 +232,7 @@ export function useChatActions() {
    */
   const retryFromIndex = useCallback(
     async (index: number, newContent: UserMessage["content"]) => {
-      if (!chatId || !config) return;
+      if (!chatId) return;
 
       const content = convertUserMessageContent(newContent);
 
@@ -253,7 +253,7 @@ export function useChatActions() {
       newContent: MessageContent,
       regenerate?: boolean,
     ) => {
-      if (!chatId || !config) return;
+      if (!chatId) return;
       await updateMessageApi(
         chatId,
         messageId,
@@ -268,7 +268,7 @@ export function useChatActions() {
 
   const removeMessage = useCallback(
     async (messageId: string, regenerate?: boolean) => {
-      if (!chatId || !config) return;
+      if (!chatId) return;
       await removeMessageApi(
         chatId,
         messageId,
@@ -281,13 +281,13 @@ export function useChatActions() {
   );
 
   const regenerate = useCallback(async () => {
-    if (!chatId || !config) return;
+    if (!chatId) return;
     await regenerateApi(chatId, config, apiKey ?? undefined);
   }, [chatId, config, apiKey]);
 
   const cancelQueued = useCallback(
     async (clientRequestId: string) => {
-      if (!chatId || !config) return false;
+      if (!chatId) return false;
       return cancelQueuedItem(
         chatId,
         clientRequestId,

@@ -1417,7 +1417,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     [
       activeChat,
       plannerChats,
-      config.apiKey,
       config,
       dispatch,
       mergeTarget,

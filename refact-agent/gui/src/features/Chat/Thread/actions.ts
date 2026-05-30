@@ -145,7 +145,7 @@ export const sendIdeMessagesToCurrentChat = createAsyncThunk(
     const chatId = selectCurrentThreadId(state);
     const connection = selectConfig(state);
     const apiKey = selectApiKey(state) ?? undefined;
-    if (!chatId || !connection) return;
+    if (!chatId) return;
 
     const runtime = state.chat.threads[chatId];
     if (!runtime) return;
@@ -230,7 +230,7 @@ export const newChatWithInitialMessages = createAsyncThunk(
     const chatId = state.chat.current_thread_id;
     const connection = selectConfig(state);
     const apiKey = selectApiKey(state) ?? undefined;
-    if (!chatId || !connection) return;
+    if (!chatId) return;
 
     const runtime = state.chat.threads[chatId];
     if (runtime && runtime.thread.messages.length === 0) {

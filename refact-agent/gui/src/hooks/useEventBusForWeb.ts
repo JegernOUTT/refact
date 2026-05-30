@@ -72,14 +72,5 @@ export function useEventBusForWeb() {
         apiKey,
       }),
     );
-  }, [
-    apiKey,
-    lspUrl,
-    dispatch,
-    config.host,
-    config.lspUrl,
-    config.lspPort,
-    config.engineServed,
-    config.dev,
-  ]);
+  }, [apiKey, lspUrl, dispatch, config]);
 }
