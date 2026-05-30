@@ -1,6 +1,7 @@
 name: Refact VS Code Plugin CI build
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "*"
