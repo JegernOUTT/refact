@@ -1657,6 +1657,14 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
     let trajectory_object = trajectory
         .as_object_mut()
         .ok_or_else(|| "Trajectory JSON root must be an object".to_string())?;
+    let current_chat_id = trajectory_object.get("id").and_then(|value| value.as_str());
+    if current_chat_id != Some(chat_id.as_str()) {
+        return Err(format!(
+            "Trajectory source id mismatch for repair: expected {}, found {}",
+            chat_id,
+            current_chat_id.unwrap_or("<missing>")
+        ));
+    }
 
     trajectory_object.remove("previous_response_id");
     trajectory_object.remove("claude_code_identity");
@@ -1735,10 +1743,6 @@ pub async fn check_external_reload_pending(
     }
     if let Some(mut loaded) = load_trajectory_for_chat(gcx.clone(), &chat_id).await {
         let transition_identity_repaired = loaded.transition_identity_repaired;
-        let loaded_had_auto_approve_editing_tools_present =
-            loaded.auto_approve_editing_tools_present;
-        let loaded_had_auto_approve_dangerous_commands_present =
-            loaded.auto_approve_dangerous_commands_present;
         apply_mode_defaults_to_thread(
             gcx.clone(),
             &mut loaded.thread,
@@ -1746,9 +1750,6 @@ pub async fn check_external_reload_pending(
             loaded.auto_approve_dangerous_commands_present,
         )
         .await;
-        loaded.auto_approve_editing_tools_present = loaded_had_auto_approve_editing_tools_present;
-        loaded.auto_approve_dangerous_commands_present =
-            loaded_had_auto_approve_dangerous_commands_present;
         let repair_patch = loaded.repair_patch();
         let repaired_version = {
             let mut session = session_arc.lock().await;
@@ -1959,10 +1960,6 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
 
     if let Some(mut loaded) = load_trajectory_for_chat(gcx.clone(), chat_id).await {
         let transition_identity_repaired = loaded.transition_identity_repaired;
-        let loaded_had_auto_approve_editing_tools_present =
-            loaded.auto_approve_editing_tools_present;
-        let loaded_had_auto_approve_dangerous_commands_present =
-            loaded.auto_approve_dangerous_commands_present;
         apply_mode_defaults_to_thread(
             gcx.clone(),
             &mut loaded.thread,
@@ -1970,9 +1967,6 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             loaded.auto_approve_dangerous_commands_present,
         )
         .await;
-        loaded.auto_approve_editing_tools_present = loaded_had_auto_approve_editing_tools_present;
-        loaded.auto_approve_dangerous_commands_present =
-            loaded_had_auto_approve_dangerous_commands_present;
         let repair_patch = loaded.repair_patch();
         let repaired_version = {
             let mut session = session_arc.lock().await;
@@ -6151,7 +6145,10 @@ mod tests {
         assert!(raw.get("frozen_request_prefix").is_none());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
-        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-immediate");
+        assert_eq!(
+            raw["browser_meta"]["browser_runtime_id"],
+            "browser-immediate"
+        );
         assert_eq!(raw["custom_future_field"]["nested"]["value"], 44);
     }
 
@@ -6549,7 +6546,10 @@ mod tests {
         assert!(raw.get("frozen_request_prefix").is_none());
         assert!(raw.get("claude_code_identity").is_none());
         assert!(raw.get("previous_response_id").is_none());
-        assert_eq!(raw["browser_meta"]["browser_runtime_id"], "browser-immediate");
+        assert_eq!(
+            raw["browser_meta"]["browser_runtime_id"],
+            "browser-immediate"
+        );
         assert_eq!(raw["custom_future_field"]["nested"]["value"], 44);
     }
 
@@ -6731,6 +6731,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repair_source_id_mismatch_errors_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "repair-source-original";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "id": chat_id,
+                "title": "Repair Source Original",
+                "model": "model",
+                "mode": "task_planner",
+                "tool_use": "agent",
+                "parent_id": "source-chat",
+                "link_type": "mode_transition",
+                "previous_response_id": "resp_source",
+                "messages": [
+                    {"role":"system","content":"target task planner system"},
+                    {"role":"user","content":"hello"}
+                ],
+                "frozen_request_prefix": {
+                    "schema_version": 1,
+                    "created_at": "2026-05-29T00:00:00Z",
+                    "system_prompt": "source system",
+                    "tools_canonical": [{"type":"function","function":{"name":"source_tool"}}]
+                },
+                "claude_code_identity": {
+                    "device_id":"source-device",
+                    "session_id":"source-session"
+                },
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "include_project_info": true,
+                "checkpoints_enabled": true,
+                "custom_future_field": {"keep": true}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.transition_identity_repaired);
+        apply_mode_defaults_to_thread(
+            gcx.clone(),
+            &mut loaded.thread,
+            loaded.auto_approve_editing_tools_present,
+            loaded.auto_approve_dangerous_commands_present,
+        )
+        .await;
+        let repair_patch = loaded.repair_patch();
+        let replacement = serde_json::to_string(&json!({
+            "id": "repair-source-replacement",
+            "title": "Replacement Must Stay",
+            "model": "model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": [],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "include_project_info": true,
+            "checkpoints_enabled": true,
+            "previous_response_id": "replacement-response"
+        }))
+        .unwrap();
+        tokio::fs::write(&path, &replacement).await.unwrap();
+
+        let err = persist_loaded_trajectory_repair_raw(&repair_patch)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("Trajectory source id mismatch for repair"));
+        assert_eq!(tokio::fs::read_to_string(path).await.unwrap(), replacement);
+    }
+
+    #[tokio::test]
     async fn mode_transition_repair_persists_to_loaded_task_path_with_normal_collision() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
@@ -6789,7 +6874,9 @@ mod tests {
         .await
         .unwrap();
 
-        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id).await.unwrap();
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
         assert_eq!(loaded.source_path, task_path);
         assert!(loaded.transition_identity_repaired);
         apply_mode_defaults_to_thread(
