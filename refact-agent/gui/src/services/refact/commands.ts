@@ -1,6 +1,7 @@
 import { RootState } from "../../app/store";
 import { parseOrElse } from "../../utils";
 import { LspChatMessage } from "./chat";
+import { buildApiUrlFromState } from "./apiUrl";
 import { AT_COMMAND_COMPLETION, AT_COMMAND_PREVIEW } from "./consts";
 import type { ChatContextFile, ChatMeta } from "./types";
 
@@ -32,8 +33,7 @@ export const commandsApi = createApi({
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${AT_COMMAND_COMPLETION}`;
+        const url = buildApiUrlFromState(state, AT_COMMAND_COMPLETION);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -88,8 +88,7 @@ export const commandsApi = createApi({
       queryFn: async (args, api, _opts, baseQuery) => {
         const { messages, meta, model } = args;
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${AT_COMMAND_PREVIEW}`;
+        const url = buildApiUrlFromState(state, AT_COMMAND_PREVIEW);
         const response = await baseQuery({
           url,
           method: "POST",

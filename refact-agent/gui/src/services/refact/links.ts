@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 import { ChatMessage, ChatMessages } from "./types";
 import { formatMessagesForLsp } from "../../features/Chat/Thread/utils";
 import { CHAT_COMMIT_LINK_URL, CHAT_LINKS_URL } from "./consts";
@@ -134,13 +135,12 @@ export const linksApi = createApi({
       providesTags: ["Chat_Links"],
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
         const messageFotLsp = formatMessagesForLsp(args.messages);
 
         const response = await baseQuery({
           ...extraOptions,
           method: "POST",
-          url: `http://127.0.0.1:${port}${CHAT_LINKS_URL}`,
+          url: buildApiUrlFromState(state, CHAT_LINKS_URL),
           body: {
             meta: {
               chat_id: args.chat_id,
@@ -176,8 +176,7 @@ export const linksApi = createApi({
       invalidatesTags: ["Chat_Links"],
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${CHAT_COMMIT_LINK_URL}`;
+        const url = buildApiUrlFromState(state, CHAT_COMMIT_LINK_URL);
         const response = await baseQuery({
           ...extraOptions,
           method: "POST",

@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 import type {
   StatsSummary,
   StatsEventsParams,
@@ -24,11 +25,10 @@ export const statsApi = createApi({
     >({
       queryFn: async (args, api, _extraOptions, baseQuery) => {
         const state = (api.getState as () => RootState)();
-        const port = state.config.lspPort;
-        const params = new URLSearchParams();
-        if (args.from) params.set("from", args.from);
-        if (args.to) params.set("to", args.to);
-        const url = `http://127.0.0.1:${port}/v1/stats/llm/summary?${params.toString()}`;
+        const url = buildApiUrlFromState(state, "/v1/stats/llm/summary", {
+          from: args.from,
+          to: args.to,
+        });
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
         return { data: result.data as StatsSummary };
@@ -37,16 +37,14 @@ export const statsApi = createApi({
     getStatsEvents: builder.query<StatsEventsResponse, StatsEventsParams>({
       queryFn: async (args, api, _extraOptions, baseQuery) => {
         const state = (api.getState as () => RootState)();
-        const port = state.config.lspPort;
-        const params = new URLSearchParams();
-        if (args.from) params.set("from", args.from);
-        if (args.to) params.set("to", args.to);
-        if (args.limit !== undefined) params.set("limit", String(args.limit));
-        if (args.offset !== undefined)
-          params.set("offset", String(args.offset));
-        if (args.model) params.set("model", args.model);
-        if (args.provider) params.set("provider", args.provider);
-        const url = `http://127.0.0.1:${port}/v1/stats/llm/events?${params.toString()}`;
+        const url = buildApiUrlFromState(state, "/v1/stats/llm/events", {
+          from: args.from,
+          to: args.to,
+          limit: args.limit,
+          offset: args.offset,
+          model: args.model,
+          provider: args.provider,
+        });
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
         return { data: result.data as StatsEventsResponse };

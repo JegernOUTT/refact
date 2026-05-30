@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export interface SkillsStatusResponse {
   skills_available: number;
@@ -23,9 +24,11 @@ export const skillsStatusApi = createApi({
     getSkillsStatus: builder.query<SkillsStatusResponse, string>({
       queryFn: async (chatId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/chats/${chatId}/skills-status`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/chats/${chatId}/skills-status`,
+          ),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as SkillsStatusResponse };

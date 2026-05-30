@@ -1,5 +1,6 @@
 import { RootState } from "../../app/store";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type ChatModeThreadDefaults = {
   include_project_info: boolean;
@@ -53,7 +54,7 @@ export const chatModesApi = createApi({
         }
 
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/chat-modes`,
+          url: buildApiUrlFromState(state, "/v1/chat-modes"),
           credentials: "same-origin",
           redirect: "follow",
         });

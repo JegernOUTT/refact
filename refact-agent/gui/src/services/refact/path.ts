@@ -1,4 +1,5 @@
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 import { CONFIG_PATH_URL, FULL_PATH_URL } from "./consts";
 import {
   BaseQueryApi,
@@ -39,8 +40,7 @@ async function fetchPath(
   suffix: string,
 ): Promise<ReturnType<BaseQueryTypeResponse>> {
   const state = api.getState() as RootState;
-  const port = state.config.lspPort as unknown as number;
-  const previewEndpoint = `http://127.0.0.1:${port}${configPathUrl}`;
+  const previewEndpoint = buildApiUrlFromState(state, configPathUrl);
   const response = await baseQuery(
     {
       url: previewEndpoint,
@@ -79,8 +79,7 @@ export const pathApi = createApi({
     getFullPath: builder.query<string | null, string>({
       queryFn: async (path, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${FULL_PATH_URL}`;
+        const url = buildApiUrlFromState(state, FULL_PATH_URL);
         const result = await baseQuery({
           url,
           credentials: "same-origin",

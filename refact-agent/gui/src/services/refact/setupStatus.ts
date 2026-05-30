@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type SetupStatusDetail = {
   project_root?: string | null;
@@ -35,7 +36,7 @@ export const setupStatusApi = createApi({
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/setup/status`,
+          url: buildApiUrlFromState(state, "/v1/setup/status"),
         });
         if (result.error) {
           return { error: result.error };

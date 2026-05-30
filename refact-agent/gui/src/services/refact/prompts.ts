@@ -1,4 +1,5 @@
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 import { CUSTOM_PROMPTS_URL } from "./consts";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 
@@ -20,8 +21,7 @@ export const promptsApi = createApi({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const getState = api.getState as () => RootState;
         const state = getState();
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${CUSTOM_PROMPTS_URL}`;
+        const url = buildApiUrlFromState(state, CUSTOM_PROMPTS_URL);
         const result = await baseQuery({
           url,
           credentials: "same-origin",

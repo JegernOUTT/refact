@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export interface ConfigItem {
   id: string;
@@ -77,7 +78,7 @@ export const customizationApi = createApi({
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/customization/registry`,
+          url: buildApiUrlFromState(state, "/v1/customization/registry"),
         });
         if (result.error) {
           return {
@@ -102,9 +103,10 @@ export const customizationApi = createApi({
         if (!port) {
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
-        const scopeParam = scope ? `?scope=${scope}` : "";
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}${scopeParam}`,
+          url: buildApiUrlFromState(state, `/v1/customization/${kind}/${id}`, {
+            scope,
+          }),
         });
         if (result.error) {
           return {
@@ -143,7 +145,7 @@ export const customizationApi = createApi({
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}`,
+          url: buildApiUrlFromState(state, `/v1/customization/${kind}/${id}`),
           method: "PUT",
           body: { config, scope, draft_id },
         });
@@ -179,7 +181,7 @@ export const customizationApi = createApi({
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/customization/${kind}`,
+          url: buildApiUrlFromState(state, `/v1/customization/${kind}`),
           method: "POST",
           body: { id, config, scope },
         });
@@ -207,7 +209,9 @@ export const customizationApi = createApi({
           return { error: { status: 500, data: "Missing lspPort in config" } };
         }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/customization/${kind}/${id}?scope=${scope}`,
+          url: buildApiUrlFromState(state, `/v1/customization/${kind}/${id}`, {
+            scope,
+          }),
           method: "DELETE",
         });
         if (result.error) {

@@ -1,4 +1,5 @@
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 import {
   TOOLS_CHECK_CONFIRMATION,
   EDIT_TOOL_DRY_RUN_URL,
@@ -34,8 +35,7 @@ export const toolsApi = createApi({
       queryFn: async (_args, api, _extraOptions, baseQuery) => {
         const getState = api.getState as () => RootState;
         const state = getState();
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${TOOLS}`;
+        const url = buildApiUrlFromState(state, TOOLS);
         const result = await baseQuery({
           url,
           credentials: "same-origin",
@@ -59,8 +59,7 @@ export const toolsApi = createApi({
       queryFn: async (newToolGroups, api, _extraOptions, baseQuery) => {
         const getState = api.getState as () => RootState;
         const state = getState();
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${TOOLS}`;
+        const url = buildApiUrlFromState(state, TOOLS);
         const result = await baseQuery({
           method: "POST",
           url,
@@ -91,12 +90,11 @@ export const toolsApi = createApi({
       queryFn: async (args, api, _extraOptions, baseQuery) => {
         const getState = api.getState as () => RootState;
         const state = getState();
-        const port = state.config.lspPort;
 
         const { messages, tool_calls } = args;
         const messagesForLsp = formatMessagesForLsp(messages);
 
-        const url = `http://127.0.0.1:${port}${TOOLS_CHECK_CONFIRMATION}`;
+        const url = buildApiUrlFromState(state, TOOLS_CHECK_CONFIRMATION);
         const result = await baseQuery({
           url,
           method: "POST",
@@ -128,8 +126,7 @@ export const toolsApi = createApi({
       async queryFn(args, api, extraOptions, baseQuery) {
         const getState = api.getState as () => RootState;
         const state = getState();
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${EDIT_TOOL_DRY_RUN_URL}`;
+        const url = buildApiUrlFromState(state, EDIT_TOOL_DRY_RUN_URL);
 
         const response = await baseQuery({
           ...extraOptions,

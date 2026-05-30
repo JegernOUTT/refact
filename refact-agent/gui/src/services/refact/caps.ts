@@ -2,6 +2,7 @@ import { RootState } from "../../app/store";
 import { CAPS_URL } from "./consts";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { CodeChatModel, CodeCompletionModel, EmbeddingModel } from "./models";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export const capsApi = createApi({
   reducerPath: "caps",
@@ -18,8 +19,7 @@ export const capsApi = createApi({
     getCaps: builder.query<CapsResponse, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${CAPS_URL}`;
+        const url = buildApiUrlFromState(state, CAPS_URL);
 
         const result = await baseQuery({
           url,
