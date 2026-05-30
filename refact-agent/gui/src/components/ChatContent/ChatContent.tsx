@@ -211,10 +211,10 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   useDiffFileReload();
 
   const showLoading =
-    !isCompressing &&
-    (switching ||
-      (!snapshotReceived && messages.length === 0) ||
-      (sseStatus === "connecting" && messages.length === 0));
+    switching ||
+    (!isCompressing &&
+      ((!snapshotReceived && messages.length === 0) ||
+        (sseStatus === "connecting" && messages.length === 0)));
 
   const displayItems = useMemo(() => {
     const prevMessages = prevDisplayMessagesRef.current;
