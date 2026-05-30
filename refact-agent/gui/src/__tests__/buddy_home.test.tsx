@@ -924,6 +924,112 @@ describe("BuddyHome_renders_all_sections", () => {
     expect(within(errorsPanel).queryByText("×2")).not.toBeInTheDocument();
   });
 
+  it("old dismissed terminal error is not shown in recent errors", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T12:00:00Z"));
+    try {
+      const oldDismissedError = {
+        id: "old-dismissed-terminal-error",
+        signal_type: "chat_error",
+        title: "Old dismissed provider failure",
+        description: "This should not linger.",
+        source: "provider",
+        status: "failed",
+        priority: "high",
+        dismissed: true,
+        created_at: "2024-01-01T05:00:00Z",
+      } satisfies BuddyRuntimeEvent;
+
+      server.use(
+        http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [] }),
+        ),
+        http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+          HttpResponse.json([]),
+        ),
+        http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+          HttpResponse.json({
+            totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+          }),
+        ),
+        http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+          HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+        ),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot(makePulse(), { runtime_queue: [oldDismissedError] }),
+        ),
+      );
+
+      render(<BuddyHome />, { store });
+      const errorsPanel = await screen.findByTestId(
+        "buddy-recent-errors-panel",
+      );
+
+      expect(
+        within(errorsPanel).queryByText("Old dismissed provider failure"),
+      ).not.toBeInTheDocument();
+      expect(
+        within(errorsPanel).getByText(/No errors recorded/),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("active streaming old event remains shown in recent errors", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T12:00:00Z"));
+    try {
+      const oldStreamingError = {
+        id: "old-streaming-error",
+        signal_type: "chat_error",
+        title: "Old streaming provider issue",
+        description: "Still running and actionable.",
+        source: "provider",
+        status: "streaming",
+        priority: "high",
+        created_at: "2024-01-01T05:00:00Z",
+      } satisfies BuddyRuntimeEvent;
+
+      server.use(
+        http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [] }),
+        ),
+        http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+          HttpResponse.json([]),
+        ),
+        http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+          HttpResponse.json({
+            totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+          }),
+        ),
+        http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+          HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+        ),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot(makePulse(), { runtime_queue: [oldStreamingError] }),
+        ),
+      );
+
+      render(<BuddyHome />, { store });
+      const errorsPanel = await screen.findByTestId(
+        "buddy-recent-errors-panel",
+      );
+
+      expect(
+        within(errorsPanel).getByText("Old streaming provider issue"),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("failed dashboard runtime dismiss remains local", async () => {
     let dismissCalled = false;
     const runtime = {
@@ -2336,11 +2442,17 @@ describe("BuddyWorld_dynamic_environment", () => {
       source: "test",
       status: "progress",
       priority: "normal",
-      created_at: "2024-01-01T00:00:00Z",
+      created_at: "2024-01-01T13:59:30Z",
     };
     const world = buildBuddyWorldState({
-      now: new Date("2024-01-01T14:00:00"),
-      pulse: makePulse(),
+      now: new Date("2024-01-01T14:00:00Z"),
+      pulse: {
+        ...makePulse(),
+        diagnostics: { last_hour: 0, top_error_types: [] },
+        git: { uncommitted_files: 0, diff_lines_4h: 0, branches: 3 },
+        mcp: { total: 4, failing: 0, auth_expiring: 0 },
+        memory: { total: 10, orphan: 0, stale_conflicts: 0 },
+      },
       pet: makeSnapshot().state.pet,
       nowPlaying: runtimeEvent,
       activeQuest: null,
@@ -2448,7 +2560,7 @@ describe("buildBuddySceneSpeech", () => {
       source: "test",
       status: "info",
       priority: "normal",
-      created_at: "2024-01-01T00:00:00Z",
+      created_at: new Date().toISOString(),
       ...overrides,
     };
   }

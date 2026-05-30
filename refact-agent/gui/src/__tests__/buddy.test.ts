@@ -2454,11 +2454,11 @@ describe("runtime event new fields", () => {
     ).toBe(false);
   });
 
-  test("persistent no-ttl runtime event remains visible", () => {
+  test("non-durable no-ttl runtime event older than freshness window is hidden", () => {
     const event = makeEvent({
-      signal_type: "diagnostic_error",
-      status: "failed",
-      persistent: true,
+      signal_type: "ordinary_status",
+      status: "completed",
+      persistent: false,
       ttl_ms: undefined,
       created_at: "2024-01-01T00:00:00Z",
     });
@@ -2466,9 +2466,31 @@ describe("runtime event new fields", () => {
     expect(
       isBuddyRuntimeEventVisible(
         event,
-        new Date("2024-01-01T12:00:00Z").getTime(),
+        new Date("2024-01-01T00:02:00Z").getTime(),
       ),
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  test("persistent or durable no-ttl runtime event remains visible", () => {
+    const persistent = makeEvent({
+      signal_type: "diagnostic_error",
+      status: "failed",
+      persistent: true,
+      ttl_ms: undefined,
+      created_at: "2024-01-01T00:00:00Z",
+    });
+    const durable = makeEvent({
+      signal_type: "ordinary_status",
+      status: "completed",
+      persistent: false,
+      ttl_ms: undefined,
+      bubble_policy: "durable",
+      created_at: "2024-01-01T00:00:00Z",
+    });
+    const nowMs = new Date("2024-01-01T12:00:00Z").getTime();
+
+    expect(isBuddyRuntimeEventVisible(persistent, nowMs)).toBe(true);
+    expect(isBuddyRuntimeEventVisible(durable, nowMs)).toBe(true);
   });
 
   test("fresh no-ttl error remains visible and error-like", () => {
@@ -2487,6 +2509,23 @@ describe("runtime event new fields", () => {
       ),
     ).toBe(true);
     expect(isErrorRuntimeEvent(event)).toBe(true);
+  });
+
+  test("fresh no-ttl runtime event remains visible within freshness window", () => {
+    const event = makeEvent({
+      signal_type: "ordinary_status",
+      status: "completed",
+      persistent: false,
+      ttl_ms: undefined,
+      created_at: "2024-01-01T00:00:30Z",
+    });
+
+    expect(
+      isBuddyRuntimeEventVisible(
+        event,
+        new Date("2024-01-01T00:01:00Z").getTime(),
+      ),
+    ).toBe(true);
   });
 
   test("error grace helper rejects old and invalid timestamps", () => {

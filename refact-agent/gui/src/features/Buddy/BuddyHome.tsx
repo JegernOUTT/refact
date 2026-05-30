@@ -549,7 +549,6 @@ export const BuddyHome: React.FC = () => {
       if (
         Number.isFinite(createdAt) &&
         createdAt < cutoff &&
-        !e.dismissed &&
         e.status !== "started" &&
         e.status !== "progress" &&
         e.status !== "streaming"

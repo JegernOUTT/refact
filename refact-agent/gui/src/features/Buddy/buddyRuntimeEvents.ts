@@ -87,7 +87,6 @@ export function isBuddyRuntimeEventVisible(
   if (nowMs < MIN_EPOCH_MS) return true;
   if (createdAtMs > nowMs + RUNTIME_EVENT_FUTURE_SKEW_MS) return false;
   if (event.ttl_ms == null || !Number.isFinite(event.ttl_ms)) {
-    if (!isErrorRuntimeEvent(event)) return true;
     if (createdAtMs < MIN_EPOCH_MS) return true;
     return nowMs - createdAtMs <= RUNTIME_EVENT_FRESHNESS_MS;
   }
