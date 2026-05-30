@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -145,36 +146,65 @@ async fn read_plan_from_path(
     gcx: Arc<crate::global_context::GlobalContext>,
     path: &str,
 ) -> Result<String, String> {
-    if !Path::new(path).is_absolute() {
+    let requested_path = Path::new(path);
+    if !requested_path.is_absolute() {
         return Err("argument `path` must be absolute".to_string());
     }
-    let path = crate::files_correction::canonical_path(path);
-    if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+    if requested_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("md")
+    {
         return Err("argument `path` must point to a .md file".to_string());
     }
-    crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &path).await?;
-    reject_oversized_disk_plan_file(&path).await?;
-    let content = crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &path)
+
+    let path = canonicalize_existing_plan_path(requested_path).await?;
+    if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+        return Err("argument `path` must resolve to a .md file".to_string());
+    }
+    let metadata = tokio::fs::metadata(&path)
         .await
-        .map_err(|error| format!("failed to read plan from {}: {error}", path.display()))?;
+        .map_err(|error| format!("failed to inspect plan file {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "argument `path` must point to a regular .md file: {}",
+            path.display()
+        ));
+    }
+    crate::files_in_workspace::check_file_privacy_for_send(gcx, &path).await?;
+
+    let content = read_bounded_plan_file(&path).await?;
     if content.trim().is_empty() {
         return Err(format!("plan file {} is empty", path.display()));
     }
     Ok(content)
 }
 
-async fn reject_oversized_disk_plan_file(path: &Path) -> Result<(), String> {
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) if metadata.is_file() && metadata.len() > MAX_PLAN_FILE_BYTES => {
-            Err("plan file is too large to read as a plan; use a smaller .md file".to_string())
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "failed to inspect plan file {}: {error}",
-            path.display()
-        )),
+async fn canonicalize_existing_plan_path(path: &Path) -> Result<PathBuf, String> {
+    tokio::fs::canonicalize(path)
+        .await
+        .map(|path| dunce::simplified(&path).to_path_buf())
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!("plan file {} does not exist", path.display()),
+            _ => format!("failed to resolve plan file {}: {error}", path.display()),
+        })
+}
+
+async fn read_bounded_plan_file(path: &Path) -> Result<String, String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("failed to open plan file {}: {error}", path.display()))?;
+    let mut reader = file.take(MAX_PLAN_FILE_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| format!("failed to read plan file {}: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_PLAN_FILE_BYTES {
+        return Err("plan file is too large to read as a plan; use a smaller .md file".to_string());
     }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("plan file {} is not valid UTF-8: {error}", path.display()))
 }
 
 fn current_plan_including_queued(session: &ChatSession) -> Option<&ChatMessage> {
@@ -221,6 +251,7 @@ mod tests {
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use crate::chat::internal_roles::{EVENT_ROLE, PLAN_ROLE};
     use crate::chat::types::{ChatEvent, ChatSession, EventEnvelope};
+    use crate::files_in_workspace::Document;
     use crate::llm::adapter::{AdapterSettings, LlmWireAdapter};
     use crate::llm::adapters::openai_chat::OpenAiChatAdapter;
     use crate::privacy::{FilePrivacySettings, PrivacySettings};
@@ -585,6 +616,94 @@ mod tests {
             err,
             "plan file is too large to read as a plan; use a smaller .md file"
         );
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        assert!(session.messages.is_empty());
+        assert!(session.post_tool_side_effects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn path_rejects_missing_disk_file() {
+        let (gcx, ccx, _rx) = ccx_for_session("agent").await;
+        let temp = tempfile::tempdir().unwrap();
+        allow_all_privacy(&gcx);
+        let plan_path = temp.path().join("missing.md");
+        let mut document = Document::new(&plan_path);
+        document.update_text(&"## Memory fallback must not load".to_string());
+        gcx.documents_state.memory_document_map.lock().await.insert(
+            plan_path.clone(),
+            Arc::new(tokio::sync::RwLock::new(document)),
+        );
+        gcx.documents_state.workspace_folders.lock().unwrap().push(
+            crate::files_correction::canonical_path(temp.path().to_string_lossy().to_string()),
+        );
+        let mut tool = ToolSetPlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([(
+            "path".to_string(),
+            json!(plan_path.to_string_lossy().to_string()),
+        )]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("does not exist"), "unexpected error: {err}");
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        assert!(session.post_tool_side_effects.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn path_rejects_symlink_with_non_md_target() {
+        let (gcx, ccx, _rx) = ccx_for_session("agent").await;
+        let temp = tempfile::tempdir().unwrap();
+        allow_all_privacy(&gcx);
+        let secret_path = temp.path().join("secret.txt");
+        let plan_link = temp.path().join("plan.md");
+        tokio::fs::write(&secret_path, "secret").await.unwrap();
+        std::os::unix::fs::symlink(&secret_path, &plan_link).unwrap();
+        gcx.documents_state.workspace_folders.lock().unwrap().push(
+            crate::files_correction::canonical_path(temp.path().to_string_lossy().to_string()),
+        );
+        let mut tool = ToolSetPlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([(
+            "path".to_string(),
+            json!(plan_link.to_string_lossy().to_string()),
+        )]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, "argument `path` must resolve to a .md file");
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        assert!(session.post_tool_side_effects.is_empty());
     }
 
     #[tokio::test]
