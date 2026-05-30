@@ -3,8 +3,11 @@ use std::borrow::Cow;
 use axum::body::{boxed, Full};
 use axum::extract::Path;
 use axum::http::{header, HeaderValue, Response, StatusCode};
+use axum::Extension;
 use axum::response::IntoResponse;
 use rust_embed::RustEmbed;
+
+use crate::http::GuiPublicOriginCandidates;
 
 #[derive(RustEmbed)]
 #[folder = "assets/chat/"]
@@ -14,13 +17,37 @@ const INDEX_PATH: &str = "index.html";
 const ASSET_PREFIX: &str = "dist/chat/";
 const CACHE_CONTROL: &str = "no-cache";
 
-pub async fn handle_gui_index() -> impl IntoResponse {
+pub async fn handle_gui_index(
+    Extension(candidates): Extension<GuiPublicOriginCandidates>,
+) -> impl IntoResponse {
     match ChatGuiAsset::get(INDEX_PATH) {
-        Some(asset) => asset_response(INDEX_PATH, asset.data, StatusCode::OK),
+        Some(asset) => {
+            let body = inject_gui_origin_candidates(asset.data, &candidates);
+            asset_response(INDEX_PATH, body, StatusCode::OK)
+        }
         None => html_response(
             StatusCode::SERVICE_UNAVAILABLE,
             missing_gui_index_html().as_bytes().to_vec().into(),
         ),
+    }
+}
+
+fn inject_gui_origin_candidates(
+    body: Cow<'static, [u8]>,
+    candidates: &GuiPublicOriginCandidates,
+) -> Cow<'static, [u8]> {
+    let Ok(html) = std::str::from_utf8(body.as_ref()) else {
+        return body;
+    };
+    let Ok(json) = serde_json::to_string(&candidates.origins) else {
+        return body;
+    };
+    let marker = "__REFACT_ENGINE_ORIGIN_CANDIDATES__ = []";
+    let replacement = format!("__REFACT_ENGINE_ORIGIN_CANDIDATES__ = {json}");
+    if html.contains(marker) {
+        Cow::Owned(html.replace(marker, &replacement).into_bytes())
+    } else {
+        body
     }
 }
 

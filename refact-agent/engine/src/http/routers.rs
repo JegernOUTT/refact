@@ -4,6 +4,7 @@ use axum::routing::get;
 use tower_http::cors::CorsLayer;
 
 use crate::app_state::AppState;
+use crate::http::GuiPublicOriginCandidates;
 use crate::http::handler_404;
 use crate::providers::http::handle_openai_codex_auth_callback;
 
@@ -21,6 +22,7 @@ pub fn make_refact_http_server(app_state: AppState) -> Router {
         .route("/favicon.ico", get(gui::handle_favicon))
         .route("/dist/chat/*path", get(gui::handle_gui_asset))
         .fallback(handler_404)
+        .layer(axum::Extension(GuiPublicOriginCandidates::default()))
         .layer(DefaultBodyLimit::max(2usize.pow(20) * 15)) // new limit of payload 15MB(default: 2MB)
         .layer(CorsLayer::very_permissive())
         .with_state(app_state)

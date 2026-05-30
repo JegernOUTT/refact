@@ -5,6 +5,7 @@ import * as fetchAPI from "./fetchAPI";
 import { join } from 'path';
 import * as lspClient from 'vscode-languageclient/node';
 import * as net from 'net';
+import * as os from 'os';
 import { register_commands } from './rconsoleCommands';
 import { QuickActionProvider } from './quickProvider';
 
@@ -66,12 +67,36 @@ export class RustBinaryBlob {
             return "";
         }
         const configuredHost = vscode.workspace.getConfiguration().get<string>("refactai.browserHost")?.trim();
-        const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_mdns_host();
+        const host = configuredHost && configuredHost !== "0.0.0.0" ? configuredHost : this.default_browser_host();
         return `http://${host}:${port}/`;
     }
 
+    private default_browser_host(): string {
+        const lanAddress = this.default_lan_ipv4_host();
+        if (lanAddress) {
+            return lanAddress;
+        }
+        return this.default_mdns_host();
+    }
+
+    private default_lan_ipv4_host(): string | undefined {
+        for (const infos of Object.values(os.networkInterfaces())) {
+            for (const info of infos ?? []) {
+                if (
+                    info.family === "IPv4" &&
+                    !info.internal &&
+                    !info.address.startsWith("169.254.") &&
+                    info.address !== "0.0.0.0"
+                ) {
+                    return info.address;
+                }
+            }
+        }
+        return undefined;
+    }
+
     private default_mdns_host(): string {
-        const hostname = require("os").hostname() as string;
+        const hostname = os.hostname() as string;
         const label = hostname
             .toLowerCase()
             .replace(/[^a-z0-9-]/g, "-")

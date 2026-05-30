@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use axum::{
+    Extension,
     http::{StatusCode, Uri},
     response::IntoResponse,
 };
@@ -40,6 +41,72 @@ pub(crate) fn resolve_http_bind_addr(
 }
 
 const MDNS_SERVICE_TYPE: &str = "_refact-lsp._tcp.local.";
+
+#[derive(Clone, Debug, Default)]
+pub struct GuiPublicOriginCandidates {
+    pub origins: Vec<String>,
+}
+
+fn is_candidate_lan_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || ip.is_unspecified())
+}
+
+fn is_likely_virtual_interface_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("docker")
+        || name.starts_with("br-")
+        || name.starts_with("veth")
+        || name.starts_with("virbr")
+        || name.starts_with("tun")
+        || name.starts_with("tap")
+        || name.starts_with("tailscale")
+        || name.starts_with("zt")
+}
+
+pub(crate) fn local_lan_ipv4_hosts() -> Vec<Ipv4Addr> {
+    let mut preferred = Vec::new();
+    let mut fallback = Vec::new();
+    for iface in pnet_datalink::interfaces() {
+        if iface.is_loopback() || !iface.is_up() {
+            continue;
+        }
+        let virtual_iface = is_likely_virtual_interface_name(&iface.name);
+        for network in iface.ips {
+            if let IpAddr::V4(ip) = network.ip() {
+                if !is_candidate_lan_ipv4(ip)
+                    || preferred.contains(&ip)
+                    || fallback.contains(&ip)
+                {
+                    continue;
+                }
+                if virtual_iface {
+                    fallback.push(ip);
+                } else {
+                    preferred.push(ip);
+                }
+            }
+        }
+    }
+    preferred.extend(fallback);
+    preferred
+}
+
+pub(crate) fn gui_public_origin_candidates(port: u16) -> GuiPublicOriginCandidates {
+    let mut origins = Vec::new();
+    for ip in local_lan_ipv4_hosts() {
+        origins.push(format!("http://{ip}:{port}"));
+    }
+    let mdns_origin = format!("http://{}:{port}", local_mdns_browser_host());
+    if !origins.contains(&mdns_origin) {
+        origins.push(mdns_origin);
+    }
+    GuiPublicOriginCandidates { origins }
+}
 
 pub(crate) fn local_mdns_host_name() -> String {
     let hostname = hostname::get()
@@ -176,7 +243,8 @@ pub async fn start_server(
                 info!("HTTP server listening on {}", addr);
                 let mdns = start_mdns_advertisement(port, app_searchable_id.clone());
                 let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-                let router = make_refact_http_server(app_state);
+                let gui_origins = gui_public_origin_candidates(port);
+                let router = make_refact_http_server(app_state).layer(Extension(gui_origins));
                 let gcx_for_shutdown = gcx.clone();
                 let shutdown = async move {
                     crate::global_context::block_until_signal(ask_shutdown_receiver, shutdown_flag)

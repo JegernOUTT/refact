@@ -587,7 +587,11 @@ impl ExecRegistry {
             )
             .await
         {
-            kill_and_reap(&child).await?;
+            if let Err(cleanup_error) = kill_and_reap(&child).await {
+                return Err(format!(
+                    "{message}; additionally failed to cleanup spawned child: {cleanup_error}"
+                ));
+            }
             return Err(message);
         }
         let stdout_task = pump_output(
@@ -677,7 +681,11 @@ impl ExecRegistry {
             )
             .await
         {
-            kill_and_reap(&child).await?;
+            if let Err(cleanup_error) = kill_and_reap(&child).await {
+                return Err(format!(
+                    "{message}; additionally failed to cleanup spawned child: {cleanup_error}"
+                ));
+            }
             return Err(message);
         }
         let stdout_task = pump_blocking_output(
@@ -1249,15 +1257,24 @@ mod tests {
             )
             .await
             .unwrap();
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let pid_path = pid_file.path().to_path_buf();
+        let pid_arg = pid_path.to_string_lossy();
         let command = if cfg!(windows) {
-            "[Console]::Out.WriteLine($PID); Start-Sleep -Seconds 30"
+            format!(
+                "[Console]::Out.WriteLine($PID); [System.IO.File]::WriteAllText('{}', [string]$PID); Start-Sleep -Seconds 30",
+                pid_arg.replace("'", "''''")
+            )
         } else {
-            "printf \"%s\\n\" $$; sleep 30"
+            format!(
+                "printf \"%s\\n\" $$; printf \"%s\\n\" $$ > '{}'; sleep 30",
+                pid_arg.replace("'", "'\\''")
+            )
         };
         let started = Instant::now();
         let err = match registry
             .spawn(
-                ExecSpawnRequest::service(shell_script(command))
+                ExecSpawnRequest::service(shell_script(&command))
                     .with_owner(owner)
                     .with_startup_wait(Duration::from_secs(30)),
             )
@@ -1267,8 +1284,16 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(err.contains("process already exists"));
+        assert!(
+            err.contains("process already exists"),
+            "unexpected error: {err}"
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
+        if let Ok(Ok(pid)) =
+            std::fs::read_to_string(&pid_path).map(|value| value.trim().parse::<u32>())
+        {
+            assert_process_missing(pid).await;
+        }
         assert_eq!(
             registry
                 .get(&first.snapshot.meta.process_id)

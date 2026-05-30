@@ -3670,6 +3670,22 @@ async fn is_real_file(path: &Path) -> bool {
     matches!(fs::symlink_metadata(path).await, Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
+#[cfg(target_os = "macos")]
+fn allowed_real_dir_symlink_target(path: &Path) -> Option<PathBuf> {
+    let expected_target = match path.to_str()? {
+        "/tmp" => Path::new("/private/tmp"),
+        "/var" => Path::new("/private/var"),
+        _ => return None,
+    };
+    let resolved = std::fs::canonicalize(path).ok()?;
+    (resolved == expected_target).then_some(resolved)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn allowed_real_dir_symlink_target(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
 async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -3692,7 +3708,17 @@ async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
         }
         match fs::symlink_metadata(&current).await {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                if metadata.file_type().is_symlink() {
+                    if let Some(resolved) = allowed_real_dir_symlink_target(&current) {
+                        current = resolved;
+                        continue;
+                    }
+                    return Err(format!(
+                        "Refusing to use non-real directory component: {}",
+                        current.display()
+                    ));
+                }
+                if !metadata.is_dir() {
                     return Err(format!(
                         "Refusing to use non-real directory component: {}",
                         current.display()
@@ -4881,6 +4907,34 @@ mod tests {
             tokio::fs::read_to_string(outside_path).await.unwrap(),
             before
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_system_temp_symlink_roots_are_allowed_for_save() {
+        let dir = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "macos-var-save-ok";
+
+        save_trajectory_snapshot(
+            gcx,
+            test_snapshot(
+                chat_id,
+                "macOS /var Save",
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(tokio::fs::try_exists(
+            dir.path()
+                .join(".refact")
+                .join("trajectories")
+                .join(format!("{chat_id}.json"))
+        )
+        .await
+        .unwrap());
     }
 
     #[cfg(unix)]

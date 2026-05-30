@@ -26,6 +26,7 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.ServerSocket
 import java.net.URI
+import java.net.NetworkInterface
 import java.nio.file.Paths
 import java.security.MessageDigest
 import java.util.*
@@ -117,13 +118,29 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         return "$label.local"
     }
 
+    private fun defaultLanIpv4Host(): String? {
+        return runCatching {
+            NetworkInterface.getNetworkInterfaces().toList()
+                .asSequence()
+                .filter { it.isUp && !it.isLoopback && !it.isVirtual }
+                .flatMap { it.inetAddresses.toList().asSequence() }
+                .filterIsInstance<java.net.Inet4Address>()
+                .map { it.hostAddress }
+                .firstOrNull { it != "0.0.0.0" && !it.startsWith("169.254.") }
+        }.getOrNull()
+    }
+
+    private fun defaultBrowserHost(): String {
+        return defaultLanIpv4Host() ?: defaultMdnsHost()
+    }
+
     open fun browserUrlOrNull(): URI? {
         val base = baseUrlOrNull() ?: return null
         val configuredHost = InferenceGlobalContext.browserHost.trim()
         val host = if (configuredHost.isNotEmpty() && configuredHost != "0.0.0.0") {
             configuredHost
         } else {
-            defaultMdnsHost()
+            defaultBrowserHost()
         }
         return URI("http://$host:${base.port}/")
     }
