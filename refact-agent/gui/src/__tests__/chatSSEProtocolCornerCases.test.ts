@@ -52,10 +52,14 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
     const mockFetch = createMockFetch([chunk1, chunk2]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -78,10 +82,14 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
     const mockFetch = createMockFetch([chunk1, chunk2]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -104,10 +112,14 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
     const mockFetch = createMockFetch([chunk1, chunk2]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -129,10 +141,14 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
     const mockFetch = createMockFetch([chunk]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -159,10 +175,14 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
     const mockFetch = createMockFetch([chunk]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -185,10 +205,14 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
     const mockFetch = createMockFetch([chunk]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -218,10 +242,14 @@ describe("SSE Protocol - Chunking Corner Cases", () => {
     const mockFetch = createMockFetch(chunks);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -279,10 +307,14 @@ describe("SSE Protocol - Message Variations", () => {
     ]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -342,10 +374,14 @@ describe("SSE Protocol - Message Variations", () => {
     ]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -402,10 +438,14 @@ describe("SSE Protocol - Message Variations", () => {
       ]);
       global.fetch = mockFetch;
 
-      subscribeToChatEvents("test", 8001, {
-        onEvent: (e) => events.push(e),
-        onError: vi.fn(),
-      });
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        {
+          onEvent: (e) => events.push(e),
+          onError: vi.fn(),
+        },
+      );
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -458,10 +498,14 @@ describe("SSE Protocol - Message Variations", () => {
     ]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -488,11 +532,15 @@ describe("SSE Protocol - Disconnect Handling", () => {
     ]);
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: vi.fn(),
-      onError: vi.fn(),
-      onDisconnected,
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+        onDisconnected,
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -505,10 +553,14 @@ describe("SSE Protocol - Disconnect Handling", () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("Network error"));
     global.fetch = mockFetch;
 
-    subscribeToChatEvents("test", 8001, {
-      onEvent: vi.fn(),
-      onError,
-    });
+    subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: vi.fn(),
+        onError,
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -549,11 +601,15 @@ describe("SSE Protocol - Disconnect Handling", () => {
     });
     global.fetch = mockFetch;
 
-    const unsubscribe = subscribeToChatEvents("test", 8001, {
-      onEvent: vi.fn(),
-      onError: vi.fn(),
-      onDisconnected,
-    });
+    const unsubscribe = subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+        onDisconnected,
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 5));
     unsubscribe();

@@ -2,6 +2,7 @@ import { debugRefact } from "../../debugConfig";
 import type { TrajectoryMeta, TrajectoryEvent } from "./trajectories";
 import type { TaskMeta, TaskBoard } from "./tasks";
 import type { BuddySnapshot, BuddySSEEvent } from "../../features/Buddy/types";
+import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
 
 export type { TrajectoryMeta, TrajectoryEvent };
 
@@ -394,18 +395,12 @@ function parseSseBlock(block: string): string | null {
   return dataStr === "[DONE]" ? null : dataStr;
 }
 
-function lspBaseUrl(port: number, lspUrl?: string): string {
-  const trimmed = lspUrl?.trim();
-  return (trimmed ? trimmed : `http://127.0.0.1:${port}`).replace(/\/+$/, "");
-}
-
 export function subscribeToSidebarEvents(
-  port: number,
+  config: EngineApiConfig,
   apiKey: string | null,
   callbacks: SidebarSubscriptionCallbacks,
-  lspUrl?: string,
 ): () => void {
-  const url = `${lspBaseUrl(port, lspUrl)}/v1/sidebar/subscribe`;
+  const url = buildApiUrl(config, "/v1/sidebar/subscribe");
   const abortController = new AbortController();
   const state = { connected: false, lastSeq: -1, aborted: false };
   let idleTimer: ReturnType<typeof setTimeout> | null = null;

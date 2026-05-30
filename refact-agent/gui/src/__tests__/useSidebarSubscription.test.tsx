@@ -46,7 +46,7 @@ function sectionSnapshot(
 }
 
 function sidebarSnapshotHandler(...events: Record<string, unknown>[]) {
-  return http.get("http://127.0.0.1:8001/v1/sidebar/subscribe", () => {
+  return http.get("*/v1/sidebar/subscribe", () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
@@ -72,7 +72,7 @@ function sidebarDelayedSnapshotHandler(
   delayMs: number,
   ...events: Record<string, unknown>[]
 ) {
-  return http.get("http://127.0.0.1:8001/v1/sidebar/subscribe", () => {
+  return http.get("*/v1/sidebar/subscribe", () => {
     const encoder = new TextEncoder();
     let cancelled = false;
     const stream = new ReadableStream({
@@ -103,6 +103,26 @@ function sidebarDelayedSnapshotHandler(
         Connection: "keep-alive",
       },
     });
+  });
+}
+
+function pendingSidebarHandler(url: string, requests: string[]) {
+  return http.get(url, ({ request }) => {
+    requests.push(request.url);
+    return new HttpResponse(
+      new ReadableStream<Uint8Array>({
+        start() {
+          return undefined;
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      },
+    );
   });
 }
 
@@ -160,6 +180,44 @@ afterEach(() => {
 });
 
 describe("useSidebarSubscription", () => {
+  it("reconnects when lspUrl changes with the same port", async () => {
+    const firstRequests: string[] = [];
+    const secondRequests: string[] = [];
+    server.use(
+      pendingSidebarHandler(
+        "https://first.example.com/v1/sidebar/subscribe",
+        firstRequests,
+      ),
+      pendingSidebarHandler(
+        "https://second.example.com/v1/sidebar/subscribe",
+        secondRequests,
+      ),
+    );
+
+    const store = renderSidebarSubscription({
+      config: {
+        apiKey: "test",
+        lspPort: 8001,
+        themeProps: {},
+        host: "web",
+        lspUrl: "https://first.example.com/v1/ping",
+      },
+    });
+
+    await waitFor(() => {
+      expect(firstRequests).toHaveLength(1);
+    });
+
+    store.dispatch(
+      updateConfig({ lspUrl: "https://second.example.com/v1/ping" }),
+    );
+
+    await waitFor(() => {
+      expect(secondRequests).toHaveLength(1);
+    });
+    expect(store.getState().config.lspPort).toBe(8001);
+  });
+
   it("keeps local project info while waiting for an explicit workspace snapshot", async () => {
     server.use(
       sidebarSnapshotHandler(
@@ -252,7 +310,7 @@ describe("useSidebarSubscription", () => {
   it("keeps loaded sections while reconnecting after a closed stream", async () => {
     let requestCount = 0;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/sidebar/subscribe", () => {
+      http.get("*/v1/sidebar/subscribe", () => {
         requestCount += 1;
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({

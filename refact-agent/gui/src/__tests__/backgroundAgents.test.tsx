@@ -197,10 +197,14 @@ async function parseSnapshot(
     ),
   );
 
-  subscribeToChatEvents(chatId, 8001, {
-    onEvent,
-    onError: vi.fn(),
-  });
+  subscribeToChatEvents(
+    chatId,
+    { host: "vscode", lspPort: 8001 },
+    {
+      onEvent,
+      onError: vi.fn(),
+    },
+  );
 
   await new Promise((resolve) => setTimeout(resolve, 10));
 

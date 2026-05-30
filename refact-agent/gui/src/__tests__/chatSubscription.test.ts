@@ -186,7 +186,7 @@ describe("chatSubscription", () => {
 
       subscribeToChatEvents(
         chatId,
-        port,
+        { host: "vscode", lspPort: port },
         {
           onEvent: vi.fn(),
           onError: vi.fn(),
@@ -200,6 +200,67 @@ describe("chatSubscription", () => {
           method: "GET",
           headers: { Authorization: "Bearer test-key" },
         }),
+      );
+    });
+
+    it("uses a relative SSE URL in Vite and engine-served web mode", () => {
+      const read = vi.fn().mockResolvedValue({ done: true });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        body: { getReader: () => ({ read }) },
+      });
+
+      subscribeToChatEvents(
+        "chat/1",
+        { host: "web", dev: true },
+        {
+          onEvent: vi.fn(),
+          onError: vi.fn(),
+        },
+      );
+      subscribeToChatEvents(
+        "chat/2",
+        { host: "web", engineServed: true, lspUrl: "http://127.0.0.1:8001" },
+        {
+          onEvent: vi.fn(),
+          onError: vi.fn(),
+        },
+      );
+
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        1,
+        "/v1/chats/subscribe?chat_id=chat%2F1",
+        expect.objectContaining({ method: "GET" }),
+      );
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        2,
+        "/v1/chats/subscribe?chat_id=chat%2F2",
+        expect.objectContaining({ method: "GET" }),
+      );
+    });
+
+    it("uses the configured remote origin in web mode", () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi.fn().mockResolvedValue({ done: true }),
+          }),
+        },
+      });
+
+      subscribeToChatEvents(
+        "remote-chat",
+        { host: "web", lspUrl: "https://remote.example.com/proxy/v1/ping" },
+        {
+          onEvent: vi.fn(),
+          onError: vi.fn(),
+        },
+      );
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://remote.example.com/proxy/v1/chats/subscribe?chat_id=remote-chat",
+        expect.objectContaining({ method: "GET" }),
       );
     });
 
@@ -226,10 +287,14 @@ describe("chatSubscription", () => {
         },
       });
 
-      subscribeToChatEvents("test", 8001, {
-        onEvent,
-        onError: vi.fn(),
-      });
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        {
+          onEvent,
+          onError: vi.fn(),
+        },
+      );
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -272,10 +337,14 @@ describe("chatSubscription", () => {
           },
         });
 
-        subscribeToChatEvents("test", 8001, {
-          onEvent,
-          onError: vi.fn(),
-        });
+        subscribeToChatEvents(
+          "test",
+          { host: "vscode", lspPort: 8001 },
+          {
+            onEvent,
+            onError: vi.fn(),
+          },
+        );
 
         await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -322,10 +391,14 @@ describe("chatSubscription", () => {
         },
       });
 
-      subscribeToChatEvents("test", 8001, {
-        onEvent,
-        onError,
-      });
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        {
+          onEvent,
+          onError,
+        },
+      );
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -345,11 +418,15 @@ describe("chatSubscription", () => {
         },
       });
 
-      subscribeToChatEvents("test", 8001, {
-        onEvent: vi.fn(),
-        onError: vi.fn(),
-        onDisconnected,
-      });
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        {
+          onEvent: vi.fn(),
+          onError: vi.fn(),
+          onDisconnected,
+        },
+      );
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -376,7 +453,7 @@ describe("chatSubscription", () => {
 
       const unsubscribe = subscribeToChatEvents(
         "test",
-        8001,
+        { host: "vscode", lspPort: 8001 },
         {
           onEvent: vi.fn(),
           onError,

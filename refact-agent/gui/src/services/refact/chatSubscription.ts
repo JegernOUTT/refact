@@ -1,3 +1,4 @@
+import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
 import type { BackgroundAgentSummary, ChatMessage } from "./types";
 import type { WorktreeMeta } from "./worktrees";
 
@@ -357,14 +358,12 @@ const MAX_SSE_EVENT_CHARS = 4_000_000;
 
 export function subscribeToChatEvents(
   chatId: string,
-  port: number,
+  config: EngineApiConfig,
   callbacks: ChatSubscriptionCallbacks,
   apiKey?: string,
   options: SubscriptionOptions = {},
 ): () => void {
-  const url = `http://127.0.0.1:${port}/v1/chats/subscribe?chat_id=${encodeURIComponent(
-    chatId,
-  )}`;
+  const url = buildApiUrl(config, "/v1/chats/subscribe", { chat_id: chatId });
 
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;

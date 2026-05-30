@@ -87,7 +87,7 @@ function sseRawStream(blocks: string[]): ReadableStream<Uint8Array> {
 
 function sidebarHandler(events: unknown[]) {
   return http.get(
-    "http://127.0.0.1:8001/v1/sidebar/subscribe",
+    "*/v1/sidebar/subscribe",
     () =>
       new HttpResponse(sseStream(events), {
         headers: { "Content-Type": "text/event-stream" },
@@ -97,11 +97,22 @@ function sidebarHandler(events: unknown[]) {
 
 function sidebarRawHandler(blocks: string[]) {
   return http.get(
-    "http://127.0.0.1:8001/v1/sidebar/subscribe",
+    "*/v1/sidebar/subscribe",
     () =>
       new HttpResponse(sseRawStream(blocks), {
         headers: { "Content-Type": "text/event-stream" },
       }),
+  );
+}
+
+function pendingSidebarResponse() {
+  return new HttpResponse(
+    new ReadableStream<Uint8Array>({
+      start() {
+        return undefined;
+      },
+    }),
+    { headers: { "Content-Type": "text/event-stream" } },
   );
 }
 
@@ -111,12 +122,16 @@ function subscribeForTest(
   const events: Parameters<SidebarSubscriptionCallbacks["onEvent"]>[0][] = [];
   const errors: Error[] = [];
   const liveness = vi.fn();
-  const disconnect = subscribeToSidebarEvents(8001, "test", {
-    onEvent: (event) => events.push(event),
-    onError: (error) => errors.push(error),
-    onLiveness: liveness,
-    ...overrides,
-  });
+  const disconnect = subscribeToSidebarEvents(
+    { host: "vscode", lspPort: 8001 },
+    "test",
+    {
+      onEvent: (event) => events.push(event),
+      onError: (error) => errors.push(error),
+      onLiveness: liveness,
+      ...overrides,
+    },
+  );
   return { events, errors, liveness, disconnect };
 }
 
@@ -190,6 +205,73 @@ const chatC = {
 };
 
 describe("useSidebarSubscription", () => {
+  it("uses a relative SSE URL in Vite and engine-served web mode", async () => {
+    const requests: string[] = [];
+    server.use(
+      http.get("/v1/sidebar/subscribe", ({ request }) => {
+        requests.push(request.url);
+        return pendingSidebarResponse();
+      }),
+    );
+
+    const devDisconnect = subscribeToSidebarEvents(
+      { host: "web", dev: true },
+      "test",
+      {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+      },
+    );
+    const engineServedDisconnect = subscribeToSidebarEvents(
+      { host: "web", engineServed: true, lspUrl: "http://127.0.0.1:8001" },
+      "test",
+      {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+      },
+    );
+
+    await waitFor(() => {
+      expect(requests).toHaveLength(2);
+    });
+    expect(
+      requests.every(
+        (url) => new URL(url).pathname === "/v1/sidebar/subscribe",
+      ),
+    ).toBe(true);
+    devDisconnect();
+    engineServedDisconnect();
+  });
+
+  it("uses the configured remote origin in web mode", async () => {
+    const requests: string[] = [];
+    server.use(
+      http.get(
+        "https://remote.example.com/proxy/v1/sidebar/subscribe",
+        ({ request }) => {
+          requests.push(request.url);
+          return pendingSidebarResponse();
+        },
+      ),
+    );
+
+    const disconnect = subscribeToSidebarEvents(
+      { host: "web", lspUrl: "https://remote.example.com/proxy/v1/ping" },
+      "test",
+      {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+      },
+    );
+
+    await waitFor(() => {
+      expect(requests).toEqual([
+        "https://remote.example.com/proxy/v1/sidebar/subscribe",
+      ]);
+    });
+    disconnect();
+  });
+
   it("unknown_event_type_is_ignored_not_fatal", async () => {
     server.use(
       sidebarHandler([
@@ -292,11 +374,15 @@ describe("useSidebarSubscription", () => {
     server.use(sidebarHandler([envelope(0, { type: "heartbeat" })]));
     const events: Parameters<SidebarSubscriptionCallbacks["onEvent"]>[0][] = [];
     const liveness = vi.fn();
-    const disconnect = subscribeToSidebarEvents(8001, "test", {
-      onEvent: (event) => events.push(event),
-      onError: () => undefined,
-      onLiveness: liveness,
-    });
+    const disconnect = subscribeToSidebarEvents(
+      { host: "vscode", lspPort: 8001 },
+      "test",
+      {
+        onEvent: (event) => events.push(event),
+        onError: () => undefined,
+        onLiveness: liveness,
+      },
+    );
 
     await waitFor(() => {
       expect(liveness).toHaveBeenCalled();
@@ -385,7 +471,7 @@ describe("useSidebarSubscription", () => {
   it("handles v2 section snapshots and null buddy snapshots", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -426,7 +512,7 @@ describe("useSidebarSubscription", () => {
 
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -463,7 +549,7 @@ describe("useSidebarSubscription", () => {
   it("clears stale buddy state when a later v2 buddy snapshot is null", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([sectionSnapshot(0, "buddy", { buddy: null })]),
@@ -493,7 +579,7 @@ describe("useSidebarSubscription", () => {
   it("section resync replaces only the tasks section", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -523,7 +609,7 @@ describe("useSidebarSubscription", () => {
   it("resync snapshots replace chats and tasks without reconnecting", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -558,7 +644,7 @@ describe("useSidebarSubscription", () => {
   it("keeps section readiness when workspace snapshot arrives after other sections", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -587,7 +673,7 @@ describe("useSidebarSubscription", () => {
   it("processes other sections while one section errors and recovers on retry", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -655,7 +741,7 @@ describe("useSidebarSubscription", () => {
     };
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -694,7 +780,7 @@ describe("useSidebarSubscription", () => {
     );
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([
@@ -723,7 +809,7 @@ describe("useSidebarSubscription", () => {
   it("turns a chat error snapshot into an error state instead of forever loading", async () => {
     server.use(
       http.get(
-        "http://127.0.0.1:8001/v1/sidebar/subscribe",
+        "*/v1/sidebar/subscribe",
         () =>
           new HttpResponse(
             sseStream([

@@ -211,10 +211,14 @@ describe("Chat Streaming + Large History Stress", () => {
 
     global.fetch = createMockFetch([encoder.encode(payload)]);
 
-    subscribeToChatEvents("stress-chat", 8001, {
-      onEvent: (e) => events.push(e),
-      onError: vi.fn(),
-    });
+    subscribeToChatEvents(
+      "stress-chat",
+      { host: "vscode", lspPort: 8001 },
+      {
+        onEvent: (e) => events.push(e),
+        onError: vi.fn(),
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 40));
 

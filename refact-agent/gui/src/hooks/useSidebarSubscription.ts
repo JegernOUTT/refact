@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useMemo, useRef, useCallback } from "react";
 import { useAppDispatch } from "./useAppDispatch";
 import { useConfig } from "./useConfig";
 import { usePostMessage } from "./usePostMessage";
@@ -66,6 +66,7 @@ import {
   sidebarSubscriptionStarted,
   sidebarWorkspaceChanged,
 } from "../features/Sidebar/sidebarSlice";
+import { getEngineEndpointIdentity } from "../services/refact/apiUrl";
 
 const RECONNECT_DELAY_MS = 500;
 const MIGRATION_KEY = "refact-trajectories-migrated";
@@ -219,13 +220,30 @@ type SidebarSnapshotEvent = Extract<
 export function useSidebarSubscription() {
   const dispatch = useAppDispatch();
   const config = useConfig();
+  const endpointIdentity = getEngineEndpointIdentity(config);
+  const subscriptionConfig = useMemo(
+    () => ({
+      host: config.host,
+      lspPort: config.lspPort,
+      lspUrl: config.lspUrl,
+      dev: config.dev,
+      engineServed: config.engineServed,
+    }),
+    [
+      config.host,
+      config.lspPort,
+      config.lspUrl,
+      config.dev,
+      config.engineServed,
+    ],
+  );
   const postMessage = usePostMessage();
   const historyChats = useAppSelector((state) => state.history.chats);
   const historyRef = useRef(historyChats);
   historyRef.current = historyChats;
   const serverWorkspaceRootsRef = useRef<string[] | undefined>(undefined);
   const disconnectRef = useRef<(() => void) | null>(null);
-  const activePortRef = useRef<number | null>(null);
+  const activeEndpointRef = useRef<string | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -832,21 +850,21 @@ export function useSidebarSubscription() {
       reconnectTimeoutRef.current = null;
     }
 
-    const port = config.lspPort;
     const apiKey = config.apiKey ?? null;
 
-    if (port <= 0 || port > 65535) {
-      activePortRef.current = null;
+    if (config.lspPort <= 0 || config.lspPort > 65535) {
+      activeEndpointRef.current = null;
       scheduleReconnect();
       return;
     }
 
     const generation = ++generationRef.current;
-    const reconnectingSameEndpoint = activePortRef.current === port;
-    activePortRef.current = port;
+    const reconnectingSameEndpoint =
+      activeEndpointRef.current === endpointIdentity;
+    activeEndpointRef.current = endpointIdentity;
 
     if (!reconnectingSameEndpoint) {
-      dispatch(resetSidebarState({ lspPort: port }));
+      dispatch(resetSidebarState({ lspPort: config.lspPort }));
       serverWorkspaceRootsRef.current = undefined;
       void prepareInitialHistory(generation);
     }
@@ -858,7 +876,7 @@ export function useSidebarSubscription() {
         dispatch(
           sidebarSubscriptionStarted({
             subscriptionId: envelope.subscription_id,
-            lspPort: port,
+            lspPort: config.lspPort,
           }),
         );
       }
@@ -891,26 +909,22 @@ export function useSidebarSubscription() {
       scheduleReconnect();
     };
 
-    disconnectRef.current = subscribeToSidebarEvents(
-      port,
-      apiKey,
-      {
-        onEvent,
-        onError,
-        onDisconnected,
-      },
-      config.lspUrl,
-    );
+    disconnectRef.current = subscribeToSidebarEvents(subscriptionConfig, apiKey, {
+      onEvent,
+      onError,
+      onDisconnected,
+    });
   }, [
-    config.lspPort,
     config.apiKey,
-    config.lspUrl,
+    config.lspPort,
     dispatch,
+    endpointIdentity,
     prepareInitialHistory,
     processNotification,
     processSectionSnapshot,
     processSectionUpdate,
     scheduleReconnect,
+    subscriptionConfig,
   ]);
 
   connectRef.current = connect;
@@ -922,7 +936,7 @@ export function useSidebarSubscription() {
       if (disconnectRef.current) {
         disconnectRef.current();
       }
-      activePortRef.current = null;
+      activeEndpointRef.current = null;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }

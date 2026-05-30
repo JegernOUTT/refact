@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppDispatch } from "./useAppDispatch";
 import { useAppSelector } from "./useAppSelector";
 import {
@@ -7,7 +7,8 @@ import {
   markThreadSseError,
 } from "../features/Chat/Thread/actions";
 import { selectSseRefreshRequested } from "../features/Chat/Thread/selectors";
-import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
+import { selectConfig } from "../features/Config/configSlice";
+import { getEngineEndpointIdentity } from "../services/refact/apiUrl";
 import {
   subscribeToChatEvents,
   type ChatEventEnvelope,
@@ -81,8 +82,24 @@ export function useChatSubscription(
   } = options;
 
   const dispatch = useAppDispatch();
-  const port = useAppSelector(selectLspPort);
-  const apiKey = useAppSelector(selectApiKey);
+  const config = useAppSelector(selectConfig);
+  const endpointIdentity = getEngineEndpointIdentity(config);
+  const subscriptionConfig = useMemo(
+    () => ({
+      host: config.host,
+      lspPort: config.lspPort,
+      lspUrl: config.lspUrl,
+      dev: config.dev,
+      engineServed: config.engineServed,
+    }),
+    [
+      config.host,
+      config.lspPort,
+      config.lspUrl,
+      config.dev,
+      config.engineServed,
+    ],
+  );
 
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<Error | null>(null);
@@ -309,7 +326,7 @@ export function useChatSubscription(
 
   const scheduleReconnect = useCallback(
     (delayMs: number) => {
-      if (!autoReconnect || !enabled || !chatId || !port) return;
+      if (!autoReconnect || !enabled || !chatId || !config.lspPort) return;
 
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -319,11 +336,11 @@ export function useChatSubscription(
         connectRef.current();
       }, delayMs);
     },
-    [autoReconnect, enabled, chatId, port],
+    [autoReconnect, enabled, chatId, config.lspPort],
   );
 
   const connect = useCallback(() => {
-    if (!chatId || !port || !enabled) return;
+    if (!chatId || !config.lspPort || !enabled) return;
     if (connectingRef.current) return;
 
     cleanup();
@@ -334,7 +351,7 @@ export function useChatSubscription(
 
     unsubscribeRef.current = subscribeToChatEvents(
       chatId,
-      port,
+      subscriptionConfig,
       {
         onEvent: (envelope) => {
           try {
@@ -431,13 +448,15 @@ export function useChatSubscription(
           scheduleReconnect(reconnectDelay);
         },
       },
-      apiKey ?? undefined,
+      config.apiKey ?? undefined,
     );
   }, [
     chatId,
-    port,
-    apiKey,
+    config.apiKey,
+    config.lspPort,
+    endpointIdentity,
     enabled,
+    subscriptionConfig,
     cleanup,
     clearSubchatFlush,
     enqueueSubchatUpdate,
@@ -478,10 +497,10 @@ export function useChatSubscription(
   useEffect(() => {
     if (status === "connected" && chatId && enabled) {
       if (DEBUG)
-        console.log("[SSE] Port changed, reconnecting for chat:", chatId); // eslint-disable-line no-console
+        console.log("[SSE] Endpoint changed, reconnecting for chat:", chatId); // eslint-disable-line no-console
       connect();
     }
-  }, [port]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [endpointIdentity]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Listen for SSE refresh requests (e.g., after trajectory transform)
   const sseRefreshRequested = useAppSelector(selectSseRefreshRequested);

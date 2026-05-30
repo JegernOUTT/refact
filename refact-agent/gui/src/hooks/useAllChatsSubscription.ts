@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useMemo, useRef, useCallback } from "react";
 import { useAppDispatch } from "./useAppDispatch";
 import { useAppSelector } from "./useAppSelector";
 import {
@@ -11,7 +11,11 @@ import {
   selectOpenThreadIds,
   selectSseRefreshRequested,
 } from "../features/Chat/Thread/selectors";
-import { selectLspPort, selectApiKey } from "../features/Config/configSlice";
+import { selectConfig } from "../features/Config/configSlice";
+import {
+  getEngineEndpointIdentity,
+  type EngineApiConfig,
+} from "../services/refact/apiUrl";
 import { subscribeToChatEvents } from "../services/refact/chatSubscription";
 import {
   setSseStatus,
@@ -97,8 +101,24 @@ export function pickDesiredChatSubscriptions({
 
 export function useAllChatsSubscription() {
   const dispatch = useAppDispatch();
-  const port = useAppSelector(selectLspPort);
-  const apiKey = useAppSelector(selectApiKey);
+  const config = useAppSelector(selectConfig);
+  const endpointIdentity = getEngineEndpointIdentity(config);
+  const subscriptionConfig = useMemo(
+    () => ({
+      host: config.host,
+      lspPort: config.lspPort,
+      lspUrl: config.lspUrl,
+      dev: config.dev,
+      engineServed: config.engineServed,
+    }),
+    [
+      config.host,
+      config.lspPort,
+      config.lspUrl,
+      config.dev,
+      config.engineServed,
+    ],
+  );
   const currentThreadId = useAppSelector(selectCurrentThreadId);
   const openThreadIds = useAppSelector(selectOpenThreadIds);
   const sseRefreshRequested = useAppSelector(selectSseRefreshRequested);
@@ -123,8 +143,9 @@ export function useAllChatsSubscription() {
   >(new Map());
   const streamedBytesRef = useRef<Map<string, number>>(new Map());
   const pendingBytesRef = useRef<Map<string, number>>(new Map());
-  const portRef = useRef(port);
-  const apiKeyRef = useRef(apiKey);
+  const configRef = useRef<EngineApiConfig>(subscriptionConfig);
+  const endpointIdentityRef = useRef(endpointIdentity);
+  const apiKeyRef = useRef(config.apiKey);
   const subscribeRef = useRef<((chatId: string) => void) | null>(null);
   const unsubscribeRef = useRef<((chatId: string) => void) | null>(null);
   const enqueueStreamDeltaRef = useRef<
@@ -390,7 +411,7 @@ export function useAllChatsSubscription() {
   const subscribeToChat = useCallback(
     (chatId: string) => {
       if (subscriptionsRef.current.has(chatId)) return;
-      if (!portRef.current) return;
+      if ((configRef.current.lspPort ?? 0) <= 0) return;
       if (!desiredIdsRef.current.has(chatId)) return;
 
       manualCloseRef.current.delete(chatId);
@@ -400,7 +421,7 @@ export function useAllChatsSubscription() {
 
       const unsubscribe = subscribeToChatEvents(
         chatId,
-        portRef.current,
+        configRef.current,
         {
           onEvent: (envelope) => {
             const seq = BigInt(envelope.seq);
@@ -572,13 +593,17 @@ export function useAllChatsSubscription() {
   }, [dispatch]);
 
   useEffect(() => {
-    if (port !== portRef.current || apiKey !== apiKeyRef.current) {
+    if (
+      endpointIdentity !== endpointIdentityRef.current ||
+      config.apiKey !== apiKeyRef.current
+    ) {
       unsubscribeAll();
-      portRef.current = port;
-      apiKeyRef.current = apiKey;
+      endpointIdentityRef.current = endpointIdentity;
+      apiKeyRef.current = config.apiKey;
     }
+    configRef.current = subscriptionConfig;
 
-    if (!port) return;
+    if (!config.lspPort) return;
 
     const subscribedIds = Array.from(subscriptionsRef.current.keys());
     const desiredOrder = pickDesiredChatSubscriptions({
@@ -603,16 +628,18 @@ export function useAllChatsSubscription() {
   }, [
     activeChatId,
     openThreadIds,
-    port,
-    apiKey,
+    config.apiKey,
+    config.lspPort,
+    endpointIdentity,
     subscribe,
+    subscriptionConfig,
     unsubscribe,
     unsubscribeAll,
   ]);
 
   useEffect(() => {
     if (!sseRefreshRequested) return;
-    if (!portRef.current) return;
+    if (!configRef.current.lspPort) return;
 
     unsubscribe(sseRefreshRequested);
     setTimeout(() => {
