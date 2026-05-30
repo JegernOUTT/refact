@@ -967,14 +967,10 @@ pub async fn process_command_queue(
                     run_hooks(app.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
                 if let Some(reason) = first_block_reason(&prompt_results) {
                     let mut session = session_arc.lock().await;
-                    let compression_phase = session.compression_phase;
-                    let compression_reason = session.compression_reason;
                     session.emit(super::types::ChatEvent::RuntimeUpdated {
                         state: super::types::SessionState::Error,
                         error: Some(format!("Message blocked by hook: {}", reason)),
                         is_compressing: false,
-                        compression_phase,
-                        compression_reason,
                     });
                     session.set_runtime_state(super::types::SessionState::Idle, None);
                     continue;
@@ -1228,14 +1224,10 @@ pub async fn process_command_queue(
                     Err(e) => {
                         warn!("SetParams worktree update rejected: {}", e);
                         let mut session = session_arc.lock().await;
-                        let compression_phase = session.compression_phase;
-                        let compression_reason = session.compression_reason;
                         session.emit(ChatEvent::RuntimeUpdated {
                             state: SessionState::Error,
                             error: Some(e),
                             is_compressing: false,
-                            compression_phase,
-                            compression_reason,
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                         continue;
@@ -1318,14 +1310,10 @@ pub async fn process_command_queue(
                     Err(error) => {
                         warn!("CleanBackgroundProcesses failed: {}", error);
                         let mut session = session_arc.lock().await;
-                        let compression_phase = session.compression_phase;
-                        let compression_reason = session.compression_reason;
                         session.emit(ChatEvent::RuntimeUpdated {
                             state: SessionState::Error,
                             error: Some(error),
                             is_compressing: false,
-                            compression_phase,
-                            compression_reason,
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                     }
