@@ -498,6 +498,12 @@ export type EventSubkind =
   | "plan_delta"
   | "system_notice";
 
+export type EventMetadata = {
+  subkind: EventSubkind;
+  source: string;
+  payload?: unknown;
+};
+
 export type EventMessage = MessageEnvelope & {
   role: "event";
   content: string;
@@ -505,6 +511,60 @@ export type EventMessage = MessageEnvelope & {
   source: string;
   payload?: unknown;
 };
+
+export function isEventSubkind(value: unknown): value is EventSubkind {
+  return (
+    value === "mode_switch" ||
+    value === "tool_decision" ||
+    value === "ide_callback" ||
+    value === "process_completed" ||
+    value === "cron_fire" ||
+    value === "tick" ||
+    value === "summarization_marker" ||
+    value === "verifier_report" ||
+    value === "cancellation_note" ||
+    value === "plan_delta" ||
+    value === "system_notice"
+  );
+}
+
+export function getEventMetadata(message: EventMessage): EventMetadata | null {
+  const backendEvent = isRecord(message.extra?.event)
+    ? message.extra.event
+    : null;
+  const subkind = isEventSubkind(backendEvent?.subkind)
+    ? backendEvent.subkind
+    : isEventSubkind(message.subkind)
+      ? message.subkind
+      : null;
+  if (!subkind) return null;
+
+  const source =
+    typeof backendEvent?.source === "string"
+      ? backendEvent.source
+      : typeof message.source === "string"
+        ? message.source
+        : "";
+  const payload = backendEvent?.payload ?? message.payload;
+  return payload === undefined
+    ? { subkind, source }
+    : { subkind, source, payload };
+}
+
+export function normalizeEventMessageMetadata(
+  message: EventMessage,
+): EventMessage {
+  const metadata = getEventMetadata(message);
+  if (!metadata) return message;
+  if (
+    message.subkind === metadata.subkind &&
+    message.source === metadata.source &&
+    message.payload === metadata.payload
+  ) {
+    return message;
+  }
+  return { ...message, ...metadata };
+}
 
 export type PlanMetadata = {
   mode?: string;
@@ -576,7 +636,7 @@ export function syntheticSummarizationMessage(
 }
 
 export function isEventMessage(message: ChatMessage): message is EventMessage {
-  return message.role === "event";
+  return message.role === "event" && getEventMetadata(message) !== null;
 }
 
 export function isPlanMessage(message: ChatMessage): message is PlanMessage {

@@ -6,6 +6,10 @@ import type {
   EventMessage,
   EventSubkind,
 } from "../../../services/refact/types";
+import {
+  getEventMetadata,
+  normalizeEventMessageMetadata,
+} from "../../../services/refact/types";
 import { EventLogEntry } from "./EventLogEntry";
 import { eventSubkindIcon } from "./eventSubkind";
 import styles from "./EventLog.module.css";
@@ -49,7 +53,12 @@ function isEventSubkind(value: unknown): value is EventLogSubkind {
 }
 
 function isEventLogMessage(event: EventMessage): event is EventLogMessage {
-  return event.subkind !== "plan_delta";
+  const metadata = getEventMetadata(event);
+  return Boolean(metadata && metadata.subkind !== "plan_delta");
+}
+
+function normalizeEventLogMessage(event: EventMessage): EventLogMessage {
+  return normalizeEventMessageMetadata(event) as EventLogMessage;
 }
 
 function readCollapsed(threadId: string): boolean {
@@ -102,7 +111,11 @@ function writeSelectedSubkinds(
 }
 
 function entryKey(event: EventMessage, index: number): string {
-  return event.message_id ?? `${event.subkind}-${event.source}-${index}`;
+  const metadata = getEventMetadata(event);
+  return (
+    event.message_id ??
+    `${metadata?.subkind ?? "event"}-${metadata?.source ?? ""}-${index}`
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -133,12 +146,15 @@ export const EventLog: React.FC<EventLogProps> = ({
   }, [threadId]);
 
   const visibleEvents = useMemo(
-    () => events.filter(isEventLogMessage),
+    () => events.filter(isEventLogMessage).map(normalizeEventLogMessage),
     [events],
   );
 
   const filterEvents = useMemo(
-    () => rawFilterEvents.filter(isEventLogMessage),
+    () =>
+      rawFilterEvents
+        .filter(isEventLogMessage)
+        .map(normalizeEventLogMessage),
     [rawFilterEvents],
   );
 

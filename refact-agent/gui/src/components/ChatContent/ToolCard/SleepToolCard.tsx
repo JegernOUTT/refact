@@ -20,6 +20,7 @@ import type {
   ToolCall,
   ToolResult,
 } from "../../../services/refact/types";
+import { normalizeEventMessageMetadata } from "../../../services/refact/types";
 import styles from "./SleepToolCard.module.css";
 
 type SleepArgs = {
@@ -148,25 +149,6 @@ const TickDots = React.memo(function TickDots({
   );
 });
 
-function normalizeEventMessage(message: EventMessage): EventMessage {
-  const flat = message as EventMessage & {
-    event?: { subkind?: unknown; source?: unknown; payload?: unknown };
-  };
-  if (!flat.event) return message;
-  return {
-    ...message,
-    subkind:
-      typeof flat.event.subkind === "string"
-        ? (flat.event.subkind as EventMessage["subkind"])
-        : message.subkind,
-    source:
-      typeof flat.event.source === "string"
-        ? flat.event.source
-        : message.source,
-    payload: flat.event.payload ?? message.payload,
-  };
-}
-
 export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
@@ -188,7 +170,10 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
     () =>
       messages.flatMap((message, index) => {
         if (message.role !== "event") return [];
-        const tick = tickFromEvent(normalizeEventMessage(message), index);
+        const tick = tickFromEvent(
+          normalizeEventMessageMetadata(message),
+          index,
+        );
         return tick ? [tick] : [];
       }),
     [messages],

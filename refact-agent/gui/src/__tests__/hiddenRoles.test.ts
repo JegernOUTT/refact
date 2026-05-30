@@ -86,6 +86,26 @@ function makeEventMessage(overrides: Partial<EventMessage> = {}): EventMessage {
   };
 }
 
+function makeBackendEventMessage(
+  subkind: EventMessage["subkind"],
+  content: string,
+  payload: Record<string, unknown>,
+  messageId: string,
+): EventMessage {
+  return {
+    role: "event",
+    content,
+    message_id: messageId,
+    extra: {
+      event: {
+        subkind,
+        source: "tool.update_plan",
+        payload,
+      },
+    },
+  } as unknown as EventMessage;
+}
+
 function makePlanMessage(
   version: number,
   overrides: Partial<PlanMessage> = {},
@@ -124,6 +144,18 @@ const planDeltaTwo = makeEventMessage({
   content: "second update",
   subkind: "plan_delta",
 });
+const backendPlanDelta = makeBackendEventMessage(
+  "plan_delta",
+  "backend update",
+  { seq: 1 },
+  "backend-plan-delta",
+);
+const backendModeEvent = makeBackendEventMessage(
+  "mode_switch",
+  "backend mode event",
+  { mode: "agent" },
+  "backend-mode-event",
+);
 const planOne = makePlanMessage(1, { message_id: "plan-1" });
 const planTwo = makePlanMessage(3, { message_id: "plan-3" });
 const planThree = makePlanMessage(2, { message_id: "plan-2" });
@@ -142,7 +174,9 @@ const mixedMessages: ChatMessages = [
   eventTwo,
   planTwo,
   planThree,
+  backendPlanDelta,
   planDeltaTwo,
+  backendModeEvent,
 ];
 
 function makeMessageAddedEvent(
@@ -175,7 +209,16 @@ describe("hidden chat roles", () => {
   it("selectEventLog returns only non-plan-delta event messages", () => {
     const events = selectEventLog(makeRootState(mixedMessages), threadId);
 
-    expect(events).toEqual([eventOne, eventTwo]);
+    expect(events.map((event) => event.message_id)).toEqual([
+      "event-1",
+      "event-2",
+      "backend-mode-event",
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      subkind: "mode_switch",
+      source: "tool.update_plan",
+      payload: { mode: "agent" },
+    });
   });
 
   it("selectCurrentPlan returns highest-version plan", () => {
@@ -190,7 +233,16 @@ describe("hidden chat roles", () => {
       threadId,
     );
 
-    expect(deltas).toEqual([planDeltaOne, planDeltaTwo]);
+    expect(deltas.map((delta) => delta.message_id)).toEqual([
+      "plan-delta-1",
+      "backend-plan-delta",
+      "plan-delta-2",
+    ]);
+    expect(deltas[1]).toMatchObject({
+      subkind: "plan_delta",
+      source: "tool.update_plan",
+      payload: { seq: 1 },
+    });
   });
 
   it("selectSynthesizedPlanText concatenates current base and deltas in order", () => {
@@ -200,14 +252,19 @@ describe("hidden chat roles", () => {
     );
 
     expect(text).toBe(
-      "plan 3\n\n---\n\n## Plan updates\n\nfirst update\n\nsecond update",
+      "plan 3\n\n---\n\n## Plan updates\n\nfirst update\n\nbackend update\n\nsecond update",
     );
   });
 
   it("selectPlanHistory returns current base plus deltas", () => {
     const plans = selectPlanHistory(makeRootState(mixedMessages), threadId);
 
-    expect(plans).toEqual([planTwo, planDeltaOne, planDeltaTwo]);
+    expect(plans.map((plan) => plan.message_id)).toEqual([
+      "plan-3",
+      "plan-delta-1",
+      "backend-plan-delta",
+      "plan-delta-2",
+    ]);
   });
 
   it("reducer accepts MessageAdded for role=event", () => {

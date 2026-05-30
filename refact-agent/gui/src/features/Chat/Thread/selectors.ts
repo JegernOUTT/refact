@@ -11,7 +11,9 @@ import {
   ChatMessages,
   DiffMessage,
   EventMessage,
+  getEventMetadata,
   getPlanMetadata,
+  normalizeEventMessageMetadata,
   PlanMessage,
   ToolResult,
   ToolMessage,
@@ -224,9 +226,13 @@ export const selectEventLog = (
   state: RootState,
   threadId: string,
 ): EventMessage[] => {
-  const eventMessages = selectMessagesById(state, threadId).filter(
-    (message): message is EventMessage =>
-      isEventMessage(message) && message.subkind !== "plan_delta",
+  const eventMessages = selectMessagesById(state, threadId).flatMap(
+    (message) => {
+      if (!isEventMessage(message)) return [];
+      const metadata = getEventMetadata(message);
+      if (!metadata || metadata.subkind === "plan_delta") return [];
+      return [normalizeEventMessageMetadata(message)];
+    },
   );
   return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
 };
@@ -258,9 +264,11 @@ function selectBasePlanMessages(
 function collectPlanDeltaEvents(messages: ChatMessages): EventMessage[] {
   let deltas: EventMessage[] | null = null;
   for (const message of messages) {
-    if (!isEventMessage(message) || message.subkind !== "plan_delta") continue;
+    if (!isEventMessage(message)) continue;
+    const metadata = getEventMetadata(message);
+    if (!metadata || metadata.subkind !== "plan_delta") continue;
     if (!deltas) deltas = [];
-    deltas.push(message);
+    deltas.push(normalizeEventMessageMetadata(message));
   }
   return deltas ?? EMPTY_EVENT_MESSAGES;
 }

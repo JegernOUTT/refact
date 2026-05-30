@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import type { EventMessage } from "../../../services/refact/types";
+import { normalizeEventMessageMetadata } from "../../../services/refact/types";
 import { eventSubkindIcon } from "./eventSubkind";
 import styles from "./EventLog.module.css";
 
@@ -75,12 +76,22 @@ export const EventLogEntry: React.FC<EventLogEntryProps> = ({
   entryId,
   onEventClick,
 }) => {
+  const normalizedEvent = useMemo(
+    () => normalizeEventMessageMetadata(event),
+    [event],
+  );
   const [expanded, setExpanded] = useState(false);
   const jsonId = `${entryId}-json`;
-  const timestamp = useMemo(() => eventTimestamp(event), [event]);
-  const formattedPayload = useMemo(() => payloadJson(event.payload), [event]);
+  const timestamp = useMemo(
+    () => eventTimestamp(normalizedEvent),
+    [normalizedEvent],
+  );
+  const formattedPayload = useMemo(
+    () => payloadJson(normalizedEvent.payload),
+    [normalizedEvent],
+  );
   const handleClick = () => {
-    if (onEventClick?.(event)) return;
+    if (onEventClick?.(normalizedEvent)) return;
     setExpanded((current) => !current);
   };
 
@@ -95,19 +106,19 @@ export const EventLogEntry: React.FC<EventLogEntryProps> = ({
       >
         <Flex align="center" gap="2" className={styles.entryRow}>
           <Text as="span" className={styles.icon} aria-hidden="true">
-            {eventSubkindIcon(event.subkind)}
+            {eventSubkindIcon(normalizedEvent.subkind)}
           </Text>
           <Text as="span" size="1" className={styles.timestamp}>
             {timestamp}
           </Text>
           <Text as="span" size="1" className={styles.subkindChip}>
-            {event.subkind}
+            {normalizedEvent.subkind}
           </Text>
           <Text as="span" size="1" className={styles.source}>
-            {event.source}
+            {normalizedEvent.source}
           </Text>
           <Text as="span" size="1" className={styles.summaryText}>
-            {summaryText(event.content)}
+            {summaryText(normalizedEvent.content)}
           </Text>
         </Flex>
       </button>
