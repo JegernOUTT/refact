@@ -2193,15 +2193,6 @@ pub async fn execute_tools(
     }
 
     let app2 = app.clone();
-    let is_buddy = thread
-        .buddy_meta
-        .as_ref()
-        .map(|m| m.is_buddy_chat)
-        .unwrap_or(false);
-    let first_tool_name = tool_calls
-        .first()
-        .map(|tc| tc.function.name.clone())
-        .unwrap_or_default();
     let chat_id = thread.id.clone();
     let chat_label = {
         let t = thread.title.trim().to_string();
@@ -2235,40 +2226,14 @@ pub async fn execute_tools(
             .iter()
             .any(|m| &m.tool_call_id == tool_call_id && m.tool_failed == Some(true));
         if failed {
-            // Emit an explicit tool_failed runtime event so the GUI
-            // can distinguish failure from normal tool completion.
-            let mut ev = make_runtime_event(
-                "tool_failed",
-                &format!("Tool failed in '{}'", chat_label),
-                "tool",
-                dedupe_key,
-                "failed",
-                None,
-            );
-            ev.chat_id = Some(chat_id.to_string());
-            app2.buddy_event_sink.enqueue_event(ev).await;
+            app2.buddy_event_sink
+                .complete_event(dedupe_key, "failed")
+                .await;
         } else {
             app2.buddy_event_sink
                 .complete_event(dedupe_key, "completed")
                 .await;
         }
-    }
-
-    if !is_buddy && result_msgs.iter().any(|m| m.tool_failed == Some(true)) {
-        let suggestion = refact_buddy_core::types::BuddySuggestion {
-            id: uuid::Uuid::new_v4().to_string(),
-            suggestion_type: "tool_failure".to_string(),
-            title: "I noticed a tool failure".to_string(),
-            description: format!(
-                "'{}' failed. Want me to investigate what happened?",
-                first_tool_name
-            ),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            dismissed: false,
-            controls: vec![],
-            quest: None,
-        };
-        app2.buddy_event_sink.maybe_add_suggestion(suggestion).await;
     }
 
     (result_msgs, had_corrections)

@@ -1581,6 +1581,35 @@ describe("Buddy chat notification freshness", () => {
     }
   });
 
+  test("tool failure completion stays silent in chat bubbles", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const silentToolFailure = makeChatRuntimeEvent({
+        id: "runtime-silent-tool-failure",
+        signal_type: "tool_used",
+        title: "Running search_pattern in 'Chat'",
+        source: "tool",
+        status: "failed",
+        priority: "normal",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [silentToolFailure] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectNoCompanionNotification(
+        container,
+        "runtime:runtime-silent-tool-failure",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("explicit durable runtime bubble policy survives event-once freshness window", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));

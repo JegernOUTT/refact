@@ -71,6 +71,14 @@ export function isBuddyRuntimeEventVisible(
 ): event is BuddyRuntimeEvent {
   if (event == null) return false;
   if (event.dismissed === true) return false;
+  if (
+    event.source === "tool" &&
+    event.status === "failed" &&
+    event.priority === "normal" &&
+    (event.controls?.length ?? 0) === 0
+  ) {
+    return false;
+  }
   if (event.persistent === true) return true;
   if (isDeliberatelyDurableRuntimeEvent(event)) return true;
   const createdAtMs = Date.parse(event.created_at);
