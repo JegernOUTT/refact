@@ -16,6 +16,8 @@ use crate::tools::tools_description::{
 };
 use crate::yaml_configs::customization_registry::map_legacy_mode_to_id;
 
+const MAX_PLAN_FILE_BYTES: u64 = (internal_roles::MAX_PLAN_BODY_CHARS * 4 + 16 * 1024) as u64;
+
 pub struct ToolSetPlan {
     pub config_path: String,
 }
@@ -150,6 +152,8 @@ async fn read_plan_from_path(
     if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
         return Err("argument `path` must point to a .md file".to_string());
     }
+    crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &path).await?;
+    reject_oversized_disk_plan_file(&path).await?;
     let content = crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx, &path)
         .await
         .map_err(|error| format!("failed to read plan from {}: {error}", path.display()))?;
@@ -157,6 +161,20 @@ async fn read_plan_from_path(
         return Err(format!("plan file {} is empty", path.display()));
     }
     Ok(content)
+}
+
+async fn reject_oversized_disk_plan_file(path: &Path) -> Result<(), String> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() && metadata.len() > MAX_PLAN_FILE_BYTES => {
+            Err("plan file is too large to read as a plan; use a smaller .md file".to_string())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to inspect plan file {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn current_plan_including_queued(session: &ChatSession) -> Option<&ChatMessage> {
@@ -536,6 +554,36 @@ mod tests {
         assert_eq!(
             content_text(&session.post_tool_side_effects[0]),
             "## File plan\n- loaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn path_rejects_oversized_plan_file_before_reading() {
+        let (gcx, ccx, _rx) = ccx_for_session("agent").await;
+        let temp = tempfile::tempdir().unwrap();
+        allow_all_privacy(&gcx);
+        let plan_path = temp.path().join("huge.md");
+        let file = std::fs::File::create(&plan_path).unwrap();
+        file.set_len(MAX_PLAN_FILE_BYTES + 1).unwrap();
+        gcx.documents_state.workspace_folders.lock().unwrap().push(
+            crate::files_correction::canonical_path(temp.path().to_string_lossy().to_string()),
+        );
+        let mut tool = ToolSetPlan {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([(
+            "path".to_string(),
+            json!(plan_path.to_string_lossy().to_string()),
+        )]);
+
+        let err = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "plan file is too large to read as a plan; use a smaller .md file"
         );
     }
 
