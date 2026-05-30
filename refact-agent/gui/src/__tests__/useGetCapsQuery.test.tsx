@@ -134,6 +134,46 @@ describe("useGetCapsQuery", () => {
     store.dispatch(capsApi.util.resetApiState());
   });
 
+  it("fetches ping and caps from a remote web lspUrl when lspPort is zero", async () => {
+    const pingUrls: string[] = [];
+    const capsUrls: string[] = [];
+    server.use(
+      http.get("https://remote.example.com/v1/ping", ({ request }) => {
+        pingUrls.push(request.url);
+        return HttpResponse.text("pong");
+      }),
+      http.get("https://remote.example.com/v1/caps", ({ request }) => {
+        capsUrls.push(request.url);
+        return HttpResponse.json(STUB_CAPS_RESPONSE);
+      }),
+    );
+
+    const store = setUpStore({
+      config: {
+        apiKey: "test",
+        lspPort: 0,
+        themeProps: {},
+        host: "web",
+        lspUrl: "https://remote.example.com/v1/ping",
+      },
+    });
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <Provider store={store}>{children}</Provider>
+    );
+
+    const { result } = renderHook(() => useGetCapsQuery(), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.data?.chat_models).toEqual(
+        STUB_CAPS_RESPONSE.chat_models,
+      );
+    });
+    expect(pingUrls).toContain("https://remote.example.com/v1/ping");
+    expect(capsUrls).toContain("https://remote.example.com/v1/caps");
+
+    store.dispatch(capsApi.util.resetApiState());
+  });
+
   it("resets endpoint-bound state when lspUrl changes without a port change", () => {
     const store = setUpStore({
       config: {

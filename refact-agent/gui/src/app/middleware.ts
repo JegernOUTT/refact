@@ -94,7 +94,10 @@ import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import { isToolMessage, modelsApi, providersApi } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { schedulerApi } from "../services/refact/schedulerApi";
-import { getEngineEndpointIdentity } from "../services/refact/apiUrl";
+import {
+  getEngineEndpointIdentity,
+  hasUsableEngineEndpoint,
+} from "../services/refact/apiUrl";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -127,6 +130,10 @@ function endpointConfigChanged(
     previous.lspPort !== next.lspPort ||
     previous.lspUrl !== next.lspUrl
   );
+}
+
+function hasConfiguredEngineEndpoint(state: RootState): boolean {
+  return hasUsableEngineEndpoint(state.config);
 }
 
 function persistOpenChatTabs(state: RootState): void {
@@ -219,8 +226,7 @@ startListening({
     // New chats are created client-side first; sync the initial params to backend
     // immediately so the first snapshot doesn't overwrite local defaults.
     const runtime = state.chat.threads[chatId];
-    const port = state.config.lspPort;
-    if (!runtime || !port || !chatId) return;
+    if (!runtime || !hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const patch = buildThreadParamsPatch(runtime.thread, true);
@@ -537,8 +543,7 @@ startListening({
 
     listenerApi.dispatch(upsertToolCallIntoHistory(action.payload));
 
-    const port = state.config.lspPort;
-    if (!port) return;
+    if (!hasConfiguredEngineEndpoint(state)) return;
 
     const apiKey = state.config.apiKey;
     const content =
@@ -593,13 +598,12 @@ startListening({
   actionCreator: saveTitle,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.id;
     const title = action.payload.title;
     const isTitleGenerated = action.payload.isTitleGenerated;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -803,7 +807,6 @@ startListening({
     const { new_chat_id } = content;
     const state = listenerApi.getState();
 
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
 
     // Preserve task/browser metadata from the source thread so the new chat
@@ -874,7 +877,7 @@ startListening({
       listenerApi.dispatch(push({ name: "chat" }));
     }
 
-    if (port) {
+    if (hasConfiguredEngineEndpoint(state)) {
       const { regenerate } = await import("../services/refact/chatCommands");
       inFlightHandoffs.add(key);
       try {
@@ -910,11 +913,10 @@ startListening({
   actionCreator: setBoostReasoning,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -943,11 +945,10 @@ startListening({
   actionCreator: setReasoningEffort,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -975,11 +976,10 @@ startListening({
   actionCreator: setThinkingBudget,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1007,11 +1007,10 @@ startListening({
   actionCreator: setTemperature,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1031,11 +1030,10 @@ startListening({
   actionCreator: setMaxTokens,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1055,11 +1053,10 @@ startListening({
   actionCreator: setAutoApproveEditingTools,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1079,11 +1076,10 @@ startListening({
   actionCreator: setAutoApproveDangerousCommands,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1103,11 +1099,10 @@ startListening({
   actionCreator: setIncludeProjectInfo,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1127,11 +1122,10 @@ startListening({
   actionCreator: setEnabledCheckpoints,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = state.chat.current_thread_id;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1151,12 +1145,11 @@ startListening({
   actionCreator: setToolUse,
   effect: async (_action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = state.chat.current_thread_id;
     const runtime = state.chat.threads[chatId];
 
-    if (!port || !chatId || !runtime) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
     if (runtime.thread.messages.length > 0) return;
 
     try {
@@ -1180,12 +1173,11 @@ startListening({
   actionCreator: setChatMode,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = state.chat.current_thread_id;
     const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
-    if (!port || !chatId || !runtime) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
 
     try {
       const { sendChatCommand } = await import(
@@ -1208,12 +1200,11 @@ startListening({
   actionCreator: setThreadMode,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = action.payload.chatId;
     const runtime = state.chat.threads[chatId];
 
-    if (!port || !chatId || !runtime) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
     if (runtime.thread.messages.length > 0) return;
 
     try {
@@ -1237,11 +1228,10 @@ startListening({
   actionCreator: setChatModel,
   effect: async (action, listenerApi) => {
     const state = listenerApi.getState();
-    const port = state.config.lspPort;
     const apiKey = state.config.apiKey;
     const chatId = state.chat.current_thread_id;
 
-    if (!port || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
 
     try {
       const { sendChatCommand } = await import(

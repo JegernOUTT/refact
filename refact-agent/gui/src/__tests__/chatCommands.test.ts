@@ -85,6 +85,7 @@ describe("chatCommands", () => {
         {
           host: "web",
           lspUrl: "https://engine.example.com/proxy/v1/ping/Refact?stale=1",
+          lspPort: 0,
         },
         undefined,
         { type: "abort" },

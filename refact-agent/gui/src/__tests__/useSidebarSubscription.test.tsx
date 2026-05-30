@@ -218,6 +218,30 @@ describe("useSidebarSubscription", () => {
     expect(store.getState().config.lspPort).toBe(8001);
   });
 
+  it("connects to a remote web lspUrl when lspPort is zero", async () => {
+    const requests: string[] = [];
+    server.use(
+      pendingSidebarHandler(
+        "https://remote.example.com/v1/sidebar/subscribe",
+        requests,
+      ),
+    );
+
+    renderSidebarSubscription({
+      config: {
+        apiKey: "test",
+        lspPort: 0,
+        themeProps: {},
+        host: "web",
+        lspUrl: "https://remote.example.com/v1/ping",
+      },
+    });
+
+    await waitFor(() => {
+      expect(requests).toHaveLength(1);
+    });
+  });
+
   it("keeps local project info while waiting for an explicit workspace snapshot", async () => {
     server.use(
       sidebarSnapshotHandler(

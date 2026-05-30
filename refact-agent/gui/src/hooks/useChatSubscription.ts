@@ -8,7 +8,10 @@ import {
 } from "../features/Chat/Thread/actions";
 import { selectSseRefreshRequested } from "../features/Chat/Thread/selectors";
 import { selectConfig } from "../features/Config/configSlice";
-import { getEngineEndpointIdentity } from "../services/refact/apiUrl";
+import {
+  getEngineEndpointIdentity,
+  hasUsableEngineEndpoint,
+} from "../services/refact/apiUrl";
 import {
   subscribeToChatEvents,
   type ChatEventEnvelope,
@@ -84,6 +87,7 @@ export function useChatSubscription(
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
   const endpointIdentity = getEngineEndpointIdentity(config);
+  const hasEndpoint = hasUsableEngineEndpoint(config);
   const subscriptionConfig = useMemo(
     () => ({
       host: config.host,
@@ -326,7 +330,7 @@ export function useChatSubscription(
 
   const scheduleReconnect = useCallback(
     (delayMs: number) => {
-      if (!autoReconnect || !enabled || !chatId || !config.lspPort) return;
+      if (!autoReconnect || !enabled || !chatId || !hasEndpoint) return;
 
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -336,11 +340,11 @@ export function useChatSubscription(
         connectRef.current();
       }, delayMs);
     },
-    [autoReconnect, enabled, chatId, config.lspPort],
+    [autoReconnect, enabled, chatId, hasEndpoint],
   );
 
   const connect = useCallback(() => {
-    if (!chatId || !config.lspPort || !enabled) return;
+    if (!chatId || !hasEndpoint || !enabled) return;
     if (connectingRef.current) return;
 
     cleanup();
@@ -453,7 +457,7 @@ export function useChatSubscription(
   }, [
     chatId,
     config.apiKey,
-    config.lspPort,
+    hasEndpoint,
     enabled,
     subscriptionConfig,
     cleanup,

@@ -5,6 +5,7 @@ import { pingApi } from "../services/refact";
 import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import { setBackendStatus } from "../features/Connection";
+import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
 
 const POLL_INTERVAL_HEALTHY = 5000;
 const POLL_INTERVAL_ERROR = 2000;
@@ -17,7 +18,7 @@ export const useGetPing = () => {
   const currentEngineServed = config.engineServed;
   const currentLspPort = config.lspPort;
   const currentLspUrl = config.lspUrl;
-  const canPing = Number.isFinite(currentLspPort) && currentLspPort > 0;
+  const canPing = hasUsableEngineEndpoint(config);
 
   const [pollingInterval, setPollingInterval] = useState(POLL_INTERVAL_ERROR);
   const [queryStarted, setQueryStarted] = useState(false);

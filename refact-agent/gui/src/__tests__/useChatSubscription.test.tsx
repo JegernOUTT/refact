@@ -1,10 +1,13 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { Provider } from "react-redux";
 import { configureStore } from "@reduxjs/toolkit";
 import { useChatSubscription } from "../hooks/useChatSubscription";
 import { chatReducer } from "../features/Chat/Thread/reducer";
-import { reducer as configReducer } from "../features/Config/configSlice";
+import {
+  reducer as configReducer,
+  updateConfig,
+} from "../features/Config/configSlice";
 
 const createTestStore = () => {
   return configureStore({
@@ -15,12 +18,16 @@ const createTestStore = () => {
   });
 };
 
+const mockFetch = vi.fn();
+
 const wrapper = ({ children }: { children: React.ReactNode }) => (
   <Provider store={createTestStore()}>{children}</Provider>
 );
 
 describe("useChatSubscription", () => {
   afterEach(() => {
+    mockFetch.mockReset();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -80,5 +87,39 @@ describe("useChatSubscription", () => {
     );
 
     expect(result.current.error).toBeNull();
+  });
+
+  it("connects to a remote web lspUrl when lspPort is zero", async () => {
+    global.fetch = mockFetch as unknown as typeof fetch;
+    mockFetch.mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn().mockResolvedValue({ done: true }),
+        }),
+      },
+    });
+    const store = createTestStore();
+    store.dispatch(
+      updateConfig({
+        host: "web",
+        lspPort: 0,
+        lspUrl: "https://remote.example.com/v1/ping",
+      }),
+    );
+    const remoteWrapper = ({ children }: { children: React.ReactNode }) => (
+      <Provider store={store}>{children}</Provider>
+    );
+
+    renderHook(() => useChatSubscription("remote-chat"), {
+      wrapper: remoteWrapper,
+    });
+
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://remote.example.com/v1/chats/subscribe?chat_id=remote-chat",
+        expect.objectContaining({ method: "GET" }),
+      );
+    });
   });
 });

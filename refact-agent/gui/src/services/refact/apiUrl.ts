@@ -12,6 +12,10 @@ export type QueryParams = Record<string, QueryValue> | URLSearchParams;
 const DEFAULT_LSP_PORT = 8001;
 const SAME_ORIGIN_IDENTITY = "same-origin";
 
+function isValidLspPort(port: number | undefined): boolean {
+  return Number.isFinite(port) && port !== undefined && port > 0;
+}
+
 function dropV1Path(pathname: string): string {
   const segments = pathname.split("/");
   const v1Index = segments.findIndex((segment) => segment === "v1");
@@ -66,6 +70,15 @@ export function resolveEngineBaseUrl(config: EngineApiConfig): string {
     sanitizeEngineBaseUrl(config.lspUrl) ??
     `http://127.0.0.1:${config.lspPort ?? DEFAULT_LSP_PORT}`
   );
+}
+
+export function hasUsableEngineEndpoint(config: EngineApiConfig): boolean {
+  const host = config.host ?? "web";
+  const baseUrl = resolveEngineBaseUrl(config);
+
+  if (baseUrl === "") return host === "web";
+  if (sanitizeEngineBaseUrl(config.lspUrl) !== null) return true;
+  return host !== "web" && isValidLspPort(config.lspPort);
 }
 
 export function normalizeEndpointPath(path: string): string {

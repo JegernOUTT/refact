@@ -66,7 +66,10 @@ import {
   sidebarSubscriptionStarted,
   sidebarWorkspaceChanged,
 } from "../features/Sidebar/sidebarSlice";
-import { getEngineEndpointIdentity } from "../services/refact/apiUrl";
+import {
+  getEngineEndpointIdentity,
+  hasUsableEngineEndpoint,
+} from "../services/refact/apiUrl";
 
 const RECONNECT_DELAY_MS = 500;
 const MIGRATION_KEY = "refact-trajectories-migrated";
@@ -221,6 +224,7 @@ export function useSidebarSubscription() {
   const dispatch = useAppDispatch();
   const config = useConfig();
   const endpointIdentity = getEngineEndpointIdentity(config);
+  const hasEndpoint = hasUsableEngineEndpoint(config);
   const subscriptionConfig = useMemo(
     () => ({
       host: config.host,
@@ -852,7 +856,7 @@ export function useSidebarSubscription() {
 
     const apiKey = config.apiKey ?? null;
 
-    if (config.lspPort <= 0 || config.lspPort > 65535) {
+    if (!hasEndpoint) {
       activeEndpointRef.current = null;
       scheduleReconnect();
       return;
@@ -917,6 +921,7 @@ export function useSidebarSubscription() {
   }, [
     config.apiKey,
     config.lspPort,
+    hasEndpoint,
     dispatch,
     endpointIdentity,
     prepareInitialHistory,

@@ -251,7 +251,11 @@ describe("chatSubscription", () => {
 
       subscribeToChatEvents(
         "remote-chat",
-        { host: "web", lspUrl: "https://remote.example.com/proxy/v1/ping" },
+        {
+          host: "web",
+          lspUrl: "https://remote.example.com/proxy/v1/ping",
+          lspPort: 0,
+        },
         {
           onEvent: vi.fn(),
           onError: vi.fn(),

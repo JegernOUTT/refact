@@ -31,11 +31,8 @@ import {
   type MessageContent,
   updateChatParams,
 } from "../../../services/refact/chatCommands";
-import {
-  selectConfig,
-  selectLspPort,
-  selectApiKey,
-} from "../../Config/configSlice";
+import { selectConfig, selectApiKey } from "../../Config/configSlice";
+import { hasUsableEngineEndpoint } from "../../../services/refact/apiUrl";
 import { selectCurrentThreadId, selectMessagesById } from "./selectors";
 import { push } from "../../Pages/pagesSlice";
 import type {
@@ -206,9 +203,8 @@ export const openChatInModeAndStart = createAsyncThunk<
     api.dispatch(push({ name: "chat" }));
 
     const state = api.getState();
-    const port = selectLspPort(state);
-    if (!port) return undefined;
     const connection = selectConfig(state);
+    if (!hasUsableEngineEndpoint(connection)) return undefined;
 
     const apiKey = selectApiKey(state) ?? undefined;
     const startMessage =
@@ -713,9 +709,8 @@ export const startBuddyInvestigation = createAsyncThunk<
   "chat/startBuddyInvestigation",
   async ({ triggerText, triggerSource, sourceChatId, diagnostic }, api) => {
     const state = api.getState();
-    const port = selectLspPort(state);
-    if (!port) return undefined;
     const connection = selectConfig(state);
+    if (!hasUsableEngineEndpoint(connection)) return undefined;
 
     const apiKey = selectApiKey(state) ?? undefined;
     const messages = sourceChatId

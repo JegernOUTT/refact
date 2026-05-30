@@ -14,6 +14,7 @@ import {
 import { selectConfig } from "../features/Config/configSlice";
 import {
   getEngineEndpointIdentity,
+  hasUsableEngineEndpoint,
   type EngineApiConfig,
 } from "../services/refact/apiUrl";
 import { subscribeToChatEvents } from "../services/refact/chatSubscription";
@@ -103,6 +104,7 @@ export function useAllChatsSubscription() {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
   const endpointIdentity = getEngineEndpointIdentity(config);
+  const hasEndpoint = hasUsableEngineEndpoint(config);
   const subscriptionConfig = useMemo(
     () => ({
       host: config.host,
@@ -145,6 +147,7 @@ export function useAllChatsSubscription() {
   const pendingBytesRef = useRef<Map<string, number>>(new Map());
   const configRef = useRef<EngineApiConfig>(subscriptionConfig);
   const endpointIdentityRef = useRef(endpointIdentity);
+  const hasEndpointRef = useRef(hasEndpoint);
   const apiKeyRef = useRef(config.apiKey);
   const subscribeRef = useRef<((chatId: string) => void) | null>(null);
   const unsubscribeRef = useRef<((chatId: string) => void) | null>(null);
@@ -411,7 +414,7 @@ export function useAllChatsSubscription() {
   const subscribeToChat = useCallback(
     (chatId: string) => {
       if (subscriptionsRef.current.has(chatId)) return;
-      if ((configRef.current.lspPort ?? 0) <= 0) return;
+      if (!hasEndpointRef.current) return;
       if (!desiredIdsRef.current.has(chatId)) return;
 
       manualCloseRef.current.delete(chatId);
@@ -602,8 +605,9 @@ export function useAllChatsSubscription() {
       apiKeyRef.current = config.apiKey;
     }
     configRef.current = subscriptionConfig;
+    hasEndpointRef.current = hasEndpoint;
 
-    if (!config.lspPort) return;
+    if (!hasEndpoint) return;
 
     const subscribedIds = Array.from(subscriptionsRef.current.keys());
     const desiredOrder = pickDesiredChatSubscriptions({
@@ -629,6 +633,7 @@ export function useAllChatsSubscription() {
     activeChatId,
     openThreadIds,
     config.apiKey,
+    hasEndpoint,
     config.lspPort,
     endpointIdentity,
     subscribe,
@@ -639,7 +644,7 @@ export function useAllChatsSubscription() {
 
   useEffect(() => {
     if (!sseRefreshRequested) return;
-    if (!configRef.current.lspPort) return;
+    if (!hasEndpointRef.current) return;
 
     unsubscribe(sseRefreshRequested);
     setTimeout(() => {

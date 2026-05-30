@@ -4,6 +4,7 @@ import {
   buildApiUrlFromParts,
   buildApiUrlFromState,
   getEngineEndpointIdentity,
+  hasUsableEngineEndpoint,
   normalizeEndpointPath,
   resolveEngineBaseUrl,
   sanitizeEngineBaseUrl,
@@ -93,6 +94,47 @@ describe("resolveEngineBaseUrl", () => {
         lspUrl: "https://remote.example.com/refact/v1/ping",
       }),
     ).toBe("https://remote.example.com/refact");
+  });
+});
+
+describe("hasUsableEngineEndpoint", () => {
+  test("allows web relative modes", () => {
+    expect(hasUsableEngineEndpoint({ host: "web", dev: true })).toBe(true);
+    expect(hasUsableEngineEndpoint({ host: "web", engineServed: true })).toBe(
+      true,
+    );
+  });
+
+  test("allows sanitized remote lspUrl without a usable port", () => {
+    expect(
+      hasUsableEngineEndpoint({
+        host: "web",
+        lspUrl: "https://remote.example.com/v1/ping",
+        lspPort: 0,
+      }),
+    ).toBe(true);
+    expect(
+      hasUsableEngineEndpoint({
+        host: "vscode",
+        lspUrl: "https://remote.example.com/v1/ping",
+      }),
+    ).toBe(true);
+  });
+
+  test("requires a positive finite port for local IDE fallback", () => {
+    expect(hasUsableEngineEndpoint({ host: "vscode", lspPort: 8001 })).toBe(
+      true,
+    );
+    expect(hasUsableEngineEndpoint({ host: "vscode", lspPort: 0 })).toBe(
+      false,
+    );
+    expect(hasUsableEngineEndpoint({ host: "jetbrains" })).toBe(false);
+    expect(
+      hasUsableEngineEndpoint({
+        host: "ide",
+        lspPort: Number.POSITIVE_INFINITY,
+      }),
+    ).toBe(false);
   });
 });
 
