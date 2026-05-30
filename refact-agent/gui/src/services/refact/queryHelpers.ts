@@ -1,5 +1,8 @@
 import type { FetchArgs, FetchBaseQueryError } from "@reduxjs/toolkit/query";
-import type { RootState } from "../../app/store";
+import type { EngineApiConfig } from "./apiUrl";
+import { buildApiUrlFromState } from "./apiUrl";
+
+type QueryState = { config: EngineApiConfig };
 
 type InnerBaseQuery = (
   arg: string | FetchArgs,
@@ -8,8 +11,51 @@ type InnerBaseQuery = (
   | { error: FetchBaseQueryError; data?: undefined }
 >;
 
+function isEngineApiPath(url: string): boolean {
+  const trimmed = url.trim();
+  return (
+    trimmed === "v1" ||
+    trimmed.startsWith("v1/") ||
+    trimmed === "/v1" ||
+    trimmed.startsWith("/v1/")
+  );
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]"
+  );
+}
+
+function normalizeRequestUrl(state: QueryState, url: string): string {
+  const trimmed = url.trim();
+  if (isEngineApiPath(trimmed)) {
+    return buildApiUrlFromState(state, trimmed);
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const path = `${parsed.pathname}${parsed.search}`;
+    if (isLoopbackHost(parsed.hostname) && isEngineApiPath(path)) {
+      return buildApiUrlFromState(state, path);
+    }
+  } catch {
+    return url;
+  }
+
+  return url;
+}
+
+function normalizeRequest(state: QueryState, request: string | FetchArgs): FetchArgs {
+  if (typeof request === "string") {
+    return { url: normalizeRequestUrl(state, request) };
+  }
+
+  return { ...request, url: normalizeRequestUrl(state, request.url) };
+}
+
 export function lspQueryFn<TArg, TResult>(
-  buildRequest: (arg: TArg, port: number) => string | FetchArgs,
+  buildRequest: (arg: TArg, state: QueryState) => string | FetchArgs,
 ) {
   return async (
     arg: TArg,
@@ -17,20 +63,9 @@ export function lspQueryFn<TArg, TResult>(
     _opts: object,
     baseQuery: InnerBaseQuery,
   ) => {
-    const state = api.getState() as RootState;
-    const port = state.config.lspPort;
-    if (!port) {
-      return {
-        error: {
-          status: 500,
-          data: "Missing lspPort in config",
-        } as FetchBaseQueryError,
-      };
-    }
-    const request = buildRequest(arg, port);
-    const result = await baseQuery(
-      typeof request === "string" ? { url: request } : request,
-    );
+    const state = api.getState() as QueryState;
+    const request = normalizeRequest(state, buildRequest(arg, state));
+    const result = await baseQuery(request);
     if (result.error) {
       return {
         error: {

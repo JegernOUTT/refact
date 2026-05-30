@@ -96,17 +96,15 @@ export const extensionsApi = createApi({
   endpoints: (builder) => ({
     getExtRegistry: builder.query<ExtRegistryResponse, undefined>({
       queryFn: lspQueryFn<undefined, ExtRegistryResponse>(
-        (_arg, port) => `http://127.0.0.1:${port}/v1/ext/registry`,
+        () => "/v1/ext/registry",
       ),
       providesTags: ["ExtRegistry"],
     }),
 
     getSkill: builder.query<SkillDetail, { name: string; scope?: string }>({
       queryFn: lspQueryFn<{ name: string; scope?: string }, SkillDetail>(
-        ({ name, scope }, port) =>
-          `http://127.0.0.1:${port}/v1/ext/skills/${name}${
-            scope ? `?scope=${scope}` : ""
-          }`,
+        ({ name, scope }) =>
+          `/v1/ext/skills/${name}${scope ? `?scope=${scope}` : ""}`,
       ),
       providesTags: (_result, _error, { name }) => [
         { type: "Skill", id: name },
@@ -120,10 +118,8 @@ export const extensionsApi = createApi({
       queryFn: lspQueryFn<
         { name: string; scope?: string; body: Record<string, unknown> },
         undefined
-      >(({ name, scope, body }, port) => ({
-        url: `http://127.0.0.1:${port}/v1/ext/skills/${name}${
-          scope ? `?scope=${scope}` : ""
-        }`,
+      >(({ name, scope, body }) => ({
+        url: `/v1/ext/skills/${name}${scope ? `?scope=${scope}` : ""}`,
         method: "PUT",
         body,
       })),
@@ -140,8 +136,8 @@ export const extensionsApi = createApi({
       queryFn: lspQueryFn<
         { name: string; scope: string; description: string; body: string },
         undefined
-      >((body, port) => ({
-        url: `http://127.0.0.1:${port}/v1/ext/skills`,
+      >((body) => ({
+        url: "/v1/ext/skills",
         method: "POST",
         body,
       })),
@@ -150,10 +146,8 @@ export const extensionsApi = createApi({
 
     deleteSkill: builder.mutation<undefined, { name: string; scope?: string }>({
       queryFn: lspQueryFn<{ name: string; scope?: string }, undefined>(
-        ({ name, scope }, port) => ({
-          url: `http://127.0.0.1:${port}/v1/ext/skills/${name}${
-            scope ? `?scope=${scope}` : ""
-          }`,
+        ({ name, scope }) => ({
+          url: `/v1/ext/skills/${name}${scope ? `?scope=${scope}` : ""}`,
           method: "DELETE",
         }),
       ),
@@ -162,10 +156,8 @@ export const extensionsApi = createApi({
 
     getCommand: builder.query<CommandDetail, { name: string; scope?: string }>({
       queryFn: lspQueryFn<{ name: string; scope?: string }, CommandDetail>(
-        ({ name, scope }, port) =>
-          `http://127.0.0.1:${port}/v1/ext/commands/${name}${
-            scope ? `?scope=${scope}` : ""
-          }`,
+        ({ name, scope }) =>
+          `/v1/ext/commands/${name}${scope ? `?scope=${scope}` : ""}`,
       ),
       providesTags: (_result, _error, { name }) => [
         { type: "Command", id: name },
@@ -179,10 +171,8 @@ export const extensionsApi = createApi({
       queryFn: lspQueryFn<
         { name: string; scope?: string; body: Record<string, unknown> },
         undefined
-      >(({ name, scope, body }, port) => ({
-        url: `http://127.0.0.1:${port}/v1/ext/commands/${name}${
-          scope ? `?scope=${scope}` : ""
-        }`,
+      >(({ name, scope, body }) => ({
+        url: `/v1/ext/commands/${name}${scope ? `?scope=${scope}` : ""}`,
         method: "PUT",
         body,
       })),
@@ -193,8 +183,8 @@ export const extensionsApi = createApi({
     }),
 
     createCommand: builder.mutation<undefined, Record<string, unknown>>({
-      queryFn: lspQueryFn<Record<string, unknown>, undefined>((body, port) => ({
-        url: `http://127.0.0.1:${port}/v1/ext/commands`,
+      queryFn: lspQueryFn<Record<string, unknown>, undefined>((body) => ({
+        url: "/v1/ext/commands",
         method: "POST",
         body,
       })),
@@ -206,10 +196,8 @@ export const extensionsApi = createApi({
       { name: string; scope?: string }
     >({
       queryFn: lspQueryFn<{ name: string; scope?: string }, undefined>(
-        ({ name, scope }, port) => ({
-          url: `http://127.0.0.1:${port}/v1/ext/commands/${name}${
-            scope ? `?scope=${scope}` : ""
-          }`,
+        ({ name, scope }) => ({
+          url: `/v1/ext/commands/${name}${scope ? `?scope=${scope}` : ""}`,
           method: "DELETE",
         }),
       ),
@@ -218,10 +206,7 @@ export const extensionsApi = createApi({
 
     getHooks: builder.query<HooksDetail, { scope?: string }>({
       queryFn: lspQueryFn<{ scope?: string }, HooksDetail>(
-        ({ scope }, port) =>
-          `http://127.0.0.1:${port}/v1/ext/hooks${
-            scope ? `?scope=${scope}` : ""
-          }`,
+        ({ scope }) => `/v1/ext/hooks${scope ? `?scope=${scope}` : ""}`,
       ),
       providesTags: ["Hooks"],
     }),
@@ -233,10 +218,8 @@ export const extensionsApi = createApi({
       queryFn: lspQueryFn<
         { scope?: string; body: Record<string, unknown> },
         undefined
-      >(({ scope, body }, port) => ({
-        url: `http://127.0.0.1:${port}/v1/ext/hooks${
-          scope ? `?scope=${scope}` : ""
-        }`,
+      >(({ scope, body }) => ({
+        url: `/v1/ext/hooks${scope ? `?scope=${scope}` : ""}`,
         method: "PUT",
         body,
       })),

@@ -52,14 +52,14 @@ export const pluginsApi = createApi({
   endpoints: (builder) => ({
     getMarketplaces: builder.query<MarketplacesResponse, undefined>({
       queryFn: lspQueryFn<undefined, MarketplacesResponse>(
-        (_arg, port) => `http://127.0.0.1:${port}/v1/plugins/marketplaces`,
+        () => "/v1/plugins/marketplaces",
       ),
       providesTags: ["Marketplaces"],
     }),
 
     addMarketplace: builder.mutation<undefined, { source: string }>({
-      queryFn: lspQueryFn<{ source: string }, undefined>((body, port) => ({
-        url: `http://127.0.0.1:${port}/v1/plugins/marketplaces`,
+      queryFn: lspQueryFn<{ source: string }, undefined>((body) => ({
+        url: "/v1/plugins/marketplaces",
         method: "POST",
         body,
       })),
@@ -67,8 +67,8 @@ export const pluginsApi = createApi({
     }),
 
     deleteMarketplace: builder.mutation<undefined, string>({
-      queryFn: lspQueryFn<string, undefined>((name, port) => ({
-        url: `http://127.0.0.1:${port}/v1/plugins/marketplaces/${name}`,
+      queryFn: lspQueryFn<string, undefined>((name) => ({
+        url: `/v1/plugins/marketplaces/${name}`,
         method: "DELETE",
       })),
       invalidatesTags: ["Marketplaces"],
@@ -76,8 +76,7 @@ export const pluginsApi = createApi({
 
     getMarketplacePlugins: builder.query<PluginListResponse, string>({
       queryFn: lspQueryFn<string, PluginListResponse>(
-        (name, port) =>
-          `http://127.0.0.1:${port}/v1/plugins/marketplace/${name}/plugins`,
+        (name) => `/v1/plugins/marketplace/${name}/plugins`,
       ),
     }),
 
@@ -86,8 +85,8 @@ export const pluginsApi = createApi({
       { plugin: string; marketplace: string }
     >({
       queryFn: lspQueryFn<{ plugin: string; marketplace: string }, undefined>(
-        (body, port) => ({
-          url: `http://127.0.0.1:${port}/v1/plugins/install`,
+        (body) => ({
+          url: "/v1/plugins/install",
           method: "POST",
           body,
         }),
@@ -101,14 +100,14 @@ export const pluginsApi = createApi({
 
     getInstalled: builder.query<InstalledPluginsResponse, undefined>({
       queryFn: lspQueryFn<undefined, InstalledPluginsResponse>(
-        (_arg, port) => `http://127.0.0.1:${port}/v1/plugins/installed`,
+        () => "/v1/plugins/installed",
       ),
       providesTags: ["InstalledPlugins"],
     }),
 
     uninstallPlugin: builder.mutation<undefined, string>({
-      queryFn: lspQueryFn<string, undefined>((name, port) => ({
-        url: `http://127.0.0.1:${port}/v1/plugins/installed/${name}`,
+      queryFn: lspQueryFn<string, undefined>((name) => ({
+        url: `/v1/plugins/installed/${name}`,
         method: "DELETE",
       })),
       invalidatesTags: ["InstalledPlugins"],

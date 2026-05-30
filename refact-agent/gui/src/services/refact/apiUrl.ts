@@ -1,5 +1,3 @@
-import type { RootState } from "../../app/store";
-
 export type EngineApiConfig = {
   host?: "web" | "ide" | "vscode" | "jetbrains";
   lspPort?: number;
@@ -94,7 +92,7 @@ export function buildApiUrl(
 }
 
 export function buildApiUrlFromState(
-  state: RootState,
+  state: { config: EngineApiConfig },
   path: string,
   query?: QueryParams,
 ): string {
