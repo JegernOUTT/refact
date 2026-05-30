@@ -9324,6 +9324,45 @@ fn bug_reaction_not_blocked_by_ambient_cooldown() {
     );
 }
 
+#[test]
+fn chat_reaction_limiter_rolls_back_when_runtime_event_not_queued() {
+    use super::chat_reactions::{
+        ChatReactionDebugState, ChatReactionKind, ChatReactionLimiter, ChatReactionSkipReason,
+    };
+
+    let mut limiter = ChatReactionLimiter::new();
+    let mut debug = ChatReactionDebugState::new();
+    let now = chrono::Utc::now();
+    let reservation = limiter
+        .try_allow_kind("not-queued-chat", ChatReactionKind::Ambient, now)
+        .unwrap();
+
+    debug.record_not_queued("not-queued-chat", "speech_chat_reaction");
+    limiter.rollback(reservation);
+
+    assert!(limiter
+        .try_allow_kind(
+            "not-queued-chat",
+            ChatReactionKind::Ambient,
+            now + Duration::seconds(10),
+        )
+        .is_ok());
+    assert_eq!(
+        limiter.try_allow_kind(
+            "not-queued-chat",
+            ChatReactionKind::Ambient,
+            now + Duration::seconds(11),
+        ),
+        Err(ChatReactionSkipReason::RateLimited)
+    );
+    let snapshot = debug.snapshot();
+    assert_eq!(snapshot.counts_by_result.get("not_queued"), Some(&1));
+    let attempt = snapshot.recent_attempts.last().unwrap();
+    assert_eq!(attempt.result, "not_queued");
+    assert_eq!(attempt.queued, Some(false));
+    assert!(attempt.event_id.is_none());
+}
+
 #[tokio::test]
 async fn chat_activity_reaction_emits_after_normal_chat_activity_or_completion() {
     use super::chat_reactions::{
@@ -9358,6 +9397,168 @@ async fn chat_activity_reaction_emits_after_normal_chat_activity_or_completion()
         "activity reaction must use ambient fallback, got: {speech}"
     );
     assert!(renderer.intent_kinds().is_empty());
+}
+
+#[tokio::test]
+async fn chat_activity_reaction_does_not_emit_after_recent_insight_or_humor() {
+    use super::chat_reactions::{
+        AcceptedUserMessage, ChatActivityCompletion, maybe_enqueue_chat_activity_reaction,
+        maybe_enqueue_chat_reaction,
+    };
+    use crate::call_validation::ChatContent;
+    use crate::chat::types::ThreadParams;
+
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![None]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app = make_gcx_with_buddy().await;
+    let chat_id = "activity-after-insight-chat".to_string();
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(
+                "please design a new caching architecture carefully".to_string(),
+            ),
+        },
+    )
+    .await;
+
+    let _ = wait_for_runtime_event(&app, "speech_insight").await;
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+        },
+    )
+    .await;
+
+    let lock = app.buddy.buddy.lock().await;
+    let svc = lock.as_ref().unwrap();
+    assert_eq!(svc.runtime_queue.items.len(), 1);
+    assert!(!svc
+        .runtime_queue
+        .items
+        .iter()
+        .any(|event| event.signal_type == "speech_chat_reaction"));
+    let debug = svc.chat_reaction_debug.snapshot();
+    assert!(debug.recent_attempts.iter().any(|attempt| {
+        attempt.chat_id == chat_id && attempt.skip_reason.as_deref() == Some("rate_limited")
+    }));
+}
+
+#[tokio::test]
+async fn chat_activity_reaction_still_allows_bug_candidate_after_ambient() {
+    use super::chat_reactions::{
+        AcceptedUserMessage, ChatActivityCompletion, maybe_enqueue_chat_activity_reaction,
+        maybe_enqueue_chat_reaction,
+    };
+    use crate::call_validation::ChatContent;
+    use crate::chat::types::ThreadParams;
+
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![None, None]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app = make_gcx_with_buddy().await;
+    let chat_id = "bug-after-ambient-activity-chat".to_string();
+
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+        },
+    )
+    .await;
+    let _ = wait_for_runtime_event(&app, "speech_chat_reaction").await;
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(
+                "the app crashed on save every time I try".to_string(),
+            ),
+        },
+    )
+    .await;
+
+    let _ = wait_for_runtime_event(&app, "chat_bug_candidate").await;
+    let lock = app.buddy.buddy.lock().await;
+    let svc = lock.as_ref().unwrap();
+    assert!(svc
+        .runtime_queue
+        .items
+        .iter()
+        .any(|event| event.signal_type == "speech_chat_reaction"));
+    assert!(svc
+        .runtime_queue
+        .items
+        .iter()
+        .any(|event| event.signal_type == "chat_bug_candidate"));
+}
+
+#[tokio::test]
+async fn chat_activity_reaction_uses_stable_dedupe_key() {
+    use super::chat_reactions::{
+        ChatActivityCompletion, CHAT_ACTIVITY_ANALYSIS_TEXT, maybe_enqueue_chat_activity_reaction,
+    };
+    use crate::chat::types::ThreadParams;
+
+    let app = make_gcx_with_buddy().await;
+    let chat_id = "stable-activity-dedupe-chat".to_string();
+
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+        },
+    )
+    .await;
+    let first = wait_for_runtime_event(&app, "speech_chat_reaction").await;
+    let first_dedupe = first.dedupe_key.clone();
+
+    {
+        let mut lock = app.buddy.buddy.lock().await;
+        lock.as_mut().unwrap().chat_reaction_limiter.reset();
+    }
+
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+        },
+    )
+    .await;
+
+    let lock = app.buddy.buddy.lock().await;
+    let svc = lock.as_ref().unwrap();
+    let events: Vec<_> = svc
+        .runtime_queue
+        .items
+        .iter()
+        .filter(|event| event.signal_type == "speech_chat_reaction")
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].dedupe_key, first_dedupe);
+    assert!(events[0]
+        .dedupe_key
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with(&format!("chat_reaction:{chat_id}:ambient:")));
+    let serialized = serde_json::to_string(events[0]).unwrap();
+    assert!(!serialized.contains("completed safely at"));
+    assert!(!serialized.contains(&chrono::Utc::now().timestamp().to_string()));
+    assert_eq!(
+        CHAT_ACTIVITY_ANALYSIS_TEXT,
+        "normal chat activity completed safely"
+    );
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@ pub const CHAT_REACTION_SPEECH_MAX_CHARS: usize = 140;
 pub const PER_CHAT_COOLDOWN_SECS: i64 = 180;
 pub const GLOBAL_HOURLY_CAP: u32 = 20;
 pub const CHAT_REACTION_DEBUG_ATTEMPT_CAP: usize = 50;
+pub const CHAT_ACTIVITY_ANALYSIS_TEXT: &str = "normal chat activity completed safely";
 const HUMOR_BUCKET_PERCENT: u64 = 40;
 const CHAT_REACTION_ECHO_NGRAM_WORDS: usize = 3;
 const CHAT_REACTION_ECHO_NGRAM_MIN_CHARS: usize = 18;
@@ -374,6 +375,21 @@ impl ChatReactionDebugState {
         self.last_emitted_at = Some(attempted_at);
     }
 
+    pub fn record_not_queued(&mut self, chat_id: &str, signal_type: &str) {
+        self.record(ChatReactionAttempt {
+            attempted_at: Utc::now().to_rfc3339(),
+            chat_id: chat_id.to_string(),
+            result: "not_queued".to_string(),
+            skip_reason: Some("not_queued".to_string()),
+            signal_type: Some(signal_type.to_string()),
+            event_id: None,
+            ttl_ms: None,
+            bubble_policy: None,
+            queued: Some(false),
+        });
+        self.last_skip_reason = Some("not_queued".to_string());
+    }
+
     pub fn snapshot(&self) -> ChatReactionDebug {
         ChatReactionDebug {
             recent_attempts: self.recent_attempts.iter().cloned().collect(),
@@ -398,6 +414,28 @@ impl ChatReactionDebugState {
 impl Default for ChatReactionDebugState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn record_queued_reaction(
+    svc: &mut crate::buddy::actor::BuddyService,
+    chat_id: &str,
+    signal_type: &str,
+    event: BuddyRuntimeEvent,
+    reservation: ChatReactionLimiterReservation,
+) -> bool {
+    let stored_event = svc.enqueue_runtime_event_with_stored(event);
+    if let Some(stored_event) = stored_event.as_ref() {
+        svc.chat_reaction_limiter
+            .record_success(chat_id, stored_event, Utc::now());
+        svc.chat_reaction_debug
+            .record_emitted(chat_id, signal_type, Some(stored_event));
+        true
+    } else {
+        svc.chat_reaction_limiter.rollback(reservation);
+        svc.chat_reaction_debug
+            .record_not_queued(chat_id, signal_type);
+        false
     }
 }
 
@@ -883,20 +921,25 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
         if let Some(svc) = svc_guard.as_mut() {
             if settings_allow_chat_reactions(&svc.settings) {
                 let signal_type = event.signal_type.clone();
-                let stored_event = svc.enqueue_runtime_event_with_stored(event);
-                svc.chat_reaction_debug.record_emitted(
-                    &chat_id,
-                    signal_type.as_str(),
-                    stored_event.as_ref(),
-                );
-                debug!(
-                    target: "buddy.chat_reactions",
-                    chat_id = %chat_id,
-                    reaction_kind = ?candidate.kind,
-                    analysis_hash = %analysis_hash,
-                    event_id = %event_id,
-                    "buddy chat reaction emitted"
-                );
+                if record_queued_reaction(svc, &chat_id, signal_type.as_str(), event, reservation) {
+                    debug!(
+                        target: "buddy.chat_reactions",
+                        chat_id = %chat_id,
+                        reaction_kind = ?candidate.kind,
+                        analysis_hash = %analysis_hash,
+                        event_id = %event_id,
+                        "buddy chat reaction emitted"
+                    );
+                } else {
+                    debug!(
+                        target: "buddy.chat_reactions",
+                        chat_id = %chat_id,
+                        reaction_kind = ?candidate.kind,
+                        analysis_hash = %analysis_hash,
+                        event_id = %event_id,
+                        "buddy chat reaction not queued"
+                    );
+                }
             } else {
                 svc.chat_reaction_limiter.rollback(reservation);
                 svc.chat_reaction_debug
@@ -924,10 +967,7 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
 }
 
 pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatActivityCompletion) {
-    let analysis_text = format!(
-        "normal chat activity completed safely at {}",
-        Utc::now().timestamp()
-    );
+    let analysis_text = CHAT_ACTIVITY_ANALYSIS_TEXT.to_string();
 
     let plan = {
         let mut svc_guard = app.buddy.buddy.lock().await;
@@ -965,6 +1005,22 @@ pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatA
             return;
         }
         let now = Utc::now();
+        if svc
+            .chat_reaction_limiter
+            .has_recent_non_bug_success(&activity.chat_id, now)
+        {
+            svc.chat_reaction_debug
+                .record_skipped(&activity.chat_id, ChatReactionSkipReason::RateLimited);
+            debug!(
+                target: "buddy.chat_reactions",
+                chat_id = %activity.chat_id,
+                reason = %ChatReactionSkipReason::RateLimited.as_str(),
+                reaction_kind = ?ChatReactionKind::Ambient,
+                analysis_hash = %message_hash(&analysis_text),
+                "buddy chat activity reaction skipped"
+            );
+            return;
+        }
         let reservation = match svc.chat_reaction_limiter.try_allow_kind(
             &activity.chat_id,
             ChatReactionKind::Ambient,
@@ -1004,20 +1060,31 @@ pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatA
     if let Some(svc) = svc_guard.as_mut() {
         if settings_allow_chat_reactions(&svc.settings) {
             let signal_type = event.signal_type.clone();
-            let stored_event = svc.enqueue_runtime_event_with_stored(event);
-            svc.chat_reaction_debug.record_emitted(
+            if record_queued_reaction(
+                svc,
                 &activity.chat_id,
                 signal_type.as_str(),
-                stored_event.as_ref(),
-            );
-            debug!(
-                target: "buddy.chat_reactions",
-                chat_id = %activity.chat_id,
-                reaction_kind = ?ChatReactionKind::Ambient,
-                analysis_hash = %analysis_hash,
-                event_id = %event_id,
-                "buddy chat activity reaction emitted"
-            );
+                event,
+                reservation,
+            ) {
+                debug!(
+                    target: "buddy.chat_reactions",
+                    chat_id = %activity.chat_id,
+                    reaction_kind = ?ChatReactionKind::Ambient,
+                    analysis_hash = %analysis_hash,
+                    event_id = %event_id,
+                    "buddy chat activity reaction emitted"
+                );
+            } else {
+                debug!(
+                    target: "buddy.chat_reactions",
+                    chat_id = %activity.chat_id,
+                    reaction_kind = ?ChatReactionKind::Ambient,
+                    analysis_hash = %analysis_hash,
+                    event_id = %event_id,
+                    "buddy chat activity reaction not queued"
+                );
+            }
         } else {
             svc.chat_reaction_limiter.rollback(reservation);
             svc.chat_reaction_debug
@@ -1036,6 +1103,7 @@ pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatA
 
 pub struct ChatReactionLimiter {
     pub(crate) per_chat_kind_last_at: HashMap<(String, ChatReactionKind), DateTime<Utc>>,
+    recent_non_bug_success_at: HashMap<String, DateTime<Utc>>,
     global_hourly_count: u32,
     global_window_start: DateTime<Utc>,
 }
@@ -1052,6 +1120,7 @@ impl ChatReactionLimiter {
     pub fn new() -> Self {
         Self {
             per_chat_kind_last_at: HashMap::new(),
+            recent_non_bug_success_at: HashMap::new(),
             global_hourly_count: 0,
             global_window_start: Utc::now(),
         }
@@ -1074,6 +1143,8 @@ impl ChatReactionLimiter {
         now: DateTime<Utc>,
     ) -> Result<ChatReactionLimiterReservation, ChatReactionSkipReason> {
         self.per_chat_kind_last_at
+            .retain(|_, last_at| (now - *last_at).num_seconds() < PER_CHAT_COOLDOWN_SECS);
+        self.recent_non_bug_success_at
             .retain(|_, last_at| (now - *last_at).num_seconds() < PER_CHAT_COOLDOWN_SECS);
         if (now - self.global_window_start).num_seconds() >= 3600 {
             self.global_hourly_count = 0;
@@ -1118,12 +1189,28 @@ impl ChatReactionLimiter {
         }
     }
 
+    pub fn record_success(&mut self, chat_id: &str, event: &BuddyRuntimeEvent, now: DateTime<Utc>) {
+        if event.signal_type != "chat_bug_candidate" {
+            self.recent_non_bug_success_at
+                .insert(chat_id.to_string(), now);
+        }
+    }
+
+    pub fn has_recent_non_bug_success(&mut self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        self.recent_non_bug_success_at
+            .retain(|_, last_at| (now - *last_at).num_seconds() < PER_CHAT_COOLDOWN_SECS);
+        self.recent_non_bug_success_at
+            .get(chat_id)
+            .is_some_and(|last_at| (now - *last_at).num_seconds() < PER_CHAT_COOLDOWN_SECS)
+    }
+
     pub fn allow(&mut self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.allow_kind(chat_id, ChatReactionKind::Humor, now)
     }
 
     pub fn reset(&mut self) {
         self.per_chat_kind_last_at.clear();
+        self.recent_non_bug_success_at.clear();
         self.global_hourly_count = 0;
         self.global_window_start = Utc::now();
     }
