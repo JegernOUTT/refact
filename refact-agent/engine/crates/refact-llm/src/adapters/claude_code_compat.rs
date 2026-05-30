@@ -161,7 +161,7 @@ pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     ("strategic_planning", "plan"),
     ("deep_research", "research"),
     ("code_review", "review"),
-    ("subagent", "delegate"),
+    ("subagent", "subagent"),
     // General task management
     ("tasks_set", "set_tasks"),
     ("task_done", "finish"),
@@ -263,7 +263,7 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
     ("strategic_planning",       "plan"),
     ("deep_research",            "research"),
     ("code_review",              "review"),
-    ("subagent",                 "delegate"),
+    ("subagent",                 "subagent"),
     // Task management
     ("tasks_set",                "set_tasks"),
     ("task_done",                "finish"),
@@ -699,7 +699,7 @@ mod tests {
             cc_resolve_tool_name("t_patch_ln"),
             "update_textdoc_by_lines"
         );
-        assert_eq!(cc_resolve_tool_name("t_delegate"), "subagent");
+        assert_eq!(cc_resolve_tool_name("t_subagent"), "subagent");
         assert_eq!(cc_resolve_tool_name("t_ctx_probe"), "compress_chat_probe");
         // Non-renamed builtins: just strip t_ prefix
         assert_eq!(cc_resolve_tool_name("t_cat"), "cat");
@@ -909,7 +909,7 @@ mod tests {
     fn test_cc_resolve_tool_name_full_rename_table() {
         assert_eq!(cc_resolve_tool_name("t_tree"), "tree");
         assert_eq!(cc_resolve_tool_name("t_cat"), "cat");
-        assert_eq!(cc_resolve_tool_name("t_delegate"), "subagent");
+        assert_eq!(cc_resolve_tool_name("t_subagent"), "subagent");
         assert_eq!(cc_resolve_tool_name("t_plan"), "strategic_planning");
         assert_eq!(cc_resolve_tool_name("t_write"), "create_textdoc");
         assert_eq!(cc_resolve_tool_name("t_patch"), "update_textdoc");
