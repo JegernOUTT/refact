@@ -295,6 +295,7 @@ dist
 # Refact binary/symlink
 **/refact/bin/refact-lsp
 
+.refact/
 .refact_knowledge*/
 .refact*/
 .refact-tmp/
