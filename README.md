@@ -17,8 +17,8 @@
 </div>
 
 > [!IMPORTANT]
-> This repository is kept as the legacy archive for the original Refact project and is no longer the active development home.
-> Ongoing development has moved to [JegernOUTT/refact](https://github.com/JegernOUTT/refact); please use that repository for new issues, pull requests, and future updates.
+> This fork is the active development home for Refact going forward.
+> The original [`smallcloudai/refact`](https://github.com/smallcloudai/refact) repository is kept as a legacy archive.
 
 Refact runs a local Rust engine (`refact-lsp`) from your IDE and connects only to the model providers, local runtimes, and integrations you configure. It brings together chat, codebase search, autonomous agents, browser automation, and tool integrations while keeping project state, indexes, trajectories, and task data on your machine.
 
