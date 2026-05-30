@@ -215,13 +215,13 @@ function setupCompanionRender() {
 
 function setupCompanionApiHandlers() {
   server.use(
-    http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+    http.get("*/v1/buddy/opportunities", () =>
       HttpResponse.json({ opportunities: [] }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
+    http.post("*/v1/buddy/runtime/:id/dismiss", () =>
       HttpResponse.json({ dismissed: true }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+    http.post("*/v1/buddy/conversations", () =>
       HttpResponse.json({
         chat_id: "buddy-investigation-chat",
         title: "Buddy investigation",
@@ -230,7 +230,7 @@ function setupCompanionApiHandlers() {
         message_count: 0,
       }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/investigation-context", () =>
+    http.post("*/v1/buddy/investigation-context", () =>
       HttpResponse.json({
         logs: "logs",
         internal_context: "context",
@@ -238,9 +238,7 @@ function setupCompanionApiHandlers() {
         repo_name: "refact",
       }),
     ),
-    http.post("http://127.0.0.1:8001/v1/chats/:id/commands", () =>
-      HttpResponse.json({ ok: true }),
-    ),
+    http.post("*/v1/chats/:id/commands", () => HttpResponse.json({ ok: true })),
   );
 }
 
@@ -278,16 +276,13 @@ describe("buddy action execution contract", () => {
   it("click_second_action_sends_action_index_1", async () => {
     let requestBody: unknown = null;
     server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept",
-        async ({ request }) => {
-          requestBody = await request.json();
-          return acceptResponse({
-            kind: "open_page",
-            navigate_to: { type: "buddy" },
-          });
-        },
-      ),
+      http.post("*/v1/buddy/opportunities/:id/accept", async ({ request }) => {
+        requestBody = await request.json();
+        return acceptResponse({
+          kind: "open_page",
+          navigate_to: { type: "buddy" },
+        });
+      }),
     );
 
     const opp = makeOpportunity({
@@ -309,7 +304,7 @@ describe("buddy action execution contract", () => {
 
   it("accept_response_dispatches_snapshot_to_redux", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         HttpResponse.json({
           snapshot: makeSnapshot("Backend Snapshot"),
           action_result: {
@@ -331,7 +326,7 @@ describe("buddy action execution contract", () => {
 
   it("draft_action_with_empty_draft_id_uses_returned_id", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         acceptResponse({
           kind: "draft",
           draft_kind: "skill",
@@ -358,7 +353,7 @@ describe("buddy action execution contract", () => {
 
   it("open_page_action_navigates_using_returned_navigate_to", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         acceptResponse({
           kind: "open_page",
           navigate_to: { type: "stats" },
@@ -379,22 +374,16 @@ describe("buddy action execution contract", () => {
     let acceptCalled = false;
     let dismissCalled = false;
     server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept",
-        () => {
-          acceptCalled = true;
-          return acceptResponse({ kind: "dismiss" });
-        },
-      ),
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/dismiss",
-        () => {
-          dismissCalled = true;
-          return HttpResponse.json({
-            snapshot: makeSnapshot("Dismiss Snapshot"),
-          });
-        },
-      ),
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalled = true;
+        return acceptResponse({ kind: "dismiss" });
+      }),
+      http.post("*/v1/buddy/opportunities/:id/dismiss", () => {
+        dismissCalled = true;
+        return HttpResponse.json({
+          snapshot: makeSnapshot("Dismiss Snapshot"),
+        });
+      }),
     );
 
     const { store, execute } = renderExecutor();
@@ -411,16 +400,13 @@ describe("buddy action execution contract", () => {
   it("failed_marketplace_install_shows_error_and_stays_retryable", async () => {
     let acceptCalls = 0;
     server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept",
-        () => {
-          acceptCalls += 1;
-          return HttpResponse.json(
-            { detail: "marketplace_install_failed: denied" },
-            { status: 502 },
-          );
-        },
-      ),
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalls += 1;
+        return HttpResponse.json(
+          { detail: "marketplace_install_failed: denied" },
+          { status: 502 },
+        );
+      }),
     );
 
     const action: BuddyAction = {
@@ -451,9 +437,8 @@ describe("buddy action execution contract", () => {
 
   it("dismiss_failure_shows_error_and_keeps_button_visible", async () => {
     server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/dismiss",
-        () => HttpResponse.json({ detail: "dismiss failed" }, { status: 409 }),
+      http.post("*/v1/buddy/opportunities/:id/dismiss", () =>
+        HttpResponse.json({ detail: "dismiss failed" }, { status: 409 }),
       ),
     );
 
@@ -480,10 +465,10 @@ describe("buddy action execution contract", () => {
       proposed_actions: [{ kind: "open_page", page: { type: "buddy" } }],
     });
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [opportunity] }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         HttpResponse.json({ detail: "accept failed" }, { status: 500 }),
       ),
     );
@@ -527,12 +512,11 @@ describe("buddy action execution contract", () => {
       proposed_actions: [{ kind: "dismiss" }],
     });
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [opportunity] }),
       ),
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/dismiss",
-        () => HttpResponse.json({ detail: "dismiss failed" }, { status: 409 }),
+      http.post("*/v1/buddy/opportunities/:id/dismiss", () =>
+        HttpResponse.json({ detail: "dismiss failed" }, { status: 409 }),
       ),
     );
     const store = setUpStore();
@@ -571,10 +555,10 @@ describe("buddy action execution contract", () => {
     pinCompanionTime();
     let conversationStarted = false;
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
+      http.post("*/v1/buddy/runtime/:id/dismiss", () =>
         HttpResponse.json({ detail: "offline" }, { status: 503 }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () => {
+      http.post("*/v1/buddy/conversations", () => {
         conversationStarted = true;
         return HttpResponse.json({
           chat_id: "buddy-investigation-chat",
@@ -615,7 +599,7 @@ describe("buddy action execution contract", () => {
     setupCompanionApiHandlers();
     pinCompanionTime();
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
+      http.post("*/v1/buddy/runtime/:id/dismiss", () =>
         HttpResponse.json({ detail: "offline" }, { status: 503 }),
       ),
     );
@@ -671,7 +655,7 @@ describe("buddy action execution contract", () => {
 
   it("successful_marketplace_install_navigates_to_marketplace_hub", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         acceptResponse({
           kind: "marketplace_install",
           market_kind: "mcp",
@@ -698,7 +682,7 @@ describe("buddy action execution contract", () => {
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         HttpResponse.text("action_not_implemented", { status: 501 }),
       ),
     );
@@ -720,16 +704,13 @@ describe("buddy action execution contract", () => {
   it("workshop_action_with_null_opp_executes_locally", async () => {
     let acceptCalled = false;
     server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept",
-        () => {
-          acceptCalled = true;
-          return acceptResponse({
-            kind: "open_page",
-            navigate_to: { type: "buddy" },
-          });
-        },
-      ),
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalled = true;
+        return acceptResponse({
+          kind: "open_page",
+          navigate_to: { type: "buddy" },
+        });
+      }),
     );
 
     const { store, execute } = renderExecutor();

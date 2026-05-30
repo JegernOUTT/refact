@@ -25,7 +25,6 @@ export function useVoiceInput(
   onTranscript: (text: string) => void,
 ): UseVoiceInputResult {
   const config = useConfig();
-  const port = config.lspPort;
   const isJetBrains = config.host === "jetbrains";
   const {
     isRecording,
@@ -35,7 +34,7 @@ export function useVoiceInput(
     startRecording,
     stopRecording,
     cancelRecording,
-  } = useStreamingVoiceRecording(port);
+  } = useStreamingVoiceRecording(config);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<VoiceStatusResponse | null>(null);
 
@@ -56,16 +55,16 @@ export function useVoiceInput(
       });
       return;
     }
-    getVoiceStatus(port)
+    getVoiceStatus(config)
       .then(setStatus)
       .catch(() => setStatus(null));
-  }, [port, isJetBrains]);
+  }, [config, isJetBrains]);
 
   useEffect(() => {
     if (!status?.is_downloading) return;
 
     const interval = setInterval(() => {
-      getVoiceStatus(port)
+      getVoiceStatus(config)
         .then(setStatus)
         .catch(() => {
           // Silently ignore errors during polling
@@ -73,7 +72,7 @@ export function useVoiceInput(
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [status?.is_downloading, port]);
+  }, [status?.is_downloading, config]);
 
   const toggleRecording = useCallback(async (): Promise<string | null> => {
     setError(null);
@@ -100,17 +99,17 @@ export function useVoiceInput(
         const message =
           err instanceof Error ? err.message : "Failed to start recording";
         if (message.includes("Model not downloaded")) {
-          downloadVoiceModel(port).catch(() => {
+          downloadVoiceModel(config).catch(() => {
             // Silently ignore download errors
           });
-          const newStatus = await getVoiceStatus(port).catch(() => null);
+          const newStatus = await getVoiceStatus(config).catch(() => null);
           if (newStatus) setStatus(newStatus);
         }
         setError(message);
       }
       return null;
     }
-  }, [isRecording, startRecording, stopRecording, onTranscript, port]);
+  }, [isRecording, startRecording, stopRecording, onTranscript, config]);
 
   return {
     isRecording,

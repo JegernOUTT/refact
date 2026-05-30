@@ -79,21 +79,18 @@ describe("ProcessStdinInput", () => {
   test("submit calls API and clears the input", async () => {
     receivedChars.length = 0;
     server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/exec/:processId/stdin",
-        async ({ request }) => {
-          const body = (await request.json()) as { chars: string };
-          receivedChars.push(body.chars);
-          return HttpResponse.json({
-            process_id: "exec_test",
-            status: "running",
-            bytes_written: body.chars.length,
-            since_seq: 0,
-            next_seq: 0,
-            latest_seq: 0,
-          });
-        },
-      ),
+      http.post("*/v1/exec/:processId/stdin", async ({ request }) => {
+        const body = (await request.json()) as { chars: string };
+        receivedChars.push(body.chars);
+        return HttpResponse.json({
+          process_id: "exec_test",
+          status: "running",
+          bytes_written: body.chars.length,
+          since_seq: 0,
+          next_seq: 0,
+          latest_seq: 0,
+        });
+      }),
     );
 
     await renderExpandedStdinCard(true);

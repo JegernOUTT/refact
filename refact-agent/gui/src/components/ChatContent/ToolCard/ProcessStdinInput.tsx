@@ -4,7 +4,7 @@ import { Box, Button, Flex, Text, TextField } from "@radix-ui/themes";
 import { useAppSelector } from "../../../hooks";
 import {
   selectApiKey,
-  selectLspPort,
+  selectConfig,
 } from "../../../features/Config/configSlice";
 import { writeProcessStdin } from "../../../services/refact/exec";
 import styles from "./ExecToolCard.module.css";
@@ -16,7 +16,7 @@ type ProcessStdinInputProps = {
 export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
   processId,
 }) => {
-  const port = useAppSelector(selectLspPort);
+  const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
   const [chars, setChars] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -24,11 +24,11 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
 
   const sendChars = useCallback(
     async (value: string) => {
-      if (!port || isSending || value.length === 0) return;
+      if (!config.lspPort || isSending || value.length === 0) return;
       setIsSending(true);
       setError(null);
       try {
-        await writeProcessStdin(processId, value, port, apiKey ?? undefined);
+        await writeProcessStdin(processId, value, config, apiKey ?? undefined);
         setChars("");
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -36,10 +36,10 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
         setIsSending(false);
       }
     },
-    [apiKey, isSending, port, processId],
+    [apiKey, config, isSending, processId],
   );
 
-  const canSend = chars.length > 0 && !isSending && Boolean(port);
+  const canSend = chars.length > 0 && !isSending && Boolean(config.lspPort);
 
   return (
     <Flex direction="column" gap="2" className={styles.stdinInputRow}>
@@ -60,7 +60,7 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
               size="1"
               value={chars}
               placeholder="Type stdin..."
-              disabled={isSending || !port}
+              disabled={isSending || !config.lspPort}
               onChange={(event) => setChars(event.target.value)}
               onClick={(event) => event.stopPropagation()}
             />
@@ -78,7 +78,7 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
             size="1"
             variant="soft"
             color="gray"
-            disabled={isSending || !port}
+            disabled={isSending || !config.lspPort}
             onClick={(event) => {
               event.stopPropagation();
               void sendChars("\u0003");

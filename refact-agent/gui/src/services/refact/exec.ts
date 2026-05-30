@@ -1,3 +1,6 @@
+import { buildApiUrl } from "./apiUrl";
+import { normalizeConnection, type PortOrConnection } from "./chatCommands";
+
 export type ExecStdinResponse = {
   process_id: string;
   status: string;
@@ -10,12 +13,13 @@ export type ExecStdinResponse = {
 export async function writeProcessStdin(
   processId: string,
   chars: string,
-  port: number,
+  connection: PortOrConnection,
   apiKey?: string,
 ): Promise<ExecStdinResponse> {
-  const url = `http://127.0.0.1:${port}/v1/exec/${encodeURIComponent(
-    processId,
-  )}/stdin`;
+  const url = buildApiUrl(
+    normalizeConnection(connection),
+    `/v1/exec/${encodeURIComponent(processId)}/stdin`,
+  );
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };

@@ -1,5 +1,6 @@
 import { store } from "../../app/store";
 import { postBuddyErrorRequest } from "../../services/refact/buddy";
+import type { EngineApiConnection } from "../../services/refact/chatCommands";
 
 const REPORT_DEDUPE_MS = 10000;
 const REPORT_TRIM_LEN = 4000;
@@ -553,7 +554,7 @@ function shouldReport(key: string, now: number): boolean {
 }
 
 type BuddyFrontendReporterState = {
-  config: {
+  config: EngineApiConnection & {
     apiKey: string | null;
     lspPort: number;
   };
@@ -633,7 +634,7 @@ export async function reportBuddyFrontendError(
   if (!shouldReport(key, deps.now())) return;
 
   try {
-    await deps.post(port, apiKey, {
+    await deps.post(state.config, apiKey, {
       error: `[frontend:${args.source}] ${normalized}`,
       source_file: sourceFile,
       tool_name: toolName,

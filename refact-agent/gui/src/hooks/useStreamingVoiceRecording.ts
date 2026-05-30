@@ -5,6 +5,7 @@ import {
   sendVoiceChunk,
   VoiceStreamEvent,
 } from "../services/refact/voice";
+import type { EngineApiConnection } from "../services/refact/chatCommands";
 
 export interface UseStreamingVoiceRecordingResult {
   isRecording: boolean;
@@ -36,7 +37,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 export function useStreamingVoiceRecording(
-  port: number,
+  connection: EngineApiConnection,
 ): UseStreamingVoiceRecordingResult {
   const [isRecording, setIsRecording] = useState(false);
   const [isFinishing, setIsFinishing] = useState(false);
@@ -130,9 +131,9 @@ export function useStreamingVoiceRecording(
         base64 = arrayBufferToBase64(pcmBuffer);
       }
 
-      await sendVoiceChunk(port, sessionIdRef.current, base64, final);
+      await sendVoiceChunk(connection, sessionIdRef.current, base64, final);
     },
-    [port],
+    [connection],
   );
 
   const startRecording = useCallback(async () => {
@@ -153,7 +154,7 @@ export function useStreamingVoiceRecording(
     recordingStartTimeRef.current = Date.now();
 
     unsubscribeRef.current = subscribeToVoiceStream(
-      port,
+      connection,
       sessionIdRef.current,
       undefined,
       handleEvent,
@@ -191,7 +192,7 @@ export function useStreamingVoiceRecording(
     }, 1000);
 
     setIsRecording(true);
-  }, [port, handleEvent, sendBufferedAudio, cleanupStream]);
+  }, [connection, handleEvent, sendBufferedAudio, cleanupStream]);
 
   const stopRecording = useCallback(async (): Promise<string> => {
     if (!isRecording) throw new Error("Not recording");

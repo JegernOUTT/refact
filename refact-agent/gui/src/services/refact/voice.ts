@@ -1,5 +1,12 @@
-function getVoiceApiBase(port: number): string {
-  return `http://127.0.0.1:${port}/v1/voice`;
+import { buildApiUrl } from "./apiUrl";
+import { normalizeConnection, type PortOrConnection } from "./chatCommands";
+
+function voiceUrl(
+  connection: PortOrConnection,
+  path: string,
+  query?: Record<string, string | number | boolean | null | undefined>,
+): string {
+  return buildApiUrl(normalizeConnection(connection), path, query);
 }
 
 export interface TranscribeRequest {
@@ -32,10 +39,10 @@ export interface DownloadModelResponse {
 }
 
 export async function transcribeAudio(
-  port: number,
+  connection: PortOrConnection,
   request: TranscribeRequest,
 ): Promise<TranscribeResponse> {
-  const response = await fetch(`${getVoiceApiBase(port)}/transcribe`, {
+  const response = await fetch(voiceUrl(connection, "/v1/voice/transcribe"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -50,9 +57,9 @@ export async function transcribeAudio(
 }
 
 export async function getVoiceStatus(
-  port: number,
+  connection: PortOrConnection,
 ): Promise<VoiceStatusResponse> {
-  const response = await fetch(`${getVoiceApiBase(port)}/status`);
+  const response = await fetch(voiceUrl(connection, "/v1/voice/status"));
   if (!response.ok) {
     throw new Error("Failed to get voice status");
   }
@@ -60,10 +67,10 @@ export async function getVoiceStatus(
 }
 
 export async function downloadVoiceModel(
-  port: number,
+  connection: PortOrConnection,
   model?: string,
 ): Promise<DownloadModelResponse> {
-  const response = await fetch(`${getVoiceApiBase(port)}/download`, {
+  const response = await fetch(voiceUrl(connection, "/v1/voice/download"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: model ?? "base.en" }),
@@ -100,17 +107,17 @@ export type VoiceStreamEvent =
   | StreamingEndedEvent;
 
 export function subscribeToVoiceStream(
-  port: number,
+  connection: PortOrConnection,
   sessionId: string,
   language: string | undefined,
   onEvent: (event: VoiceStreamEvent) => void,
   onError?: (error: Error) => void,
 ): () => void {
-  const params = new URLSearchParams();
-  if (language) params.set("language", language);
-  const url = `${getVoiceApiBase(
-    port,
-  )}/stream/${sessionId}/subscribe?${params.toString()}`;
+  const url = voiceUrl(
+    connection,
+    `/v1/voice/stream/${encodeURIComponent(sessionId)}/subscribe`,
+    language ? { language } : undefined,
+  );
 
   const eventSource = new EventSource(url);
 
@@ -131,14 +138,17 @@ export function subscribeToVoiceStream(
 }
 
 export async function sendVoiceChunk(
-  port: number,
+  connection: PortOrConnection,
   sessionId: string,
   audioData: string,
   isFinal: boolean,
   language?: string,
 ): Promise<void> {
   const response = await fetch(
-    `${getVoiceApiBase(port)}/stream/${sessionId}/chunk`,
+    voiceUrl(
+      connection,
+      `/v1/voice/stream/${encodeURIComponent(sessionId)}/chunk`,
+    ),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

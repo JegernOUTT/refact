@@ -167,7 +167,7 @@ describe("buddy frontend state hardening", () => {
       makeOpportunity({ id: "opp-2" }),
     ];
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities }),
       ),
     );
@@ -187,7 +187,7 @@ describe("buddy frontend state hardening", () => {
       makeOpportunity({ id: "opp-2" }),
     ];
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities }),
       ),
     );
@@ -204,13 +204,13 @@ describe("buddy frontend state hardening", () => {
   it("accept_invalidates_opportunities_tag", async () => {
     let getCount = 0;
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () => {
+      http.get("*/v1/buddy/opportunities", () => {
         getCount += 1;
         return HttpResponse.json({
           opportunities: [makeOpportunity({ id: `opp-${getCount}` })],
         });
       }),
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         HttpResponse.json({
           snapshot: makeSnapshot(),
           action_result: { kind: "open_page", navigate_to: { type: "buddy" } },

@@ -724,8 +724,8 @@ export const startBuddyInvestigation = createAsyncThunk<
     const title = buildBuddyInvestigationTitle(triggerText);
 
     const [meta, context] = await Promise.all([
-      createBuddyConversationRequest(port, apiKey, { title }),
-      fetchBuddyInvestigationContextRequest(port, apiKey, {
+      createBuddyConversationRequest(connection, apiKey, { title }),
+      fetchBuddyInvestigationContextRequest(connection, apiKey, {
         error: triggerText,
         source_file: diagnostic?.source_file ?? undefined,
         tool_name: diagnostic?.tool_name ?? undefined,

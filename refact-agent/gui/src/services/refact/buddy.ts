@@ -1,4 +1,10 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
+import { buildApiUrl, buildApiUrlFromState } from "./apiUrl";
+import {
+  normalizeConnection,
+  type EngineApiConnection,
+  type PortOrConnection,
+} from "./chatCommands";
 import type {
   BuddySnapshot,
   BuddySettings,
@@ -29,7 +35,7 @@ import {
 } from "../../features/Buddy/buddySlice";
 
 type BuddyApiState = {
-  config: {
+  config: EngineApiConnection & {
     apiKey: string | null;
     lspPort: number;
   };
@@ -242,6 +248,22 @@ function makeHeaders(apiKey: string | undefined, includeJson = true): Headers {
   return headers;
 }
 
+function buddyUrl(
+  connection: PortOrConnection,
+  path: string,
+  query?: Record<string, string | number | boolean | null | undefined>,
+): string {
+  return buildApiUrl(normalizeConnection(connection), path, query);
+}
+
+function buddyUrlFromState(
+  state: BuddyApiState,
+  path: string,
+  query?: Record<string, string | number | boolean | null | undefined>,
+): string {
+  return buildApiUrlFromState(state, path, query);
+}
+
 async function parseBuddyResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const text = await response.text();
@@ -275,12 +297,12 @@ function redactFrontendSource(value: string | undefined): string | undefined {
 }
 
 export async function createBuddyConversationRequest(
-  port: number,
+  connection: PortOrConnection,
   apiKey: string | undefined,
   body?: BuddyConversationCreateRequest,
 ): Promise<BuddyConversationMeta> {
   const response = await fetch(
-    `http://127.0.0.1:${port}/v1/buddy/conversations`,
+    buddyUrl(connection, "/v1/buddy/conversations"),
     {
       method: "POST",
       headers: makeHeaders(apiKey, !!body),
@@ -291,12 +313,12 @@ export async function createBuddyConversationRequest(
 }
 
 export async function postBuddyErrorRequest(
-  port: number,
+  connection: PortOrConnection,
   apiKey: string | undefined,
   body: BuddyErrorReport,
 ): Promise<void> {
   const response = await fetch(
-    `http://127.0.0.1:${port}/v1/buddy/diagnostics/collect`,
+    buddyUrl(connection, "/v1/buddy/diagnostics/collect"),
     {
       method: "POST",
       headers: makeHeaders(apiKey),
@@ -307,12 +329,12 @@ export async function postBuddyErrorRequest(
 }
 
 export async function fetchBuddyInvestigationContextRequest(
-  port: number,
+  connection: PortOrConnection,
   apiKey: string | undefined,
   body: BuddyInvestigationContextRequest,
 ): Promise<BuddyInvestigationContextResponse> {
   const response = await fetch(
-    `http://127.0.0.1:${port}/v1/buddy/investigation-context`,
+    buddyUrl(connection, "/v1/buddy/investigation-context"),
     {
       method: "POST",
       headers: makeHeaders(apiKey),
@@ -344,8 +366,7 @@ export const buddyApi = createApi({
     getBuddySnapshot: builder.query<BuddySnapshot, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
-        const result = await baseQuery(`http://127.0.0.1:${port}/v1/buddy`);
+        const result = await baseQuery(buddyUrlFromState(state, "/v1/buddy"));
         if (result.error) return { error: result.error };
         return { data: result.data as BuddySnapshotResponse as BuddySnapshot };
       },
@@ -354,9 +375,8 @@ export const buddyApi = createApi({
     getBuddySettings: builder.query<BuddySettings, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery(
-          `http://127.0.0.1:${port}/v1/buddy/settings`,
+          buddyUrlFromState(state, "/v1/buddy/settings"),
         );
         if (result.error) return { error: result.error };
         return { data: result.data as BuddySettings };
@@ -369,9 +389,8 @@ export const buddyApi = createApi({
     >({
       queryFn: async (settings, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/settings`,
+          url: buddyUrlFromState(state, "/v1/buddy/settings"),
           method: "POST",
           body: settings,
         });
@@ -411,9 +430,8 @@ export const buddyApi = createApi({
     careBuddy: builder.mutation<BuddyCareResponse, BuddyCareRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/care`,
+          url: buddyUrlFromState(state, "/v1/buddy/care"),
           method: "POST",
           body,
         });
@@ -424,9 +442,8 @@ export const buddyApi = createApi({
     acceptBuddyQuest: builder.mutation<BuddyQuestAcceptResponse, string>({
       queryFn: async (suggestionId, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/quest/accept`,
+          url: buddyUrlFromState(state, "/v1/buddy/quest/accept"),
           method: "POST",
           body: { suggestion_id: suggestionId },
         });
@@ -440,9 +457,8 @@ export const buddyApi = createApi({
     >({
       queryFn: async (_body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/personality/reroll`,
+          url: buddyUrlFromState(state, "/v1/buddy/personality/reroll"),
           method: "POST",
         });
         if (result.error) return { error: result.error };
@@ -452,9 +468,8 @@ export const buddyApi = createApi({
     getBuddyActivities: builder.query<BuddyActivityEntry[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery(
-          `http://127.0.0.1:${port}/v1/buddy/activities`,
+          buddyUrlFromState(state, "/v1/buddy/activities"),
         );
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyActivityEntry[] };
@@ -466,13 +481,12 @@ export const buddyApi = createApi({
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const kind = args?.kind;
-        const url = kind
-          ? `http://127.0.0.1:${port}/v1/buddy/conversations?kind=${encodeURIComponent(
-              kind,
-            )}`
-          : `http://127.0.0.1:${port}/v1/buddy/conversations`;
+        const url = buddyUrlFromState(
+          state,
+          "/v1/buddy/conversations",
+          kind ? { kind } : undefined,
+        );
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyConversationEntry[] };
@@ -484,11 +498,14 @@ export const buddyApi = createApi({
     >({
       queryFn: async (args, api) => {
         const state = api.getState() as BuddyApiState;
-        const port: number = state.config.lspPort;
         const apiKey: string | undefined = state.config.apiKey ?? undefined;
         try {
           return {
-            data: await createBuddyConversationRequest(port, apiKey, args),
+            data: await createBuddyConversationRequest(
+              state.config,
+              apiKey,
+              args,
+            ),
           };
         } catch (error) {
           return {
@@ -513,9 +530,8 @@ export const buddyApi = createApi({
     >({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/conversations/setup`,
+          url: buddyUrlFromState(state, "/v1/buddy/conversations/setup"),
           method: "POST",
           body,
         });
@@ -535,9 +551,11 @@ export const buddyApi = createApi({
     dismissBuddySuggestion: builder.mutation<{ dismissed: boolean }, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/suggestions/${id}/dismiss`,
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/suggestions/${encodeURIComponent(id)}/dismiss`,
+          ),
           method: "POST",
         });
         if (result.error) return { error: result.error };
@@ -547,11 +565,11 @@ export const buddyApi = createApi({
     dismissBuddyRuntimeEvent: builder.mutation<{ dismissed: boolean }, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/runtime/${encodeURIComponent(
-            id,
-          )}/dismiss`,
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/runtime/${encodeURIComponent(id)}/dismiss`,
+          ),
           method: "POST",
         });
         if (result.error) return { error: result.error };
@@ -562,18 +580,9 @@ export const buddyApi = createApi({
     reportError: builder.mutation<null, BuddyErrorReport>({
       queryFn: async (body, api) => {
         const state = api.getState() as BuddyApiState;
-        const port: number = state.config.lspPort;
         const apiKey: string | undefined = state.config.apiKey ?? undefined;
-        if (!Number.isFinite(port) || port <= 0) {
-          return {
-            error: {
-              status: "CUSTOM_ERROR",
-              error: "Missing lspPort in config",
-            },
-          };
-        }
         try {
-          await postBuddyErrorRequest(port, apiKey, body);
+          await postBuddyErrorRequest(state.config, apiKey, body);
           return { data: null };
         } catch (error) {
           return {
@@ -591,12 +600,11 @@ export const buddyApi = createApi({
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
-        const url = args?.status
-          ? `http://127.0.0.1:${port}/v1/buddy/opportunities?status=${encodeURIComponent(
-              args.status,
-            )}`
-          : `http://127.0.0.1:${port}/v1/buddy/opportunities`;
+        const url = buddyUrlFromState(
+          state,
+          "/v1/buddy/opportunities",
+          args?.status ? { status: args.status } : undefined,
+        );
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
         const data = result.data as { opportunities: BuddyOpportunity[] };
@@ -618,11 +626,11 @@ export const buddyApi = createApi({
     >({
       queryFn: async ({ id, action_index }, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/opportunities/${encodeURIComponent(
-            id,
-          )}/accept`,
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/opportunities/${encodeURIComponent(id)}/accept`,
+          ),
           method: "POST",
           body: { action_index },
         });
@@ -637,11 +645,11 @@ export const buddyApi = createApi({
     >({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/opportunities/${encodeURIComponent(
-            id,
-          )}/dismiss`,
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/opportunities/${encodeURIComponent(id)}/dismiss`,
+          ),
           method: "POST",
         });
         if (result.error) return { error: result.error };
@@ -652,9 +660,8 @@ export const buddyApi = createApi({
     getPulse: builder.query<BuddyPulse, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery(
-          `http://127.0.0.1:${port}/v1/buddy/pulse`,
+          buddyUrlFromState(state, "/v1/buddy/pulse"),
         );
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyPulse };
@@ -664,9 +671,8 @@ export const buddyApi = createApi({
     createSkillDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/skill`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/skill"),
           method: "POST",
           body,
         });
@@ -678,9 +684,8 @@ export const buddyApi = createApi({
     createCommandDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/command`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/command"),
           method: "POST",
           body,
         });
@@ -692,9 +697,8 @@ export const buddyApi = createApi({
     createSubagentDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/subagent`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/subagent"),
           method: "POST",
           body,
         });
@@ -706,9 +710,8 @@ export const buddyApi = createApi({
     createModeDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/mode`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/mode"),
           method: "POST",
           body,
         });
@@ -720,9 +723,8 @@ export const buddyApi = createApi({
     createAgentsMdDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/agents_md`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/agents_md"),
           method: "POST",
           body,
         });
@@ -734,9 +736,8 @@ export const buddyApi = createApi({
     createDefaultsDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/defaults`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/defaults"),
           method: "POST",
           body,
         });
@@ -748,9 +749,8 @@ export const buddyApi = createApi({
     createHookDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/hook`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/hook"),
           method: "POST",
           body,
         });
@@ -770,9 +770,8 @@ export const buddyApi = createApi({
     createPulseReportDraft: builder.mutation<BuddyDraft, CreateDraftRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/pulse_report`,
+          url: buddyUrlFromState(state, "/v1/buddy/drafts/pulse_report"),
           method: "POST",
           body,
         });
@@ -792,9 +791,11 @@ export const buddyApi = createApi({
     getDraft: builder.query<BuddyDraft, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery(
-          `http://127.0.0.1:${port}/v1/buddy/drafts/${encodeURIComponent(id)}`,
+          buddyUrlFromState(
+            state,
+            `/v1/buddy/drafts/${encodeURIComponent(id)}`,
+          ),
         );
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyDraft };
@@ -804,11 +805,11 @@ export const buddyApi = createApi({
     deleteDraft: builder.mutation<undefined, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/drafts/${encodeURIComponent(
-            id,
-          )}`,
+          url: buddyUrlFromState(
+            state,
+            `/v1/buddy/drafts/${encodeURIComponent(id)}`,
+          ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
@@ -827,9 +828,8 @@ export const buddyApi = createApi({
     postUserAction: builder.mutation<undefined, UserActionPayload>({
       queryFn: async (action, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/user_action`,
+          url: buddyUrlFromState(state, "/v1/buddy/user_action"),
           method: "POST",
           body: action,
         });
@@ -840,11 +840,10 @@ export const buddyApi = createApi({
     getUserActivity: builder.query<UserActivityResponse, { hours?: number }>({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery(
-          `http://127.0.0.1:${port}/v1/buddy/user_activity?hours=${
-            args.hours ?? 24
-          }`,
+          buddyUrlFromState(state, "/v1/buddy/user_activity", {
+            hours: args.hours ?? 24,
+          }),
         );
         if (result.error) return { error: result.error };
         return { data: result.data as UserActivityResponse };
@@ -853,21 +852,12 @@ export const buddyApi = createApi({
     reportFrontendError: builder.mutation<null, FrontendErrorReport>({
       queryFn: async (body, api) => {
         const state = api.getState() as BuddyApiState;
-        const port: number = state.config.lspPort;
         const apiKey: string | undefined = state.config.apiKey ?? undefined;
-        if (!Number.isFinite(port) || port <= 0) {
-          return {
-            error: {
-              status: "CUSTOM_ERROR",
-              error: "Missing lspPort in config",
-            },
-          };
-        }
         try {
           const headers = new Headers({ "Content-Type": "application/json" });
           if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
           const response = await fetch(
-            `http://127.0.0.1:${port}/v1/buddy/frontend-error`,
+            buddyUrlFromState(state, "/v1/buddy/frontend-error"),
             {
               method: "POST",
               headers,
@@ -897,9 +887,8 @@ export const buddyApi = createApi({
     getBuddyArtifacts: builder.query<MemoryOpsState, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery(
-          `http://127.0.0.1:${port}/v1/buddy/artifacts`,
+          buddyUrlFromState(state, "/v1/buddy/artifacts"),
         );
         if (result.error) return { error: result.error };
         return { data: result.data as MemoryOpsState };
@@ -909,9 +898,8 @@ export const buddyApi = createApi({
     approveBuddyArtifact: builder.mutation<undefined, { op_id: string }>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/artifact_approve`,
+          url: buddyUrlFromState(state, "/v1/buddy/artifact_approve"),
           method: "POST",
           body,
         });
@@ -923,9 +911,8 @@ export const buddyApi = createApi({
     rejectBuddyArtifact: builder.mutation<undefined, { op_id: string }>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/buddy/artifact_reject`,
+          url: buddyUrlFromState(state, "/v1/buddy/artifact_reject"),
           method: "POST",
           body,
         });

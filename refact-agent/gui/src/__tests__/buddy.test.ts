@@ -315,8 +315,11 @@ function makeDiagnostic(
 
 function makePostMock() {
   return vi.fn(
-    (_port: number, _apiKey: string | undefined, _body: BuddyErrorReport) =>
-      Promise.resolve(undefined),
+    (
+      _connection: number | { lspPort?: number },
+      _apiKey: string | undefined,
+      _body: BuddyErrorReport,
+    ) => Promise.resolve(undefined),
   );
 }
 
@@ -406,13 +409,13 @@ type BuddyTestStore = ReturnType<typeof setUpStore>;
 
 function setupBuddyCompanionHandlers() {
   server.use(
-    http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+    http.get("*/v1/buddy/opportunities", () =>
       HttpResponse.json({ opportunities: [] }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
+    http.post("*/v1/buddy/runtime/:id/dismiss", () =>
       HttpResponse.json({ dismissed: true }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+    http.post("*/v1/buddy/conversations", () =>
       HttpResponse.json({
         chat_id: "buddy-investigation-chat",
         title: "Buddy investigation",
@@ -421,7 +424,7 @@ function setupBuddyCompanionHandlers() {
         message_count: 0,
       }),
     ),
-    http.post("http://127.0.0.1:8001/v1/buddy/investigation-context", () =>
+    http.post("*/v1/buddy/investigation-context", () =>
       HttpResponse.json({
         logs: "logs",
         internal_context: "context",
@@ -585,13 +588,10 @@ describe("Buddy chat notification freshness", () => {
   test("disabled chat companion renders re-enable affordance and sends enabled patch", async () => {
     let capturedBody: unknown;
     server.use(
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json(defaultBuddySettings());
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json(defaultBuddySettings());
+      }),
     );
     const store = setUpStore({
       config: { apiKey: "test", lspPort: 8001, themeProps: {}, host: "vscode" },
@@ -645,10 +645,10 @@ describe("Buddy chat notification freshness", () => {
       proposed_actions: [{ kind: "open_page", page: { type: "buddy" } }],
     });
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [opportunity] }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
         HttpResponse.json({ detail: "accept failed" }, { status: 500 }),
       ),
     );
@@ -683,12 +683,11 @@ describe("Buddy chat notification freshness", () => {
       proposed_actions: [{ kind: "dismiss" }],
     });
     server.use(
-      http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+      http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [opportunity] }),
       ),
-      http.post(
-        "http://127.0.0.1:8001/v1/buddy/opportunities/:id/dismiss",
-        () => HttpResponse.json({ detail: "dismiss failed" }, { status: 409 }),
+      http.post("*/v1/buddy/opportunities/:id/dismiss", () =>
+        HttpResponse.json({ detail: "dismiss failed" }, { status: 409 }),
       ),
     );
     store.dispatch(
@@ -714,10 +713,10 @@ describe("Buddy chat notification freshness", () => {
   test("failed runtime dismiss during investigation still starts investigation", async () => {
     let conversationStarted = false;
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
+      http.post("*/v1/buddy/runtime/:id/dismiss", () =>
         HttpResponse.json({ detail: "offline" }, { status: 503 }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () => {
+      http.post("*/v1/buddy/conversations", () => {
         conversationStarted = true;
         return HttpResponse.json({
           chat_id: "buddy-investigation-chat",
@@ -756,7 +755,7 @@ describe("Buddy chat notification freshness", () => {
 
   test("runtime dismiss failure does not create unhandled rejection", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/runtime/:id/dismiss", () =>
+      http.post("*/v1/buddy/runtime/:id/dismiss", () =>
         HttpResponse.json({ detail: "offline" }, { status: 503 }),
       ),
     );
@@ -1085,7 +1084,7 @@ describe("Buddy chat notification freshness", () => {
         created_at: new Date(0).toISOString(),
       });
       server.use(
-        http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        http.get("*/v1/buddy/opportunities", () =>
           HttpResponse.json({ opportunities: [opportunity] }),
         ),
       );
@@ -3104,13 +3103,20 @@ describe("Buddy frontend error reporting helpers", () => {
     }
   });
 
-  test("reportError mutation returns RTK Query error when lspPort is missing", async () => {
+  test("reportError mutation uses same-origin URL when lspPort is missing", async () => {
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn<typeof fetch>();
+    const fetchMock = vi.fn<typeof fetch>(() =>
+      Promise.resolve(
+        new Response("null", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const store = configureStore({
       reducer: {
-        config: () => ({ apiKey: "key", lspPort: 0 }),
+        config: () => ({ apiKey: "key", lspPort: 0, host: "web" }),
         [buddyApi.reducerPath]: buddyApi.reducer,
       },
       middleware: (getDefault) => getDefault().concat(buddyApi.middleware),
@@ -3124,11 +3130,11 @@ describe("Buddy frontend error reporting helpers", () => {
         }),
       );
 
-      expect("error" in result).toBe(true);
-      expect(JSON.stringify("error" in result ? result.error : null)).toContain(
-        "Missing lspPort",
+      expect("data" in result).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(
+        "/v1/buddy/diagnostics/collect",
       );
-      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       vi.stubGlobal("fetch", originalFetch);
     }
@@ -3437,7 +3443,7 @@ describe("Buddy frontend error reporting helpers", () => {
 
     expect(post).toHaveBeenCalledTimes(1);
     const call = post.mock.calls[0];
-    expect(call[0]).toBe(8001);
+    expect(call[0]).toMatchObject({ lspPort: 8001 });
     expect(call[1]).toBe("key");
     expect(call[2].chat_id).toBe("chat-a");
     expect(call[2].source_file).toBe("[REDACTED_PATH]");
@@ -5755,7 +5761,7 @@ describe("restoreChat buddy_meta handling", () => {
 
   test("startBuddyInvestigation marks the created chat when setup commands fail", async () => {
     server.use(
-      http.post("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+      http.post("*/v1/buddy/conversations", () =>
         HttpResponse.json({
           chat_id: "buddy-investigation-setup-fails",
           title: "Buddy investigation",
@@ -5764,7 +5770,7 @@ describe("restoreChat buddy_meta handling", () => {
           message_count: 0,
         }),
       ),
-      http.post("http://127.0.0.1:8001/v1/buddy/investigation-context", () =>
+      http.post("*/v1/buddy/investigation-context", () =>
         HttpResponse.json({
           logs: "logs",
           internal_context: "context",
