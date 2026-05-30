@@ -2,23 +2,8 @@ name: Refact JetBrains Plugin CI build
 
 on:
   push:
-    branches: [main, dev]
-    paths:
-      - "plugins/intellij/**"
-      - "refact-agent/gui/**"
-      - "refact-agent/engine/**"
-      - ".github/workflows/plugin_intellij_*"
-      - ".github/workflows/agent_gui_*"
-      - ".github/workflows/agent_engine_*"
-  pull_request:
-    paths:
-      - "plugins/intellij/**"
-      - "refact-agent/gui/**"
-      - "refact-agent/engine/**"
-      - ".github/workflows/plugin_intellij_*"
-      - ".github/workflows/agent_gui_*"
-      - ".github/workflows/agent_engine_*"
-  workflow_dispatch:
+    tags:
+      - "*"
 
 concurrency:
   group: plugin-intellij-build-${{ github.head_ref || github.ref_name }}

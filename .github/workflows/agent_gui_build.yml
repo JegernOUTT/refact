@@ -2,16 +2,9 @@ name: Refact Agent GUI CI build (Node.js)
 
 on:
   push:
-    branches: [main, dev]
-    paths:
-      - "refact-agent/gui/**"
-      - ".github/workflows/agent_gui_*"
+    tags:
+      - "*"
   workflow_call:
-  pull_request:
-    paths:
-      - "refact-agent/gui/**"
-      - ".github/workflows/agent_gui_*"
-  workflow_dispatch:
 
 concurrency:
   group: agent-gui-build-${{ github.run_id }}

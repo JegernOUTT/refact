@@ -2,23 +2,8 @@ name: Refact VS Code Plugin CI build
 
 on:
   push:
-    branches: [main, dev]
-    paths:
-      - "plugins/vscode/**"
-      - "refact-agent/gui/**"
-      - "refact-agent/engine/**"
-      - ".github/workflows/plugin_vscode_*"
-      - ".github/workflows/agent_gui_*"
-      - ".github/workflows/agent_engine_*"
-  pull_request:
-    paths:
-      - "plugins/vscode/**"
-      - "refact-agent/gui/**"
-      - "refact-agent/engine/**"
-      - ".github/workflows/plugin_vscode_*"
-      - ".github/workflows/agent_gui_*"
-      - ".github/workflows/agent_engine_*"
-  workflow_dispatch:
+    tags:
+      - "*"
 
 concurrency:
   group: plugin-vscode-build-${{ github.head_ref || github.ref_name }}
