@@ -36,20 +36,19 @@ const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
   "links",
   "ping",
   "rag-status",
+  "task",
   "tasks",
   "tools",
   "trajectories",
   "vecdb-search",
   "voice",
+  "worktrees",
 ]);
 
 function isEngineV1Suffix(segments: string[], index: number): boolean {
+  if (index >= segments.length - 1) return true;
   const nextSegment = segments[index + 1];
-  return (
-    nextSegment === undefined ||
-    nextSegment === "" ||
-    ENGINE_V1_ENDPOINT_SEGMENTS.has(nextSegment)
-  );
+  return nextSegment === "" || ENGINE_V1_ENDPOINT_SEGMENTS.has(nextSegment);
 }
 
 function isValidLspPort(port: number | undefined): boolean {
