@@ -277,6 +277,10 @@ fn build_chat_model_record(
     };
 
     let supports_agent = supports_tools;
+    let supports_cache_control = model.supports_cache_control
+        || resolved_caps
+            .as_ref()
+            .is_some_and(|resolved| resolved.caps.supports_cache_control);
     let effective_wire_format = model.wire_format_override.unwrap_or(runtime_wire_format);
     let effective_endpoint = model
         .endpoint_override
@@ -315,7 +319,7 @@ fn build_chat_model_record(
                 .as_ref()
                 .map(|r| r.caps.supports_web_search)
                 .unwrap_or(false),
-            supports_cache_control: runtime_supports_cache_control && model.supports_cache_control,
+            supports_cache_control: runtime_supports_cache_control && supports_cache_control,
             removable: model.is_custom,
             user_configured: model.is_custom,
         },
@@ -965,8 +969,6 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
     record.reasoning_effort_options = caps.reasoning_effort_options.clone();
     record.supports_thinking_budget = caps.supports_thinking_budget;
     record.supports_adaptive_thinking_budget = caps.supports_adaptive_thinking_budget;
-    record.base.supports_cache_control =
-        record.base.supports_cache_control && caps.supports_cache_control;
     record.supports_agent = record.supports_tools;
     record.supports_temperature = caps.supports_temperature;
     record.base.supports_web_search = caps.supports_web_search;
@@ -1162,6 +1164,78 @@ mod tests {
         assert_eq!(record.base.tokenizer, "openai-tokenizer");
         assert!(record.supports_tools);
         assert!(record.supports_strict_tools);
+    }
+
+    #[test]
+    fn test_build_chat_model_record_uses_registry_cache_control_with_runtime_gate() {
+        let mut model_caps = HashMap::new();
+        model_caps.insert(
+            "anthropic/claude-sonnet-4".to_string(),
+            ModelCapabilities {
+                n_ctx: 200_000,
+                supports_tools: true,
+                supports_cache_control: true,
+                tokenizer: "fake".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let model = AvailableModel {
+            id: "claude-sonnet-4".to_string(),
+            display_name: None,
+            n_ctx: 0,
+            supports_tools: false,
+            supports_parallel_tools: false,
+            supports_strict_tools: false,
+            supports_multimodality: false,
+            reasoning_effort_options: None,
+            supports_thinking_budget: false,
+            supports_adaptive_thinking_budget: false,
+            supports_cache_control: false,
+            tokenizer: None,
+            enabled: true,
+            is_custom: false,
+            pricing: None,
+            available_providers: Vec::new(),
+            selected_provider: None,
+            max_output_tokens: None,
+            provider_variants: Vec::new(),
+            wire_format_override: None,
+            endpoint_override: None,
+            base_model: None,
+        };
+
+        let record = build_chat_model_record(
+            "anthropic",
+            &["anthropic".to_string()],
+            &model,
+            &model_caps,
+            WireFormat::AnthropicMessages,
+            "https://api.anthropic.com/v1/messages",
+            "sk-ant",
+            "",
+            "",
+            &HashMap::new(),
+            true,
+        );
+
+        assert!(record.base.supports_cache_control);
+
+        let unsupported_runtime_record = build_chat_model_record(
+            "anthropic_proxy",
+            &["anthropic".to_string()],
+            &model,
+            &model_caps,
+            WireFormat::AnthropicMessages,
+            "https://proxy.example/v1/messages",
+            "sk-ant",
+            "",
+            "",
+            &HashMap::new(),
+            false,
+        );
+
+        assert!(!unsupported_runtime_record.base.supports_cache_control);
     }
 
     #[test]

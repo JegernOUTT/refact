@@ -418,6 +418,7 @@ fn models_dev_model_to_model_caps(
         reasoning_effort_options: reasoning_controls.reasoning_effort_options,
         supports_thinking_budget: reasoning_controls.supports_thinking_budget,
         supports_adaptive_thinking_budget: reasoning_controls.supports_adaptive_thinking_budget,
+        supports_cache_control: models_dev_model_supports_cache_control(model),
         tokenizer: "fake".to_string(),
         pricing: model_cost_to_pricing(model),
         raw_cost: model
@@ -427,6 +428,16 @@ fn models_dev_model_to_model_caps(
         status: non_empty_status(model.status.as_deref()),
         ..Default::default()
     }
+}
+
+fn models_dev_model_supports_cache_control(model: &ModelsDevModel) -> bool {
+    model.cost.as_ref().is_some_and(|cost| {
+        cost.cache_read.is_some()
+            || cost.cache_write.is_some()
+            || cost
+                .context_over_200k
+                .is_some_and(|tier| tier.cache_read.is_some() || tier.cache_write.is_some())
+    })
 }
 
 fn reasoning_control_rules() -> &'static [ReasoningControlRule] {
@@ -983,4 +994,74 @@ fn unique_models_dev_cache_tmp_path(cache_path: &Path) -> PathBuf {
 fn unique_models_dev_cache_backup_path(cache_path: &Path) -> PathBuf {
     let unique_id = MODELS_DEV_CACHE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     cache_path.with_extension(format!("json.backup.{}.{}", std::process::id(), unique_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_provider() -> ModelsDevProvider {
+        ModelsDevProvider {
+            id: "anthropic".to_string(),
+            name: "Anthropic".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn test_model(cost: Option<ModelsDevCost>) -> ModelsDevModel {
+        ModelsDevModel {
+            id: "claude-test".to_string(),
+            name: "claude-test".to_string(),
+            temperature: Some(true),
+            tool_call: Some(true),
+            cost,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn model_caps_enable_cache_control_when_cache_pricing_exists() {
+        let model = test_model(Some(ModelsDevCost {
+            input: Some(3.0),
+            output: Some(15.0),
+            cache_read: Some(0.3),
+            cache_write: Some(3.75),
+            ..Default::default()
+        }));
+
+        let caps = models_dev_model_to_model_caps("anthropic", &test_provider(), &model);
+
+        assert!(caps.supports_cache_control);
+    }
+
+    #[test]
+    fn model_caps_do_not_enable_cache_control_without_cache_pricing() {
+        let model = test_model(Some(ModelsDevCost {
+            input: Some(3.0),
+            output: Some(15.0),
+            ..Default::default()
+        }));
+
+        let caps = models_dev_model_to_model_caps("anthropic", &test_provider(), &model);
+
+        assert!(!caps.supports_cache_control);
+    }
+
+    #[test]
+    fn model_caps_enable_cache_control_when_long_context_cache_pricing_exists() {
+        let model = test_model(Some(ModelsDevCost {
+            input: Some(3.0),
+            output: Some(15.0),
+            context_over_200k: Some(ModelsDevCostTier {
+                cache_read: Some(0.3),
+                cache_write: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+
+        let caps = models_dev_model_to_model_caps("anthropic", &test_provider(), &model);
+
+        assert!(caps.supports_cache_control);
+    }
 }

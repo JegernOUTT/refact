@@ -5,12 +5,16 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::config::resolve_env_var;
 use crate::traits::{
-    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    available_models_from_caps_for_provider, merge_custom_models, parse_custom_models,
+    parse_enabled_models, set_model_enabled_impl,
 };
+
+const SUPPORTS_CACHE_CONTROL: bool = true;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnthropicProvider {
@@ -111,7 +115,7 @@ available:
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
-            supports_cache_control: true,
+            supports_cache_control: SUPPORTS_CACHE_CONTROL,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
             embedding_model: None,
@@ -135,6 +139,25 @@ available:
         &self.custom_models
     }
 
+    fn get_available_models_from_caps(
+        &self,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let enabled_set: std::collections::HashSet<_> =
+            self.enabled_models.iter().map(|s| s.as_str()).collect();
+        let custom_models = self.custom_models();
+        let mut models = available_models_from_caps_for_provider(self, model_caps);
+        for model in &mut models {
+            model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
+        }
+        merge_custom_models(&mut models, custom_models, &enabled_set);
+        for model in &mut models {
+            model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
+        }
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+
     fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
         set_model_enabled_impl(&mut self.enabled_models, model_id, enabled);
     }
@@ -151,5 +174,49 @@ available:
         self.custom_models
             .get(model_id)
             .and_then(|config| config.pricing.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_runtime_enables_cache_control() {
+        let provider = AnthropicProvider {
+            api_key: "sk-ant-test".to_string(),
+            enabled: true,
+            enabled_models: vec!["claude-sonnet-4".to_string()],
+            ..Default::default()
+        };
+
+        let runtime = provider.build_runtime().unwrap();
+
+        assert!(runtime.supports_cache_control);
+    }
+
+    #[test]
+    fn anthropic_available_models_enable_cache_control_even_when_caps_omit_it() {
+        let provider = AnthropicProvider {
+            enabled_models: vec!["claude-sonnet-4".to_string()],
+            ..Default::default()
+        };
+        let mut model_caps = HashMap::new();
+        model_caps.insert(
+            "anthropic/claude-sonnet-4".to_string(),
+            ModelCapabilities {
+                n_ctx: 200_000,
+                tokenizer: "claude".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let models = provider.get_available_models_from_caps(&model_caps);
+        let model = models
+            .iter()
+            .find(|model| model.id == "claude-sonnet-4")
+            .expect("anthropic model should be available");
+
+        assert!(model.supports_cache_control);
     }
 }

@@ -9,8 +9,11 @@ use refact_core::llm_types::WireFormat;
 use crate::claude_code_oauth::OAuthTokens;
 use crate::traits::{
     AvailableModel, CustomModelConfig, ModelSource, ProviderRuntime, ProviderTrait,
-    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    available_models_from_caps_for_provider, merge_custom_models, parse_custom_models,
+    parse_enabled_models, set_model_enabled_impl,
 };
+
+const SUPPORTS_CACHE_CONTROL: bool = true;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClaudeCodeProvider {
@@ -297,7 +300,7 @@ available:
             auth_token,
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
-            supports_cache_control: true,
+            supports_cache_control: SUPPORTS_CACHE_CONTROL,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
             embedding_model: None,
@@ -319,6 +322,25 @@ available:
 
     fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
         &self.custom_models
+    }
+
+    fn get_available_models_from_caps(
+        &self,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let enabled_set: std::collections::HashSet<_> =
+            self.enabled_models.iter().map(|s| s.as_str()).collect();
+        let custom_models = self.custom_models();
+        let mut models = available_models_from_caps_for_provider(self, model_caps);
+        for model in &mut models {
+            model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
+        }
+        merge_custom_models(&mut models, custom_models, &enabled_set);
+        for model in &mut models {
+            model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
+        }
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
     }
 
     async fn fetch_available_models(
@@ -372,6 +394,7 @@ available:
                 let enabled = enabled_set.contains(api_id.as_str());
                 let pricing = self.custom_model_pricing(api_id);
                 let mut model = AvailableModel::from_caps(api_id, &caps.caps, enabled, pricing);
+                model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
                 if api_id != &caps.matched_key {
                     model.display_name = Some(api_id.clone());
                 }
@@ -476,7 +499,7 @@ fn claude_code_api_model_without_caps(model_id: &str, enabled: bool) -> Availabl
         reasoning_effort_options: None,
         supports_thinking_budget: true,
         supports_adaptive_thinking_budget: false,
-        supports_cache_control: true,
+        supports_cache_control: SUPPORTS_CACHE_CONTROL,
         tokenizer: Some("claude".to_string()),
         enabled,
         is_custom: false,
@@ -584,6 +607,44 @@ mod tests {
                 "models.dev snapshot should resolve Claude Code API id {model_id}"
             );
         }
+    }
+
+    #[test]
+    fn claude_code_available_models_enable_cache_control_even_when_caps_omit_it() {
+        let provider = ClaudeCodeProvider {
+            enabled_models: vec!["claude-sonnet-4".to_string()],
+            ..Default::default()
+        };
+        let mut model_caps = HashMap::new();
+        model_caps.insert(
+            "claude-sonnet-4".to_string(),
+            ModelCapabilities {
+                n_ctx: 200_000,
+                tokenizer: "claude".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let models = provider.get_available_models_from_caps(&model_caps);
+        let model = models
+            .iter()
+            .find(|model| model.id == "claude-sonnet-4")
+            .expect("claude code model should be available");
+
+        assert!(model.supports_cache_control);
+    }
+
+    #[test]
+    fn claude_code_api_model_from_caps_enables_cache_control() {
+        let caps = ModelCapabilities {
+            n_ctx: 200_000,
+            tokenizer: "claude".to_string(),
+            ..Default::default()
+        };
+        let mut model = AvailableModel::from_caps("claude-sonnet-4", &caps, true, None);
+        model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
+
+        assert!(model.supports_cache_control);
     }
 
     #[test]

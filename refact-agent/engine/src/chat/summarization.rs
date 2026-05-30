@@ -79,8 +79,8 @@ impl SegmentSummaryFailure {
 
 fn public_compression_failure_text(failure: &SegmentSummaryFailure) -> String {
     let source = failure.to_string();
-    let scan_cap = PUBLIC_COMPRESSION_FAILURE_MAX_CHARS
-        .saturating_add(SEGMENT_REDACTION_SCAN_EXTRA_CHARS);
+    let scan_cap =
+        PUBLIC_COMPRESSION_FAILURE_MAX_CHARS.saturating_add(SEGMENT_REDACTION_SCAN_EXTRA_CHARS);
     let (window, truncated) = bounded_redaction_window(&source, scan_cap);
     let mut redacted = refact_core::string_utils::redact_sensitive(window);
     if truncated {

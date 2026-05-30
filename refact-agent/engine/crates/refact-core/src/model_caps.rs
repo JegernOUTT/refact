@@ -57,6 +57,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_cache_control_support() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelCapabilities {
     pub n_ctx: usize,
@@ -101,7 +105,7 @@ pub struct ModelCapabilities {
     pub default_max_tokens: Option<usize>,
     #[serde(default)]
     pub supports_web_search: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_cache_control_support")]
     pub supports_cache_control: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ModelPricing>,
@@ -145,6 +149,9 @@ pub fn validate_model_caps(caps: &mut HashMap<String, ModelCapabilities>) {
                 name, cap.max_output_tokens, MAX_REASONABLE_OUTPUT_TOKENS
             );
             cap.max_output_tokens = MAX_REASONABLE_OUTPUT_TOKENS;
+        }
+        if matches!(cap.caching, CachingType::Explicit) {
+            cap.supports_cache_control = true;
         }
         cap.tokenizer = normalize_tokenizer(&cap.tokenizer);
     }
@@ -525,6 +532,22 @@ mod tests {
         assert_eq!(huge.n_ctx, MAX_REASONABLE_N_CTX);
         assert_eq!(huge.max_output_tokens, MAX_REASONABLE_OUTPUT_TOKENS);
         assert_eq!(huge.tokenizer, "hf://Qwen/Qwen3");
+    }
+
+    #[test]
+    fn validate_model_caps_derives_cache_support_from_explicit_caching() {
+        let mut caps = HashMap::from([(
+            "explicit-cache".to_string(),
+            ModelCapabilities {
+                caching: CachingType::Explicit,
+                supports_cache_control: false,
+                ..Default::default()
+            },
+        )]);
+
+        validate_model_caps(&mut caps);
+
+        assert!(caps.get("explicit-cache").unwrap().supports_cache_control);
     }
 
     #[test]
