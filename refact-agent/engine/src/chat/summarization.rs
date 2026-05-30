@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -253,31 +254,43 @@ fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
 }
 
 fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
-    let result_ids: std::collections::HashSet<&str> = messages
-        .iter()
-        .filter(|message| matches!(message.role.as_str(), "tool" | "diff"))
-        .filter_map(|message| {
-            (!message.tool_call_id.is_empty()).then_some(message.tool_call_id.as_str())
-        })
-        .collect();
-
-    messages.iter().any(|message| {
-        if message.role != "assistant" {
-            return false;
+    let mut completed_after_call = HashSet::new();
+    for message in messages.iter().rev() {
+        match message.role.as_str() {
+            "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                completed_after_call.insert(message.tool_call_id.as_str());
+            }
+            "assistant" => {
+                let Some(tool_calls) = message.tool_calls.as_ref() else {
+                    if assistant_finish_reason_requests_tools(message) {
+                        return true;
+                    }
+                    continue;
+                };
+                if assistant_finish_reason_requests_tools(message) && tool_calls.is_empty() {
+                    return true;
+                }
+                if tool_calls
+                    .iter()
+                    .any(|tool_call| !completed_after_call.contains(tool_call.id.as_str()))
+                {
+                    return true;
+                }
+            }
+            _ => {}
         }
-        let Some(tool_calls) = message.tool_calls.as_ref() else {
-            return assistant_finish_reason_requests_tools(message);
-        };
-        tool_calls
-            .iter()
-            .any(|tool_call| !result_ids.contains(tool_call.id.as_str()))
-    })
+    }
+    false
 }
 
-fn tail_has_meaningful_non_error_content(messages: &[ChatMessage]) -> bool {
+fn is_trimmable_tail_diagnostic(message: &ChatMessage) -> bool {
+    is_excluded_from_segment(message) || matches!(message.role.as_str(), "event" | "error")
+}
+
+fn has_tail_summarizable_output(messages: &[ChatMessage]) -> bool {
     messages.iter().any(|message| {
-        !is_ui_only_message(message)
-            && !matches!(message.role.as_str(), "event" | "error")
+        matches!(message.role.as_str(), "assistant" | "tool" | "diff")
+            && !is_ui_only_message(message)
             && !message.content.content_text_only().trim().is_empty()
     })
 }
@@ -294,21 +307,29 @@ pub fn eligible_tail_non_user_segment(messages: &[ChatMessage]) -> Option<Summar
         return None;
     }
 
-    let tail = &messages[start..];
+    let mut end = messages.len() - 1;
+    while end >= start && is_trimmable_tail_diagnostic(&messages[end]) {
+        if end == 0 {
+            return None;
+        }
+        end -= 1;
+    }
+    if end < start {
+        return None;
+    }
+
+    let tail = &messages[start..=end];
     if tail.iter().any(is_excluded_from_segment) {
         return None;
     }
-    if !tail_has_meaningful_non_error_content(tail) {
+    if !has_tail_summarizable_output(tail) {
         return None;
     }
     if tail_has_pending_tool_calls(tail) {
         return None;
     }
 
-    let segment = SummarySegment {
-        start,
-        end: messages.len() - 1,
-    };
+    let segment = SummarySegment { start, end };
     if segment_is_matching_summary(messages, segment) {
         return None;
     }
@@ -1061,6 +1082,14 @@ fn apply_resolved_segment_summary(
     source_hash: &str,
     summary: ChatMessage,
 ) -> bool {
+    if matches!(
+        session.runtime.state,
+        SessionState::Generating | SessionState::ExecutingTools
+    ) || session.draft_message.is_some()
+    {
+        emit_compression_skipped(session, CompressionReason::NoEligibleSegment);
+        return false;
+    }
     let Some(current_segment) = first_eligible_segment(&session.messages) else {
         emit_compression_skipped(session, CompressionReason::NoEligibleSegment);
         return false;
@@ -1297,6 +1326,12 @@ mod tests {
         )
     }
 
+    fn ui_only_event(text: &str) -> ChatMessage {
+        let mut message = event(text);
+        message.extra.insert("_ui_only".to_string(), json!(true));
+        message
+    }
+
     fn plan(text: &str) -> ChatMessage {
         ChatMessage {
             role: "plan".to_string(),
@@ -1337,6 +1372,34 @@ mod tests {
                 tool_type: "function".to_string(),
                 extra_content: None,
             }]),
+            ..Default::default()
+        }
+    }
+
+    fn assistant_with_tool_call_id(id: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: id.to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "shell".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            finish_reason: Some("tool_calls".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn tool_with_id(id: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            tool_call_id: id.to_string(),
             ..Default::default()
         }
     }
@@ -1545,10 +1608,68 @@ mod tests {
     }
 
     #[test]
+    fn tail_segment_trims_trailing_ui_only_diagnostic() {
+        let mut messages = vec![
+            user("summarize this"),
+            assistant("assistant output"),
+            ui_only_event("diagnostic"),
+        ];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed tail",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "user");
+        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(messages[2].role, "event");
+    }
+
+    #[test]
     fn tail_segment_pending_assistant_tool_call_is_not_eligible() {
         let mut pending = assistant_with_tool_call();
         pending.finish_reason = Some("tool_calls".to_string());
         let mut messages = vec![user("run tool"), pending];
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+    }
+
+    #[test]
+    fn tail_segment_empty_tool_calls_finish_reason_is_not_eligible() {
+        let pending = ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            finish_reason: Some("tool_calls".to_string()),
+            tool_calls: Some(Vec::new()),
+            ..Default::default()
+        };
+        let mut messages = vec![user("run tool"), pending];
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+    }
+
+    #[test]
+    fn tail_segment_prior_tool_result_does_not_satisfy_pending_call() {
+        let mut messages = vec![
+            user("run tool"),
+            tool_with_id("call_later", "stale result"),
+            assistant_with_tool_call_id("call_later"),
+        ];
 
         assert_eq!(eligible_tail_non_user_segment(&messages), None);
         assert!(!summarize_oldest_segment_with_static_summary(
@@ -1580,6 +1701,18 @@ mod tests {
     #[test]
     fn tail_segment_ui_only_event_is_not_eligible() {
         let mut messages = vec![user("hello"), event("just ui")];
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+    }
+
+    #[test]
+    fn tail_segment_user_context_file_only_is_not_eligible() {
+        let mut messages = vec![user("look here"), context_file("file context")];
 
         assert_eq!(eligible_tail_non_user_segment(&messages), None);
         assert!(!summarize_oldest_segment_with_static_summary(
@@ -2224,6 +2357,42 @@ mod tests {
         }
         assert!(saw_runtime_false);
         assert!(saw_snapshot_with_summary);
+    }
+
+    #[test]
+    fn apply_resolved_segment_summary_skips_when_runtime_becomes_active() {
+        let mut session = ChatSession::new("compression-active-skip".to_string());
+        session.messages = vec![user("first"), assistant("old answer"), user("second")];
+        session.is_compressing = true;
+        session.runtime.is_compressing = true;
+        let segment = first_eligible_segment(&session.messages).unwrap();
+        let source_messages = session.messages[segment.start..=segment.end].to_vec();
+        let source_hash = source_hash_for_messages(&source_messages);
+        let summary = make_segment_summary_message(
+            "compressed summary".to_string(),
+            &source_messages,
+            "test-model",
+        );
+        session.runtime.state = SessionState::Generating;
+
+        assert!(!apply_resolved_segment_summary(
+            &mut session,
+            &source_hash,
+            summary
+        ));
+
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(
+            session.messages[1].content.content_text_only(),
+            "old answer"
+        );
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::NoEligibleSegment)
+        );
     }
 
     #[tokio::test]
