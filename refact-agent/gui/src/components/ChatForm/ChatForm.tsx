@@ -161,6 +161,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [isVoiceActive, setIsVoiceActive] = React.useState(false);
   const [liveTranscript, setLiveTranscript] = React.useState("");
   const [inputResetKey, setInputResetKey] = React.useState(0);
+  const [isComposerExpanded, setIsComposerExpanded] = React.useState(false);
+  const composerRef = React.useRef<HTMLDivElement>(null);
   const isOnline = useIsOnline();
   const { isContextFull } = useUsageCounter();
   const messages = useAppSelector(selectMessages);
@@ -408,6 +410,49 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     [],
   );
 
+  const focusComposerInput = useCallback(() => {
+    setIsComposerExpanded(true);
+    window.requestAnimationFrame(() => {
+      composerRef.current?.querySelector("textarea")?.focus();
+    });
+  }, []);
+
+  const handleCompactPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.closest("button, a, input, textarea")) return;
+
+      event.preventDefault();
+      focusComposerInput();
+    },
+    [focusComposerInput],
+  );
+
+  const handleCompactKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      focusComposerInput();
+    },
+    [focusComposerInput],
+  );
+
+  const handleComposerBlur = useCallback(
+    (event: React.FocusEvent<HTMLDivElement>) => {
+      const root = event.currentTarget;
+      const nextTarget = event.relatedTarget;
+      if (nextTarget instanceof Node && root.contains(nextTarget)) return;
+
+      window.setTimeout(() => {
+        const activeElement = document.activeElement;
+        if (activeElement instanceof Node && root.contains(activeElement)) return;
+        setIsComposerExpanded(false);
+      }, 0);
+    },
+    [],
+  );
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.shiftKey && event.code === "Space") {
@@ -429,7 +474,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   }
 
   return (
-    <Box style={{ flexShrink: 0, position: "relative" }}>
+    <Box
+      ref={composerRef}
+      onBlur={handleComposerBlur}
+      style={{ flexShrink: 0, position: "relative" }}
+    >
       {!globalError && !chatError && information && (
         <InformationCallout
           mt="2"
@@ -465,178 +514,39 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             styles.chatForm,
             styles.chatForm__form,
             styles.chatFormMain,
+            isComposerExpanded
+              ? styles.chatFormExpanded
+              : styles.chatFormCollapsed,
             className,
           )}
           onSubmit={() => handleSubmit("after_flow")}
         >
-          <Box className={styles.textareaWrapper}>
-            <Box className={styles.inputHeader}>
-              <UnifiedAttachmentsTray
-                attachedFiles={attachedFiles}
-                previewFiles={previewFiles}
-                manualPreviewItems={manualPreviewItems}
-                onRemoveManualPreviewItem={
-                  chatId
-                    ? (index) =>
-                        dispatch(removeManualPreviewItem({ chatId, index }))
-                    : undefined
-                }
-                onOpenFile={queryPathThenOpenFile}
-              />
-              <Flex
-                align="center"
-                gap="2"
-                justify="between"
-                wrap="wrap"
-                className={styles.topControlsRow}
-              >
-                <ChatInputTopControls
-                  checkboxes={checkboxes}
-                  onCheckedChange={onToggleCheckbox}
-                  attachedFiles={attachedFiles}
-                  disabled={isBuddyChat}
-                />
-                <Flex
-                  align="center"
-                  gap="2"
-                  className={styles.topStatusControls}
-                >
-                  <span className={styles.hideTopTokensFirst}>
-                    <StreamingTokenCounter />
-                  </span>
-                  <span className={styles.hideTopTokensFirst}>
-                    <ProviderUsageIndicator />
-                  </span>
-                  <span className={styles.hideTopTokensFirst}>
-                    <UsageCounter />
-                  </span>
-                  <span className={styles.hideTopCompressLast}>
-                    <TrajectoryButton disabled={isBuddyChat} />
-                  </span>
-                </Flex>
-              </Flex>
-            </Box>
-
-            <ComboBox
-              key={inputResetKey}
-              onHelpClick={handleHelpCommand}
-              commands={commands}
-              requestCommandsCompletion={requestCompletion}
-              value={
-                isVoiceActive && liveTranscript
-                  ? value.trim()
-                    ? `${value}\n${liveTranscript}`
-                    : liveTranscript
-                  : value
-              }
-              onChange={handleChange}
-              onSubmit={(event) => {
-                handleEnter(event);
-              }}
-              placeholder={
-                isVoiceActive
-                  ? "Listening..."
-                  : commands.completions.length < 1
-                    ? "Type @ or / for commands"
-                    : ""
-              }
-              render={(props) => (
-                <TextAreaWithChips
-                  data-testid="chat-form-textarea"
-                  required={true}
-                  {...props}
-                  host={host}
-                  onOpenFile={queryPathThenOpenFile}
-                  autoFocus={autoFocus}
-                  readOnly={isVoiceActive}
-                  style={{ boxShadow: "none", outline: "none" }}
-                  onPaste={handlePastingFile}
-                />
-              )}
-            />
-          </Box>
-          <Flex
-            gap="2"
-            wrap="nowrap"
-            py="2"
-            px="3"
-            align="center"
-            className={styles.bottomControlsRow}
+          <div
+            className={styles.compactControlsRow}
+            role="button"
+            tabIndex={0}
+            aria-label="Expand chat input"
+            onPointerDown={handleCompactPointerDown}
+            onKeyDown={handleCompactKeyDown}
           >
-            <span className={styles.bottomModelControl}>
-              <ChatSettingsDropdown disabled={isBuddyChat} />
+            <span className={styles.compactModelControl}>
+              <ChatSettingsDropdown disabled={isBuddyChat} compact />
             </span>
-            <span className={styles.bottomModeControl}>
-              <ModeSelect
-                selectedMode={threadMode ?? DEFAULT_MODE}
-                onModeChange={onSetMode}
-                disabled={isBuddyChat || isModeDisabled}
-              />
+            <span className={styles.compactStreamingTokens}>
+              <StreamingTokenCounter />
             </span>
-            <span className={styles.bottomWorkspaceControl}>
-              <WorktreeControl disabled={isBuddyChat} />
+            <span className={styles.compactUsageCounter}>
+              <UsageCounter />
             </span>
-
-            <Flex
-              justify="end"
-              wrap="nowrap"
-              gap="2"
-              align="center"
-              className={styles.bottomActionControls}
-            >
-              <span className={styles.hideActionFirst}>
-                <BrowserToggleButton chatId={chatId} />
-              </span>
-              <span className={styles.hideActionSecond}>
-                <AutoEnrichmentToggleButton
-                  disabled={isStreaming || isWaiting}
-                />
-              </span>
-              <span className={styles.hideActionThird}>
-                <AutoCompactToggleButton disabled={isStreaming || isWaiting} />
-              </span>
-              <span className={styles.hideActionFourth}>
-                <WandButton
-                  currentText={value}
-                  disabled={isStreaming || isWaiting}
-                  onUpdateText={handleChange}
-                />
-              </span>
-              {onClose && (
-                <span className={styles.hideActionFifth}>
-                  <BackToSideBarButton
-                    disabled={isStreaming}
-                    title="Return to sidebar"
-                    onClick={onClose}
-                  />
-                </span>
-              )}
-              {config.features?.images !== false &&
-                isMultimodalitySupportedForCurrentModel && (
-                  <span className={styles.hideActionSixth}>
-                    <AttachImagesButton />
-                  </span>
-                )}
-              <span className={styles.hideActionSeventh}>
-                <MicrophoneButton
-                  ref={microphoneRef}
-                  onTranscript={(text) => {
-                    setValue((prev) => {
-                      if (prev.trim()) {
-                        return `${prev}\n${text}`;
-                      }
-                      return text;
-                    });
-                  }}
-                  onLiveTranscript={handleLiveTranscript}
-                  onRecordingChange={handleRecordingChange}
-                  disabled={disableMicrophone}
-                />
-              </span>
+            <Flex className={styles.compactActionControls}>
               <UnifiedSendButton
                 disabled={isVoiceActive || !isOnline || allDisabled}
                 isStreaming={isStreaming || isWaiting}
-                hasText={value.trim().length > 0 || attachedImages.length > 0}
+                hasText={
+                  value.trim().length > 0 ||
+                  attachedImages.length > 0 ||
+                  textFiles.length > 0
+                }
                 hasMessages={messages.length > 0}
                 queuedCount={queuedItems.length}
                 onSend={() => handleSubmit("after_flow")}
@@ -645,7 +555,199 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                 onResend={() => void regenerate()}
               />
             </Flex>
-          </Flex>
+          </div>
+          <Box
+            className={styles.expandedComposerContent}
+            onFocus={() => setIsComposerExpanded(true)}
+          >
+            <Box className={styles.expandedComposerContentInner}>
+              <Box className={styles.textareaWrapper}>
+                <Box className={styles.inputHeader}>
+                  <UnifiedAttachmentsTray
+                    attachedFiles={attachedFiles}
+                    previewFiles={previewFiles}
+                    manualPreviewItems={manualPreviewItems}
+                    onRemoveManualPreviewItem={
+                      chatId
+                        ? (index) =>
+                            dispatch(
+                              removeManualPreviewItem({ chatId, index }),
+                            )
+                        : undefined
+                    }
+                    onOpenFile={queryPathThenOpenFile}
+                  />
+                  <Flex
+                    align="center"
+                    gap="2"
+                    justify="between"
+                    wrap="wrap"
+                    className={styles.topControlsRow}
+                  >
+                    <ChatInputTopControls
+                      checkboxes={checkboxes}
+                      onCheckedChange={onToggleCheckbox}
+                      attachedFiles={attachedFiles}
+                      disabled={isBuddyChat}
+                    />
+                    <Flex
+                      align="center"
+                      gap="2"
+                      className={styles.topStatusControls}
+                    >
+                      <span className={styles.hideTopTokensFirst}>
+                        <StreamingTokenCounter />
+                      </span>
+                      <span className={styles.hideTopTokensFirst}>
+                        <ProviderUsageIndicator />
+                      </span>
+                      <span className={styles.hideTopTokensFirst}>
+                        <UsageCounter />
+                      </span>
+                      <span className={styles.hideTopCompressLast}>
+                        <TrajectoryButton disabled={isBuddyChat} />
+                      </span>
+                    </Flex>
+                  </Flex>
+                </Box>
+
+                <ComboBox
+                  key={inputResetKey}
+                  onHelpClick={handleHelpCommand}
+                  commands={commands}
+                  requestCommandsCompletion={requestCompletion}
+                  value={
+                    isVoiceActive && liveTranscript
+                      ? value.trim()
+                        ? `${value}\n${liveTranscript}`
+                        : liveTranscript
+                      : value
+                  }
+                  onChange={handleChange}
+                  onSubmit={(event) => {
+                    handleEnter(event);
+                  }}
+                  placeholder={
+                    isVoiceActive
+                      ? "Listening..."
+                      : commands.completions.length < 1
+                        ? "Type @ or / for commands"
+                        : ""
+                  }
+                  render={(props) => (
+                    <TextAreaWithChips
+                      data-testid="chat-form-textarea"
+                      required={true}
+                      {...props}
+                      host={host}
+                      onOpenFile={queryPathThenOpenFile}
+                      autoFocus={autoFocus}
+                      readOnly={isVoiceActive}
+                      style={{ boxShadow: "none", outline: "none" }}
+                      onPaste={handlePastingFile}
+                    />
+                  )}
+                />
+              </Box>
+              <Flex
+                gap="2"
+                wrap="nowrap"
+                py="2"
+                px="3"
+                align="center"
+                className={styles.bottomControlsRow}
+              >
+                <span className={styles.bottomModelControl}>
+                  <ChatSettingsDropdown disabled={isBuddyChat} />
+                </span>
+                <span className={styles.bottomModeControl}>
+                  <ModeSelect
+                    selectedMode={threadMode ?? DEFAULT_MODE}
+                    onModeChange={onSetMode}
+                    disabled={isBuddyChat || isModeDisabled}
+                  />
+                </span>
+                <span className={styles.bottomWorkspaceControl}>
+                  <WorktreeControl disabled={isBuddyChat} />
+                </span>
+
+                <Flex
+                  justify="end"
+                  wrap="nowrap"
+                  gap="2"
+                  align="center"
+                  className={styles.bottomActionControls}
+                >
+                  <span className={styles.hideActionFirst}>
+                    <BrowserToggleButton chatId={chatId} />
+                  </span>
+                  <span className={styles.hideActionSecond}>
+                    <AutoEnrichmentToggleButton
+                      disabled={isStreaming || isWaiting}
+                    />
+                  </span>
+                  <span className={styles.hideActionThird}>
+                    <AutoCompactToggleButton
+                      disabled={isStreaming || isWaiting}
+                    />
+                  </span>
+                  <span className={styles.hideActionFourth}>
+                    <WandButton
+                      currentText={value}
+                      disabled={isStreaming || isWaiting}
+                      onUpdateText={handleChange}
+                    />
+                  </span>
+                  {onClose && (
+                    <span className={styles.hideActionFifth}>
+                      <BackToSideBarButton
+                        disabled={isStreaming}
+                        title="Return to sidebar"
+                        onClick={onClose}
+                      />
+                    </span>
+                  )}
+                  {config.features?.images !== false &&
+                    isMultimodalitySupportedForCurrentModel && (
+                      <span className={styles.hideActionSixth}>
+                        <AttachImagesButton />
+                      </span>
+                    )}
+                  <span className={styles.hideActionSeventh}>
+                    <MicrophoneButton
+                      ref={microphoneRef}
+                      onTranscript={(text) => {
+                        setValue((prev) => {
+                          if (prev.trim()) {
+                            return `${prev}\n${text}`;
+                          }
+                          return text;
+                        });
+                      }}
+                      onLiveTranscript={handleLiveTranscript}
+                      onRecordingChange={handleRecordingChange}
+                      disabled={disableMicrophone}
+                    />
+                  </span>
+                  <UnifiedSendButton
+                    disabled={isVoiceActive || !isOnline || allDisabled}
+                    isStreaming={isStreaming || isWaiting}
+                    hasText={
+                      value.trim().length > 0 ||
+                      attachedImages.length > 0 ||
+                      textFiles.length > 0
+                    }
+                    hasMessages={messages.length > 0}
+                    queuedCount={queuedItems.length}
+                    onSend={() => handleSubmit("after_flow")}
+                    onSendImmediately={handleSendImmediately}
+                    onStop={() => void abort()}
+                    onResend={() => void regenerate()}
+                  />
+                </Flex>
+              </Flex>
+            </Box>
+          </Box>
         </Form>
       </Flex>
     </Box>

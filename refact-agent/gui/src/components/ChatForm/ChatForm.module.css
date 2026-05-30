@@ -10,6 +10,26 @@
   background-color: transparent;
 }
 
+.chatFormMain {
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.chatFormCollapsed {
+  border-color: var(--gray-a3);
+}
+
+.chatFormCollapsed:hover,
+.chatFormCollapsed:focus-within {
+  border-color: var(--gray-a5);
+}
+
+.chatFormExpanded,
+.chatFormExpanded:focus-within {
+  border-color: var(--accent-a7);
+}
+
 /* Main chat input - transparent/subtle appearance */
 .chatFormMain {
   background-color: transparent;
@@ -68,6 +88,79 @@
 .textareaWrapper {
   position: relative;
   --chat-input-padding: var(--space-3);
+}
+
+.compactControlsRow {
+  container-type: inline-size;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-2);
+  overflow: hidden;
+  cursor: text;
+  transition:
+    min-height 0.18s ease,
+    padding 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.compactControlsRow:focus-visible {
+  outline: 1px solid var(--accent-a8);
+  outline-offset: -2px;
+}
+
+.compactModelControl,
+.compactStreamingTokens,
+.compactUsageCounter {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.compactModelControl {
+  flex: 1 1 auto;
+}
+
+.compactStreamingTokens,
+.compactUsageCounter {
+  flex: 0 0 auto;
+}
+
+.compactActionControls {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.expandedComposerContent {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows 0.2s ease,
+    opacity 0.16s ease;
+}
+
+.expandedComposerContentInner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chatFormCollapsed .expandedComposerContent {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chatFormExpanded .compactControlsRow {
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chatFormExpanded .compactControlsRow :global(*) {
+  pointer-events: none;
 }
 
 .inputHeader {
@@ -174,6 +267,18 @@
 @container (max-width: 520px) {
   .hideTopTokensFirst,
   .hideActionFirst {
+    display: none;
+  }
+}
+
+@container (max-width: 420px) {
+  .compactStreamingTokens {
+    display: none;
+  }
+}
+
+@container (max-width: 320px) {
+  .compactUsageCounter {
     display: none;
   }
 }

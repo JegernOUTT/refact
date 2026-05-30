@@ -17,13 +17,14 @@ import {
   Callout,
 } from "@radix-ui/themes";
 import { ChevronDownIcon, Cross1Icon } from "@radix-ui/react-icons";
+import classNames from "classnames";
 import {
   useAppSelector,
   useAppDispatch,
   useCapsForToolUse,
   useGetCapsQuery,
 } from "../../hooks";
-import { CapCost } from "../../services/refact/caps";
+import type { CapCost } from "../../services/refact/caps";
 import {
   selectChatId,
   selectModel,
@@ -79,10 +80,12 @@ function formatPricingDetailed(cost: CapCost): {
 
 type ChatSettingsDropdownProps = {
   disabled?: boolean;
+  compact?: boolean;
 };
 
 export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   disabled,
+  compact = false,
 }) => {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
@@ -277,7 +280,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
       <Text size="1" className={styles.modelName}>
         {currentModelName}
       </Text>
-      {maxTokens > 0 && (
+      {!compact && maxTokens > 0 && (
         <>
           <Text size="1" color="gray">
             ·
@@ -287,7 +290,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           </Text>
         </>
       )}
-      {supportsBoostReasoning && isBoostReasoningEnabled && (
+      {!compact && supportsBoostReasoning && isBoostReasoningEnabled && (
         <>
           <Text size="1" color="gray">
             ·
@@ -305,9 +308,11 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
       <Popover.Trigger>
         <button
-          className={`${styles.trigger} ${
-            isInteractionDisabled ? styles.disabled : ""
-          }`}
+          className={classNames(
+            styles.trigger,
+            compact && styles.compactTrigger,
+            isInteractionDisabled && styles.disabled,
+          )}
           disabled={isInteractionDisabled}
           type="button"
         >
@@ -315,12 +320,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
         </button>
       </Popover.Trigger>
 
-      <Popover.Content
-        className={styles.content}
-        side="top"
-        align="start"
-        sideOffset={8}
-      >
+      <Popover.Content className={styles.content} side="top" sideOffset={8}>
         {/* Model Section */}
         <div className={`${styles.section} ${styles.modelSection}`}>
           <div className={styles.modelList} ref={modelListRef}>

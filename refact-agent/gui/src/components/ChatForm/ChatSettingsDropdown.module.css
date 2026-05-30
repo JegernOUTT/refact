@@ -16,6 +16,11 @@
   background-color: var(--gray-a3);
 }
 
+.compactTrigger {
+  max-width: 100%;
+  padding: 0 var(--space-1);
+}
+
 .trigger.disabled {
   opacity: 0.5;
   cursor: default;
@@ -31,6 +36,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 140px;
+}
+
+.compactTrigger .modelName {
+  max-width: min(140px, calc(100vw - 160px));
 }
 
 .chevron {
