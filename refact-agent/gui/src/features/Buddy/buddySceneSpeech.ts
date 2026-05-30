@@ -346,6 +346,12 @@ export function buildBuddySceneSpeech(args: {
 export function pickBuddySceneSpeechCandidate(
   candidates: BuddySceneSpeech[],
 ): BuddySceneSpeech | null {
+  const actionableCandidates = candidates.filter(
+    (candidate) => candidate.controls.length > 0,
+  );
+  if (actionableCandidates.length > 0) {
+    return shuffleCandidates(actionableCandidates)[0] ?? null;
+  }
   if (bucketedRandom("buddy-scene-silence", 30_000) < SPEECH_SILENCE_CHANCE) {
     return null;
   }

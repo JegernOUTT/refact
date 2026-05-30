@@ -46,6 +46,7 @@ import {
   buildBuddySceneSpeech,
   formatBuddyRuntimeEventText,
   isBuddySpeechExpired,
+  pickBuddySceneSpeechCandidate,
 } from "../features/Buddy/buddySceneSpeech";
 import { formatFailureLabel } from "../features/Buddy/buddyUtils";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
@@ -2652,6 +2653,24 @@ describe("buildBuddySceneSpeech", () => {
       action: "dismiss_suggestion",
       action_param: "suggestion-1",
     });
+  });
+
+  it("does not silence actionable runtime speech", () => {
+    const speech = buildBuddySceneSpeech({
+      activeSpeech: null,
+      nowPlaying: makeRuntimeEvent({
+        id: "actionable-runtime",
+        title: "Runtime needs action",
+        status: "failed",
+        priority: "high",
+        created_at: new Date().toISOString(),
+      }),
+      runtimeQueue: [],
+      activeSuggestion: null,
+    });
+
+    expect(speech).not.toBeNull();
+    expect(pickBuddySceneSpeechCandidate(speech ? [speech] : [])).toBe(speech);
   });
 });
 
