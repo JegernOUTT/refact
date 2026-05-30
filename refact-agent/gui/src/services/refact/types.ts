@@ -13,6 +13,7 @@ export type ChatRole =
   | "diff"
   | "plain_text"
   | "cd_instruction"
+  | "compression_report"
   | "summarization"
   | "event"
   | "plan";
@@ -485,6 +486,14 @@ export interface SummarizationMessage extends BaseMessage {
   summarized_token_estimate?: number;
 }
 
+export interface CompressionReportMessage extends BaseMessage {
+  role: "compression_report";
+  content: string;
+  summarization_tier?: SummarizationTier;
+  summarized_token_estimate?: number;
+  extra?: Record<string, unknown>;
+}
+
 export type EventSubkind =
   | "mode_switch"
   | "tool_decision"
@@ -608,6 +617,12 @@ export function isSummarizationMessage(
   return message.role === "summarization";
 }
 
+export function isCompressionReportMessage(
+  message: ChatMessage,
+): message is CompressionReportMessage {
+  return message.role === "compression_report";
+}
+
 export function isCompressedAssistantMessage(
   message: ChatMessage,
 ): message is AssistantMessage {
@@ -635,6 +650,22 @@ export function syntheticSummarizationMessage(
   };
 }
 
+export function syntheticCompressionReportMessage(
+  msg: CompressionReportMessage,
+): SummarizationMessage {
+  return {
+    role: "summarization",
+    content: msg.content,
+    message_id: msg.message_id,
+    summarization_tier: msg.summarization_tier ?? "tier2_reactive",
+    summarized_token_estimate:
+      typeof msg.summarized_token_estimate === "number"
+        ? msg.summarized_token_estimate
+        : undefined,
+    extra: msg.extra,
+  };
+}
+
 export function isEventMessage(message: ChatMessage): message is EventMessage {
   return message.role === "event" && getEventMetadata(message) !== null;
 }
@@ -653,6 +684,7 @@ export type ChatMessage =
   | DiffMessage
   | PlainTextMessage
   | CDInstructionMessage
+  | CompressionReportMessage
   | SummarizationMessage
   | EventMessage
   | PlanMessage;

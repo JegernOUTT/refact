@@ -2802,13 +2802,16 @@ fn build_title_generation_context(messages: &[serde_json::Value]) -> String {
         if role == "error" {
             continue;
         }
-        if role == "system"
-            || role == "tool"
-            || role == "context_file"
-            || role == "cd_instruction"
-            || role == "plan"
-            || role == "event"
-        {
+        if matches!(
+            role,
+            "system"
+                | "tool"
+                | "context_file"
+                | "cd_instruction"
+                | "compression_report"
+                | "plan"
+                | "event"
+        ) {
             continue;
         }
         let content_text = match msg

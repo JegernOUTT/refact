@@ -164,7 +164,10 @@ impl Tool for ToolTrajectoryContext {
                 .get("role")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            if role == "context_file" || role == "cd_instruction" || role == "system" {
+            if matches!(
+                role,
+                "context_file" | "cd_instruction" | "compression_report" | "system"
+            ) {
                 continue;
             }
 

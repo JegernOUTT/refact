@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { AssistantMessage, ChatMessages } from "../../services/refact";
+import type {
+  AssistantMessage,
+  CDInstructionMessage,
+  ChatMessages,
+  CompressionReportMessage,
+} from "../../services/refact";
 import {
   buildDisplayItems,
   tryIncrementalDisplayItemsUpdate,
@@ -13,6 +18,31 @@ function assistantMessage(
     content: "assistant content",
     message_id: "assistant-1",
     ...overrides,
+  };
+}
+
+function compressionReportMessage(
+  overrides: Partial<CompressionReportMessage> = {},
+): CompressionReportMessage {
+  return {
+    role: "compression_report",
+    content: "## Chat compression report\n\n- Context files removed: 1",
+    message_id: "compression-report-1",
+    summarization_tier: "tier2_reactive",
+    summarized_token_estimate: 42,
+    extra: {
+      compression_report: {
+        kind: "chat_compression_report",
+      },
+    },
+    ...overrides,
+  };
+}
+
+function cdInstructionMessage(content: string): CDInstructionMessage {
+  return {
+    role: "cd_instruction",
+    content,
   };
 }
 
@@ -58,5 +88,43 @@ describe("ChatContent display items", () => {
     expect(nextItems).toHaveLength(1);
     expect(nextItems?.[0]?.type).toBe("assistant");
     expect(nextItems?.[0]).not.toBe(previousItems[0]);
+  });
+
+  it("renders compression_report messages as summarization display items", () => {
+    const messages: ChatMessages = [
+      assistantMessage({ message_id: "assistant-before" }),
+      compressionReportMessage(),
+      assistantMessage({ message_id: "assistant-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items).toHaveLength(3);
+    expect(items[1]?.type).toBe("summarization");
+    if (items[1]?.type !== "summarization") {
+      throw new Error("Expected summarization item");
+    }
+    expect(items[1].messageIndex).toBe(1);
+    expect(items[1].message.summarization_tier).toBe("tier2_reactive");
+    expect(items[1].message.summarized_token_estimate).toBe(42);
+    expect(items[1].message.extra).toEqual({
+      compression_report: { kind: "chat_compression_report" },
+    });
+  });
+
+  it("still renders skill activation cd_instruction messages", () => {
+    const header = JSON.stringify({
+      name: "frog-skill",
+      allowed_tools: ["cat"],
+      model_override: null,
+    });
+    const messages: ChatMessages = [
+      cdInstructionMessage(`💿 SKILL_ACTIVATED ${header}\nSkill body`),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]?.type).toBe("skill_activated");
   });
 });

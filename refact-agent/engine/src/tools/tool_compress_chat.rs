@@ -13,7 +13,7 @@ use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use refact_chat_history::history_limit::{compress_duplicate_context_files, compute_context_budget};
-use refact_chat_history::trajectory_ops::TOOLS_TO_PRESERVE;
+use refact_chat_history::trajectory_ops::{build_compression_report_message, TOOLS_TO_PRESERVE};
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
 
 const TOOL_OUTPUT_TRUNCATE_LIMIT: usize = 200;
@@ -73,6 +73,15 @@ struct CompressChatApplyStats {
     project_info_dropped: usize,
     dedup_count: usize,
     aggressive_summary_skipped_reason: Option<&'static str>,
+}
+
+impl CompressChatApplyStats {
+    fn context_files_removed(&self) -> usize {
+        self.context_files_dropped
+            + self.memory_dropped
+            + self.project_info_dropped
+            + self.dedup_count
+    }
 }
 
 struct CompressChatApplyRequest<'a> {
@@ -162,7 +171,8 @@ fn compress_chat_apply_head_messages(
     mut head_messages: Vec<ChatMessage>,
     immutable_tail: &[ChatMessage],
     request: &CompressChatApplyRequest,
-) -> (Vec<ChatMessage>, CompressChatApplyStats) {
+) -> (Vec<ChatMessage>, CompressChatApplyStats, usize) {
+    let before_tokens = tokens_with_tail(&head_messages, &[], immutable_tail);
     let preserve_cutoff = preserve_cutoff_for(&head_messages, request.preserve_last_turns);
     let mut preserved_tail = head_messages.split_off(preserve_cutoff.min(head_messages.len()));
     let mut stats = CompressChatApplyStats::default();
@@ -298,8 +308,15 @@ fn compress_chat_apply_head_messages(
         }
     }
 
+    let after_tokens_pre_report = tokens_with_tail(&head_messages, &preserved_tail, immutable_tail);
+    head_messages.push(build_compression_report_message(
+        stats.context_files_removed(),
+        stats.tool_truncated + stats.tool_dropped,
+        before_tokens,
+        after_tokens_pre_report,
+    ));
     head_messages.append(&mut preserved_tail);
-    (head_messages, stats)
+    (head_messages, stats, before_tokens)
 }
 
 #[cfg(test)]
@@ -420,6 +437,13 @@ mod tests {
         let actual_start = after.len() - (before.len() - cutoff);
         let actual = serde_json::to_string(&after[actual_start..]).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    fn compression_report_index(messages: &[ChatMessage]) -> usize {
+        messages
+            .iter()
+            .position(|message| message.role == "compression_report")
+            .expect("expected compression_report message")
     }
 
     #[test]
@@ -567,10 +591,14 @@ mod tests {
         );
         request.drop_all_memories = true;
 
-        let (after, stats) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
+        let (after, stats, _) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
 
         assert_eq!(stats.memory_dropped, 1);
         assert_preserved_tail_unchanged(&messages, &after, 1);
+        let report_idx = compression_report_index(&after);
+        assert!(after[report_idx + 1..]
+            .iter()
+            .any(|message| message.content.content_text_only().contains("tail memory")));
         assert!(after
             .iter()
             .any(|message| message.content.content_text_only().contains("tail memory")));
@@ -600,7 +628,7 @@ mod tests {
             &tool_call_names,
         );
 
-        let (after, stats) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
+        let (after, stats, _) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
 
         assert_eq!(stats.context_messages_dropped, 1);
         assert_preserved_tail_unchanged(&messages, &after, 1);
@@ -640,7 +668,7 @@ mod tests {
             &tool_call_names,
         );
 
-        let (after, stats) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
+        let (after, stats, _) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
 
         assert_eq!(stats.tool_truncated, 1);
         assert_eq!(stats.tool_dropped, 0);
@@ -648,7 +676,48 @@ mod tests {
             .content
             .content_text_only()
             .starts_with("Tool result compressed:")));
+        assert!(compression_report_index(&after) <= find_preserve_cutoff(&messages, 1));
         assert_preserved_tail_unchanged(&messages, &after, 1);
+    }
+
+    #[test]
+    fn apply_inserts_compression_report_before_preserved_tail() {
+        let messages = vec![
+            user_message("old user"),
+            context_file_message("old_context", "old.rs", "old context"),
+            user_message("tail user"),
+            assistant_message("tail assistant"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+
+        let (after, stats, before_tokens) =
+            compress_chat_apply_head_messages(messages.clone(), &[], &request);
+
+        assert_eq!(stats.context_messages_dropped, 1);
+        let report_idx = compression_report_index(&after);
+        assert_eq!(
+            after[report_idx + 1].content.content_text_only(),
+            "tail user"
+        );
+        let metadata = &after[report_idx].extra["compression_report"];
+        assert_eq!(metadata["kind"], json!("chat_compression_report"));
+        assert_eq!(metadata["context_files_removed"], json!(1));
+        assert_eq!(metadata["tool_results_truncated"], json!(0));
+        assert_eq!(metadata["tokens_before"], json!(before_tokens));
+        assert!(metadata["tokens_after"].as_u64().unwrap() <= before_tokens as u64);
     }
 
     #[test]
@@ -675,7 +744,7 @@ mod tests {
         );
         request.drop_project_information = true;
 
-        let (after, stats) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
+        let (after, stats, _) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
 
         assert_eq!(stats.project_info_dropped, 1);
         assert!(!after.iter().any(|message| message
@@ -722,7 +791,7 @@ mod tests {
         request.strength = "aggressive";
         request.target_tokens = Some(0);
 
-        let (after, stats) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
+        let (after, stats, _) = compress_chat_apply_head_messages(messages.clone(), &[], &request);
 
         assert_eq!(stats.memory_dropped, 1);
         assert_eq!(stats.tool_truncated, 0);
@@ -1183,11 +1252,6 @@ impl Tool for ToolCompressChatApply {
             return Err("Cannot compress while generating".to_string());
         }
 
-        let before_tokens = session_snapshot
-            .messages
-            .iter()
-            .map(approx_tokens_for_message)
-            .sum::<usize>();
         let before_count = session_snapshot.messages.len();
         let active_start = session_snapshot
             .messages
@@ -1234,7 +1298,7 @@ impl Tool for ToolCompressChatApply {
             target_tokens,
             tool_call_names: &tool_call_names,
         };
-        let (mut head_messages, stats) = compress_chat_apply_head_messages(
+        let (mut head_messages, stats, before_tokens) = compress_chat_apply_head_messages(
             session_snapshot.messages[..active_start].to_vec(),
             &tail_messages,
             &request,
@@ -1246,12 +1310,24 @@ impl Tool for ToolCompressChatApply {
             .map(approx_tokens_for_message)
             .sum::<usize>();
         let after_count = head_messages.len();
-        let target_met = target_tokens.map_or(true, |t| after_tokens <= t);
+        let report_after_tokens = head_messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "compression_report")
+            .and_then(|message| message.extra.get("compression_report"))
+            .and_then(|metadata| metadata.get("tokens_after"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize)
+            .unwrap_or(after_tokens);
+        let target_met = target_tokens.map_or(true, |t| report_after_tokens <= t);
 
         let first_role = head_messages.first().map(|m| m.role.as_str()).unwrap_or("");
-        if !matches!(first_role, "system" | "user" | "event" | "plan") {
+        if !matches!(
+            first_role,
+            "system" | "user" | "event" | "plan" | "compression_report"
+        ) {
             return Err(format!(
-                "ctx_apply would produce an invalid chat history: first message has role '{}', expected 'system', 'user', 'event', or 'plan'. Compression aborted.",
+                "ctx_apply would produce an invalid chat history: first message has role '{}', expected 'system', 'user', 'event', 'plan', or 'compression_report'. Compression aborted.",
                 if first_role.is_empty() { "(empty)" } else { first_role }
             ));
         }
@@ -1276,7 +1352,7 @@ impl Tool for ToolCompressChatApply {
             "before_message_count": before_count,
             "after_message_count": after_count,
             "before_tokens": before_tokens,
-            "after_tokens": after_tokens,
+            "after_tokens": report_after_tokens,
             "target_tokens": target_tokens,
             "target_met": target_met,
             "strength": strength,
@@ -1287,6 +1363,13 @@ impl Tool for ToolCompressChatApply {
             "tool_outputs_dropped": stats.tool_dropped,
             "project_info_dropped": stats.project_info_dropped,
             "dedup_context_files": stats.dedup_count,
+            "compression_report": {
+                "role": "compression_report",
+                "context_files_removed": stats.context_files_removed(),
+                "tool_results_truncated": stats.tool_truncated + stats.tool_dropped,
+                "tokens_before": before_tokens,
+                "tokens_after": report_after_tokens,
+            },
             "aggressive_summary_skipped_reason": stats.aggressive_summary_skipped_reason,
             "active_tail_start": active_start,
         });

@@ -98,7 +98,10 @@ impl TrajectoryFileSplitter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                if role == "context_file" || role == "cd_instruction" || role == "system" {
+                if matches!(
+                    role.as_str(),
+                    "context_file" | "cd_instruction" | "compression_report" | "system"
+                ) {
                     return None;
                 }
                 let content = self.extract_content(msg);

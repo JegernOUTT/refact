@@ -77,8 +77,12 @@ function parseReactiveStats(
       key: "Context file entries deduplicated",
       label: "Context files deduped",
     },
+    { key: "Context files removed", label: "Context files removed" },
     { key: "Tool outputs truncated", label: "Tool outputs truncated" },
+    { key: "Tokens before", label: "Tokens before" },
+    { key: "Tokens after", label: "Tokens after" },
     { key: "Estimated tokens saved", label: "Tokens saved" },
+    { key: "Reduction", label: "Reduction" },
   ];
   const lines = content.split("\n");
   const stats: { label: string; value: string }[] = [];

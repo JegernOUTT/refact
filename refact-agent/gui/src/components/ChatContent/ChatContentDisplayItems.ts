@@ -9,12 +9,14 @@ import {
   isDiffMessage,
   isCompressedAssistantMessage,
   isAssistantMessage,
+  isCompressionReportMessage,
   isEventMessage,
   isErrorMessage,
   isToolMessage,
   isSystemMessage,
   isSummarizationMessage,
   SummarizationMessage,
+  syntheticCompressionReportMessage,
   syntheticSummarizationMessage,
   UserMessage,
 } from "../../services/refact";
@@ -356,6 +358,16 @@ function buildDisplayItemsFromIndex(
         key: getMessageKey(compressedAssistant, i),
         messageIndex: i,
         message: syntheticSummarizationMessage(compressedAssistant),
+      });
+      continue;
+    }
+
+    if (isCompressionReportMessage(head)) {
+      items.push({
+        type: "summarization",
+        key: getMessageKey(head, i),
+        messageIndex: i,
+        message: syntheticCompressionReportMessage(head),
       });
       continue;
     }
@@ -729,6 +741,16 @@ export function buildDisplayItems(
         key: getMessageKey(compressedAssistant, i),
         messageIndex: i,
         message: syntheticSummarizationMessage(compressedAssistant),
+      });
+      continue;
+    }
+
+    if (isCompressionReportMessage(head)) {
+      items.push({
+        type: "summarization",
+        key: getMessageKey(head, i),
+        messageIndex: i,
+        message: syntheticCompressionReportMessage(head),
       });
       continue;
     }

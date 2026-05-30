@@ -1607,7 +1607,7 @@ fn is_plan_delta_event(msg: &ChatMessage) -> bool {
 }
 
 fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::Value> {
-    if matches!(msg.role.as_str(), "plan" | "event") {
+    if matches!(msg.role.as_str(), "plan" | "event" | "compression_report") {
         msg.extra.clone()
     } else {
         serde_json::Map::new()
@@ -1617,7 +1617,7 @@ fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::V
 fn is_allowed_for_restore(msg: &ChatMessage) -> bool {
     matches!(
         msg.role.as_str(),
-        "user" | "assistant" | "system" | "tool" | "plan"
+        "user" | "assistant" | "system" | "tool" | "plan" | "compression_report"
     ) || is_plan_delta_event(msg)
 }
 
@@ -1670,7 +1670,7 @@ fn sanitize_message_for_branch(msg: &ChatMessage) -> ChatMessage {
 fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
     matches!(
         msg.role.as_str(),
-        "user" | "assistant" | "system" | "tool" | "context_file" | "plan"
+        "user" | "assistant" | "system" | "tool" | "context_file" | "plan" | "compression_report"
     ) || is_plan_delta_event(msg)
 }
 

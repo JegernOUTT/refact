@@ -153,6 +153,42 @@ describe("SummarizationMessage", () => {
     expect(stats).toHaveTextContent("1024");
   });
 
+  it("parses chat compression report stats", async () => {
+    const reportContent = [
+      "## Chat compression report",
+      "",
+      "- Context files removed: 2",
+      "- Tool outputs truncated: 4",
+      "- Tokens before: 10000",
+      "- Tokens after: 7000",
+      "- Estimated tokens saved: 3000",
+      "- Reduction: 30%",
+    ].join("\n");
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier2_reactive",
+          content: reportContent,
+        })}
+      />,
+    );
+
+    await user.click(screen.getByTestId("summarization-card-header"));
+    const stats = screen.getByTestId("summarization-card-stats");
+    expect(stats).toHaveTextContent("Context files removed");
+    expect(stats).toHaveTextContent("2");
+    expect(stats).toHaveTextContent("Tool outputs truncated");
+    expect(stats).toHaveTextContent("4");
+    expect(stats).toHaveTextContent("Tokens before");
+    expect(stats).toHaveTextContent("10000");
+    expect(stats).toHaveTextContent("Tokens after");
+    expect(stats).toHaveTextContent("7000");
+    expect(stats).toHaveTextContent("Tokens saved");
+    expect(stats).toHaveTextContent("3000");
+    expect(stats).toHaveTextContent("Reduction");
+    expect(stats).toHaveTextContent("30%");
+  });
+
   it("does not render a stats grid for non-reactive tiers", async () => {
     const { user } = render(
       <SummarizationMessage

@@ -44,6 +44,7 @@ fn preserve_hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serd
     match msg.role.as_str() {
         "plan" => preserve_extra_key(&msg.extra, "plan"),
         "event" => preserve_extra_key(&msg.extra, "event"),
+        COMPRESSION_REPORT_ROLE => preserve_extra_key(&msg.extra, "compression_report"),
         _ => serde_json::Map::new(),
     }
 }
@@ -164,6 +165,66 @@ pub struct TransformStats {
     pub after_approx_tokens: usize,
     pub context_messages_modified: usize,
     pub tool_messages_modified: usize,
+}
+
+pub const COMPRESSION_REPORT_ROLE: &str = "compression_report";
+pub const COMPRESSION_REPORT_KIND: &str = "chat_compression_report";
+
+pub fn build_compression_report_message(
+    context_files_removed: usize,
+    tool_results_truncated: usize,
+    tokens_before: usize,
+    tokens_after: usize,
+) -> ChatMessage {
+    let estimated_tokens_saved = tokens_before.saturating_sub(tokens_after);
+    let reduction_percent = if tokens_before > 0 {
+        (estimated_tokens_saved * 100) / tokens_before
+    } else {
+        0
+    };
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "compression_report".to_string(),
+        serde_json::json!({
+            "kind": COMPRESSION_REPORT_KIND,
+            "context_files_removed": context_files_removed,
+            "tool_results_truncated": tool_results_truncated,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "estimated_tokens_saved": estimated_tokens_saved,
+            "reduction_percent": reduction_percent,
+        }),
+    );
+    ChatMessage {
+        role: COMPRESSION_REPORT_ROLE.to_string(),
+        content: ChatContent::SimpleText(format!(
+            "## Chat compression report\n\n- Context files removed: {}\n- Tool outputs truncated: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%",
+            context_files_removed,
+            tool_results_truncated,
+            tokens_before,
+            tokens_after,
+            estimated_tokens_saved,
+            reduction_percent
+        )),
+        summarization_tier: Some("tier2_reactive".to_string()),
+        summarized_token_estimate: Some(estimated_tokens_saved),
+        extra,
+        ..Default::default()
+    }
+}
+
+fn compression_report_insert_index(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .position(|m| matches!(m.role.as_str(), "system" | "user"))
+        .map(|idx| idx + 1)
+        .or_else(|| {
+            messages
+                .first()
+                .filter(|m| matches!(m.role.as_str(), "event" | "plan"))
+                .map(|_| 1)
+        })
+        .unwrap_or(0)
 }
 
 pub const TOOLS_TO_PRESERVE: &[&str] = &["research", "delegate", "plan", "review"];
@@ -446,25 +507,14 @@ pub fn compress_in_place(
     }
 
     let after_tokens_pre = approx_token_count(messages);
-    let reduction_percent = if before_tokens > 0 {
-        ((before_tokens.saturating_sub(after_tokens_pre)) * 100) / before_tokens
-    } else {
-        0
-    };
 
-    let instruction = ChatMessage {
-        role: "cd_instruction".to_string(),
-        content: ChatContent::SimpleText(format!(
-            " Chat compressed. {} context files removed, {} tool results truncated. Tokens reduced from ~{} to ~{} (~{}% reduction). You can use the Trajectory panel to further compress or create a handoff.",
-            context_modified,
-            tool_modified,
-            before_tokens,
-            after_tokens_pre,
-            reduction_percent
-        )),
-        ..Default::default()
-    };
-    messages.push(instruction);
+    let report = build_compression_report_message(
+        context_modified,
+        tool_modified,
+        before_tokens,
+        after_tokens_pre,
+    );
+    messages.insert(compression_report_insert_index(messages), report);
 
     let after_tokens = approx_token_count(messages);
     Ok(TransformStats {
@@ -636,6 +686,13 @@ mod tests {
         assert!(!message.extra.contains_key("unrelated"));
     }
 
+    fn compression_report(messages: &[ChatMessage]) -> &ChatMessage {
+        messages
+            .iter()
+            .find(|msg| msg.role == COMPRESSION_REPORT_ROLE)
+            .expect("expected compression_report message")
+    }
+
     #[test]
     fn sanitize_messages_for_model_switch_drops_ui_only_messages() {
         let mut messages = vec![
@@ -718,7 +775,7 @@ mod tests {
 
         let persisted: Vec<_> = messages
             .iter()
-            .filter(|msg| msg.role != "cd_instruction")
+            .filter(|msg| msg.role != COMPRESSION_REPORT_ROLE)
             .collect();
         assert_eq!(persisted.len(), 2);
         assert_only_hidden_plan_extra(persisted[0]);
@@ -741,7 +798,7 @@ mod tests {
 
         let persisted: Vec<_> = messages
             .iter()
-            .filter(|msg| msg.role != "cd_instruction")
+            .filter(|msg| msg.role != COMPRESSION_REPORT_ROLE)
             .collect();
         assert_eq!(persisted.len(), 2);
         assert!(persisted.iter().all(|msg| !is_ui_only_message(msg)));
@@ -768,7 +825,7 @@ mod tests {
 
         let persisted: Vec<_> = messages
             .iter()
-            .filter(|msg| msg.role != "cd_instruction")
+            .filter(|msg| msg.role != COMPRESSION_REPORT_ROLE)
             .collect();
         assert_eq!(persisted.len(), 3);
         assert_eq!(
@@ -801,9 +858,9 @@ mod tests {
         assert_eq!(stats.context_messages_modified, 1);
         assert!(messages
             .iter()
-            .filter(|m| m.role != "cd_instruction")
+            .filter(|m| m.role != COMPRESSION_REPORT_ROLE)
             .all(|m| m.role != "context_file"));
-        assert!(messages.last().unwrap().role == "cd_instruction");
+        assert_eq!(messages[1].role, COMPRESSION_REPORT_ROLE);
     }
 
     #[test]
@@ -940,16 +997,67 @@ mod tests {
     }
 
     #[test]
-    fn test_cd_instruction_added_after_compress() {
+    fn test_compression_report_added_after_compress() {
         let mut messages = vec![make_user_msg("hello"), make_assistant_msg("response")];
         let opts = CompressOptions::default();
         compress_in_place(&mut messages, &opts).unwrap();
-        let last_msg = messages.last().unwrap();
-        assert_eq!(last_msg.role, "cd_instruction");
-        assert!(last_msg
+        let report = compression_report(&messages);
+        assert!(report
             .content
             .content_text_only()
-            .contains("Chat compressed"));
+            .contains("Chat compression report"));
+        assert!(messages.iter().all(|msg| msg.role != "cd_instruction"));
+    }
+
+    #[test]
+    fn test_compression_report_metadata_fields_exist() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            make_tool_msg("tc1", &"x".repeat(1000)),
+            make_context_file_msg("test.rs", "fn main() {}"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let report = compression_report(&messages);
+        assert_eq!(report.summarization_tier.as_deref(), Some("tier2_reactive"));
+        let metadata = &report.extra["compression_report"];
+        assert_eq!(metadata["kind"], serde_json::json!(COMPRESSION_REPORT_KIND));
+        assert_eq!(metadata["context_files_removed"], serde_json::json!(1));
+        assert_eq!(metadata["tool_results_truncated"], serde_json::json!(1));
+        assert!(metadata["tokens_before"].as_u64().unwrap() > 0);
+        assert!(metadata["tokens_after"].as_u64().unwrap() > 0);
+        assert!(metadata["reduction_percent"].as_u64().unwrap() <= 100);
+        assert_eq!(
+            report.summarized_token_estimate,
+            metadata["estimated_tokens_saved"]
+                .as_u64()
+                .map(|value| value as usize)
+        );
+    }
+
+    #[test]
+    fn test_compression_report_preserves_tail_after_boundary() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let roles: Vec<_> = messages.iter().map(|msg| msg.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", COMPRESSION_REPORT_ROLE, "assistant"]);
     }
 
     #[test]
@@ -1247,8 +1355,8 @@ mod tests {
         let stats = compress_in_place(&mut messages, &opts).unwrap();
         assert_eq!(stats.after_message_count, 3);
         assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(messages[2].role, "cd_instruction");
+        assert_eq!(messages[1].role, COMPRESSION_REPORT_ROLE);
+        assert_eq!(messages[2].role, "assistant");
     }
 
     #[test]
@@ -1258,7 +1366,7 @@ mod tests {
         let stats = compress_in_place(&mut messages, &opts).unwrap();
         assert_eq!(stats.before_message_count, 0);
         assert_eq!(stats.after_message_count, 1);
-        assert_eq!(messages[0].role, "cd_instruction");
+        assert_eq!(messages[0].role, COMPRESSION_REPORT_ROLE);
     }
 
     #[test]
