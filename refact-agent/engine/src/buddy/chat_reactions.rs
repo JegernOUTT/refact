@@ -15,8 +15,8 @@ use super::voice_service::{voice_service, ChatReactionSpeechIntent, VoiceCtx};
 pub const ANALYSIS_TEXT_MIN_CHARS: usize = 20;
 pub const ANALYSIS_TEXT_MAX_CHARS: usize = 500;
 pub const CHAT_REACTION_SPEECH_MAX_CHARS: usize = 140;
-pub const PER_CHAT_COOLDOWN_SECS: i64 = 300;
-pub const GLOBAL_HOURLY_CAP: u32 = 10;
+pub const PER_CHAT_COOLDOWN_SECS: i64 = 180;
+pub const GLOBAL_HOURLY_CAP: u32 = 20;
 pub const CHAT_REACTION_DEBUG_ATTEMPT_CAP: usize = 50;
 const HUMOR_BUCKET_PERCENT: u64 = 40;
 const CHAT_REACTION_ECHO_NGRAM_WORDS: usize = 3;
@@ -291,6 +291,11 @@ pub struct AcceptedUserMessage {
     pub chat_id: String,
     pub thread: ThreadParams,
     pub content: ChatContent,
+}
+
+pub struct ChatActivityCompletion {
+    pub chat_id: String,
+    pub thread: ThreadParams,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -918,6 +923,117 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
     });
 }
 
+pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatActivityCompletion) {
+    let analysis_text = format!(
+        "normal chat activity completed safely at {}",
+        Utc::now().timestamp()
+    );
+
+    let plan = {
+        let mut svc_guard = app.buddy.buddy.lock().await;
+        if !should_observe_thread(&activity.thread) {
+            if let Some(svc) = svc_guard.as_mut() {
+                svc.chat_reaction_debug
+                    .record_skipped(&activity.chat_id, ChatReactionSkipReason::ThreadFiltered);
+            }
+            debug!(
+                target: "buddy.chat_reactions",
+                chat_id = %activity.chat_id,
+                reason = %ChatReactionSkipReason::ThreadFiltered.as_str(),
+                "buddy chat activity reaction skipped"
+            );
+            return;
+        }
+        let Some(svc) = svc_guard.as_mut() else {
+            debug!(
+                target: "buddy.chat_reactions",
+                chat_id = %activity.chat_id,
+                reason = %ChatReactionSkipReason::BuddyUnavailable.as_str(),
+                "buddy chat activity reaction skipped"
+            );
+            return;
+        };
+        if !settings_allow_chat_reactions(&svc.settings) {
+            svc.chat_reaction_debug
+                .record_skipped(&activity.chat_id, ChatReactionSkipReason::SettingsDisabled);
+            debug!(
+                target: "buddy.chat_reactions",
+                chat_id = %activity.chat_id,
+                reason = %ChatReactionSkipReason::SettingsDisabled.as_str(),
+                "buddy chat activity reaction skipped"
+            );
+            return;
+        }
+        let now = Utc::now();
+        let reservation = match svc.chat_reaction_limiter.try_allow_kind(
+            &activity.chat_id,
+            ChatReactionKind::Ambient,
+            now,
+        ) {
+            Ok(reservation) => reservation,
+            Err(reason) => {
+                svc.chat_reaction_debug
+                    .record_skipped(&activity.chat_id, reason);
+                debug!(
+                    target: "buddy.chat_reactions",
+                    chat_id = %activity.chat_id,
+                    reason = %reason.as_str(),
+                    reaction_kind = ?ChatReactionKind::Ambient,
+                    analysis_hash = %message_hash(&analysis_text),
+                    "buddy chat activity reaction skipped"
+                );
+                return;
+            }
+        };
+        (reservation, analysis_text)
+    };
+
+    let (reservation, analysis_text) = plan;
+    let speech = fallback_chat_reaction_text(ChatReactionKind::Ambient, &analysis_text);
+    let event = build_reaction_event(
+        &activity.chat_id,
+        &analysis_text,
+        &ChatReaction {
+            kind: ChatReactionKind::Ambient,
+            text: speech,
+        },
+    );
+    let event_id = event.id.clone();
+    let analysis_hash = message_hash(&analysis_text);
+    let mut svc_guard = app.buddy.buddy.lock().await;
+    if let Some(svc) = svc_guard.as_mut() {
+        if settings_allow_chat_reactions(&svc.settings) {
+            let signal_type = event.signal_type.clone();
+            let stored_event = svc.enqueue_runtime_event_with_stored(event);
+            svc.chat_reaction_debug.record_emitted(
+                &activity.chat_id,
+                signal_type.as_str(),
+                stored_event.as_ref(),
+            );
+            debug!(
+                target: "buddy.chat_reactions",
+                chat_id = %activity.chat_id,
+                reaction_kind = ?ChatReactionKind::Ambient,
+                analysis_hash = %analysis_hash,
+                event_id = %event_id,
+                "buddy chat activity reaction emitted"
+            );
+        } else {
+            svc.chat_reaction_limiter.rollback(reservation);
+            svc.chat_reaction_debug
+                .record_skipped(&activity.chat_id, ChatReactionSkipReason::SettingsDisabled);
+            debug!(
+                target: "buddy.chat_reactions",
+                chat_id = %activity.chat_id,
+                reason = %ChatReactionSkipReason::SettingsDisabled.as_str(),
+                reaction_kind = ?ChatReactionKind::Ambient,
+                analysis_hash = %analysis_hash,
+                "buddy chat activity reaction skipped"
+            );
+        }
+    }
+}
+
 pub struct ChatReactionLimiter {
     pub(crate) per_chat_kind_last_at: HashMap<(String, ChatReactionKind), DateTime<Utc>>,
     global_hourly_count: u32,
@@ -1451,12 +1567,12 @@ mod tests {
         let now = Utc::now();
         for i in 0..GLOBAL_HOURLY_CAP {
             let chat_id = format!("chat-{i}");
-            assert!(lim.allow(&chat_id, now + Duration::seconds(i64::from(i) * 300)));
+            assert!(lim.allow(&chat_id, now + Duration::seconds(i64::from(i))));
         }
         let overflow_chat = format!("chat-{}", GLOBAL_HOURLY_CAP);
         assert!(!lim.allow(
             &overflow_chat,
-            now + Duration::seconds(i64::from(GLOBAL_HOURLY_CAP) * 300)
+            now + Duration::seconds(i64::from(GLOBAL_HOURLY_CAP))
         ));
     }
 
@@ -1466,7 +1582,7 @@ mod tests {
         let now = Utc::now();
         for i in 0..GLOBAL_HOURLY_CAP {
             let chat_id = format!("chat-reset-{i}");
-            lim.allow(&chat_id, now + Duration::seconds(i64::from(i) * 300));
+            lim.allow(&chat_id, now + Duration::seconds(i64::from(i)));
         }
         let after_hour = now + Duration::seconds(3601);
         assert!(lim.allow("chat-fresh", after_hour));

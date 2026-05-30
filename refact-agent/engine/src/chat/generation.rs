@@ -7,6 +7,7 @@ use uuid::Uuid;
 use refact_buddy_core::types::BuddyRuntimeEvent;
 
 use crate::app_state::AppState;
+use crate::buddy::chat_reactions::{maybe_enqueue_chat_activity_reaction, ChatActivityCompletion};
 use crate::subchat::{resolve_subchat_config_with_parent, run_subchat};
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -529,6 +530,20 @@ fn is_claude_code_model(model: &BaseModelRecord) -> bool {
     model.wire_format == crate::llm::WireFormat::AnthropicMessages && !model.auth_token.is_empty()
 }
 
+async fn maybe_enqueue_completion_activity_reaction(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) {
+    let activity = {
+        let session = session_arc.lock().await;
+        ChatActivityCompletion {
+            chat_id: session.chat_id.clone(),
+            thread: session.thread.clone(),
+        }
+    };
+    maybe_enqueue_chat_activity_reaction(app, activity).await;
+}
+
 async fn ensure_claude_code_identity(
     session_arc: &Arc<AMutex<ChatSession>>,
     model: &BaseModelRecord,
@@ -765,6 +780,11 @@ pub fn start_generation(
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                         drop(session);
+                        maybe_enqueue_completion_activity_reaction(
+                            app.clone(),
+                            session_arc.clone(),
+                        )
+                        .await;
                         maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                         break;
                     }
@@ -1120,6 +1140,8 @@ pub fn start_generation(
                             .apply_chat_completion(ev, 4, "happy".to_string())
                             .await;
                     }
+                    maybe_enqueue_completion_activity_reaction(app.clone(), session_arc.clone())
+                        .await;
                     break;
                 }
                 ToolStepOutcome::Paused => {
@@ -1148,6 +1170,8 @@ pub fn start_generation(
                     ev.chat_id = Some(chat_id.to_string());
                     app.buddy_event_sink
                         .apply_chat_completion(ev, 4, "happy".to_string())
+                        .await;
+                    maybe_enqueue_completion_activity_reaction(app.clone(), session_arc.clone())
                         .await;
                     break;
                 }

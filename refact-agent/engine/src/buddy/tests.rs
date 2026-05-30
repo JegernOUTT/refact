@@ -9260,6 +9260,178 @@ async fn chat_reaction_empty_voice_response_falls_back_to_template() {
     );
 }
 
+#[test]
+fn chat_reaction_limiter_allows_moderate_periodic_reactions_during_hour() {
+    use super::chat_reactions::{
+        ChatReactionKind, ChatReactionLimiter, ChatReactionSkipReason, GLOBAL_HOURLY_CAP,
+        PER_CHAT_COOLDOWN_SECS,
+    };
+
+    assert_eq!(PER_CHAT_COOLDOWN_SECS, 180);
+    assert_eq!(GLOBAL_HOURLY_CAP, 20);
+
+    let mut limiter = ChatReactionLimiter::new();
+    let now = chrono::Utc::now();
+    for i in 0..GLOBAL_HOURLY_CAP {
+        let allowed = limiter.try_allow_kind(
+            "moderate-chat",
+            ChatReactionKind::Ambient,
+            now + Duration::seconds(i64::from(i) * PER_CHAT_COOLDOWN_SECS),
+        );
+        assert!(allowed.is_ok(), "moderate reaction {i} must be allowed");
+    }
+
+    assert_eq!(
+        limiter.try_allow_kind(
+            "another-chat",
+            ChatReactionKind::Ambient,
+            now + Duration::seconds(3599),
+        ),
+        Err(ChatReactionSkipReason::RateLimited)
+    );
+    assert!(limiter
+        .try_allow_kind(
+            "moderate-chat",
+            ChatReactionKind::Ambient,
+            now + Duration::seconds(3601),
+        )
+        .is_ok());
+}
+
+#[test]
+fn bug_reaction_not_blocked_by_ambient_cooldown() {
+    use super::chat_reactions::{ChatReactionKind, ChatReactionLimiter, ChatReactionSkipReason};
+
+    let mut limiter = ChatReactionLimiter::new();
+    let now = chrono::Utc::now();
+    assert!(limiter
+        .try_allow_kind("bug-independent-chat", ChatReactionKind::Ambient, now)
+        .is_ok());
+    assert!(limiter
+        .try_allow_kind(
+            "bug-independent-chat",
+            ChatReactionKind::BugCandidate,
+            now + Duration::seconds(10),
+        )
+        .is_ok());
+    assert_eq!(
+        limiter.try_allow_kind(
+            "bug-independent-chat",
+            ChatReactionKind::Ambient,
+            now + Duration::seconds(10),
+        ),
+        Err(ChatReactionSkipReason::RateLimited)
+    );
+}
+
+#[tokio::test]
+async fn chat_activity_reaction_emits_after_normal_chat_activity_or_completion() {
+    use super::chat_reactions::{
+        ChatActivityCompletion, AMBIENT_LINES, maybe_enqueue_chat_activity_reaction,
+    };
+    use crate::buddy::types::BuddyBubblePolicy;
+    use crate::chat::types::ThreadParams;
+
+    let (service, renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![Some(
+            "voice service should not be used".to_string(),
+        )]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app = make_gcx_with_buddy().await;
+
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: "activity-reaction-chat".to_string(),
+            thread: ThreadParams::default(),
+        },
+    )
+    .await;
+
+    let ev = wait_for_runtime_event(&app, "speech_chat_reaction").await;
+    assert_eq!(ev.source, "chat_reactions");
+    assert_eq!(ev.chat_id.as_deref(), Some("activity-reaction-chat"));
+    assert_eq!(ev.bubble_policy, Some(BuddyBubblePolicy::Ambient));
+    let speech = ev.speech_text.as_deref().unwrap_or_default();
+    assert!(
+        AMBIENT_LINES.contains(&speech),
+        "activity reaction must use ambient fallback, got: {speech}"
+    );
+    assert!(renderer.intent_kinds().is_empty());
+}
+
+#[tokio::test]
+async fn chat_activity_reaction_skips_planner_and_task_threads() {
+    use super::chat_reactions::{ChatActivityCompletion, maybe_enqueue_chat_activity_reaction};
+    use crate::chat::types::{TaskMeta as ChatTaskMeta, ThreadParams};
+
+    let app = make_gcx_with_buddy().await;
+    let mut planner = ThreadParams::default();
+    planner.mode = "task_planner".to_string();
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: "planner-activity-chat".to_string(),
+            thread: planner,
+        },
+    )
+    .await;
+
+    let mut task = ThreadParams::default();
+    task.task_meta = Some(ChatTaskMeta::default());
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: "task-activity-chat".to_string(),
+            thread: task,
+        },
+    )
+    .await;
+
+    let lock = app.buddy.buddy.lock().await;
+    let svc = lock.as_ref().unwrap();
+    assert!(svc.runtime_queue.items.is_empty());
+    let debug = svc.chat_reaction_debug.snapshot();
+    let filtered = debug
+        .recent_attempts
+        .iter()
+        .filter(|attempt| attempt.skip_reason.as_deref() == Some("thread_filtered"))
+        .count();
+    assert_eq!(filtered, 2);
+}
+
+#[tokio::test]
+async fn chat_activity_reaction_uses_safe_fallback_without_user_echo() {
+    use super::chat_reactions::{
+        ChatActivityCompletion, AMBIENT_LINES, maybe_enqueue_chat_activity_reaction,
+    };
+    use crate::chat::types::ThreadParams;
+
+    let app = make_gcx_with_buddy().await;
+    let mut thread = ThreadParams::default();
+    thread.title = "Acme customer roadmap token=PRIVATESECRET".to_string();
+
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: "safe-activity-reaction-chat".to_string(),
+            thread,
+        },
+    )
+    .await;
+
+    let ev = wait_for_runtime_event(&app, "speech_chat_reaction").await;
+    let speech = ev.speech_text.as_deref().unwrap_or_default();
+    assert!(AMBIENT_LINES.contains(&speech));
+    let serialized = serde_json::to_string(&ev).unwrap();
+    for private in ["Acme", "customer roadmap", "PRIVATESECRET"] {
+        assert!(
+            !serialized.contains(private),
+            "private text leaked: {private}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn chat_reaction_generated_text_is_redacted_before_storage() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
