@@ -1,10 +1,12 @@
 import { act } from "react-dom/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatContent } from "./ChatContent";
 import { createDefaultChatState, render, screen } from "../../utils/test-utils";
 import type { RootState } from "../../app/store";
 import type { ChatMessages } from "../../services/refact";
-import { switchToThread } from "../../features/Chat/Thread/actions";
+import {
+  switchToThread,
+} from "../../features/Chat/Thread/actions";
 import type { ChatThreadRuntime } from "../../features/Chat/Thread/types";
 
 function userMessage(content: string): ChatMessages[number] {
@@ -80,7 +82,7 @@ function makeChatState({
 }
 
 function renderChatContent(preloadedState: Partial<RootState>) {
-  render(
+  return render(
     <ChatContent onRetry={() => undefined} onStopStreaming={() => undefined} />,
     {
       preloadedState,
@@ -89,25 +91,40 @@ function renderChatContent(preloadedState: Partial<RootState>) {
 }
 
 describe("ChatContent compression progress", () => {
-  it("renders progress for an empty compressing thread", async () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders footer status for an empty compressing thread", async () => {
     renderChatContent(makeChatState({ isCompressing: true }));
 
-    expect(
-      await screen.findByTestId("compression-progress"),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Compressing context…",
+    );
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
     expect(
       screen.getByTestId("chat-virtualized-list-wrapper"),
     ).toBeInTheDocument();
+    expect(
+      screen
+        .getByTestId("compression-progress")
+        .closest("[data-testid='chat-virtuoso-item']"),
+    ).toBeNull();
+    expect(document.querySelector("canvas")).not.toBeInTheDocument();
   });
 
-  it("renders progress before snapshot while compressing", async () => {
+  it("renders footer status before snapshot while compressing", async () => {
     renderChatContent(
       makeChatState({ isCompressing: true, snapshotReceived: false }),
     );
 
-    expect(
-      await screen.findByTestId("compression-progress"),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Compressing context…",
+    );
     expect(
       screen.getByTestId("chat-virtualized-list-wrapper"),
     ).toBeInTheDocument();
@@ -137,7 +154,7 @@ describe("ChatContent compression progress", () => {
     expect(document.querySelector("canvas")).toBeInTheDocument();
   });
 
-  it("renders progress with existing streaming messages", async () => {
+  it("renders footer status with existing streaming messages", async () => {
     renderChatContent(
       makeChatState({
         messages: [userMessage("hello")],
@@ -146,10 +163,73 @@ describe("ChatContent compression progress", () => {
       }),
     );
 
-    expect(
-      await screen.findByTestId("compression-progress"),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Compressing context…",
+    );
     expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(
+      screen
+        .getByTestId("compression-progress")
+        .closest("[data-testid='chat-virtuoso-item']"),
+    ).toBeNull();
+  });
+
+  it("does not add a transient compression item to virtualized rows", async () => {
+    renderChatContent(
+      makeChatState({
+        messages: [userMessage("hello")],
+        isCompressing: true,
+      }),
+    );
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+    expect(screen.getByText("hello")).toBeInTheDocument();
+    const rows = screen.getAllByTestId("chat-virtuoso-item");
+    expect(rows).toHaveLength(1);
+    expect(
+      screen
+        .getByTestId("compression-progress")
+        .closest("[data-testid='chat-virtuoso-item']"),
+    ).toBeNull();
+  });
+
+  it("keeps fast compression visible for the minimum duration", () => {
+    vi.useFakeTimers({ now: 0 });
+    const { store } = renderChatContent(makeChatState({ isCompressing: true }));
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      store.dispatch({
+        type: "chatThread/applyChatEvent",
+        payload: {
+          chat_id: store.getState().chat.current_thread_id,
+          type: "runtime_updated",
+          seq: "1",
+          state: "idle",
+          is_compressing: false,
+        },
+      });
+    });
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(499);
+    });
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(
+      screen.queryByTestId("compression-progress"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("chat-virtualized-list-wrapper"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows switching loading instead of old compressing chat progress", async () => {
@@ -190,9 +270,7 @@ describe("ChatContent compression progress", () => {
         { preloadedState },
       );
 
-      expect(
-        await screen.findByTestId("compression-progress"),
-      ).toBeInTheDocument();
+      expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
       expect(screen.getByText("old chat content")).toBeInTheDocument();
 
       act(() => {

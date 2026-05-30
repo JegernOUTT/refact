@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from "uuid";
 import { ChatMessages, UserMessage } from "../../services/refact";
 import { UserInput } from "./UserInput";
 import { ScrollArea } from "../ScrollArea";
-import { Flex, Container, Button, Box } from "@radix-ui/themes";
+import { Flex, Container, Button, Box, Text } from "@radix-ui/themes";
 import styles from "./ChatContent.module.css";
 import { BuddyPulseContent } from "./BuddyPulseContent";
 import { ContextFiles } from "./ContextFiles";
@@ -61,7 +61,8 @@ import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
 import { PlanBanner } from "./PlanBanner";
-import { CompressionProgress } from "./CompressionProgress";
+
+const COMPRESSION_MIN_VISIBLE_MS = 500;
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -118,15 +119,50 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const prevChatIdRef = useRef(renderChatId);
   const prevDisplayMessagesRef = useRef<ChatMessages | null>(null);
   const prevDisplayItemsRef = useRef<DisplayItem[] | null>(null);
+  const [visibleCompression, setVisibleCompression] = useState(isCompressing);
+  const compressionVisibleSinceRef = useRef<number | null>(
+    isCompressing ? Date.now() : null,
+  );
+
+  useEffect(() => {
+    if (isCompressing) {
+      compressionVisibleSinceRef.current = Date.now();
+      setVisibleCompression(true);
+      return;
+    }
+
+    const visibleSince = compressionVisibleSinceRef.current;
+    if (visibleSince === null) {
+      setVisibleCompression(false);
+      return;
+    }
+
+    const elapsed = Date.now() - visibleSince;
+    const remaining = COMPRESSION_MIN_VISIBLE_MS - elapsed;
+    if (remaining <= 0) {
+      compressionVisibleSinceRef.current = null;
+      setVisibleCompression(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      compressionVisibleSinceRef.current = null;
+      setVisibleCompression(false);
+    }, remaining);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isCompressing]);
 
   useEffect(() => {
     if (prevChatIdRef.current !== renderChatId) {
       collapsibleState.reset();
       prevDisplayMessagesRef.current = null;
       prevDisplayItemsRef.current = null;
+      compressionVisibleSinceRef.current = isCompressing ? Date.now() : null;
+      setVisibleCompression(isCompressing);
       prevChatIdRef.current = renderChatId;
     }
-  }, [renderChatId, collapsibleState]);
+  }, [renderChatId, collapsibleState, isCompressing]);
 
   const handleBranch = useCallback(
     (messageId: string) => {
@@ -235,25 +271,11 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return nextItems;
   }, [messages, isStreaming]);
 
-  const augmentedDisplayItems = useMemo(() => {
-    if (isCompressing) {
-      return [
-        ...displayItems,
-        {
-          type: "compression_progress" as const,
-          key: "compression-progress-indicator",
-          messageIndex: -1,
-        },
-      ];
-    }
-    return displayItems;
-  }, [displayItems, isCompressing]);
-
   const initialScrollIndex = useMemo(() => {
-    return augmentedDisplayItems.length > 0
-      ? augmentedDisplayItems.length - 1
+    return displayItems.length > 0
+      ? displayItems.length - 1
       : undefined;
-  }, [augmentedDisplayItems]);
+  }, [displayItems]);
 
   const virtuosoFooter = useMemo(
     () => (
@@ -261,18 +283,38 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         <Container>
           <UncommittedChangesWarning />
         </Container>
-        <Flex justify="center" pt="4" pb="8">
+        <Flex
+          justify="center"
+          pt="4"
+          pb="8"
+          direction="column"
+          align="center"
+          gap="2"
+        >
           {!isWaitingForConfirmation && (
-            <LogoAnimation
-              size="8"
-              isStreaming={isStreaming}
-              isWaiting={isWaiting}
-            />
+            <>
+              <LogoAnimation
+                size="8"
+                isStreaming={isStreaming || visibleCompression}
+                isWaiting={isWaiting || visibleCompression}
+              />
+              {visibleCompression && (
+                <Text
+                  size="2"
+                  color="gray"
+                  role="status"
+                  aria-live="polite"
+                  data-testid="compression-progress"
+                >
+                  Compressing context…
+                </Text>
+              )}
+            </>
           )}
         </Flex>
       </>
     ),
-    [isStreaming, isWaiting, isWaitingForConfirmation],
+    [isStreaming, isWaiting, isWaitingForConfirmation, visibleCompression],
   );
 
   const renderDisplayItem = useCallback(
@@ -376,9 +418,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             <SummarizationMessageCard key={item.key} message={item.message} />
           );
 
-        case "compression_progress":
-          return <CompressionProgress />;
-
         default:
           return null;
       }
@@ -401,7 +440,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     );
   }
 
-  if (messages.length === 0 && !isCompressing) {
+  if (messages.length === 0 && !visibleCompression) {
     return (
       <Flex
         direction="column"
@@ -427,7 +466,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       >
         <VirtualizedChatList
           key={renderChatId}
-          items={augmentedDisplayItems}
+          items={displayItems}
           renderItem={renderDisplayItem}
           initialScrollIndex={initialScrollIndex}
           footer={virtuosoFooter}

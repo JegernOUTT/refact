@@ -157,12 +157,6 @@ type DisplayItemSummarization = {
   message: SummarizationMessage;
 };
 
-type DisplayItemCompressionProgress = {
-  type: "compression_progress";
-  key: string;
-  messageIndex: number;
-};
-
 export type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
@@ -173,8 +167,7 @@ export type DisplayItem =
   | DisplayItemError
   | DisplayItemSkillActivated
   | DisplayItemSkillReport
-  | DisplayItemSummarization
-  | DisplayItemCompressionProgress;
+  | DisplayItemSummarization;
 
 function updateAssistantStreamingFlags(
   items: DisplayItem[],
