@@ -2,6 +2,7 @@ import { RootState } from "../../app/store";
 import { hasProperty } from "../../utils";
 import { isDetailMessage } from "./commands";
 import { PROVIDERS_URL, PROVIDER_DEFAULTS_URL } from "./consts";
+import { buildApiUrlFromState } from "./apiUrl";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { capsApi } from "./caps";
 
@@ -361,9 +362,13 @@ export const providersApi = createApi({
     },
   }),
   endpoints: (builder) => ({
-    getConfiguredProviders: builder.query<ConfiguredProvidersResponse, number>({
-      queryFn: async (port, _api, extraOptions, baseQuery) => {
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}`;
+    getConfiguredProviders: builder.query<
+      ConfiguredProvidersResponse,
+      undefined
+    >({
+      queryFn: async (_arg, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(state, PROVIDERS_URL);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -405,8 +410,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -446,8 +453,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/schema`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/schema`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -485,8 +494,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/models`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/models`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -525,8 +536,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/available-models`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/available-models`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -561,12 +574,14 @@ export const providersApi = createApi({
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
         const providerName =
           args.useInstanceRoute === true ? args.providerName : "openrouter";
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${providerName}/models/${encodeURIComponent(
-          args.modelId,
-        )}/endpoints`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${providerName}/models/${encodeURIComponent(
+            args.modelId,
+          )}/endpoints`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -601,14 +616,13 @@ export const providersApi = createApi({
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
         const path = providerScopedPath(
           "/v1/openrouter/account-info",
           "openrouter",
           args,
           "/account-info",
         );
-        const url = `http://127.0.0.1:${port}${path}`;
+        const url = buildApiUrlFromState(state, path);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -632,14 +646,13 @@ export const providersApi = createApi({
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
         const path = providerScopedPath(
           "/v1/openrouter/health",
           "openrouter",
           args,
           "/health",
         );
-        const url = `http://127.0.0.1:${port}${path}`;
+        const url = buildApiUrlFromState(state, path);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -663,10 +676,10 @@ export const providersApi = createApi({
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${encodeURIComponent(
-          args.providerName,
-        )}/usage`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${encodeURIComponent(args.providerName)}/usage`,
+        );
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
@@ -709,10 +722,10 @@ export const providersApi = createApi({
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${encodeURIComponent(
-          args.providerName,
-        )}/usage`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${encodeURIComponent(args.providerName)}/usage`,
+        );
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10_000);
@@ -760,8 +773,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/models/toggle`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/models/toggle`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -820,8 +835,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/models/provider`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/models/provider`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -862,8 +879,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/custom-models`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/custom-models`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -909,8 +928,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/custom-models/remove`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/custom-models/remove`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -957,8 +978,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -994,8 +1017,10 @@ export const providersApi = createApi({
     >({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/oauth/start`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/oauth/start`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -1036,8 +1061,10 @@ export const providersApi = createApi({
           : [],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/oauth/exchange`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/oauth/exchange`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -1078,8 +1105,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${args.providerName}/oauth/logout`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${args.providerName}/oauth/logout`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -1104,8 +1133,10 @@ export const providersApi = createApi({
       ],
       queryFn: async (providerName, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDERS_URL}/${providerName}`;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${providerName}`,
+        );
 
         const result = await baseQuery({
           ...extraOptions,
@@ -1138,8 +1169,7 @@ export const providersApi = createApi({
       providesTags: ["DEFAULTS"],
       queryFn: async (_args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDER_DEFAULTS_URL}`;
+        const url = buildApiUrlFromState(state, PROVIDER_DEFAULTS_URL);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -1175,8 +1205,7 @@ export const providersApi = createApi({
       invalidatesTags: ["DEFAULTS"],
       queryFn: async (defaults, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${PROVIDER_DEFAULTS_URL}`;
+        const url = buildApiUrlFromState(state, PROVIDER_DEFAULTS_URL);
 
         const result = await baseQuery({
           ...extraOptions,

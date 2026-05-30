@@ -1,14 +1,11 @@
 import { providersApi } from "../services/refact";
 import { useAppSelector } from "./useAppSelector";
 import { selectBackendStatus } from "../features/Connection";
-import { selectLspPort } from "../features/Config/configSlice";
 
 export function useGetConfiguredProvidersQuery() {
   const backendStatus = useAppSelector(selectBackendStatus);
-  const lspPort = useAppSelector(selectLspPort);
-  return providersApi.useGetConfiguredProvidersQuery(lspPort, {
-    skip:
-      backendStatus !== "online" || !Number.isFinite(lspPort) || lspPort <= 0,
+  return providersApi.useGetConfiguredProvidersQuery(undefined, {
+    skip: backendStatus !== "online",
     refetchOnMountOrArgChange: true,
     refetchOnFocus: true,
     refetchOnReconnect: true,

@@ -9,6 +9,7 @@ import {
   INTEGRATIONS_URL,
 } from "./consts";
 import { isDetailMessage } from "./commands";
+import { buildApiUrlFromState } from "./apiUrl";
 
 // TODO: Cache invalidation logic.
 export const integrationsApi = createApi({
@@ -30,8 +31,7 @@ export const integrationsApi = createApi({
       providesTags: ["INTEGRATIONS"],
       async queryFn(_arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${INTEGRATIONS_URL}`;
+        const url = buildApiUrlFromState(state, INTEGRATIONS_URL);
         const response = await baseQuery({
           url,
           ...extraOptions,
@@ -60,8 +60,7 @@ export const integrationsApi = createApi({
       ],
       async queryFn(pathArg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${INTEGRATION_MCP_LOGS_PATH}`;
+        const url = buildApiUrlFromState(state, INTEGRATION_MCP_LOGS_PATH);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -107,8 +106,7 @@ export const integrationsApi = createApi({
       ],
       async queryFn(pathArg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${INTEGRATION_GET_URL}`;
+        const url = buildApiUrlFromState(state, INTEGRATION_GET_URL);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -147,8 +145,7 @@ export const integrationsApi = createApi({
       ],
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${INTEGRATION_SAVE_URL}`;
+        const url = buildApiUrlFromState(state, INTEGRATION_SAVE_URL);
         const response = await baseQuery({
           ...extraOptions,
           url,
@@ -168,8 +165,9 @@ export const integrationsApi = createApi({
       ],
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${INTEGRATION_DELETE_URL}?integration_path=${arg}`;
+        const url = buildApiUrlFromState(state, INTEGRATION_DELETE_URL, {
+          integration_path: arg,
+        });
 
         const response = await baseQuery({
           ...extraOptions,
@@ -203,8 +201,7 @@ export const integrationsApi = createApi({
     >({
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/mcp/oauth/start`;
+        const url = buildApiUrlFromState(state, "/v1/mcp/oauth/start");
         const response = await baseQuery({
           ...extraOptions,
           url,
@@ -223,8 +220,7 @@ export const integrationsApi = createApi({
       invalidatesTags: [{ type: "MCP_OAUTH" }],
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/mcp/oauth/exchange`;
+        const url = buildApiUrlFromState(state, "/v1/mcp/oauth/exchange");
         const response = await baseQuery({
           ...extraOptions,
           url,
@@ -245,8 +241,7 @@ export const integrationsApi = createApi({
       ],
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/mcp/oauth/logout`;
+        const url = buildApiUrlFromState(state, "/v1/mcp/oauth/logout");
         const response = await baseQuery({
           ...extraOptions,
           url,
@@ -265,8 +260,7 @@ export const integrationsApi = createApi({
       invalidatesTags: ["MCP_OAUTH"],
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/mcp/oauth/cancel`;
+        const url = buildApiUrlFromState(state, "/v1/mcp/oauth/cancel");
         const response = await baseQuery({
           ...extraOptions,
           url,
@@ -284,10 +278,9 @@ export const integrationsApi = createApi({
       ],
       async queryFn(configPath, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/mcp/oauth/status?config_path=${encodeURIComponent(
-          configPath,
-        )}`;
+        const url = buildApiUrlFromState(state, "/v1/mcp/oauth/status", {
+          config_path: configPath,
+        });
         const response = await baseQuery({ ...extraOptions, url });
         if (response.error) return { error: response.error };
         return { data: response.data as MCPOAuthStatusResponse };

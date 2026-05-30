@@ -15,8 +15,6 @@ import {
   ReaderIcon,
   RowsIcon,
 } from "@radix-ui/react-icons";
-import { useAppSelector } from "../../../hooks";
-import { selectLspPort } from "../../../features/Config/configSlice";
 import {
   useGetMCPServerInfoQuery,
   useReconnectMCPServerMutation,
@@ -84,16 +82,15 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
   configPath,
   integrName,
 }) => {
-  const port = useAppSelector(selectLspPort);
   const { data, isLoading, isError } = useGetMCPServerInfoQuery(
-    { configPath, port },
+    { configPath },
     { pollingInterval: 3000 },
   );
   const [reconnect, { isLoading: isReconnecting }] =
     useReconnectMCPServerMutation();
 
   const handleReconnect = () => {
-    void reconnect({ configPath, port });
+    void reconnect({ configPath });
   };
 
   if (isLoading) {

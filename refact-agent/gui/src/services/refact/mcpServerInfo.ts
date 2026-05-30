@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type MCPToolAnnotations = {
   readOnlyHint?: boolean;
@@ -64,17 +65,15 @@ export const mcpServerInfoApi = createApi({
     },
   }),
   endpoints: (builder) => ({
-    getMCPServerInfo: builder.query<
-      MCPServerInfo,
-      { configPath: string; port: number }
-    >({
+    getMCPServerInfo: builder.query<MCPServerInfo, { configPath: string }>({
       providesTags: (_result, _error, arg) => [
         { type: "MCPServerInfo", id: arg.configPath },
       ],
-      async queryFn({ configPath, port }, _api, _extraOptions, baseQuery) {
-        const url = `http://127.0.0.1:${port}/v1/mcp-server-info?config_path=${encodeURIComponent(
-          configPath,
-        )}`;
+      async queryFn({ configPath }, api, _extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(state, "/v1/mcp-server-info", {
+          config_path: configPath,
+        });
         const result = await baseQuery(url);
         if (result.error) return { error: result.error };
         return { data: result.data as MCPServerInfo };
@@ -82,15 +81,15 @@ export const mcpServerInfoApi = createApi({
     }),
     reconnectMCPServer: builder.mutation<
       { reconnect_triggered: boolean },
-      { configPath: string; port: number }
+      { configPath: string }
     >({
       invalidatesTags: (_result, _error, arg) => [
         { type: "MCPServerInfo", id: arg.configPath },
       ],
-      async queryFn({ configPath, port }, _api, _extraOptions, baseQuery) {
-        const url = `http://127.0.0.1:${port}/v1/mcp-server-reconnect`;
+      async queryFn({ configPath }, api, _extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
         const result = await baseQuery({
-          url,
+          url: buildApiUrlFromState(state, "/v1/mcp-server-reconnect"),
           method: "POST",
           body: { config_path: configPath },
         });

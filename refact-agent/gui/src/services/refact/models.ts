@@ -8,6 +8,7 @@ import {
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { hasProperty } from "../../utils";
 import { isDetailMessage } from "./commands";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export const modelsApi = createApi({
   reducerPath: "models",
@@ -26,8 +27,7 @@ export const modelsApi = createApi({
       providesTags: ["MODELS"],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${MODELS_URL}`;
+        const url = buildApiUrlFromState(state, MODELS_URL);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -62,8 +62,7 @@ export const modelsApi = createApi({
         const { modelName, modelType, providerName } = args;
 
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${MODEL_URL}`;
+        const url = buildApiUrlFromState(state, MODEL_URL);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -97,8 +96,7 @@ export const modelsApi = createApi({
     getModelDefaults: builder.query<Model, GetModelDefaultsArgs>({
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${MODEL_DEFAULTS_URL}`;
+        const url = buildApiUrlFromState(state, MODEL_DEFAULTS_URL);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -133,8 +131,7 @@ export const modelsApi = createApi({
     >({
       queryFn: async (_args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${COMPLETION_MODEL_FAMILIES_URL}`;
+        const url = buildApiUrlFromState(state, COMPLETION_MODEL_FAMILIES_URL);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -166,8 +163,7 @@ export const modelsApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${MODEL_URL}`;
+        const url = buildApiUrlFromState(state, MODEL_URL);
 
         const result = await baseQuery({
           ...extraOptions,
@@ -203,8 +199,7 @@ export const modelsApi = createApi({
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${MODEL_URL}`;
+        const url = buildApiUrlFromState(state, MODEL_URL);
 
         const result = await baseQuery({
           ...extraOptions,

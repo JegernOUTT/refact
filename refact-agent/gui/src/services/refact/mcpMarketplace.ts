@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type MCPServer = {
   id: string;
@@ -116,19 +117,8 @@ export const mcpMarketplaceApi = createApi({
     >({
       queryFn: async (params, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const searchParams = new URLSearchParams();
-        if (params?.source) searchParams.set("source", params.source);
-        if (params?.q) searchParams.set("q", params.q);
-        if (params?.page !== undefined)
-          searchParams.set("page", String(params.page));
-        if (params?.page_size !== undefined)
-          searchParams.set("page_size", String(params.page_size));
-        const qs = searchParams.toString();
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/mcp/marketplace${
-            qs ? `?${qs}` : ""
-          }`,
+          url: buildApiUrlFromState(state, "/v1/mcp/marketplace", params),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as MarketplaceResponse };
@@ -139,9 +129,8 @@ export const mcpMarketplaceApi = createApi({
     installServer: builder.mutation<InstallResponse, InstallRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/mcp/marketplace/install`,
+          url: buildApiUrlFromState(state, "/v1/mcp/marketplace/install"),
           method: "POST",
           body,
         });
@@ -154,9 +143,8 @@ export const mcpMarketplaceApi = createApi({
     getInstalledServers: builder.query<InstalledResponse, undefined>({
       queryFn: async (_arg, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/mcp/marketplace/installed`,
+          url: buildApiUrlFromState(state, "/v1/mcp/marketplace/installed"),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as InstalledResponse };
@@ -167,9 +155,8 @@ export const mcpMarketplaceApi = createApi({
     getAutoName: builder.mutation<AutoNameResponse, AutoNameRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/mcp/auto-name`,
+          url: buildApiUrlFromState(state, "/v1/mcp/auto-name"),
           method: "POST",
           body,
         });
@@ -184,9 +171,8 @@ export const mcpMarketplaceApi = createApi({
     >({
       queryFn: async (_arg, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/mcp/marketplace/sources`,
+          url: buildApiUrlFromState(state, "/v1/mcp/marketplace/sources"),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as { sources: MarketplaceSource[] } };
@@ -198,9 +184,8 @@ export const mcpMarketplaceApi = createApi({
       {
         queryFn: async (body, api, _opts, baseQuery) => {
           const state = api.getState() as RootState;
-          const port = state.config.lspPort;
           const result = await baseQuery({
-            url: `http://127.0.0.1:${port}/v1/mcp/marketplace/sources`,
+            url: buildApiUrlFromState(state, "/v1/mcp/marketplace/sources"),
             method: "POST",
             body,
           });
@@ -217,11 +202,11 @@ export const mcpMarketplaceApi = createApi({
     >({
       queryFn: async ({ id }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/mcp/marketplace/sources/${encodeURIComponent(
-            id,
-          )}`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/mcp/marketplace/sources/${encodeURIComponent(id)}`,
+          ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
@@ -236,11 +221,11 @@ export const mcpMarketplaceApi = createApi({
     >({
       queryFn: async ({ id, ...body }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/mcp/marketplace/sources/${encodeURIComponent(
-            id,
-          )}/configure`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/mcp/marketplace/sources/${encodeURIComponent(id)}/configure`,
+          ),
           method: "POST",
           body,
         });

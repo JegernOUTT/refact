@@ -8,15 +8,17 @@ import { setUpStore } from "../app/store";
 import { setBackendStatus } from "../features/Connection";
 import { useGetConfiguredProvidersQuery } from "../hooks/useProvidersQuery";
 import { providersApi } from "../services/refact";
+import type { Config } from "../features/Config/configSlice";
 import { server } from "../utils/mockServer";
 
-function createWrapper() {
+function createWrapper(config?: Partial<Config>) {
   const store = setUpStore({
     config: {
       apiKey: "test",
       lspPort: 8001,
       themeProps: {},
       host: "vscode",
+      ...config,
     },
   });
 
@@ -53,6 +55,60 @@ describe("useGetConfiguredProvidersQuery", () => {
       expect(result.current.isSuccess).toBe(true);
     });
     expect(providersRequests).toBe(1);
+
+    store.dispatch(providersApi.util.resetApiState());
+  });
+
+  it("uses relative providers URL for dev web configs", async () => {
+    const providerUrls: string[] = [];
+    server.use(
+      http.get("/v1/providers", ({ request }) => {
+        providerUrls.push(new URL(request.url).pathname);
+        return HttpResponse.json({ providers: [] });
+      }),
+    );
+
+    const { store, wrapper } = createWrapper({ host: "web", dev: true });
+    store.dispatch(setBackendStatus({ status: "online" }));
+
+    const { result } = renderHook(() => useGetConfiguredProvidersQuery(), {
+      wrapper,
+    });
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+    expect(providerUrls).toEqual(["/v1/providers"]);
+
+    store.dispatch(providersApi.util.resetApiState());
+  });
+
+  it("uses sanitized remote providers URL for standalone web configs", async () => {
+    let providerUrl = "";
+    server.use(
+      http.get(
+        "https://remote.example.test/refact/v1/providers",
+        ({ request }) => {
+          providerUrl = request.url;
+          return HttpResponse.json({ providers: [] });
+        },
+      ),
+    );
+
+    const { store, wrapper } = createWrapper({
+      host: "web",
+      lspUrl: "https://remote.example.test/refact/v1/ping/Refact",
+    });
+    store.dispatch(setBackendStatus({ status: "online" }));
+
+    const { result } = renderHook(() => useGetConfiguredProvidersQuery(), {
+      wrapper,
+    });
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+    expect(providerUrl).toBe("https://remote.example.test/refact/v1/providers");
 
     store.dispatch(providersApi.util.resetApiState());
   });

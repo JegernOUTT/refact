@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { render, screen, fireEvent } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
+import { setUpStore } from "../app/store";
 import { MCPMarketplace } from "../features/MCPMarketplace";
 import { ServerCard } from "../features/MCPMarketplace/ServerCard";
 import { SourceSelector } from "../features/MCPMarketplace/SourceSelector";
@@ -10,6 +11,7 @@ import type {
   MarketplaceResponse,
   MarketplaceSource,
 } from "../services/refact/mcpMarketplace";
+import { mcpMarketplaceApi } from "../services/refact/mcpMarketplace";
 
 const MOCK_SERVER: MCPServer = {
   id: "test-server",
@@ -70,6 +72,88 @@ const PRELOADED_STATE = {
     host: "vscode" as const,
   },
 };
+
+describe("mcpMarketplaceApi", () => {
+  it("uses relative marketplace URLs for dev web configs", async () => {
+    const marketplaceUrls: string[] = [];
+    server.use(
+      http.get("/v1/mcp/marketplace", ({ request }) => {
+        const url = new URL(request.url);
+        marketplaceUrls.push(`${url.pathname}${url.search}`);
+        return HttpResponse.json(MOCK_RESPONSE);
+      }),
+    );
+
+    const store = setUpStore({
+      config: {
+        apiKey: "test",
+        lspPort: 8001,
+        themeProps: {},
+        host: "web",
+        dev: true,
+      },
+    });
+
+    try {
+      await store
+        .dispatch(
+          mcpMarketplaceApi.endpoints.getMarketplace.initiate({
+            q: "test server",
+            page: 2,
+          }),
+        )
+        .unwrap();
+
+      expect(marketplaceUrls).toEqual([
+        "/v1/mcp/marketplace?q=test+server&page=2",
+      ]);
+    } finally {
+      store.dispatch(mcpMarketplaceApi.util.resetApiState());
+    }
+  });
+
+  it("uses sanitized remote marketplace URLs for standalone web configs", async () => {
+    let installUrl = "";
+    server.use(
+      http.post(
+        "https://remote.example.test/refact/v1/mcp/marketplace/install",
+        ({ request }) => {
+          installUrl = request.url;
+          return HttpResponse.json({
+            installed: true,
+            config_path: "/tmp/server.yaml",
+          });
+        },
+      ),
+    );
+
+    const store = setUpStore({
+      config: {
+        apiKey: "test",
+        lspPort: 8001,
+        themeProps: {},
+        host: "web",
+        lspUrl: "https://remote.example.test/refact/v1/ping/Refact",
+      },
+    });
+
+    try {
+      await store
+        .dispatch(
+          mcpMarketplaceApi.endpoints.installServer.initiate({
+            server_id: "test-server",
+          }),
+        )
+        .unwrap();
+
+      expect(installUrl).toBe(
+        "https://remote.example.test/refact/v1/mcp/marketplace/install",
+      );
+    } finally {
+      store.dispatch(mcpMarketplaceApi.util.resetApiState());
+    }
+  });
+});
 
 describe("ServerCard", () => {
   it("renders server name, publisher and description", () => {
