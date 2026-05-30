@@ -20,11 +20,20 @@ describe("sanitizeEngineBaseUrl", () => {
   });
 
   test("preserves reverse proxy base before v1", () => {
+    expect(sanitizeEngineBaseUrl("https://example.com/refact/v1/ping")).toBe(
+      "https://example.com/refact",
+    );
     expect(
       sanitizeEngineBaseUrl(
         "https://example.com/refact/proxy/v1/ping?x=1#hash",
       ),
     ).toBe("https://example.com/refact/proxy");
+  });
+
+  test("preserves earlier v1 proxy path segments", () => {
+    expect(
+      sanitizeEngineBaseUrl("https://example.com/api/v1/refact/v1/ping"),
+    ).toBe("https://example.com/api/v1/refact");
   });
 
   test("strips stale v1 ping path back to the engine base", () => {

@@ -11,6 +11,46 @@ export type QueryParams = Record<string, QueryValue> | URLSearchParams;
 
 const DEFAULT_LSP_PORT = 8001;
 const SAME_ORIGIN_IDENTITY = "same-origin";
+const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
+  "ast-file-symbols",
+  "ast-status",
+  "at-command-completion",
+  "at-command-preview",
+  "caps",
+  "chat",
+  "chats",
+  "checkpoints-preview",
+  "checkpoints-restore",
+  "code-completion",
+  "code-lens",
+  "customization",
+  "docker-container-action",
+  "docker-container-list",
+  "git-commit",
+  "graceful-shutdown",
+  "integration-get",
+  "integration-save",
+  "integrations",
+  "knowledge",
+  "knowledge-graph",
+  "links",
+  "ping",
+  "rag-status",
+  "tasks",
+  "tools",
+  "trajectories",
+  "vecdb-search",
+  "voice",
+]);
+
+function isEngineV1Suffix(segments: string[], index: number): boolean {
+  const nextSegment = segments[index + 1];
+  return (
+    nextSegment === undefined ||
+    nextSegment === "" ||
+    ENGINE_V1_ENDPOINT_SEGMENTS.has(nextSegment)
+  );
+}
 
 function isValidLspPort(port: number | undefined): boolean {
   return Number.isFinite(port) && port !== undefined && port > 0;
@@ -18,9 +58,15 @@ function isValidLspPort(port: number | undefined): boolean {
 
 function dropV1Path(pathname: string): string {
   const segments = pathname.split("/");
-  const v1Index = segments.findIndex((segment) => segment === "v1");
-  const kept = v1Index === -1 ? pathname : segments.slice(0, v1Index).join("/");
-  return kept.replace(/\/+$/, "") || "/";
+
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index] === "v1" && isEngineV1Suffix(segments, index)) {
+      const kept = segments.slice(0, index).join("/");
+      return kept.replace(/\/+$/, "") || "/";
+    }
+  }
+
+  return pathname.replace(/\/+$/, "") || "/";
 }
 
 function appendQuery(url: string, query?: QueryParams): string {

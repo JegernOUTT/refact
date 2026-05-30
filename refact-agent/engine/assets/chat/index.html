@@ -19,7 +19,8 @@
           window.localStorage.removeItem("lspUrl");
         } catch (_error) {}
 
-        window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];
+        window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ =
+          window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ || [];
         const rawCandidates = Array.isArray(window.__REFACT_ENGINE_ORIGIN_CANDIDATES__)
           ? window.__REFACT_ENGINE_ORIGIN_CANDIDATES__
           : [];
