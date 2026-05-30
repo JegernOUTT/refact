@@ -187,6 +187,60 @@ pub struct TransformStats {
 
 pub const COMPRESSION_REPORT_ROLE: &str = "compression_report";
 pub const COMPRESSION_REPORT_KIND: &str = "chat_compression_report";
+const COMPRESSION_REPORT_EXTRA_KEY: &str = "compression_report";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompressionReportMetadataKey {
+    kind: String,
+    context_files_removed: u64,
+    context_messages_dropped: u64,
+    tool_results_truncated: u64,
+    tokens_before: u64,
+    tokens_after: u64,
+    estimated_tokens_saved: u64,
+    reduction_percent: u64,
+}
+
+fn compression_report_metadata_key(message: &ChatMessage) -> Option<CompressionReportMetadataKey> {
+    if message.role != COMPRESSION_REPORT_ROLE {
+        return None;
+    }
+
+    let metadata = message.extra.get(COMPRESSION_REPORT_EXTRA_KEY)?;
+    Some(CompressionReportMetadataKey {
+        kind: metadata.get("kind")?.as_str()?.to_string(),
+        context_files_removed: metadata.get("context_files_removed")?.as_u64()?,
+        context_messages_dropped: metadata.get("context_messages_dropped")?.as_u64()?,
+        tool_results_truncated: metadata.get("tool_results_truncated")?.as_u64()?,
+        tokens_before: metadata.get("tokens_before")?.as_u64()?,
+        tokens_after: metadata.get("tokens_after")?.as_u64()?,
+        estimated_tokens_saved: metadata.get("estimated_tokens_saved")?.as_u64()?,
+        reduction_percent: metadata.get("reduction_percent")?.as_u64()?,
+    })
+}
+
+fn remove_equivalent_compression_reports(
+    messages: &mut Vec<ChatMessage>,
+    report: &ChatMessage,
+    affected_boundary: usize,
+) -> usize {
+    let Some(report_key) = compression_report_metadata_key(report) else {
+        return affected_boundary;
+    };
+
+    let mut idx = 0usize;
+    let mut removed_before_boundary = 0usize;
+    messages.retain(|message| {
+        let remove = compression_report_metadata_key(message) == Some(report_key.clone());
+        if remove && idx < affected_boundary {
+            removed_before_boundary += 1;
+        }
+        idx += 1;
+        !remove
+    });
+
+    affected_boundary.saturating_sub(removed_before_boundary)
+}
 
 pub fn build_compression_report_message(
     context_files_removed: usize,
@@ -216,6 +270,7 @@ pub fn build_compression_report_message(
         }),
     );
     ChatMessage {
+        message_id: Uuid::new_v4().to_string(),
         role: COMPRESSION_REPORT_ROLE.to_string(),
         content: ChatContent::SimpleText(format!(
             "## Chat compression report\n\n- Context files removed: {}\n- Context messages dropped: {}\n- Tool outputs truncated: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%",
@@ -603,7 +658,8 @@ pub fn compress_in_place(
             before_tokens,
             after_tokens_pre,
         );
-        let insert_idx = compression_report_insert_index(messages, boundary);
+        let adjusted_boundary = remove_equivalent_compression_reports(messages, &report, boundary);
+        let insert_idx = compression_report_insert_index(messages, adjusted_boundary);
         messages.insert(insert_idx, report);
     }
 
@@ -853,6 +909,29 @@ mod tests {
             .iter()
             .filter(|msg| msg.role == COMPRESSION_REPORT_ROLE)
             .count()
+    }
+
+    fn stable_existing_report_for_drop_all_context() -> ChatMessage {
+        let mut report = build_compression_report_message(1, 1, 0, 0, 0);
+        for _ in 0..10 {
+            let before = approx_token_count(&[
+                make_user_msg("hello"),
+                report.clone(),
+                make_context_file_msg("test.rs", "fn main() {}"),
+                make_assistant_msg("response"),
+            ]);
+            let after = approx_token_count(&[
+                make_user_msg("hello"),
+                report.clone(),
+                make_assistant_msg("response"),
+            ]);
+            let next = build_compression_report_message(1, 1, 0, before, after);
+            if compression_report_metadata_key(&next) == compression_report_metadata_key(&report) {
+                return report;
+            }
+            report = next;
+        }
+        report
     }
 
     #[test]
@@ -1262,6 +1341,61 @@ mod tests {
                 .as_u64()
                 .map(|value| value as usize)
         );
+    }
+
+    #[test]
+    fn test_compression_report_message_has_non_empty_id() {
+        let report = build_compression_report_message(1, 1, 1, 100, 10);
+
+        assert!(!report.message_id.is_empty());
+        assert!(Uuid::parse_str(&report.message_id).is_ok());
+    }
+
+    #[test]
+    fn test_compression_report_repeated_equivalent_compression_dedupes() {
+        let existing_report = stable_existing_report_for_drop_all_context();
+        let existing_key = compression_report_metadata_key(&existing_report);
+        let mut messages = vec![
+            make_user_msg("hello"),
+            existing_report,
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        assert_eq!(compression_report_count(&messages), 1);
+        assert_eq!(
+            compression_report_metadata_key(compression_report(&messages)),
+            existing_key
+        );
+    }
+
+    #[test]
+    fn test_compression_report_non_equivalent_reports_are_preserved() {
+        let existing_report = build_compression_report_message(0, 0, 1, 1000, 800);
+        let existing_key = compression_report_metadata_key(&existing_report);
+        let mut messages = vec![
+            make_user_msg("hello"),
+            existing_report,
+            make_context_file_msg("test.rs", "fn main() {}"),
+            make_assistant_msg("response"),
+        ];
+        let opts = CompressOptions {
+            drop_all_context: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        assert_eq!(compression_report_count(&messages), 2);
+        assert!(messages
+            .iter()
+            .any(|message| compression_report_metadata_key(message) == existing_key));
     }
 
     #[test]
