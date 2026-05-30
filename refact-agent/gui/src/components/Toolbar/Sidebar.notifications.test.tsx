@@ -45,7 +45,7 @@ describe("Toolbar", () => {
     ).toHaveTextContent("1");
   });
 
-  it("opens the chat URL as an external browser link", async () => {
+  it("opens the current origin as an external browser link in relative mode", async () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
 
     render(<Toolbar activeTab={{ type: "dashboard" }} />, {
@@ -53,16 +53,48 @@ describe("Toolbar", () => {
         config: {
           host: "web",
           lspPort: 8001,
-          lspUrl: "http://127.0.0.1:8765",
+          lspUrl: "http://127.0.0.1:8765/v1/ping/Refact",
+          dev: true,
           themeProps: {},
         },
       },
     });
 
+    expect(
+      screen.getByLabelText(`Engine URL ${window.location.origin}`),
+    ).toBeInTheDocument();
+
     await userEvent.click(screen.getByLabelText("Open Chat in Browser"));
 
     expect(open).toHaveBeenCalledWith(
-      "http://127.0.0.1:8765",
+      window.location.origin,
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  it("opens sanitized standalone URLs without stale v1 paths", async () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+
+    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+      preloadedState: {
+        config: {
+          host: "web",
+          lspPort: 8001,
+          lspUrl: "https://example.com/refact/v1/ping/Refact",
+          themeProps: {},
+        },
+      },
+    });
+
+    expect(
+      screen.getByLabelText("Engine URL https://example.com/refact"),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("Open Chat in Browser"));
+
+    expect(open).toHaveBeenCalledWith(
+      "https://example.com/refact",
       "_blank",
       "noopener,noreferrer",
     );

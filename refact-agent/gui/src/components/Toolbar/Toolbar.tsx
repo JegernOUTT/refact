@@ -57,6 +57,10 @@ import {
   useOpenUrl,
 } from "../../hooks";
 import { useGetChatModesQuery } from "../../services/refact/chatModes";
+import {
+  resolveEngineBaseUrl,
+  type EngineApiConfig,
+} from "../../services/refact/apiUrl";
 
 import styles from "./Toolbar.module.css";
 import { ConnectionStatusIndicator } from "../ConnectionStatus";
@@ -126,10 +130,15 @@ const ToolbarIconButton = ({
   </HoverCard.Root>
 );
 
-function normalizeEngineUrl(lspUrl: string | undefined, lspPort: number): string {
-  const fallback = `http://127.0.0.1:${lspPort}`;
-  const value = lspUrl?.trim() ? lspUrl.trim() : fallback;
-  return value.replace(/\/+$/, "");
+function resolveBrowserEngineUrl(config: EngineApiConfig): string {
+  const baseUrl = resolveEngineBaseUrl(config);
+  if (!baseUrl) return window.location.origin;
+  if (baseUrl.startsWith("/")) {
+    return new URL(baseUrl, window.location.origin)
+      .toString()
+      .replace(/\/+$/, "");
+  }
+  return baseUrl;
 }
 
 export const Toolbar = ({ activeTab }: ToolbarProps) => {
@@ -137,12 +146,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const activeTabRef = useRef<HTMLDivElement | null>(null);
   const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
-  const { host, lspPort, lspUrl } = useConfig();
+  const config = useConfig();
+  const { host } = config;
   const openUrl = useOpenUrl();
-  const engineUrl = useMemo(
-    () => normalizeEngineUrl(lspUrl, lspPort),
-    [lspPort, lspUrl],
-  );
+  const engineUrl = useMemo(() => resolveBrowserEngineUrl(config), [config]);
 
   const tabs = useAppSelector(selectTabsDisplayData);
   const allThreads = useAppSelector(selectAllThreads);
@@ -548,7 +555,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       <div className={styles.toolbarSection}>
         <ConnectionStatusIndicator />
-        <span className={styles.engineUrl} title={engineUrl} aria-label={`Engine URL ${engineUrl}`}>
+        <span
+          className={styles.engineUrl}
+          title={engineUrl}
+          aria-label={`Engine URL ${engineUrl}`}
+        >
           {engineUrl}
         </span>
       </div>

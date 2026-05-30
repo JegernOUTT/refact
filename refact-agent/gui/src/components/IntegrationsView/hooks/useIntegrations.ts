@@ -38,6 +38,7 @@ import {
   NotConfiguredIntegrationWithIconRecord,
   ToolParameterEntity,
 } from "../../../services/refact";
+import { buildApiUrl } from "../../../services/refact/apiUrl";
 import { toPascalCase } from "../../../utils/toPascalCase";
 import { validateSnakeCase } from "../../../utils/validateSnakeCase";
 import { formatIntegrationIconPath } from "../../../utils/formatIntegrationIconPath";
@@ -186,7 +187,6 @@ export const useIntegrations = ({
     useState<NotConfiguredIntegrationWithIconRecord | null>(null);
 
   const config = useAppSelector(selectConfig);
-  const port = config.lspPort;
 
   const integrationLogo = useMemo(() => {
     const iconPath = currentIntegration
@@ -195,8 +195,11 @@ export const useIntegrations = ({
         ? formatIntegrationIconPath(currentNotConfiguredIntegration.icon_path)
         : "";
 
-    return `http://127.0.0.1:${port}/v1${iconPath}`;
-  }, [currentIntegration, currentNotConfiguredIntegration, port]);
+    const integrationIconPath = iconPath.startsWith("/v1/")
+      ? iconPath
+      : `/v1${iconPath}`;
+    return buildApiUrl(config, integrationIconPath);
+  }, [config, currentIntegration, currentNotConfiguredIntegration]);
 
   // This useEffect is required to decide whether or not the integration should be opened in intermediate page
   useEffect(() => {

@@ -9,6 +9,7 @@ import {
   DOCUMENTATION_REMOVE,
 } from "../services/refact/consts";
 import { useConfig } from "../hooks";
+import { buildApiUrl, type EngineApiConfig } from "../services/refact/apiUrl";
 
 type DocListResponse = {
   url: string;
@@ -41,11 +42,9 @@ function isDocListResponse(arr: unknown): arr is DocListResponse[] {
 }
 
 async function fetchDocumentationList(
-  lspUrl: string | undefined,
+  config: EngineApiConfig,
 ): Promise<DocumentationSource[]> {
-  const docsEndpoint = lspUrl
-    ? `${lspUrl.replace(/\/*$/, "")}${DOCUMENTATION_LIST}`
-    : DOCUMENTATION_LIST;
+  const docsEndpoint = buildApiUrl(config, DOCUMENTATION_LIST);
 
   const response = await fetch(docsEndpoint, {
     method: "GET",
@@ -76,15 +75,15 @@ async function fetchDocumentationList(
 }
 
 export const Documentation: React.FC<{ goBack?: () => void }> = () => {
-  const { lspUrl } = useConfig();
+  const config = useConfig();
   const [documentationSources, setDocumentationSources] = useState<
     DocumentationSource[]
   >([]);
 
   const refetch = useCallback(async () => {
-    const docSources = await fetchDocumentationList(lspUrl);
+    const docSources = await fetchDocumentationList(config);
     setDocumentationSources(docSources);
-  }, [lspUrl]);
+  }, [config]);
 
   useEffect(() => {
     void refetch();
@@ -96,9 +95,7 @@ export const Documentation: React.FC<{ goBack?: () => void }> = () => {
     max_pages: number,
   ) => {
     const f = async () => {
-      const docsEndpoint = lspUrl
-        ? `${lspUrl.replace(/\/*$/, "")}${DOCUMENTATION_ADD}`
-        : DOCUMENTATION_ADD;
+      const docsEndpoint = buildApiUrl(config, DOCUMENTATION_ADD);
 
       const response = await fetch(docsEndpoint, {
         method: "POST",
@@ -123,9 +120,7 @@ export const Documentation: React.FC<{ goBack?: () => void }> = () => {
 
   const deleteDocumentation = (url: string) => {
     const f = async () => {
-      const docsEndpoint = lspUrl
-        ? `${lspUrl.replace(/\/*$/, "")}${DOCUMENTATION_REMOVE}`
-        : DOCUMENTATION_REMOVE;
+      const docsEndpoint = buildApiUrl(config, DOCUMENTATION_REMOVE);
 
       const response = await fetch(docsEndpoint, {
         method: "POST",

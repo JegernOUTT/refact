@@ -13,6 +13,7 @@ import {
 import { selectConfig } from "../../../features/Config/configSlice";
 import { formatIntegrationIconPath } from "../../../utils/formatIntegrationIconPath";
 import { getIntegrationInfo } from "../../../utils/getIntegrationInfo";
+import { buildApiUrl } from "../../../services/refact/apiUrl";
 
 import styles from "./IntegrationCard.module.css";
 import { OnOffSwitch } from "../../OnOffSwitch/OnOffSwitch";
@@ -35,10 +36,12 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
   isNotConfigured = false,
 }) => {
   const config = useAppSelector(selectConfig);
-  const port = config.lspPort;
 
   const iconPath = formatIntegrationIconPath(integration.icon_path);
-  const integrationLogo = `http://127.0.0.1:${port}/v1${iconPath}`;
+  const integrationIconPath = iconPath.startsWith("/v1/")
+    ? iconPath
+    : `/v1${iconPath}`;
+  const integrationLogo = buildApiUrl(config, integrationIconPath);
 
   const { displayName } = getIntegrationInfo(integration.integr_name);
   const {
