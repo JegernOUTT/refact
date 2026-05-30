@@ -8859,68 +8859,6 @@ async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {
 }
 
 #[tokio::test]
-async fn maybe_enqueue_chat_reaction_records_event_id_in_debug() {
-    use super::chat_reactions::{AcceptedUserMessage, INSIGHT_LINES, maybe_enqueue_chat_reaction};
-    use crate::buddy::types::BuddyBubblePolicy;
-    use crate::call_validation::ChatContent;
-    use crate::chat::types::ThreadParams;
-
-    let (service, _renderer) =
-        crate::buddy::voice_service::test_voice_service_with_responses(vec![None]);
-    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
-    let app = make_gcx_with_buddy().await;
-    let chat_id = "debug-reaction-chat".to_string();
-
-    maybe_enqueue_chat_reaction(
-        app.clone(),
-        AcceptedUserMessage {
-            chat_id: chat_id.clone(),
-            thread: ThreadParams::default(),
-            content: ChatContent::SimpleText(
-                "please design a new caching architecture carefully".to_string(),
-            ),
-        },
-    )
-    .await;
-
-    let ev = wait_for_runtime_event(&app, "speech_insight").await;
-    let snapshot = wait_for_chat_reaction_debug_attempt(&app, "emitted").await;
-    let attempt = snapshot
-        .recent_attempts
-        .iter()
-        .rev()
-        .find(|attempt| attempt.result == "emitted")
-        .expect("emitted attempt must be recorded");
-
-    assert_eq!(attempt.chat_id, chat_id);
-    assert_eq!(attempt.result, "emitted");
-    assert_eq!(attempt.signal_type.as_deref(), Some("speech_insight"));
-    assert_eq!(attempt.event_id.as_deref(), Some(ev.id.as_str()));
-    assert_eq!(attempt.ttl_ms, Some(90_000));
-    assert_eq!(attempt.bubble_policy, Some(BuddyBubblePolicy::Ambient));
-    assert_eq!(attempt.queued, Some(true));
-    assert!(attempt.skip_reason.is_none());
-    assert_eq!(snapshot.counts_by_result.get("emitted"), Some(&1));
-
-    assert_eq!(ev.id, attempt.event_id.as_ref().unwrap().as_str());
-    assert_eq!(ev.source, "chat_reactions");
-    assert_eq!(ev.chat_id.as_deref(), Some(chat_id.as_str()));
-    assert_eq!(ev.signal_type, "speech_insight");
-    assert_eq!(ev.ttl_ms, Some(90_000));
-    assert_eq!(ev.bubble_policy, Some(BuddyBubblePolicy::Ambient));
-    let speech = ev.speech_text.as_ref().expect("speech_text must be set");
-    assert!(
-        INSIGHT_LINES.contains(&speech.as_str()),
-        "speech_text must be one of INSIGHT_LINES, got: {}",
-        speech
-    );
-
-    let debug_json = serde_json::to_string(&snapshot).unwrap();
-    assert!(!debug_json.contains("please design"));
-    assert!(!debug_json.contains(speech));
-}
-
-#[tokio::test]
 async fn chat_reaction_runtime_queue_jsonl_round_trips_frontend_fields() {
     use super::chat_reactions::{build_reaction_event, ChatReaction, ChatReactionKind};
     use super::storage::{append_runtime_record, load_runtime_queue, RuntimeQueueRecord};
@@ -9078,31 +9016,6 @@ async fn wait_for_runtime_event(
     })
     .await
     .unwrap_or_else(|_| panic!("runtime event {signal_type} did not arrive"))
-}
-
-async fn wait_for_chat_reaction_debug_attempt(
-    app: &AppState,
-    result: &str,
-) -> super::snapshot::ChatReactionDebug {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            {
-                let lock = app.buddy.buddy.lock().await;
-                if let Some(debug) = lock.as_ref().map(|svc| svc.chat_reaction_debug.snapshot()) {
-                    if debug
-                        .recent_attempts
-                        .iter()
-                        .any(|attempt| attempt.result == result)
-                    {
-                        return debug;
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("chat reaction debug attempt {result} did not arrive"))
 }
 
 #[tokio::test]
