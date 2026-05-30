@@ -25,6 +25,7 @@ export interface BuddySceneSpeech {
   id: string;
   text: string;
   controls: BuddyControl[];
+  mustShow?: boolean;
   chat_id?: string;
   speech_intent?: string;
   source: BuddySceneSpeechSource;
@@ -120,10 +121,14 @@ function runtimeEventToSpeech(
   const controls = event.controls?.length
     ? event.controls
     : defaultRuntimeControls(event);
+  const mustShow =
+    isErrorRuntimeEvent(event) &&
+    controls.some((control) => control.action === "dismiss_runtime_event");
   return {
     id: `runtime-${event.id}`,
     text,
     controls,
+    mustShow,
     chat_id: event.chat_id,
     source: "runtime",
     runtimeEventId: event.id,
@@ -344,12 +349,7 @@ export function buildBuddySceneSpeech(args: {
 }
 
 function isMustShowRuntimeSpeech(candidate: BuddySceneSpeech): boolean {
-  return (
-    candidate.source === "runtime" &&
-    candidate.controls.some(
-      (control) => control.action === "dismiss_runtime_event",
-    )
-  );
+  return candidate.source === "runtime" && candidate.mustShow === true;
 }
 
 export function pickBuddySceneSpeechCandidate(

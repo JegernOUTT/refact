@@ -2671,7 +2671,42 @@ describe("buildBuddySceneSpeech", () => {
     });
 
     expect(speech).not.toBeNull();
+    expect(speech?.mustShow).toBe(true);
     expect(pickBuddySceneSpeechCandidate(speech ? [speech] : [])).toBe(speech);
+  });
+
+  it("can silence non-error runtime speech with backend dismiss controls", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("1970-01-01T00:00:00Z"));
+    try {
+      const speech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: makeRuntimeEvent({
+          id: "controlled-runtime-notice",
+          title: "Runtime notice with controls",
+          status: "info",
+          priority: "normal",
+          controls: [
+            {
+              id: "dismiss-controlled-runtime-notice",
+              label: "Dismiss",
+              action: "dismiss_runtime_event",
+              action_param: "controlled-runtime-notice",
+              style: "secondary",
+            },
+          ],
+        }),
+        runtimeQueue: [],
+        activeSuggestion: null,
+      });
+
+      expect(speech?.source).toBe("runtime");
+      expect(speech?.mustShow).toBe(false);
+      expect(speech?.controls[0]?.action).toBe("dismiss_runtime_event");
+      expect(pickBuddySceneSpeechCandidate(speech ? [speech] : [])).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("can silence suggestion speech with controls", () => {
@@ -2695,6 +2730,33 @@ describe("buildBuddySceneSpeech", () => {
       });
 
       expect(speech?.source).toBe("suggestion");
+      expect(speech).not.toHaveProperty("mustShow");
+      expect(speech?.controls).toHaveLength(1);
+      expect(pickBuddySceneSpeechCandidate(speech ? [speech] : [])).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("can silence opportunity speech with controls", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("1970-01-01T00:00:00Z"));
+    try {
+      const speech = buildBuddySceneSpeech({
+        activeSpeech: null,
+        nowPlaying: null,
+        runtimeQueue: [],
+        activeSuggestion: null,
+        activeOpportunities: [
+          makeOpportunity({
+            id: "controlled-opportunity",
+            proposed_actions: [{ kind: "dismiss" }],
+          }),
+        ],
+      });
+
+      expect(speech?.source).toBe("opportunity");
+      expect(speech).not.toHaveProperty("mustShow");
       expect(speech?.controls).toHaveLength(1);
       expect(pickBuddySceneSpeechCandidate(speech ? [speech] : [])).toBeNull();
     } finally {
