@@ -1,4 +1,4 @@
-use std::path::{PathBuf, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 use axum::extract::Path as AxumPath;
@@ -352,15 +352,19 @@ pub async fn get_global_trajectories_dir(gcx: Arc<GlobalContext>) -> PathBuf {
 }
 
 pub async fn get_all_trajectories_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
+    let mut dirs = Vec::new();
+    for dir in get_project_dirs(gcx.clone())
         .await
         .into_iter()
         .map(|p| p.join(".refact").join("trajectories"))
-        .filter(|p| p.exists())
-        .collect();
+    {
+        if is_real_dir(&dir).await {
+            dirs.push(dir);
+        }
+    }
 
     let global_dir = get_global_trajectories_dir(gcx).await;
-    if global_dir.exists() {
+    if is_real_dir(&global_dir).await {
         dirs.push(global_dir);
     }
 
@@ -688,12 +692,13 @@ fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
 }
 
 async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
-    get_all_trajectories_dirs(gcx)
-        .await
-        .into_iter()
-        .map(|dir| dir.join(format!("{}.json", chat_id)))
-        .filter(|path| path.exists())
-        .collect()
+    let mut paths = Vec::new();
+    for dir in get_all_trajectories_dirs(gcx).await {
+        if let Some(path) = safe_trajectory_file_in_dir(&dir, chat_id).await {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 async fn trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
@@ -847,11 +852,17 @@ async fn find_trajectory_or_buddy_file(
 }
 
 async fn ensure_existing_trajectory_file_matches(path: &Path, chat_id: &str) -> Result<(), String> {
-    if !fs::try_exists(path)
-        .await
-        .map_err(|e| format!("Failed to check trajectory existence: {}", e))?
-    {
-        return Ok(());
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!(
+                    "Existing trajectory file is not a real file for {}",
+                    path.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("Failed to check trajectory existence: {}", e)),
     }
     let content = fs::read_to_string(path)
         .await
@@ -872,11 +883,17 @@ async fn read_existing_trajectory_object(
     path: &Path,
     chat_id: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
-    if !fs::try_exists(path)
-        .await
-        .map_err(|e| format!("Failed to check trajectory existence: {}", e))?
-    {
-        return Ok(None);
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!(
+                    "Existing trajectory file is not a real file for {}",
+                    path.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to check trajectory existence: {}", e)),
     }
     let content = fs::read_to_string(path)
         .await
@@ -1011,10 +1028,7 @@ async fn resolve_trajectory_data_save_path(
         return Ok(candidate.path);
     }
     let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
-    fs::create_dir_all(&trajectories_dir)
-        .await
-        .map_err(|e| format!("Failed to create trajectories dir: {}", e))?;
-    Ok(trajectories_dir.join(format!("{}.json", id)))
+    safe_new_trajectory_file_in_dir(&trajectories_dir, id).await
 }
 
 async fn title_generation_backing_file_matches(file_path: &Path, chat_id: &str) -> bool {
@@ -1853,10 +1867,7 @@ pub async fn save_trajectory_snapshot(
         path
     } else {
         let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
-        tokio::fs::create_dir_all(&trajectories_dir)
-            .await
-            .map_err(|e| format!("Failed to create trajectories dir: {}", e))?;
-        trajectories_dir.join(format!("{}.json", snapshot.chat_id))
+        safe_new_trajectory_file_in_dir(&trajectories_dir, &snapshot.chat_id).await?
     };
     let existing_trajectory =
         read_existing_trajectory_object(&file_path, &snapshot.chat_id).await?;
@@ -3546,6 +3557,9 @@ async fn collect_trajectory_list_candidates(
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
+            if !is_real_file(&path).await {
+                continue;
+            }
             let Ok(content) = fs::read_to_string(&path).await else {
                 continue;
             };
@@ -3582,6 +3596,135 @@ async fn collect_trajectory_list_candidates(
 
 async fn is_real_dir(path: &Path) -> bool {
     matches!(fs::symlink_metadata(path).await, Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
+async fn is_real_file(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path).await, Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink())
+}
+
+async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+            Component::ParentDir => {
+                return Err(format!(
+                    "Refusing to create directory with parent component: {}",
+                    path.display()
+                ));
+            }
+        }
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+        match fs::symlink_metadata(&current).await {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(format!(
+                        "Refusing to use non-real directory component: {}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).await.map_err(|e| {
+                    format!("Failed to create directory {}: {}", current.display(), e)
+                })?;
+                let metadata = fs::symlink_metadata(&current).await.map_err(|e| {
+                    format!(
+                        "Failed to inspect created directory {}: {}",
+                        current.display(),
+                        e
+                    )
+                })?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(format!(
+                        "Created directory is not a real directory: {}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed to inspect directory component {}: {}",
+                    current.display(),
+                    e
+                ));
+            }
+        }
+    }
+    if is_real_dir(path).await {
+        Ok(())
+    } else {
+        Err(format!(
+            "Directory is not a real directory: {}",
+            path.display()
+        ))
+    }
+}
+
+async fn canonical_child_path_under_root(root: &Path, child: &Path) -> Result<PathBuf, String> {
+    let root_canonical = std::fs::canonicalize(root)
+        .map_err(|e| format!("Failed to resolve root {}: {}", root.display(), e))?;
+    if !is_real_dir(root).await {
+        return Err(format!("Root is not a real directory: {}", root.display()));
+    }
+
+    if is_real_file(child).await {
+        let child_canonical = std::fs::canonicalize(child)
+            .map_err(|e| format!("Failed to resolve child {}: {}", child.display(), e))?;
+        if child_canonical.starts_with(&root_canonical) {
+            return Ok(child.to_path_buf());
+        }
+        return Err(format!(
+            "Child {} is outside root {}",
+            child.display(),
+            root.display()
+        ));
+    }
+
+    if let Ok(metadata) = fs::symlink_metadata(child).await {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("Refusing symlink child file: {}", child.display()));
+        }
+        return Err(format!("Child is not a real file: {}", child.display()));
+    }
+
+    let parent = child
+        .parent()
+        .ok_or_else(|| format!("Child has no parent: {}", child.display()))?;
+    let parent_canonical = std::fs::canonicalize(parent)
+        .map_err(|e| format!("Failed to resolve child parent {}: {}", parent.display(), e))?;
+    if parent_canonical.starts_with(&root_canonical) {
+        Ok(child.to_path_buf())
+    } else {
+        Err(format!(
+            "Child parent {} is outside root {}",
+            parent.display(),
+            root.display()
+        ))
+    }
+}
+
+async fn safe_trajectory_file_in_dir(dir: &Path, chat_id: &str) -> Option<PathBuf> {
+    validate_trajectory_id(chat_id).ok()?;
+    ensure_real_dir_tree(dir).await.ok()?;
+    let child = dir.join(format!("{}.json", chat_id));
+    if !is_real_file(&child).await {
+        return None;
+    }
+    canonical_child_path_under_root(dir, &child).await.ok()
+}
+
+async fn safe_new_trajectory_file_in_dir(dir: &Path, chat_id: &str) -> Result<PathBuf, String> {
+    validate_trajectory_id(chat_id).map_err(|e| e.message)?;
+    ensure_real_dir_tree(dir).await?;
+    canonical_child_path_under_root(dir, &dir.join(format!("{}.json", chat_id))).await
 }
 
 fn cursor_precedes_item(item: (&str, &str), cursor: (&str, &str)) -> bool {
@@ -3662,7 +3805,7 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
     let task_roots = get_all_task_roots(gcx.clone()).await;
 
     for trajectories_dir in list_trajectory_dirs(&gcx).await {
-        if !trajectories_dir.exists() {
+        if !is_real_dir(&trajectories_dir).await {
             continue;
         }
         let mut entries = match fs::read_dir(&trajectories_dir).await {
@@ -3672,6 +3815,9 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if !is_real_file(&path).await {
                 continue;
             }
             if let Ok(content) = fs::read_to_string(&path).await {
@@ -3779,7 +3925,7 @@ pub async fn handle_v1_trajectories_save(
     ensure_existing_trajectory_file_matches(&file_path, &id)
         .await
         .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
-    let is_new = !file_path.exists();
+    let is_new = !is_real_file(&file_path).await;
     let is_title_generated = data
         .extra
         .get("isTitleGenerated")
@@ -4531,6 +4677,142 @@ mod tests {
         write_trajectory_file(&path, "other-chat", "Mismatched", "2024-01-01T00:00:00Z").await;
 
         assert!(load_trajectory_for_chat(gcx, "safe").await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_normal_trajectory_root_is_ignored_for_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "symlink-load-ignored";
+        let refact_dir = dir.path().join(".refact");
+        tokio::fs::create_dir_all(&refact_dir).await.unwrap();
+        std::os::unix::fs::symlink(outside.path(), refact_dir.join("trajectories")).unwrap();
+        let outside_path = outside.path().join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &outside_path,
+            chat_id,
+            "Outside Symlink Load",
+            "2024-01-01T00:00:00Z",
+        )
+        .await;
+
+        assert!(find_trajectory_path(gcx.clone(), chat_id).await.is_none());
+        assert!(load_trajectory_for_chat(gcx, chat_id).await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_normal_trajectory_root_is_not_used_for_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "symlink-save-blocked";
+        let refact_dir = dir.path().join(".refact");
+        tokio::fs::create_dir_all(&refact_dir).await.unwrap();
+        std::os::unix::fs::symlink(outside.path(), refact_dir.join("trajectories")).unwrap();
+        let outside_path = outside.path().join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &outside_path,
+            chat_id,
+            "Keep Outside Save",
+            "2024-01-01T00:00:00Z",
+        )
+        .await;
+        let before = tokio::fs::read_to_string(&outside_path).await.unwrap();
+
+        let err = save_trajectory_snapshot(
+            gcx,
+            test_snapshot(
+                chat_id,
+                "Should Not Escape",
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("Refusing to use non-real directory component"));
+        assert_eq!(
+            tokio::fs::read_to_string(outside_path).await.unwrap(),
+            before
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_normal_trajectory_root_is_not_used_for_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "symlink-delete-blocked";
+        let refact_dir = dir.path().join(".refact");
+        tokio::fs::create_dir_all(&refact_dir).await.unwrap();
+        std::os::unix::fs::symlink(outside.path(), refact_dir.join("trajectories")).unwrap();
+        let outside_path = outside.path().join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &outside_path,
+            chat_id,
+            "Keep Outside Delete",
+            "2024-01-01T00:00:00Z",
+        )
+        .await;
+
+        let err = handle_v1_trajectories_delete(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::NOT_FOUND);
+        assert!(tokio::fs::try_exists(outside_path).await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_normal_trajectory_file_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "symlink-file-blocked";
+        let trajectories_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&trajectories_dir).await.unwrap();
+        let outside_path = outside.path().join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &outside_path,
+            chat_id,
+            "Keep Outside File",
+            "2024-01-01T00:00:00Z",
+        )
+        .await;
+        let before = tokio::fs::read_to_string(&outside_path).await.unwrap();
+        std::os::unix::fs::symlink(
+            &outside_path,
+            trajectories_dir.join(format!("{chat_id}.json")),
+        )
+        .unwrap();
+
+        assert!(find_trajectory_path(gcx.clone(), chat_id).await.is_none());
+        let delete_err = handle_v1_trajectories_delete(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(delete_err.status_code, StatusCode::NOT_FOUND);
+
+        let save_err = save_trajectory_snapshot(
+            gcx,
+            test_snapshot(
+                chat_id,
+                "Should Not Follow File",
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(save_err.contains("Refusing symlink child file"));
+        assert_eq!(
+            tokio::fs::read_to_string(outside_path).await.unwrap(),
+            before
+        );
     }
 
     #[tokio::test]
