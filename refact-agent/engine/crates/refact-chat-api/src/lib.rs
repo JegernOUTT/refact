@@ -91,6 +91,32 @@ impl std::fmt::Display for SessionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionPhase {
+    Checking,
+    Running,
+    Applied,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionReason {
+    AutoCompactDisabled,
+    SessionCompactionDisabled,
+    MaxAttemptsReached,
+    PendingToolCalls,
+    NoEligibleSegment,
+    EffectiveContextUnknown,
+    PressureLow,
+    NoSummaryModel,
+    InputTooLarge,
+    TransientFailure,
+    SourceChanged,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct TaskMeta {
     pub task_id: String,
@@ -249,6 +275,10 @@ pub struct RuntimeState {
     pub queue_size: usize,
     #[serde(default)]
     pub is_compressing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression_phase: Option<CompressionPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression_reason: Option<CompressionReason>,
     #[serde(default)]
     pub pause_reasons: Vec<PauseReason>,
     #[serde(default)]
@@ -269,6 +299,8 @@ impl Default for RuntimeState {
             error: None,
             queue_size: 0,
             is_compressing: false,
+            compression_phase: None,
+            compression_reason: None,
             pause_reasons: Vec::new(),
             queued_items: Vec::new(),
             auto_approved_tool_ids: Vec::new(),
@@ -387,6 +419,10 @@ pub enum ChatEvent {
         error: Option<String>,
         #[serde(default)]
         is_compressing: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compression_phase: Option<CompressionPhase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compression_reason: Option<CompressionReason>,
     },
     Ack {
         client_request_id: String,
@@ -1225,6 +1261,8 @@ mod tests {
             state: SessionState::Completed,
             error: None,
             is_compressing: false,
+            compression_phase: None,
+            compression_reason: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "runtime_updated");
@@ -1236,12 +1274,16 @@ mod tests {
             state: SessionState::Error,
             error: Some("test error".into()),
             is_compressing: true,
+            compression_phase: Some(CompressionPhase::Failed),
+            compression_reason: Some(CompressionReason::TransientFailure),
         };
         let json2 = serde_json::to_value(&event_with_error).unwrap();
         assert_eq!(json2["type"], "runtime_updated");
         assert_eq!(json2["state"], "error");
         assert_eq!(json2["error"], "test error");
         assert_eq!(json2["is_compressing"], true);
+        assert_eq!(json2["compression_phase"], "failed");
+        assert_eq!(json2["compression_reason"], "transient_failure");
     }
 
     #[test]
@@ -1258,10 +1300,14 @@ mod tests {
                 state,
                 error,
                 is_compressing,
+                compression_phase,
+                compression_reason,
             } => {
                 assert_eq!(state, SessionState::Completed);
                 assert_eq!(error, None);
                 assert!(!is_compressing);
+                assert_eq!(compression_phase, None);
+                assert_eq!(compression_reason, None);
             }
             other => panic!("expected RuntimeUpdated, got {other:?}"),
         }

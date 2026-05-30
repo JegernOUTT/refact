@@ -1,4 +1,4 @@
-import { RootState } from "../../../app/store";
+import type { RootState } from "../../../app/store";
 import { createSelector } from "@reduxjs/toolkit";
 import { isToolName } from "../../../utils/toolNameAliases";
 import {
@@ -30,6 +30,10 @@ import {
 import type { SessionState } from "../../../utils/sessionStatus";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import type { BackgroundAgentSummary } from "../../../services/refact/types";
+import type {
+  CompressionPhase,
+  CompressionReason,
+} from "../../../services/refact/chatSubscription";
 
 const EMPTY_MESSAGES: ChatMessages = [];
 const EMPTY_EVENT_MESSAGES: EventMessage[] = [];
@@ -418,6 +422,20 @@ export const selectIsStreamingById = (state: RootState, chatId: string) =>
 
 export function selectIsCompressingById(state: RootState, id: string): boolean {
   return state.chat.threads[id]?.is_compressing ?? false;
+}
+
+export function selectCompressionPhaseById(
+  state: RootState,
+  id: string,
+): CompressionPhase | undefined {
+  return state.chat.threads[id]?.compression_phase;
+}
+
+export function selectCompressionReasonById(
+  state: RootState,
+  id: string,
+): CompressionReason | undefined {
+  return state.chat.threads[id]?.compression_reason;
 }
 
 export const selectSnapshotReceived = (state: RootState) =>

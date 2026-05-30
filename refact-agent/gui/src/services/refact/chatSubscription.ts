@@ -11,6 +11,26 @@ export type SessionState =
   | "completed"
   | "error";
 
+export type CompressionPhase =
+  | "checking"
+  | "running"
+  | "applied"
+  | "skipped"
+  | "failed";
+
+export type CompressionReason =
+  | "auto_compact_disabled"
+  | "session_compaction_disabled"
+  | "max_attempts_reached"
+  | "pending_tool_calls"
+  | "no_eligible_segment"
+  | "effective_context_unknown"
+  | "pressure_low"
+  | "no_summary_model"
+  | "input_too_large"
+  | "transient_failure"
+  | "source_changed";
+
 export type ThreadParams = {
   id: string;
   title: string;
@@ -72,6 +92,8 @@ export type RuntimeState = {
   pause_reasons: PauseReason[];
   queued_items: QueuedItem[];
   is_compressing?: boolean;
+  compression_phase?: CompressionPhase | null;
+  compression_reason?: CompressionReason | null;
 };
 
 type BackgroundAgentSummaryWithDefaults = Omit<
@@ -247,6 +269,8 @@ export type EventEnvelope =
       state: string;
       error?: string;
       is_compressing?: boolean;
+      compression_phase?: CompressionPhase | null;
+      compression_reason?: CompressionReason | null;
     }
   | {
       chat_id: string;

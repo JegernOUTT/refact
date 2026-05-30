@@ -82,6 +82,10 @@ import {
 import { applyDeltaOps } from "../../../services/refact/chatSubscription";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import { loadPersistedChatTabs } from "../../../utils/chatUiPersistence";
+import type {
+  CompressionPhase,
+  CompressionReason,
+} from "../../../services/refact/chatSubscription";
 import {
   AssistantMessage,
   ChatMessages,
@@ -312,6 +316,48 @@ function isBackgroundAgentTerminal(status: string): boolean {
     status === "cancelled" ||
     status === "interrupted"
   );
+}
+
+function normalizeCompressionPhase(
+  value: unknown,
+): CompressionPhase | undefined {
+  if (
+    value === "checking" ||
+    value === "running" ||
+    value === "applied" ||
+    value === "skipped" ||
+    value === "failed"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeCompressionReason(
+  value: unknown,
+): CompressionReason | undefined {
+  if (
+    value === "auto_compact_disabled" ||
+    value === "session_compaction_disabled" ||
+    value === "max_attempts_reached" ||
+    value === "pending_tool_calls" ||
+    value === "no_eligible_segment" ||
+    value === "effective_context_unknown" ||
+    value === "pressure_low" ||
+    value === "no_summary_model" ||
+    value === "input_too_large" ||
+    value === "transient_failure" ||
+    value === "source_changed"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function clearCompressionState(rt: Draft<ChatThreadRuntime>) {
+  rt.is_compressing = false;
+  rt.compression_phase = undefined;
+  rt.compression_reason = undefined;
 }
 
 function shouldReplaceBackgroundAgent(
@@ -1074,7 +1120,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(markThreadSseError, (state, action) => {
     const rt = getRuntime(state, action.payload.id);
     if (!rt) return;
-    rt.is_compressing = false;
+    clearCompressionState(rt);
     const wasBusy =
       rt.streaming ||
       rt.waiting_for_response ||
@@ -1369,6 +1415,12 @@ export const chatReducer = createReducer(initialState, (builder) => {
             typeof event.runtime.is_compressing === "boolean"
               ? event.runtime.is_compressing
               : false,
+          compression_phase: normalizeCompressionPhase(
+            event.runtime.compression_phase,
+          ),
+          compression_reason: normalizeCompressionReason(
+            event.runtime.compression_reason,
+          ),
           task_widget_expanded: existingRuntime?.task_widget_expanded ?? false,
           last_applied_seq: event.seq,
           message_index_by_id: rebuildMessageIndexById(snapshotMessages),
@@ -1923,6 +1975,24 @@ export const chatReducer = createReducer(initialState, (builder) => {
           newState === "waiting_user_input"
         ) {
           rt.is_compressing = false;
+        }
+        const nextCompressionPhase = normalizeCompressionPhase(
+          event.compression_phase,
+        );
+        const nextCompressionReason = normalizeCompressionReason(
+          event.compression_reason,
+        );
+        if (nextCompressionPhase) {
+          rt.compression_phase = nextCompressionPhase;
+          rt.compression_reason = nextCompressionReason;
+        } else if (
+          newState === "idle" ||
+          newState === "completed" ||
+          newState === "error" ||
+          newState === "waiting_user_input"
+        ) {
+          rt.compression_phase = undefined;
+          rt.compression_reason = undefined;
         }
         rt.last_applied_seq = event.seq;
         break;
