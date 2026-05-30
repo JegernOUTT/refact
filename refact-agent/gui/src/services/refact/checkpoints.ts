@@ -1,6 +1,7 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
 import { PREVIEW_CHECKPOINTS, RESTORE_CHECKPOINTS } from "./consts";
+import { buildApiUrlFromState } from "./apiUrl";
 import {
   isPreviewCheckpointsResponse,
   isRestoreCheckpointsResponse,
@@ -32,8 +33,7 @@ export const checkpointsApi = createApi({
       async queryFn(args, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const { checkpoints, chat_id, chat_mode } = args;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${PREVIEW_CHECKPOINTS}`;
+        const url = buildApiUrlFromState(state, PREVIEW_CHECKPOINTS);
 
         const result = await baseQuery({
           url,
@@ -71,8 +71,7 @@ export const checkpointsApi = createApi({
       async queryFn(args, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const { checkpoints, chat_id, chat_mode } = args;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}${RESTORE_CHECKPOINTS}`;
+        const url = buildApiUrlFromState(state, RESTORE_CHECKPOINTS);
 
         const result = await baseQuery({
           url,

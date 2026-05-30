@@ -3,6 +3,7 @@ import { ChatThread } from "../../features/Chat/Thread/types";
 import { ChatMessages } from "./types";
 import { RootState } from "../../app/store";
 import type { WorktreeMeta } from "./worktrees";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type TrajectoryMeta = {
   id: string;
@@ -173,8 +174,7 @@ export const trajectoriesApi = createApi({
     listTrajectoriesFirstPage: builder.query<TrajectoryMeta[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/trajectories`;
+        const url = buildApiUrlFromState(state, "/v1/trajectories");
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         const response = result.data as PaginatedTrajectories;
@@ -188,14 +188,10 @@ export const trajectoriesApi = createApi({
     >({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const params = new URLSearchParams();
         if (args?.limit) params.set("limit", String(args.limit));
         if (args?.cursor) params.set("cursor", args.cursor);
-        const queryString = params.toString();
-        const url = `http://127.0.0.1:${port}/v1/trajectories${
-          queryString ? `?${queryString}` : ""
-        }`;
+        const url = buildApiUrlFromState(state, "/v1/trajectories", params);
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         return { data: result.data as PaginatedTrajectories };
@@ -205,8 +201,7 @@ export const trajectoriesApi = createApi({
     listAllTrajectories: builder.query<TrajectoryMeta[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/trajectories/all`;
+        const url = buildApiUrlFromState(state, "/v1/trajectories/all");
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         return { data: result.data as TrajectoryMeta[] };
@@ -216,8 +211,7 @@ export const trajectoriesApi = createApi({
     getTrajectory: builder.query<TrajectoryData, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/trajectories/${id}`;
+        const url = buildApiUrlFromState(state, `/v1/trajectories/${id}`);
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         return { data: result.data as TrajectoryData };
@@ -227,8 +221,7 @@ export const trajectoriesApi = createApi({
     saveTrajectory: builder.mutation<undefined, TrajectoryData>({
       queryFn: async (data, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/trajectories/${data.id}`;
+        const url = buildApiUrlFromState(state, `/v1/trajectories/${data.id}`);
         const result = await baseQuery({
           url,
           method: "PUT",
@@ -245,8 +238,7 @@ export const trajectoriesApi = createApi({
     deleteTrajectory: builder.mutation<undefined, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = `http://127.0.0.1:${port}/v1/trajectories/${id}`;
+        const url = buildApiUrlFromState(state, `/v1/trajectories/${id}`);
         const result = await baseQuery({
           url,
           method: "DELETE",

@@ -2,6 +2,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
 import type { ManualPreviewItem } from "../../features/Chat/Thread/types";
 import { selectApiKey } from "../../features/Config/configSlice";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type PreviewResult = {
   rewrittenText: string;
@@ -51,23 +52,35 @@ export const memoryEnrichmentApi = createApi({
       PreviewResult,
       { chatId: string; text: string; port: string | number }
     >({
-      query: ({ chatId, text, port }) => ({
-        url: `http://127.0.0.1:${port}/v1/chats/${chatId}/memory-enrichment/preview`,
-        method: "POST",
-        body: { text },
-      }),
-      transformResponse: (
-        response: MemoryEnrichmentPreviewResponse,
-      ): PreviewResult => ({
-        rewrittenText: response.rewritten_text ?? "",
-        items: response.items.map(
-          (item): ManualPreviewItem => ({
-            kind: item.kind,
-            label: item.label,
-            context_file: item.context_file,
-          }),
-        ),
-      }),
+      async queryFn({ chatId, text }, api, _extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          `/v1/chats/${encodeURIComponent(chatId)}/memory-enrichment/preview`,
+        );
+
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: { text },
+        });
+
+        if (response.error) return { error: response.error };
+
+        const data = response.data as MemoryEnrichmentPreviewResponse;
+        return {
+          data: {
+            rewrittenText: data.rewritten_text ?? "",
+            items: data.items.map(
+              (item): ManualPreviewItem => ({
+                kind: item.kind,
+                label: item.label,
+                context_file: item.context_file,
+              }),
+            ),
+          },
+        };
+      },
     }),
   }),
 });

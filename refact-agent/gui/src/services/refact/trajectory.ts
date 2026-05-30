@@ -7,6 +7,7 @@ import {
   TRAJECTORY_HANDOFF_APPLY_URL,
   TRAJECTORY_MODE_TRANSITION_APPLY_URL,
 } from "./consts";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type TransformOptions = {
   dedup_and_compress_context?: boolean;
@@ -60,11 +61,8 @@ export type ModeTransitionApplyResponse = {
   messages_count: number;
 };
 
-function buildUrl(template: string, chatId: string, port: number): string {
-  return `http://127.0.0.1:${port}${template.replace(
-    "{chat_id}",
-    encodeURIComponent(chatId),
-  )}`;
+function buildPath(template: string, chatId: string): string {
+  return template.replace("{chat_id}", encodeURIComponent(chatId));
 }
 
 export const trajectoryApi = createApi({
@@ -85,8 +83,10 @@ export const trajectoryApi = createApi({
     >({
       async queryFn({ chatId, options }, api, _opts, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = buildUrl(TRAJECTORY_TRANSFORM_PREVIEW_URL, chatId, port);
+        const url = buildApiUrlFromState(
+          state,
+          buildPath(TRAJECTORY_TRANSFORM_PREVIEW_URL, chatId),
+        );
         const result = await baseQuery({
           url,
           method: "POST",
@@ -103,8 +103,10 @@ export const trajectoryApi = createApi({
     >({
       async queryFn({ chatId, options }, api, _opts, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = buildUrl(TRAJECTORY_TRANSFORM_APPLY_URL, chatId, port);
+        const url = buildApiUrlFromState(
+          state,
+          buildPath(TRAJECTORY_TRANSFORM_APPLY_URL, chatId),
+        );
         const result = await baseQuery({
           url,
           method: "POST",
@@ -121,8 +123,10 @@ export const trajectoryApi = createApi({
     >({
       async queryFn({ chatId, options }, api, _opts, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = buildUrl(TRAJECTORY_HANDOFF_PREVIEW_URL, chatId, port);
+        const url = buildApiUrlFromState(
+          state,
+          buildPath(TRAJECTORY_HANDOFF_PREVIEW_URL, chatId),
+        );
         const result = await baseQuery({
           url,
           method: "POST",
@@ -139,8 +143,10 @@ export const trajectoryApi = createApi({
     >({
       async queryFn({ chatId, options }, api, _opts, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = buildUrl(TRAJECTORY_HANDOFF_APPLY_URL, chatId, port);
+        const url = buildApiUrlFromState(
+          state,
+          buildPath(TRAJECTORY_HANDOFF_APPLY_URL, chatId),
+        );
         const result = await baseQuery({
           url,
           method: "POST",
@@ -166,11 +172,9 @@ export const trajectoryApi = createApi({
         baseQuery,
       ) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        const url = buildUrl(
-          TRAJECTORY_MODE_TRANSITION_APPLY_URL,
-          chatId,
-          port,
+        const url = buildApiUrlFromState(
+          state,
+          buildPath(TRAJECTORY_MODE_TRANSITION_APPLY_URL, chatId),
         );
         const result = await baseQuery({
           url,

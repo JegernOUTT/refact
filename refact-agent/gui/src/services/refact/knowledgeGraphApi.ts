@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 import type { KnowledgeGraphResponse, SuccessResponse } from "./types";
 
 export const knowledgeGraphApi = createApi({
@@ -21,11 +22,10 @@ export const knowledgeGraphApi = createApi({
     >({
       async queryFn(arg, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
         const includeContent = arg?.includeContent ?? false;
-        const url = `http://127.0.0.1:${port}/v1/knowledge-graph?include_content=${
-          includeContent ? 1 : 0
-        }`;
+        const url = buildApiUrlFromState(state, "/v1/knowledge-graph", {
+          include_content: includeContent ? 1 : 0,
+        });
 
         const response = await baseQuery({ url });
 
@@ -51,8 +51,7 @@ export const knowledgeGraphApi = createApi({
     >({
       async queryFn(arg, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}/v1/knowledge/update-memory`;
+        const url = buildApiUrlFromState(state, "/v1/knowledge/update-memory");
 
         const response = await baseQuery({
           url,
@@ -86,8 +85,7 @@ export const knowledgeGraphApi = createApi({
     >({
       async queryFn(arg, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}/v1/knowledge/delete-memory`;
+        const url = buildApiUrlFromState(state, "/v1/knowledge/delete-memory");
 
         const response = await baseQuery({
           url,

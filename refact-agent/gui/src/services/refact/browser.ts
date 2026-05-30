@@ -17,6 +17,7 @@ import {
   BROWSER_ANNOTATE_RESULT,
   BROWSER_ANNOTATE_CLEAR,
 } from "./consts";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type BrowserStartRequest = {
   chat_id: string;
@@ -243,8 +244,7 @@ export const browserApi = createApi({
     browserStart: builder.mutation<BrowserStartResponse, BrowserStartRequest>({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_START}`;
+        const url = buildApiUrlFromState(state, BROWSER_START);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -258,8 +258,7 @@ export const browserApi = createApi({
     browserStop: builder.mutation<BrowserStopResponse, BrowserStopRequest>({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_STOP}`;
+        const url = buildApiUrlFromState(state, BROWSER_STOP);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -276,8 +275,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_SCREENSHOT}`;
+        const url = buildApiUrlFromState(state, BROWSER_SCREENSHOT);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -294,8 +292,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_CONTEXT}`;
+        const url = buildApiUrlFromState(state, BROWSER_CONTEXT);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -309,8 +306,7 @@ export const browserApi = createApi({
     browserCurl: builder.mutation<BrowserCurlResponse, BrowserCurlRequest>({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_CURL}`;
+        const url = buildApiUrlFromState(state, BROWSER_CURL);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -327,8 +323,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_ELEMENT_PICK}`;
+        const url = buildApiUrlFromState(state, BROWSER_ELEMENT_PICK);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -345,8 +340,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_ELEMENT_PICK_RESULT}`;
+        const url = buildApiUrlFromState(state, BROWSER_ELEMENT_PICK_RESULT);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -363,8 +357,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_RECORD_ANIMATION}`;
+        const url = buildApiUrlFromState(state, BROWSER_RECORD_ANIMATION);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -381,8 +374,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_HANDOFF}`;
+        const url = buildApiUrlFromState(state, BROWSER_HANDOFF);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -399,8 +391,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_STATUS}`;
+        const url = buildApiUrlFromState(state, BROWSER_STATUS);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -417,8 +408,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_ANNOTATE_START}`;
+        const url = buildApiUrlFromState(state, BROWSER_ANNOTATE_START);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -435,8 +425,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_ANNOTATE_RESULT}`;
+        const url = buildApiUrlFromState(state, BROWSER_ANNOTATE_RESULT);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -453,8 +442,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_ANNOTATE_CLEAR}`;
+        const url = buildApiUrlFromState(state, BROWSER_ANNOTATE_CLEAR);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -471,8 +459,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_CONTEXT_ESTIMATE}`;
+        const url = buildApiUrlFromState(state, BROWSER_CONTEXT_ESTIMATE);
         const response = await baseQuery({
           url,
           method: "POST",
@@ -489,8 +476,7 @@ export const browserApi = createApi({
     >({
       async queryFn(args, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort as unknown as number;
-        const url = `http://127.0.0.1:${port}${BROWSER_ACTION}`;
+        const url = buildApiUrlFromState(state, BROWSER_ACTION);
         const response = await baseQuery({
           url,
           method: "POST",
