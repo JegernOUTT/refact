@@ -126,6 +126,11 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::chat::internal_roles;
+    use crate::chat::trajectories::{
+        load_trajectory_for_chat, save_trajectory_snapshot, TrajectorySnapshot,
+    };
+    use crate::tools::tool_set_plan::ToolSetPlan;
+    use crate::tools::tool_update_plan::ToolUpdatePlan;
 
     async fn ccx(app: AppState, chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
         Arc::new(AMutex::new(
@@ -161,6 +166,170 @@ mod tests {
             }
             ContextEnum::ContextFile(_) => panic!("expected chat message"),
         }
+    }
+
+    async fn drain_plan_side_effects(app: &AppState, chat_id: &str) {
+        let session_arc = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .unwrap();
+        session_arc.lock().await.drain_post_tool_side_effects();
+    }
+
+    async fn session_messages(app: &AppState, chat_id: &str) -> Vec<ChatMessage> {
+        let session_arc = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .unwrap();
+        let session = session_arc.lock().await;
+        session.messages.clone()
+    }
+
+    #[tokio::test]
+    async fn plan_lifecycle_smoke() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let chat_id = "plan-lifecycle-smoke";
+        let mut session = ChatSession::new(chat_id.to_string());
+        session.thread.mode = "agent".to_string();
+        session.thread.tool_use = "agent".to_string();
+        session.thread.model = "model".to_string();
+        session.thread.title = "Plan Lifecycle Smoke".to_string();
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        insert_session(&app, session).await;
+
+        let mut set_tool = ToolSetPlan {
+            config_path: String::new(),
+        };
+        let set_result = result_json(
+            set_tool
+                .tool_execute(
+                    ccx(app.clone(), chat_id).await,
+                    &"set-plan".to_string(),
+                    &HashMap::from([("content".to_string(), json!("## Plan\n- base"))]),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(set_result, json!({"version": 1, "supersedes": null}));
+        drain_plan_side_effects(&app, chat_id).await;
+
+        let messages = session_messages(&app, chat_id).await;
+        let plans: Vec<_> = messages
+            .iter()
+            .filter(|message| message.role == internal_roles::PLAN_ROLE)
+            .collect();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].extra["plan"]["version"], json!(1));
+        assert_eq!(plans[0].content.content_text_only(), "## Plan\n- base");
+
+        let duplicate_err = set_tool
+            .tool_execute(
+                ccx(app.clone(), chat_id).await,
+                &"set-plan-duplicate".to_string(),
+                &HashMap::from([("content".to_string(), json!("second"))]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            duplicate_err,
+            "a plan already exists; use update_plan to change it"
+        );
+
+        let mut update_tool = ToolUpdatePlan {
+            config_path: String::new(),
+        };
+        let update_result = result_json(
+            update_tool
+                .tool_execute(
+                    ccx(app.clone(), chat_id).await,
+                    &"update-plan".to_string(),
+                    &HashMap::from([("note".to_string(), json!("- changed"))]),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(update_result, json!({"seq": 1, "truncated": false}));
+        drain_plan_side_effects(&app, chat_id).await;
+
+        let mut get_tool = ToolGetPlan::new(String::new());
+        let get_result = result_json(
+            get_tool
+                .tool_execute(
+                    ccx(app.clone(), chat_id).await,
+                    &"get-plan".to_string(),
+                    &HashMap::new(),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(get_result["plan"]["version"], json!(1));
+        assert_eq!(get_result["plan"]["delta_count"], json!(1));
+        assert_eq!(get_result["plan"]["mode"], json!("agent"));
+        assert_eq!(
+            get_result["plan"]["content"],
+            json!("## Plan\n- base\n\n---\n\n## Plan updates\n\n- changed")
+        );
+
+        let session_arc = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .unwrap();
+        let snapshot = {
+            let session = session_arc.lock().await;
+            TrajectorySnapshot::from_thread_parts(
+                chat_id.to_string(),
+                &session.thread,
+                session.messages.clone(),
+                session.created_at.clone(),
+                session.trajectory_version,
+            )
+        };
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        let loaded_session =
+            session_from_snapshot(chat_id.to_string(), loaded.thread, loaded.messages);
+        let loaded_plans: Vec<_> = loaded_session
+            .messages
+            .iter()
+            .filter(|message| message.role == internal_roles::PLAN_ROLE)
+            .collect();
+        assert_eq!(loaded_plans.len(), 1);
+        assert_eq!(loaded_plans[0].extra["plan"]["version"], json!(1));
+        assert_eq!(
+            loaded_plans[0].content.content_text_only(),
+            "## Plan\n- base"
+        );
+        let loaded_deltas = plan_role::plan_delta_events(&loaded_session);
+        assert_eq!(loaded_deltas.len(), 1);
+        assert_eq!(
+            loaded_deltas[0].extra["event"]["subkind"],
+            json!("plan_delta")
+        );
+        assert_eq!(loaded_deltas[0].extra["event"]["payload"]["seq"], json!(1));
+        assert_eq!(loaded_deltas[0].content.content_text_only(), "- changed");
+        assert_eq!(
+            plan_role::synthesize_current_plan(&loaded_session).unwrap(),
+            "## Plan\n- base\n\n---\n\n## Plan updates\n\n- changed"
+        );
     }
 
     #[tokio::test]
