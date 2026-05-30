@@ -2,6 +2,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import type { RootState } from "../../app/store";
 import { isDetailMessage } from "./commands";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type CronTask = {
   id: string;
@@ -67,9 +68,8 @@ export const schedulerApi = createApi({
     getCronTasks: builder.query<CronTask[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/scheduler/cron`,
+          url: buildApiUrlFromState(state, "/v1/scheduler/cron"),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as CronTask[] };
@@ -79,9 +79,8 @@ export const schedulerApi = createApi({
     createCron: builder.mutation<CreateCronResponse, CreateCronRequest>({
       queryFn: async (body, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/scheduler/cron`,
+          url: buildApiUrlFromState(state, "/v1/scheduler/cron"),
           method: "POST",
           body,
         });
@@ -93,11 +92,11 @@ export const schedulerApi = createApi({
     deleteCron: builder.mutation<DeleteCronResponse, DeleteCronRequest>({
       queryFn: async ({ id }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/scheduler/cron/${encodeURIComponent(
-            id,
-          )}`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/scheduler/cron/${encodeURIComponent(id)}`,
+          ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };

@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type TaskDocumentKind =
   | "plan"
@@ -201,9 +202,10 @@ export const taskDocumentsApi = createApi({
       queryFn: async ({ taskId }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(taskId)}/documents`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(taskId)}/documents`,
+          ),
         });
         if (result.error) return { error: result.error };
         const raw = result.data;
@@ -234,14 +236,14 @@ export const taskDocumentsApi = createApi({
     >({
       queryFn: async ({ taskId, slug, version }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const params =
-          version !== undefined ? `?version=${String(version)}` : "";
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(
-            taskId,
-          )}/documents/${encodeURIComponent(slug)}${params}`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/documents/${encodeURIComponent(slug)}`,
+            version !== undefined ? { version } : undefined,
+          ),
         });
         if (result.error) return { error: result.error };
         if (!isTaskDocumentDetail(result.data)) {
@@ -273,9 +275,10 @@ export const taskDocumentsApi = createApi({
       ) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(taskId)}/documents`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(taskId)}/documents`,
+          ),
           method: "POST",
           body: { slug, name, kind, content, pinned },
         });
@@ -293,11 +296,12 @@ export const taskDocumentsApi = createApi({
       queryFn: async ({ taskId, slug, content }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(
-            taskId,
-          )}/documents/${encodeURIComponent(slug)}`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/documents/${encodeURIComponent(slug)}`,
+          ),
           method: "PUT",
           body: { content },
         });
@@ -315,11 +319,12 @@ export const taskDocumentsApi = createApi({
       queryFn: async ({ taskId, slug, section }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(
-            taskId,
-          )}/documents/${encodeURIComponent(slug)}/append`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/documents/${encodeURIComponent(slug)}/append`,
+          ),
           method: "POST",
           body: { section },
         });
@@ -337,11 +342,12 @@ export const taskDocumentsApi = createApi({
       queryFn: async ({ taskId, slug }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(
-            taskId,
-          )}/documents/${encodeURIComponent(slug)}`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/documents/${encodeURIComponent(slug)}`,
+          ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
@@ -358,11 +364,12 @@ export const taskDocumentsApi = createApi({
       queryFn: async ({ taskId, slug, pinned }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(
-            taskId,
-          )}/documents/${encodeURIComponent(slug)}/pin`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/documents/${encodeURIComponent(slug)}/pin`,
+          ),
           method: "POST",
           body: { pinned },
         });
@@ -412,11 +419,12 @@ export const taskDocumentsApi = createApi({
       queryFn: async ({ taskId, slug }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(
-            taskId,
-          )}/documents/${encodeURIComponent(slug)}/history`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/documents/${encodeURIComponent(slug)}/history`,
+          ),
         });
         if (result.error) return { error: result.error };
         if (!isTaskDocumentHistoryResponse(result.data)) {

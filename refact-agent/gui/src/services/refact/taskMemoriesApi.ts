@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type TaskMemoryKind =
   | "decision"
@@ -141,7 +142,10 @@ export interface TriageTaskMemoriesResponse {
   cursor: string;
 }
 
-function buildTaskMemoriesUrl(port: number, query: TaskMemoriesQuery): string {
+function buildTaskMemoriesUrl(
+  state: RootState,
+  query: TaskMemoriesQuery,
+): string {
   const params = new URLSearchParams();
   if (query.since) params.set("since", query.since);
   if (query.kind && query.kind !== "all") params.set("kind", query.kind);
@@ -149,11 +153,8 @@ function buildTaskMemoriesUrl(port: number, query: TaskMemoriesQuery): string {
     params.set("namespace", query.namespace);
   }
   if (query.search) params.set("search", query.search);
-  const suffix = params.toString();
   const taskId = encodeURIComponent(query.taskId);
-  return `http://127.0.0.1:${port}/v1/task/${taskId}/memories${
-    suffix ? `?${suffix}` : ""
-  }`;
+  return buildApiUrlFromState(state, `/v1/task/${taskId}/memories`, params);
 }
 
 export const taskMemoriesApi = createApi({
@@ -173,7 +174,7 @@ export const taskMemoriesApi = createApi({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildTaskMemoriesUrl(state.config.lspPort, args),
+          url: buildTaskMemoriesUrl(state, args),
         });
         if (result.error) return { error: result.error };
         if (!isTaskMemoriesResponse(result.data)) {
@@ -200,9 +201,10 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(taskId)}/memories/facets`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(taskId)}/memories/facets`,
+          ),
         });
         if (result.error) return { error: result.error };
         if (!isTaskMemoryFacetsResponse(result.data)) {
@@ -229,11 +231,12 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId, filename, pinned }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
-            filename,
-          )}/pin`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
+              filename,
+            )}/pin`,
+          ),
           method: "POST",
           body: { pinned },
         });
@@ -283,11 +286,12 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId, filename }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
-            filename,
-          )}/archive`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
+              filename,
+            )}/archive`,
+          ),
           method: "POST",
         });
         if (result.error) return { error: result.error };
@@ -336,9 +340,10 @@ export const taskMemoriesApi = createApi({
       queryFn: async ({ taskId, cursor }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${
-            state.config.lspPort
-          }/v1/task/${encodeURIComponent(taskId)}/memories/triage-done`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/task/${encodeURIComponent(taskId)}/memories/triage-done`,
+          ),
           method: "POST",
           body: { cursor },
         });

@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export type FileOverride = {
   enabled?: boolean;
@@ -93,12 +94,8 @@ export const projectInformationApi = createApi({
     getProjectInformation: builder.query<ProjectInformationConfig, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        if (!port) {
-          return { error: { status: 500, data: "Missing lspPort in config" } };
-        }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/project-information`,
+          url: buildApiUrlFromState(state, "/v1/project-information"),
         });
         if (result.error) {
           return { error: result.error };
@@ -116,12 +113,8 @@ export const projectInformationApi = createApi({
     >({
       queryFn: async (config, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        if (!port) {
-          return { error: { status: 500, data: "Missing lspPort in config" } };
-        }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/project-information`,
+          url: buildApiUrlFromState(state, "/v1/project-information"),
           method: "POST",
           body: config,
         });
@@ -138,12 +131,8 @@ export const projectInformationApi = createApi({
     >({
       queryFn: async (config, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        if (!port) {
-          return { error: { status: 500, data: "Missing lspPort in config" } };
-        }
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/project-information/preview`,
+          url: buildApiUrlFromState(state, "/v1/project-information/preview"),
           method: "POST",
           body: config,
         });

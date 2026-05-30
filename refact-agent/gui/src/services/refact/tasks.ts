@@ -1,5 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
+import { buildApiUrlFromState } from "./apiUrl";
 
 export interface TaskMeta {
   id: string;
@@ -124,9 +125,8 @@ export const tasksApi = createApi({
     listTasks: builder.query<TaskMeta[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks`,
+          url: buildApiUrlFromState(state, "/v1/tasks"),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TaskMeta[] };
@@ -137,9 +137,8 @@ export const tasksApi = createApi({
     createTask: builder.mutation<TaskMeta, CreateTaskRequest>({
       queryFn: async (args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks`,
+          url: buildApiUrlFromState(state, "/v1/tasks"),
           method: "POST",
           body: args,
         });
@@ -152,9 +151,8 @@ export const tasksApi = createApi({
     getTask: builder.query<TaskMeta, string>({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}`),
         });
         if (result.error) return { error: result.error };
         const response = result.data as { meta: TaskMeta };
@@ -168,9 +166,8 @@ export const tasksApi = createApi({
     deleteTask: builder.mutation<{ deleted: boolean }, string>({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}`),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
@@ -185,9 +182,8 @@ export const tasksApi = createApi({
     >({
       queryFn: async ({ taskId, status }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/status`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/status`),
           method: "POST",
           body: { status },
         });
@@ -203,9 +199,8 @@ export const tasksApi = createApi({
     getBoard: builder.query<TaskBoard, string>({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/board`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board`),
         });
         if (result.error) return { error: result.error };
         const raw = result.data;
@@ -237,9 +232,8 @@ export const tasksApi = createApi({
     >({
       queryFn: async ({ taskId, board }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/board`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board`),
           method: "POST",
           body: board,
         });
@@ -254,9 +248,8 @@ export const tasksApi = createApi({
     getReadyCards: builder.query<ReadyCardsResult, string>({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/board/ready`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board/ready`),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as ReadyCardsResult };
@@ -266,9 +259,11 @@ export const tasksApi = createApi({
     getOrchestratorInstructions: builder.query<string, string>({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/planner-instructions`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${taskId}/planner-instructions`,
+          ),
         });
         if (result.error) return { error: result.error };
         const payload = result.data as { content?: unknown };
@@ -284,9 +279,11 @@ export const tasksApi = createApi({
     >({
       queryFn: async ({ taskId, content }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/planner-instructions`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${taskId}/planner-instructions`,
+          ),
           method: "PUT",
           body: { content },
         });
@@ -301,9 +298,11 @@ export const tasksApi = createApi({
     >({
       queryFn: async ({ taskId, role }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/trajectories/${role}`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${taskId}/trajectories/${role}`,
+          ),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as TrajectoryInfo[] };
@@ -316,9 +315,8 @@ export const tasksApi = createApi({
     createPlannerChat: builder.mutation<{ chat_id: string }, string>({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/planner-chats`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/planner-chats`),
           method: "POST",
         });
         if (result.error) return { error: result.error };
@@ -335,9 +333,11 @@ export const tasksApi = createApi({
     >({
       queryFn: async ({ taskId, chatId }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/planner-chats/${chatId}`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${taskId}/planner-chats/${chatId}`,
+          ),
           method: "DELETE",
         });
         if (result.error) return { error: result.error };
@@ -365,9 +365,11 @@ export const tasksApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/planner-chats/from-transition`,
+          url: buildApiUrlFromState(
+            state,
+            `/v1/tasks/${taskId}/planner-chats/from-transition`,
+          ),
           method: "POST",
           body: {
             source_chat_id: sourceChatId,
@@ -401,9 +403,8 @@ export const tasksApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/board`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/board`),
           method: "POST",
           body: {
             rev: 0,
@@ -444,7 +445,6 @@ export const tasksApi = createApi({
         baseQuery,
       ) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
         const body: Record<string, string> = {};
         if (name !== undefined) body.name = name;
         if (baseBranch !== undefined) body.base_branch = baseBranch;
@@ -452,7 +452,7 @@ export const tasksApi = createApi({
         if (defaultAgentModel !== undefined)
           body.default_agent_model = defaultAgentModel;
         const result = await baseQuery({
-          url: `http://127.0.0.1:${port}/v1/tasks/${taskId}/meta`,
+          url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/meta`),
           method: "PATCH",
           body,
         });
