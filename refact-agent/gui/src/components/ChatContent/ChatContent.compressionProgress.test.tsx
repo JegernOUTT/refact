@@ -28,7 +28,6 @@ function makeChatState({
   const chat = createDefaultChatState();
   const chatId = chat.current_thread_id;
   const runtime = chat.threads[chatId];
-  if (!runtime) throw new Error("missing runtime");
   runtime.thread.messages = messages;
   runtime.is_compressing = isCompressing;
   runtime.snapshot_received = snapshotReceived;

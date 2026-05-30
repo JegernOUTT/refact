@@ -68,6 +68,7 @@ import {
   useListWorktreesQuery,
   useOpenWorktreeMutation,
   type MergeWorktreeResponse,
+  type BackgroundAgentSummary,
 } from "../../services/refact";
 import {
   sendUserMessage,
@@ -104,6 +105,8 @@ type ActiveChat =
 
 const LEGACY_WORKTREE_TOOLTIP =
   "This worktree was created before the registry; recreate it via `restart_agent(mode=fresh)` to enable actions.";
+const EMPTY_BACKGROUND_AGENTS: Record<string, BackgroundAgentSummary> =
+  Object.freeze({});
 
 interface PlannerPanelProps {
   plannerChats: PlannerInfo[];
@@ -716,7 +719,9 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     selectTaskActiveChat(state, taskId),
   );
   const activeChatBackgroundAgents = useAppSelector((state) =>
-    activeChat ? selectBackgroundAgentsByThread(state, activeChat.chatId) : {},
+    activeChat
+      ? selectBackgroundAgentsByThread(state, activeChat.chatId)
+      : EMPTY_BACKGROUND_AGENTS,
   );
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const selectedCard = useMemo(
