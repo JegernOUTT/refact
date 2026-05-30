@@ -4,6 +4,30 @@ import { isOpenExternalUrl } from "../events/setup";
 import { useAppDispatch } from "./useAppDispatch";
 import { useConfig } from "./useConfig";
 import { updateConfig } from "../features/Config/configSlice";
+import { sanitizeEngineBaseUrl } from "../services/refact/apiUrl";
+
+function currentWindowPort(): number {
+  return (
+    Number(window.location.port) ||
+    (window.location.protocol === "https:" ? 443 : 80)
+  );
+}
+
+export function resolveWebLspUrl(
+  config: {
+    dev?: boolean;
+    engineServed?: boolean;
+    lspUrl?: string;
+  },
+  storedLspUrl: string,
+): string {
+  if (config.engineServed) return "";
+
+  const configLspUrl = sanitizeEngineBaseUrl(config.lspUrl) ?? "";
+  if (config.dev) return configLspUrl;
+
+  return sanitizeEngineBaseUrl(storedLspUrl) ?? configLspUrl;
+}
 
 // all of the events that are normally handeled by the IDE
 // are handled here for the web version.
@@ -41,17 +65,10 @@ export function useEventBusForWeb() {
       return;
     }
 
-    const origin = window.location.origin;
-    const nextLspUrl = config.engineServed ? origin : lspUrl || config.lspUrl;
-    const nextPort = config.engineServed
-      ? Number(window.location.port) ||
-        (window.location.protocol === "https:" ? 443 : 80)
-      : config.lspPort;
-
     dispatch(
       updateConfig({
-        lspUrl: nextLspUrl,
-        lspPort: nextPort,
+        lspUrl: resolveWebLspUrl(config, lspUrl),
+        lspPort: config.engineServed ? currentWindowPort() : config.lspPort,
         apiKey,
       }),
     );
@@ -63,5 +80,6 @@ export function useEventBusForWeb() {
     config.lspUrl,
     config.lspPort,
     config.engineServed,
+    config.dev,
   ]);
 }

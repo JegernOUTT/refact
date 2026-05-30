@@ -9,8 +9,11 @@ const element = document.getElementById("refact-chat");
 if (element) {
   render(element, {
     host: "web",
+    dev: true,
+    engineServed: false,
+    lspUrl: "",
+    lspPort: 8001,
     features: { statistics: true, vecdb: true, ast: true },
     themeProps: {},
-    lspPort: 8001,
   });
 }
