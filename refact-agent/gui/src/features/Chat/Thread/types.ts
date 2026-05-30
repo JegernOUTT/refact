@@ -1,5 +1,9 @@
 import { ToolConfirmationPauseReason, Usage } from "../../../services/refact";
 import { SystemPrompts } from "../../../services/refact/prompts";
+import type {
+  CompressionPhase,
+  CompressionReason,
+} from "../../../services/refact/chatSubscription";
 import {
   BackgroundAgentSummary,
   ChatMessages,
@@ -211,6 +215,10 @@ export type ChatThreadRuntime = {
   snapshot_received: boolean;
   /** Whether the engine is running segment summarization */
   is_compressing?: boolean;
+  /** Latest compression attempt phase from the engine */
+  compression_phase?: CompressionPhase;
+  /** Latest structured compression skip/failure reason from the engine */
+  compression_reason?: CompressionReason;
   /** Task progress widget expanded/collapsed state */
   task_widget_expanded: boolean;
   /** Actual session state from backend (for waiting_user_input, completed, etc.) */

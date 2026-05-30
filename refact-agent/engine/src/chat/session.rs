@@ -169,6 +169,8 @@ impl ChatSession {
             messages: Vec::new(),
             runtime: RuntimeState::default(),
             is_compressing: false,
+            compression_phase: None,
+            compression_reason: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -233,6 +235,8 @@ impl ChatSession {
             messages,
             runtime: RuntimeState::default(),
             is_compressing: false,
+            compression_phase: None,
+            compression_reason: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -427,6 +431,8 @@ impl ChatSession {
         let mut runtime = self.runtime.clone();
         runtime.queue_size = self.command_queue.len();
         runtime.is_compressing = self.is_compressing;
+        runtime.compression_phase = self.compression_phase;
+        runtime.compression_reason = self.compression_reason;
         runtime.queued_items = self.build_queued_items();
         ChatEvent::Snapshot {
             thread: self.thread.clone(),
@@ -788,6 +794,17 @@ impl ChatSession {
         self.runtime.error = error.clone();
         self.runtime.queue_size = self.command_queue.len();
         self.runtime.queued_items = self.build_queued_items();
+        if matches!(
+            state,
+            SessionState::Idle
+                | SessionState::Completed
+                | SessionState::Error
+                | SessionState::WaitingUserInput
+        ) && self.is_compressing
+        {
+            self.is_compressing = false;
+            self.runtime.is_compressing = false;
+        }
         self.touch();
 
         if state != SessionState::Paused && (was_paused || had_pause_reasons) {
@@ -817,6 +834,8 @@ impl ChatSession {
             state,
             error: error.clone(),
             is_compressing: self.is_compressing,
+            compression_phase: self.compression_phase,
+            compression_reason: self.compression_reason,
         });
         self.emit_trajectory_state_change();
     }
@@ -1332,6 +1351,8 @@ impl ChatSession {
                     state: self.runtime.state,
                     error: self.runtime.error.clone(),
                     is_compressing: self.is_compressing,
+                    compression_phase: self.compression_phase,
+                    compression_reason: self.compression_reason,
                 });
             }
         }

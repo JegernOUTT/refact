@@ -3,7 +3,6 @@ import { expect, test, describe, beforeEach } from "vitest";
 import { chatReducer } from "./reducer";
 import type { Chat } from "./types";
 import { newChatAction, applyChatEvent, markThreadSseError } from "./actions";
-import { selectIsCompressingById } from "./selectors";
 import type { ChatEventEnvelope } from "../../../services/refact/chatSubscription";
 import type { ChatMessage } from "../../../services/refact/types";
 
@@ -48,10 +47,13 @@ describe("Chat Thread Reducer - Edge Cases", () => {
   });
 
   const selectCompression = (state: Chat): boolean =>
-    selectIsCompressingById(
-      { chat: state } as Parameters<typeof selectIsCompressingById>[0],
-      chatId,
-    );
+    state.threads[chatId]?.is_compressing ?? false;
+
+  const selectCompressionPhase = (state: Chat) =>
+    state.threads[chatId]?.compression_phase;
+
+  const selectCompressionReason = (state: Chat) =>
+    state.threads[chatId]?.compression_reason;
 
   describe("preserve streaming fields on final message_added", () => {
     test("should keep reasoning_content from streaming when message_added arrives", () => {
@@ -366,10 +368,12 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     test("snapshot with runtime is_compressing true sets selector true", () => {
       const snapshot = createSnapshot([]);
       snapshot.runtime.is_compressing = true;
+      snapshot.runtime.compression_phase = "running";
 
       const state = chatReducer(initialState, applyChatEvent(snapshot));
 
       expect(selectCompression(state)).toBe(true);
+      expect(selectCompressionPhase(state)).toBe("running");
     });
 
     test("snapshot missing is_compressing clears stale true", () => {
@@ -383,6 +387,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
           type: "runtime_updated",
           state: "generating",
           is_compressing: true,
+          compression_phase: "running",
         }),
       );
       expect(selectCompression(state)).toBe(true);
@@ -392,6 +397,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       state = chatReducer(state, applyChatEvent(snapshot));
 
       expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBeUndefined();
     });
 
     test("runtime_updated generating with is_compressing true sets true", () => {
@@ -405,11 +411,56 @@ describe("Chat Thread Reducer - Edge Cases", () => {
           type: "runtime_updated",
           state: "generating",
           is_compressing: true,
+          compression_phase: "running",
         }),
       );
 
       expect(selectCompression(state)).toBe(true);
+      expect(selectCompressionPhase(state)).toBe("running");
+      expect(selectCompressionReason(state)).toBeUndefined();
       expect(state.threads[chatId]!.streaming).toBe(true);
+    });
+
+    test("runtime_updated skipped stores structured reason without active compression", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "idle",
+          is_compressing: false,
+          compression_phase: "skipped",
+          compression_reason: "pressure_low",
+        }),
+      );
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBe("skipped");
+      expect(selectCompressionReason(state)).toBe("pressure_low");
+    });
+
+    test("runtime_updated failed stores structured reason and clears active compression", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "idle",
+          is_compressing: false,
+          compression_phase: "failed",
+          compression_reason: "no_summary_model",
+        }),
+      );
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBe("failed");
+      expect(selectCompressionReason(state)).toBe("no_summary_model");
     });
 
     test("runtime_updated idle without is_compressing clears stale true", () => {
@@ -423,6 +474,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
           type: "runtime_updated",
           state: "generating",
           is_compressing: true,
+          compression_phase: "running",
         }),
       );
       expect(selectCompression(state)).toBe(true);
@@ -438,6 +490,8 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       );
 
       expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBeUndefined();
+      expect(selectCompressionReason(state)).toBeUndefined();
     });
   });
 
@@ -485,6 +539,7 @@ describe("Chat Thread Reducer - Edge Cases", () => {
           type: "runtime_updated",
           state: "generating",
           is_compressing: true,
+          compression_phase: "running",
         }),
       );
       expect(selectCompression(state)).toBe(true);
@@ -495,6 +550,8 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       );
 
       expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBeUndefined();
+      expect(selectCompressionReason(state)).toBeUndefined();
     });
   });
 
