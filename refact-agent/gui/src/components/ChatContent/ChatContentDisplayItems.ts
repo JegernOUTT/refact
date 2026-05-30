@@ -169,6 +169,17 @@ function syntheticCompressionFailureError(
   };
 }
 
+function syntheticCompressionFailureError(
+  message: ChatMessages[number],
+): ErrorMessage {
+  return {
+    role: "error",
+    content: typeof message.content === "string" ? message.content : "",
+    message_id: message.message_id,
+    extra: message.extra,
+  };
+}
+
 export type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
