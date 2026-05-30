@@ -340,11 +340,20 @@ impl ChatReactionDebugState {
             result: "skipped".to_string(),
             skip_reason: Some(skip_reason.clone()),
             signal_type: None,
+            event_id: None,
+            ttl_ms: None,
+            bubble_policy: None,
+            queued: None,
         });
         self.last_skip_reason = Some(skip_reason);
     }
 
-    pub fn record_emitted(&mut self, chat_id: &str, signal_type: &str) {
+    pub fn record_emitted(
+        &mut self,
+        chat_id: &str,
+        signal_type: &str,
+        event: Option<&BuddyRuntimeEvent>,
+    ) {
         let attempted_at = Utc::now().to_rfc3339();
         self.record(ChatReactionAttempt {
             attempted_at: attempted_at.clone(),
@@ -352,6 +361,10 @@ impl ChatReactionDebugState {
             result: "emitted".to_string(),
             skip_reason: None,
             signal_type: Some(signal_type.to_string()),
+            event_id: event.map(|event| event.id.clone()),
+            ttl_ms: event.and_then(|event| event.ttl_ms),
+            bubble_policy: event.and_then(|event| event.bubble_policy.clone()),
+            queued: Some(event.is_some()),
         });
         self.last_emitted_at = Some(attempted_at);
     }
@@ -696,15 +709,6 @@ fn message_hash(text: &str) -> String {
     format!("{:016x}", stable_hash(text))
 }
 
-fn signal_type_for_kind(kind: &ChatReactionKind) -> &'static str {
-    match kind {
-        ChatReactionKind::Humor => "speech_humor",
-        ChatReactionKind::Insight => "speech_insight",
-        ChatReactionKind::BugCandidate => "chat_bug_candidate",
-        ChatReactionKind::Ambient => "speech_chat_reaction",
-    }
-}
-
 pub fn build_reaction_event(
     chat_id: &str,
     analysis_text: &str,
@@ -853,7 +857,6 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
     let chat_id = accepted.chat_id.clone();
     tokio::spawn(async move {
         let (candidate, reservation, voice_inputs) = plan;
-        let signal_type = signal_type_for_kind(&candidate.kind).to_string();
         let speech = render_chat_reaction_text(
             &app2,
             &candidate.kind,
@@ -874,9 +877,13 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
         let mut svc_guard = app2.buddy.buddy.lock().await;
         if let Some(svc) = svc_guard.as_mut() {
             if settings_allow_chat_reactions(&svc.settings) {
-                svc.enqueue_runtime_event(event);
-                svc.chat_reaction_debug
-                    .record_emitted(&chat_id, signal_type.as_str());
+                let signal_type = event.signal_type.clone();
+                let stored_event = svc.enqueue_runtime_event_with_stored(event);
+                svc.chat_reaction_debug.record_emitted(
+                    &chat_id,
+                    signal_type.as_str(),
+                    stored_event.as_ref(),
+                );
                 debug!(
                     target: "buddy.chat_reactions",
                     chat_id = %chat_id,

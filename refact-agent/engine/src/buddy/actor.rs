@@ -720,6 +720,13 @@ impl BuddyService {
     }
 
     pub fn enqueue_runtime_event(&mut self, event: BuddyRuntimeEvent) {
+        let _ = self.enqueue_runtime_event_with_stored(event);
+    }
+
+    pub fn enqueue_runtime_event_with_stored(
+        &mut self,
+        event: BuddyRuntimeEvent,
+    ) -> Option<BuddyRuntimeEvent> {
         let event = self.apply_runtime_dismissal_memory(event);
         let dedupe_key = event.dedupe_key.clone();
         let input_id = event.id.clone();
@@ -746,11 +753,11 @@ impl BuddyService {
                 .find(|e| e.id == input_id)
                 .cloned()
         };
-        if let Some(ev) = to_persist {
+        if let Some(ev) = to_persist.as_ref() {
             let _ = self
                 .events_tx
                 .send(BuddyEvent::RuntimeEvent { event: ev.clone() });
-            self.persist_event(ev);
+            self.persist_event(ev.clone());
         }
         if dedupe_key.is_some()
             && self
@@ -766,6 +773,7 @@ impl BuddyService {
         for id in evicted {
             self.persist_removal(id);
         }
+        to_persist
     }
 
     pub fn expire_runtime_events_at(&mut self, now: DateTime<Utc>) -> Vec<String> {

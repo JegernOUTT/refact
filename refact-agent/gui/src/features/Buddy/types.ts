@@ -940,6 +940,10 @@ export interface ChatReactionAttempt {
   result: string;
   skip_reason?: string | null;
   signal_type?: string | null;
+  event_id?: string | null;
+  ttl_ms?: number | null;
+  bubble_policy?: "ambient" | "durable" | "event_once" | null;
+  queued?: boolean | null;
 }
 
 export interface ChatReactionDebug {
