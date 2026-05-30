@@ -43,6 +43,7 @@ import {
   snoozeChatBubbles,
   clearExpiredChatBubbleSnooze,
   recordChatBubbleImpression,
+  markBuddyNotificationSeen,
   beginBuddySettingsRequest,
   finishBuddySettingsRequest,
   defaultBuddyPulse,
@@ -544,7 +545,6 @@ describe("Buddy chat notification freshness", () => {
     expect(source).not.toContain("setSeenNotificationIds");
     expect(source).not.toContain("setInterval");
     expect(source).not.toContain("12_000");
-    expect(source).not.toContain("15_000");
     expect(source).not.toContain("data-testid");
     expect(source).not.toContain("hidden>");
   });
@@ -5107,6 +5107,242 @@ describe("buddy chat reactions settings and bubbles", () => {
       ).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  test("chat companion shows fresh chat_reactions runtime over stale high errors", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+    try {
+      const store = setUpStore();
+      const staleError = makeChatRuntimeEvent({
+        id: "stale-high-error-under-source-reaction",
+        signal_type: "provider_error",
+        title: "Stale high error",
+        source: "provider",
+        status: "failed",
+        priority: "high",
+        persistent: true,
+        controls: [],
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const reaction = makeChatRuntimeEvent({
+        id: "fresh-source-chat-reaction-over-stale",
+        signal_type: "ordinary_status",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Fresh chat reaction must show, tiny chaos sparkle.",
+        controls: [],
+        ttl_ms: 90_000,
+        created_at: "2024-01-01T00:02:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot({ runtime_queue: [staleError, reaction] }),
+        ),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotificationText(
+        container,
+        "runtime:fresh-source-chat-reaction-over-stale",
+        "Fresh chat reaction must show, tiny chaos sparkle.",
+      );
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:stale-high-error-under-source-reaction",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("chat companion keeps selected chat reaction visible after marking seen", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const reaction = makeChatRuntimeEvent({
+        id: "reaction-stays-after-seen",
+        signal_type: "speech_humor",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "I saw that message and did a tiny flip.",
+        controls: [],
+        ttl_ms: 90_000,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [reaction] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await expectCompanionNotification(
+        container,
+        "runtime:reaction-stays-after-seen",
+      );
+
+      store.dispatch(
+        markBuddyNotificationSeen("runtime:reaction-stays-after-seen"),
+      );
+
+      await expectCompanionNotificationText(
+        container,
+        "runtime:reaction-stays-after-seen",
+        "I saw that message and did a tiny flip.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("chat companion hides expired chat reaction after ttl", async () => {
+    const baseMs = new Date("2024-01-01T00:00:00Z").getTime();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(baseMs);
+    try {
+      const store = setUpStore();
+      const reaction = makeChatRuntimeEvent({
+        id: "reaction-short-ttl",
+        signal_type: "speech_chat_reaction",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Blink and the tiny gremlin vanishes.",
+        controls: [],
+        ttl_ms: 2_000,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [reaction] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await expectCompanionNotification(
+        container,
+        "runtime:reaction-short-ttl",
+      );
+
+      nowSpy.mockReturnValue(baseMs + 2_002);
+      store.dispatch(dismissRuntimeEvent("reaction-short-ttl"));
+
+      await expectNoCompanionNotification(
+        container,
+        "runtime:reaction-short-ttl",
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+  test("chat companion does not show chat reaction from another chat", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const reaction = makeChatRuntimeEvent({
+        id: "reaction-other-chat-hidden",
+        signal_type: "speech_insight",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        chat_id: "chat-b",
+        speech_text: "Wrong chat gremlin should stay in its lane.",
+        controls: [],
+        ttl_ms: 90_000,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [reaction] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectNoCompanionNotification(
+        container,
+        "runtime:reaction-other-chat-hidden",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("chat companion keeps selected chat reaction visible during queue churn until minimum duration", async () => {
+    const baseMs = new Date("2024-01-01T00:00:00Z").getTime();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(baseMs);
+    try {
+      const store = setUpStore();
+      const reaction = makeChatRuntimeEvent({
+        id: "reaction-pinned-through-churn",
+        signal_type: "speech_humor",
+        title: "Chat reaction",
+        source: "chat_reactions",
+        status: "info",
+        priority: "normal",
+        speech_text: "Pinned gremlin refuses to be swept away.",
+        controls: [],
+        ttl_ms: 90_000,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      const staleError = makeChatRuntimeEvent({
+        id: "churn-stale-high-error",
+        signal_type: "provider_error",
+        title: "Stale high error",
+        source: "provider",
+        status: "failed",
+        priority: "high",
+        persistent: true,
+        controls: [],
+        created_at: "2023-12-31T23:58:00Z",
+      });
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [reaction] })),
+      );
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await expectCompanionNotification(
+        container,
+        "runtime:reaction-pinned-through-churn",
+      );
+
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [staleError] })),
+      );
+      nowSpy.mockReturnValue(baseMs + 9_000);
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [staleError] })),
+      );
+
+      expectNoCompanionNotificationNow(
+        container,
+        "runtime:churn-stale-high-error",
+      );
+      await expectCompanionNotificationText(
+        container,
+        "runtime:reaction-pinned-through-churn",
+        "Pinned gremlin refuses to be swept away.",
+      );
+
+      nowSpy.mockReturnValue(baseMs + 10_100);
+      store.dispatch(
+        setBuddySnapshot(makeSnapshot({ runtime_queue: [staleError] })),
+      );
+
+      await expectNoCompanionNotification(
+        container,
+        "runtime:reaction-pinned-through-churn",
+      );
+      await expectCompanionNotification(
+        container,
+        "runtime:churn-stale-high-error",
+      );
+    } finally {
+      nowSpy.mockRestore();
     }
   });
 

@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -103,7 +104,16 @@ interface NotificationCandidate {
   preventsAmbientOverride?: boolean;
 }
 
+interface PinnedReactionCandidate {
+  chatId: string;
+  notificationId: string;
+  candidate: NotificationCandidate;
+  pinnedUntilMs: number;
+  expiresAtMs: number;
+}
+
 const EVENT_ONCE_FRESHNESS_MS = 75_000;
+const CHAT_REACTION_MIN_DISPLAY_MS = 10_000;
 const AMBIENT_RATIO_TARGET = 0.5;
 const AMBIENT_SIGNALS = new Set<string>([
   "speech_humor",
@@ -389,15 +399,42 @@ function reactionSignalForNotification(
   runtimeQueue: BuddyRuntimeEvent[],
   nowPlaying: BuddyRuntimeEvent | null,
 ): string | null {
-  if (notification?.source !== "runtime") return null;
-  const event = [nowPlaying, ...runtimeQueue].find(
-    (candidate): candidate is BuddyRuntimeEvent =>
-      candidate?.id === notification.sourceId,
+  const event = runtimeEventForNotification(
+    notification,
+    runtimeQueue,
+    nowPlaying,
   );
   if (!event || !isLiveChatReactionEvent(event)) return null;
   return Object.prototype.hasOwnProperty.call(SIGNALS, event.signal_type)
     ? event.signal_type
     : "speech_chat_reaction";
+}
+
+function runtimeEventForNotification(
+  notification: NotificationItem | null,
+  runtimeQueue: BuddyRuntimeEvent[],
+  nowPlaying: BuddyRuntimeEvent | null,
+): BuddyRuntimeEvent | null {
+  if (notification?.source !== "runtime") return null;
+  return (
+    [nowPlaying, ...runtimeQueue].find(
+      (candidate): candidate is BuddyRuntimeEvent =>
+        candidate?.id === notification.sourceId,
+    ) ?? null
+  );
+}
+
+function isLiveChatReactionNotification(
+  notification: NotificationItem | null,
+  runtimeQueue: BuddyRuntimeEvent[],
+  nowPlaying: BuddyRuntimeEvent | null,
+): boolean {
+  const event = runtimeEventForNotification(
+    notification,
+    runtimeQueue,
+    nowPlaying,
+  );
+  return event ? isLiveChatReactionEvent(event) : false;
 }
 
 function isFreshRuntimeEventForBubble(event: BuddyRuntimeEvent): boolean {
@@ -406,6 +443,48 @@ function isFreshRuntimeEventForBubble(event: BuddyRuntimeEvent): boolean {
   const now = Date.now();
   if (createdAtTime > now + 30_000) return false;
   return now - createdAtTime <= eventFreshnessMs(event.ttl_ms);
+}
+
+function runtimeEventFreshUntilMs(event: BuddyRuntimeEvent): number {
+  const createdAtTime = validCreatedAtMs(event.created_at);
+  if (createdAtTime == null) return Date.now();
+  return createdAtTime + eventFreshnessMs(event.ttl_ms);
+}
+
+function isPinnedReactionVisible(
+  pinned: PinnedReactionCandidate | null,
+  chatId: string,
+  dismissedNotificationIds: Set<string>,
+  runtimeQueue: BuddyRuntimeEvent[],
+  nowPlaying: BuddyRuntimeEvent | null,
+): pinned is PinnedReactionCandidate {
+  if (!pinned) return false;
+  if (pinned.chatId !== chatId) return false;
+  if (dismissedNotificationIds.has(pinned.notificationId)) {
+    return false;
+  }
+  const event = runtimeEventForNotification(
+    pinned.candidate.notification,
+    runtimeQueue,
+    nowPlaying,
+  );
+  if (event && !isBuddyRuntimeEventVisible(event)) return false;
+  if (event && !isFreshRuntimeEventForBubble(event)) return false;
+  const now = Date.now();
+  return now < pinned.pinnedUntilMs && now <= pinned.expiresAtMs;
+}
+
+function isFreshCriticalRuntimeCandidate(
+  candidate: NotificationCandidate | null,
+  runtimeQueue: BuddyRuntimeEvent[],
+  nowPlaying: BuddyRuntimeEvent | null,
+): boolean {
+  const event = runtimeEventForNotification(
+    candidate?.notification ?? null,
+    runtimeQueue,
+    nowPlaying,
+  );
+  return event?.priority === "critical" && isFreshErrorWithinGrace(event);
 }
 
 function runtimeEventRank(event: BuddyRuntimeEvent, index: number): number {
@@ -465,6 +544,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   >(null);
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pinnedReaction, setPinnedReaction] =
+    useState<PinnedReactionCandidate | null>(null);
   const [, refreshSpeechExpiry] = useState(0);
   const pendingRef = useRef(false);
   const prevChatIdRef = useRef(chatId);
@@ -477,6 +558,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       prevChatIdRef.current = chatId;
       setDismissedNotificationIds(new Set());
       setActiveNotificationId(null);
+      setPinnedReaction(null);
       setActionError(null);
     }
   }, [chatId]);
@@ -531,6 +613,9 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       dispatch(markBuddyNotificationSeen(id));
       setDismissedNotificationIds((prev) => new Set(prev).add(id));
       setActiveNotificationId((current) => (current === id ? null : current));
+      setPinnedReaction((current) =>
+        current?.notificationId === id ? null : current,
+      );
     },
     [dispatch],
   );
@@ -589,6 +674,12 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       chatDiagnostic,
     );
     for (const [index, event] of runtimes.entries()) {
+      if (
+        isLiveChatReactionEvent(event) &&
+        !isFreshRuntimeEventForBubble(event)
+      ) {
+        continue;
+      }
       const id = notificationIdentity("runtime", event.id);
       if (!isEligible(id)) continue;
       candidates.push({
@@ -766,28 +857,62 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     return () => window.clearTimeout(timer);
   }, [notificationCandidates]);
 
-  const selectedCandidate = useMemo<NotificationCandidate | null>(() => {
+  const pickedCandidate = useMemo<NotificationCandidate | null>(() => {
     if (chatBubbleSnoozedUntil != null && chatBubbleSnoozedUntil > Date.now()) {
       return null;
     }
-    const pickedCandidate = pickNotificationCandidate(
+    const candidate = pickNotificationCandidate(
       notificationCandidates,
       chatBubbleImpressions,
     );
     const activeCandidate = notificationCandidates.find(
-      (candidate) =>
-        candidate.notification.id === activeNotificationId &&
-        isCandidateFresh(candidate),
+      (item) =>
+        item.notification.id === activeNotificationId && isCandidateFresh(item),
     );
-    if (activeCandidate && pickedCandidate === activeCandidate) {
+    if (activeCandidate && candidate === activeCandidate) {
       return activeCandidate;
     }
-    return pickedCandidate;
+    return candidate;
   }, [
     activeNotificationId,
     chatBubbleImpressions,
     chatBubbleSnoozedUntil,
     notificationCandidates,
+  ]);
+
+  const selectedCandidate = useMemo<NotificationCandidate | null>(() => {
+    if (chatBubbleSnoozedUntil != null && chatBubbleSnoozedUntil > Date.now()) {
+      return null;
+    }
+    if (
+      isPinnedReactionVisible(
+        pinnedReaction,
+        chatId,
+        dismissedNotificationIds,
+        runtimeQueue,
+        nowPlaying,
+      )
+    ) {
+      if (
+        isFreshCriticalRuntimeCandidate(
+          pickedCandidate,
+          runtimeQueue,
+          nowPlaying,
+        )
+      ) {
+        return pickedCandidate;
+      }
+      return pinnedReaction.candidate;
+    }
+    return pickedCandidate;
+  }, [
+    chatBubbleSnoozedUntil,
+    chatId,
+    dismissedNotificationIds,
+    nowPlaying,
+    pickedCandidate,
+    pinnedReaction,
+    runtimeQueue,
   ]);
 
   const notification = selectedCandidate?.notification ?? null;
@@ -808,6 +933,55 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     if (activeNotificationId === notification.id) return;
     setActiveNotificationId(notification.id);
   }, [activeNotificationId, notification]);
+
+  useLayoutEffect(() => {
+    if (!selectedCandidate) return;
+    if (
+      !isLiveChatReactionNotification(
+        selectedCandidate.notification,
+        runtimeQueue,
+        nowPlaying,
+      )
+    ) {
+      return;
+    }
+    const event = runtimeEventForNotification(
+      selectedCandidate.notification,
+      runtimeQueue,
+      nowPlaying,
+    );
+    if (!event || !isFreshRuntimeEventForBubble(event)) return;
+    setPinnedReaction((current) => {
+      if (current?.notificationId === selectedCandidate.notification.id) {
+        return current;
+      }
+      const now = Date.now();
+      return {
+        chatId,
+        notificationId: selectedCandidate.notification.id,
+        candidate: selectedCandidate,
+        pinnedUntilMs: now + CHAT_REACTION_MIN_DISPLAY_MS,
+        expiresAtMs: runtimeEventFreshUntilMs(event),
+      };
+    });
+  }, [chatId, nowPlaying, runtimeQueue, selectedCandidate]);
+
+  useEffect(() => {
+    if (!pinnedReaction) return;
+    const nextCheckMs = Math.min(
+      pinnedReaction.pinnedUntilMs,
+      pinnedReaction.expiresAtMs,
+    );
+    const delayMs = nextCheckMs - Date.now() + 1;
+    if (delayMs <= 0) {
+      refreshSpeechExpiry((tick) => tick + 1);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      refreshSpeechExpiry((tick) => tick + 1);
+    }, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [pinnedReaction]);
 
   useEffect(() => {
     if (!activeNotificationId) return;
