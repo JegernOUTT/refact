@@ -3,7 +3,7 @@ import type { AssistantMessage, ChatMessages } from "../../services/refact";
 import {
   buildDisplayItems,
   tryIncrementalDisplayItemsUpdate,
-} from "./ChatContent";
+} from "./ChatContentDisplayItems";
 
 function assistantMessage(
   overrides: Partial<AssistantMessage> = {},

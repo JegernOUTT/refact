@@ -152,9 +152,7 @@ export const EventLog: React.FC<EventLogProps> = ({
 
   const filterEvents = useMemo(
     () =>
-      rawFilterEvents
-        .filter(isEventLogMessage)
-        .map(normalizeEventLogMessage),
+      rawFilterEvents.filter(isEventLogMessage).map(normalizeEventLogMessage),
     [rawFilterEvents],
   );
 
