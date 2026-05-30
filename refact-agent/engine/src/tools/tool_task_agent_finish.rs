@@ -7,11 +7,9 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
-use crate::agentic::generate_commit_message::generate_commit_message_by_diff_with_abort;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::verifier::schedule_card_verifier_after_finish;
-use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, FinalReport, StatusUpdate, SuggestedCard, VerificationResult};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -453,24 +451,58 @@ fn agents_active(cards: &[BoardCard]) -> usize {
         .count()
 }
 
+fn sanitize_commit_component(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut previous_space = false;
+
+    for ch in text.chars() {
+        if out.chars().count() >= max_chars {
+            break;
+        }
+        let ch = if ch.is_control() { ' ' } else { ch };
+        if ch.is_whitespace() {
+            if !previous_space && !out.is_empty() {
+                out.push(' ');
+                previous_space = true;
+            }
+        } else {
+            out.push(ch);
+            previous_space = false;
+        }
+    }
+
+    out.trim().to_string()
+}
+
+fn deterministic_agent_commit_message(card_id: &str, card_title: &str) -> String {
+    let card_id = sanitize_commit_component(card_id, 80);
+    let title = sanitize_commit_component(card_title, 160);
+    let card_id = if card_id.is_empty() {
+        "unknown".to_string()
+    } else {
+        card_id
+    };
+
+    if title.is_empty() {
+        format!("Card {}", card_id)
+    } else {
+        format!("Card {}: {}", card_id, title)
+    }
+}
+
 async fn auto_commit_worktree(
-    gcx: Arc<GlobalContext>,
     worktree_path: &Path,
     card_id: &str,
     card_title: &str,
-    abort_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Option<String>, String> {
-    auto_commit_worktree_with_message(gcx, worktree_path, card_id, card_title, None, abort_flag)
-        .await
+    auto_commit_worktree_with_message(worktree_path, card_id, card_title, None).await
 }
 
 async fn auto_commit_worktree_with_message(
-    gcx: Arc<GlobalContext>,
     worktree_path: &Path,
     card_id: &str,
     card_title: &str,
     commit_msg_override: Option<String>,
-    abort_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Option<String>, String> {
     validate_git_worktree(worktree_path).await?;
 
@@ -484,24 +516,11 @@ async fn auto_commit_worktree_with_message(
 
     git_output_checked(worktree_path, &["add", "-A"], "add").await?;
 
-    let diff_output =
-        git_output_checked(worktree_path, &["diff", "--cached"], "diff --cached").await?;
-    let diff = String::from_utf8_lossy(&diff_output.stdout).to_string();
-
-    let commit_msg = match commit_msg_override {
-        Some(msg) if !msg.trim().is_empty() => msg,
-        _ => match generate_commit_message_by_diff_with_abort(
-            gcx,
-            &diff,
-            &Some(card_title.to_string()),
-            abort_flag,
-        )
-        .await
-        {
-            Ok(msg) if !msg.trim().is_empty() => msg,
-            _ => format!("Card {}: {}", card_id, card_title),
-        },
-    };
+    let commit_msg = commit_msg_override
+        .as_deref()
+        .map(|msg| sanitize_commit_component(msg, 240))
+        .filter(|msg| !msg.is_empty())
+        .unwrap_or_else(|| deterministic_agent_commit_message(card_id, card_title));
 
     let commit_output = tokio::process::Command::new("git")
         .args([
@@ -598,9 +617,9 @@ impl Tool for ToolTaskAgentFinish {
 
         let report = parse_finish_report(args, success)?;
 
-        let (gcx, abort_flag_for_commit) = {
+        let gcx = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.app.gcx.clone(), ccx_lock.abort_flag.clone())
+            ccx_lock.app.gcx.clone()
         };
         let lock_task_id = task_id.clone();
         let lock_card_id = card_id.clone();
@@ -630,14 +649,7 @@ impl Tool for ToolTaskAgentFinish {
 
         let commit_result = if success {
             if let Some(ref worktree) = resolved_worktree {
-                match auto_commit_worktree(
-                    gcx.clone(),
-                    &worktree.root,
-                    &card_id,
-                    &card_title_for_commit,
-                    Some(abort_flag_for_commit.clone()),
-                )
-                .await
+                match auto_commit_worktree(&worktree.root, &card_id, &card_title_for_commit).await
                 {
                     Ok(hash) => hash,
                     Err(e) => {
@@ -809,7 +821,7 @@ mod tests {
 
     fn init_repo(root: &Path) {
         run_git(root, &["init"]);
-        run_git(root, &["checkout", "-b", "main"]);
+        run_git(root, &["checkout", "-B", "main"]);
         run_git(root, &["config", "user.email", "test@example.com"]);
         run_git(root, &["config", "user.name", "Test User"]);
         std::fs::write(root.join("file.txt"), "hello\n").unwrap();
@@ -865,10 +877,6 @@ mod tests {
             agent_id: Some("agent-1".to_string()),
             enforce: true,
         }
-    }
-
-    async fn test_gcx() -> Arc<GlobalContext> {
-        crate::global_context::tests::make_test_gcx().await
     }
 
     #[tokio::test]
@@ -960,6 +968,33 @@ mod tests {
         assert_eq!(card.agent_worktree.as_deref(), Some(worktree.as_str()));
         assert_eq!(card.agent_branch, branch);
         assert_eq!(card.agent_worktree_name, name);
+    }
+
+    #[test]
+    fn deterministic_agent_commit_message_is_bounded_single_line() {
+        let long_title = format!("  Fix   frog\n{}  ", "x".repeat(300));
+
+        let message = deterministic_agent_commit_message("T-1", &long_title);
+
+        assert!(message.starts_with("Card T-1: Fix frog "));
+        assert!(!message.contains('\n'));
+        assert!(message.chars().count() <= "Card T-1: ".chars().count() + 160);
+    }
+
+    #[test]
+    fn deterministic_agent_commit_message_sanitizes_control_chars_in_id_and_title() {
+        let message = deterministic_agent_commit_message("T-1\n\0\x1b[31m", "Fix\x07 title");
+
+        assert_eq!(message, "Card T-1 [31m: Fix title");
+        assert!(!message.chars().any(|ch| ch.is_control()));
+    }
+
+    #[test]
+    fn sanitize_commit_component_bounds_override_messages() {
+        let message = sanitize_commit_component(&format!("Fix\n{}", "x".repeat(300)), 12);
+
+        assert_eq!(message, "Fix xxxxxxxx");
+        assert!(!message.chars().any(|ch| ch.is_control()));
     }
 
     #[test]
@@ -1088,12 +1123,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing-worktree");
         let result = auto_commit_worktree_with_message(
-            test_gcx().await,
             &missing,
             "T-1",
             "Card T-1",
             Some("test commit".to_string()),
-            None,
         )
         .await;
 
@@ -1107,12 +1140,10 @@ mod tests {
         let non_git = temp.path().join("non-git");
         std::fs::create_dir_all(&non_git).unwrap();
         let result = auto_commit_worktree_with_message(
-            test_gcx().await,
             &non_git,
             "T-1",
             "Card T-1",
             Some("test commit".to_string()),
-            None,
         )
         .await;
 
@@ -1128,12 +1159,10 @@ mod tests {
         init_repo(&repo);
 
         let commit = auto_commit_worktree_with_message(
-            test_gcx().await,
             &repo,
             "T-1",
             "Card T-1",
             Some("test commit".to_string()),
-            None,
         )
         .await
         .unwrap();
@@ -1160,15 +1189,11 @@ mod tests {
             ],
         );
         std::fs::write(worktree.join("file.txt"), "changed in worktree\n").unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-
         let commit = auto_commit_worktree_with_message(
-            gcx,
             &worktree,
             "T-1",
             "Card T-1",
             Some("test commit".to_string()),
-            None,
         )
         .await
         .unwrap();
@@ -1184,6 +1209,46 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(worktree.join("file.txt")).unwrap(),
             "changed in worktree\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_finish_default_commit_message_does_not_need_subchat() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let worktree = temp.path().join("agent-worktree-default-message");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "refact/task/task-1/card/T-2/agent",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(
+            worktree.join("file.txt"),
+            "changed without generated message\n",
+        )
+        .unwrap();
+
+        let commit = auto_commit_worktree_with_message(
+            &worktree,
+            "T-2",
+            "  Implement    stable finish\nwithout subchat  ",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(commit.is_some());
+        let subject = run_git(&worktree, &["log", "-1", "--pretty=%s"]);
+        assert_eq!(
+            subject.trim(),
+            "Card T-2: Implement stable finish without subchat"
         );
     }
 }

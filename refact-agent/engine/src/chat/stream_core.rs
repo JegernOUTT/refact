@@ -25,7 +25,32 @@ lazy_static::lazy_static! {
         tokio::sync::Mutex::new(HashMap::new());
 }
 
-const OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
+const MIN_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB: usize = 8;
+const MAX_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB: usize = 512;
+
+fn stack_mb_to_bytes_clamped(value: Option<&str>, default_bytes: usize) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|mb| {
+            mb.clamp(
+                MIN_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB,
+                MAX_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB,
+            ) * 1024
+                * 1024
+        })
+        .unwrap_or(default_bytes)
+}
+
+fn openai_codex_websocket_thread_stack_bytes() -> usize {
+    stack_mb_to_bytes_clamped(
+        std::env::var("REFACT_OPENAI_CODEX_WS_STACK_MB")
+            .ok()
+            .as_deref(),
+        DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES,
+    )
+}
 
 fn merge_usage(existing: Option<ChatUsage>, incoming: ChatUsage) -> ChatUsage {
     match existing {
@@ -1814,7 +1839,7 @@ async fn run_llm_websocket_request_on_large_stack(
     let (tx, rx) = tokio::sync::oneshot::channel();
     let spawn_result = std::thread::Builder::new()
         .name("openai-codex-websocket".to_string())
-        .stack_size(OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES)
+        .stack_size(openai_codex_websocket_thread_stack_bytes())
         .spawn(move || {
             let result = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2671,6 +2696,39 @@ mod tests {
         model.endpoint = "https://chatgpt.com/backend-api/codex/responses".to_string();
         model.id = "openai/gpt-5.6-codex".to_string();
         assert!(openai_codex_websocket_endpoint(&model).is_none());
+    }
+
+    #[test]
+    fn websocket_stack_mb_parser_uses_default_and_clamps_bounds() {
+        assert_eq!(
+            stack_mb_to_bytes_clamped(None, DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES),
+            DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
+        );
+        assert_eq!(
+            stack_mb_to_bytes_clamped(
+                Some("nope"),
+                DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
+            ),
+            DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
+        );
+        assert_eq!(
+            stack_mb_to_bytes_clamped(Some("1"), DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES),
+            MIN_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB * 1024 * 1024
+        );
+        assert_eq!(
+            stack_mb_to_bytes_clamped(
+                Some("99999"),
+                DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
+            ),
+            MAX_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_MB * 1024 * 1024
+        );
+        assert_eq!(
+            stack_mb_to_bytes_clamped(
+                Some("96"),
+                DEFAULT_OPENAI_CODEX_WEBSOCKET_THREAD_STACK_BYTES
+            ),
+            96 * 1024 * 1024
+        );
     }
 
     #[test]
