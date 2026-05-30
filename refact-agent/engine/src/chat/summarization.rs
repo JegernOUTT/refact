@@ -76,6 +76,10 @@ impl SegmentSummaryFailure {
     }
 }
 
+fn public_compression_failure_text(failure: &SegmentSummaryFailure) -> String {
+    refact_core::string_utils::redact_sensitive(&failure.to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummarySegment {
     pub start: usize,
@@ -355,21 +359,21 @@ fn cap_goal_hint_with_marker(text: &str) -> String {
     format!("{}{}", prefix, GOAL_HINT_TRUNCATED_MARKER)
 }
 
-fn sanitize_goal_hint(goal_hint: Option<String>) -> Option<String> {
-    let raw = goal_hint?;
+fn sanitize_goal_hint_text(raw: &str, source_truncated: bool) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() && !source_truncated {
         return None;
     }
     let scan_cap = GOAL_HINT_MAX_CHARS.saturating_add(SEGMENT_REDACTION_SCAN_EXTRA_CHARS);
     let (window, window_truncated) = bounded_redaction_window(trimmed, scan_cap);
+    let was_truncated = source_truncated || window_truncated;
     let redacted = refact_core::string_utils::redact_sensitive(window)
         .trim()
         .to_string();
-    if redacted.is_empty() && !window_truncated {
+    if redacted.is_empty() && !was_truncated {
         return None;
     }
-    let output = if window_truncated || redacted.len() > GOAL_HINT_MAX_CHARS {
+    let output = if was_truncated || redacted.len() > GOAL_HINT_MAX_CHARS {
         cap_goal_hint_with_marker(&redacted)
     } else {
         redacted
@@ -378,6 +382,60 @@ fn sanitize_goal_hint(goal_hint: Option<String>) -> Option<String> {
         None
     } else {
         Some(output)
+    }
+}
+
+fn sanitize_goal_hint(goal_hint: Option<String>) -> Option<String> {
+    let raw = goal_hint?;
+    sanitize_goal_hint_text(&raw, false)
+}
+
+fn append_goal_hint_text_piece(buffer: &mut String, piece: &str, scan_cap: usize) -> bool {
+    if piece.is_empty() {
+        return false;
+    }
+    if !buffer.is_empty() {
+        let remaining = scan_cap.saturating_sub(buffer.len());
+        if remaining < "\n\n".len() {
+            if remaining > 0 {
+                buffer.push_str(refact_core::string_utils::safe_truncate("\n\n", remaining));
+            }
+            return true;
+        }
+        buffer.push_str("\n\n");
+    }
+    let remaining = scan_cap.saturating_sub(buffer.len());
+    if piece.len() <= remaining {
+        buffer.push_str(piece);
+        false
+    } else {
+        buffer.push_str(refact_core::string_utils::safe_truncate(piece, remaining));
+        true
+    }
+}
+
+fn bounded_goal_hint_from_message(message: &ChatMessage) -> Option<String> {
+    if message.role != "user" {
+        return None;
+    }
+    let scan_cap = GOAL_HINT_MAX_CHARS.saturating_add(SEGMENT_REDACTION_SCAN_EXTRA_CHARS);
+    match &message.content {
+        ChatContent::SimpleText(text) => {
+            let (window, truncated) = bounded_redaction_window(text, scan_cap);
+            sanitize_goal_hint_text(window, truncated)
+        }
+        ChatContent::Multimodal(elements) => {
+            let mut text = String::with_capacity(scan_cap.min(1024));
+            let mut truncated = false;
+            for element in elements.iter().filter(|element| element.m_type == "text") {
+                if append_goal_hint_text_piece(&mut text, &element.m_content, scan_cap) {
+                    truncated = true;
+                    break;
+                }
+            }
+            sanitize_goal_hint_text(&text, truncated)
+        }
+        ChatContent::ContextFiles(_) => None,
     }
 }
 
@@ -798,8 +856,7 @@ pub async fn summarize_oldest_segment_with_resolved_model(
     let goal_hint = messages[..segment.start]
         .iter()
         .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.content_text_only());
+        .find_map(bounded_goal_hint_from_message);
     let source_messages = messages[segment.start..=segment.end].to_vec();
     let summary = summarize_segment(
         gcx,
@@ -851,11 +908,12 @@ pub fn summarize_oldest_segment_with_static_summary(
 }
 
 fn append_compression_failure_event(session: &mut ChatSession, failure: &SegmentSummaryFailure) {
+    let public_failure = public_compression_failure_text(failure);
     let fail_event = event(
         EventSubkind::SystemNotice,
         "chat.summarizer",
-        json!({ "failure": failure.to_string() }),
-        format!("Context compression failed: {}", failure),
+        json!({ "failure": public_failure.clone() }),
+        format!("Context compression failed: {}", public_failure),
     );
     let index = session.messages.len();
     session.messages.push(fail_event);
@@ -966,8 +1024,7 @@ pub async fn apply_segment_summarization(
     let goal_hint = raw_messages[..segment.start]
         .iter()
         .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.content_text_only());
+        .find_map(bounded_goal_hint_from_message);
 
     match summarize_segment(gcx, &source_messages, model, model_n_ctx, goal_hint).await {
         Ok(summary) => {
@@ -1169,6 +1226,65 @@ mod tests {
     fn empty_goal_hint_is_removed() {
         assert_eq!(sanitize_goal_hint(Some(" \n\t ".to_string())), None);
         assert_eq!(sanitize_goal_hint(None), None);
+    }
+
+    #[test]
+    fn goal_hint_from_large_user_message_is_bounded_before_use() {
+        let huge = format!(
+            "Keep working with api_key=sk-abcdefghijklmnop. {} end",
+            "tail ".repeat(GOAL_HINT_MAX_CHARS * 10)
+        );
+        let huge_len = huge.len();
+        let message = user(&huge);
+
+        let hint = bounded_goal_hint_from_message(&message).unwrap();
+
+        assert!(hint.len() <= GOAL_HINT_MAX_CHARS, "len={}", hint.len());
+        assert!(hint.contains("api_key=[REDACTED]") || hint.contains("[REDACTED_SK_TOKEN]"));
+        assert!(hint.ends_with(GOAL_HINT_TRUNCATED_MARKER));
+        assert_no_raw_secrets(&hint);
+        assert!(!hint.contains(" end"));
+        assert!(hint.len() < huge_len);
+    }
+
+    #[test]
+    fn goal_hint_from_multimodal_user_message_uses_text_only() {
+        let message = ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::Multimodal(vec![
+                MultimodalElement {
+                    m_type: "text".to_string(),
+                    m_content: "visible api_key=sk-abcdefghijklmnop".to_string(),
+                },
+                MultimodalElement {
+                    m_type: "image/png".to_string(),
+                    m_content: "sk-image-secret-should-not-appear".to_string(),
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let hint = bounded_goal_hint_from_message(&message).unwrap();
+
+        assert!(
+            hint.contains("visible api_key=[REDACTED]") || hint.contains("[REDACTED_SK_TOKEN]")
+        );
+        assert!(!hint.contains("sk-abcdefghijklmnop"));
+        assert!(!hint.contains("sk-image-secret-should-not-appear"));
+    }
+
+    #[test]
+    fn goal_hint_ignores_context_file_user_content() {
+        let message = ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::ContextFiles(vec![context_file_named(
+                "secret.png",
+                "base64-like sk-image-secret-should-not-appear",
+            )]),
+            ..Default::default()
+        };
+
+        assert_eq!(bounded_goal_hint_from_message(&message), None);
     }
 
     #[test]
@@ -1667,6 +1783,31 @@ mod tests {
             }
             other => panic!("expected MessageAdded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn append_compression_failure_event_redacts_transient_failure() {
+        let mut session = ChatSession::new("compression-failure-redacted".to_string());
+        let failure = SegmentSummaryFailure::Transient(
+            "provider failed with Bearer secret-bearer-value api_key=sk-abcdefghijklmnop"
+                .to_string(),
+        );
+
+        append_compression_failure_event(&mut session, &failure);
+
+        let message = &session.messages[0];
+        let content = message.content.content_text_only();
+        let payload_failure = message.extra["event"]["payload"]["failure"]
+            .as_str()
+            .unwrap();
+        assert!(content.contains("Context compression failed"));
+        assert!(payload_failure.contains("Bearer [REDACTED]"));
+        assert!(
+            payload_failure.contains("api_key=[REDACTED]")
+                || payload_failure.contains("[REDACTED_SK_TOKEN]")
+        );
+        assert_no_raw_secrets(&content);
+        assert_no_raw_secrets(payload_failure);
     }
 
     #[test]
