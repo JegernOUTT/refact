@@ -41,6 +41,21 @@ class EventsTest {
     }
 
     @Test
+    fun configMessageWithLspUrl() {
+        val payload = Events.Config.UpdatePayload(
+            Events.Config.Features(true, false),
+            Events.Config.ThemeProps("light"),
+            8001,
+            Events.Config.KeyBindings("foo"),
+            "http://host.local:8001/"
+        )
+        val message = Events.Config.Update(payload)
+        val result = Events.stringify(message)
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"lspUrl":"http://host.local:8001/","tabbed":false,"host":"jetbrains"}}"""
+        assertEquals(expected, result)
+    }
+
+    @Test
     fun parsePasteBackMessage() {
         val message = """{"type":"ide/diffPasteBack","payload":"test"}"""
         val expected = Events.Editor.PasteDiff("test")

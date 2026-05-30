@@ -112,9 +112,10 @@ class Editor (val project: Project) {
             lspHolder?.ensureStartedAsync("editor-config-request")
         }
         val lspPort = if (rawPort > 0) rawPort else 0
+        val lspUrl = lspHolder?.browserUrlOrNull()?.toString()
         val keyBindings = Events.Config.KeyBindings(getActionKeybinding("ForceCompletionAction"))
 
-        return Events.Config.UpdatePayload(features, themeProps, lspPort, keyBindings)
+        return Events.Config.UpdatePayload(features, themeProps, lspPort, keyBindings, lspUrl)
     }
 
     fun getActiveFileInfo(cb: (Events.ActiveFile.FileInfo) -> Unit) {

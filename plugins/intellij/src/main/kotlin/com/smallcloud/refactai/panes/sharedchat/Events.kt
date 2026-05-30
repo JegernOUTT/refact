@@ -438,6 +438,7 @@ class Events {
             val themeProps: Config.ThemeProps?,
             val lspPort: Int,
             val keyBindings: Config.KeyBindings,
+            val lspUrl: String? = null,
             val tabbed: Boolean? = false,
             val host: String? = "jetbrains"
         ) : Payload()
