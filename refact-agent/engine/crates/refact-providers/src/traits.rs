@@ -157,55 +157,7 @@ pub trait ProviderTrait: Send + Sync {
         &self,
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
-        let enabled_set: std::collections::HashSet<_> =
-            self.enabled_models().iter().map(|s| s.as_str()).collect();
-        let custom_models = self.custom_models();
-
-        let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
-
-        let regex_opt: Option<Regex> = self.model_filter_regex().and_then(get_cached_regex);
-        let provider_aliases = model_caps_provider_aliases(self.base_provider_name());
-        let has_provider_qualified_caps = model_caps
-            .keys()
-            .any(|key| model_caps_key_has_provider_alias(key, &provider_aliases));
-
-        for (name, caps) in model_caps {
-            let Some(model_id) =
-                model_caps_provider_model_id(&provider_aliases, has_provider_qualified_caps, name)
-            else {
-                continue;
-            };
-            if is_legacy_refact_model(model_id) {
-                continue;
-            }
-            let matches = match &regex_opt {
-                Some(regex) => regex.is_match(model_id),
-                None => true,
-            };
-            if matches {
-                let disabled = self
-                    .disabled_models()
-                    .iter()
-                    .any(|disabled| disabled == name || disabled.as_str() == model_id);
-                let enabled = if disabled {
-                    false
-                } else {
-                    enabled_set.contains(name.as_str()) || enabled_set.contains(model_id)
-                };
-                let pricing = self
-                    .custom_model_pricing(model_id)
-                    .or_else(|| self.custom_model_pricing(name));
-                models_map.insert(
-                    model_id.to_string(),
-                    AvailableModel::from_caps(model_id, caps, enabled, pricing),
-                );
-            }
-        }
-
-        let mut models: Vec<AvailableModel> = models_map.into_values().collect();
-        merge_custom_models(&mut models, custom_models, &enabled_set);
-        models.sort_by(|a, b| a.id.cmp(&b.id));
-        models
+        available_models_from_caps_for_provider(self, model_caps)
     }
 
     fn get_custom_models_only(&self) -> Vec<AvailableModel> {
@@ -225,6 +177,64 @@ pub trait ProviderTrait: Send + Sync {
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
     }
+}
+
+pub fn available_models_from_caps_for_provider<P: ProviderTrait + ?Sized>(
+    provider: &P,
+    model_caps: &HashMap<String, ModelCapabilities>,
+) -> Vec<AvailableModel> {
+    let enabled_set: std::collections::HashSet<_> = provider
+        .enabled_models()
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let custom_models = provider.custom_models();
+
+    let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
+
+    let regex_opt: Option<Regex> = provider.model_filter_regex().and_then(get_cached_regex);
+    let provider_aliases = model_caps_provider_aliases(provider.base_provider_name());
+    let has_provider_qualified_caps = model_caps
+        .keys()
+        .any(|key| model_caps_key_has_provider_alias(key, &provider_aliases));
+
+    for (name, caps) in model_caps {
+        let Some(model_id) =
+            model_caps_provider_model_id(&provider_aliases, has_provider_qualified_caps, name)
+        else {
+            continue;
+        };
+        if is_legacy_refact_model(model_id) {
+            continue;
+        }
+        let matches = match &regex_opt {
+            Some(regex) => regex.is_match(model_id),
+            None => true,
+        };
+        if matches {
+            let disabled = provider
+                .disabled_models()
+                .iter()
+                .any(|disabled| disabled == name || disabled.as_str() == model_id);
+            let enabled = if disabled {
+                false
+            } else {
+                enabled_set.contains(name.as_str()) || enabled_set.contains(model_id)
+            };
+            let pricing = provider
+                .custom_model_pricing(model_id)
+                .or_else(|| provider.custom_model_pricing(name));
+            models_map.insert(
+                model_id.to_string(),
+                AvailableModel::from_caps(model_id, caps, enabled, pricing),
+            );
+        }
+    }
+
+    let mut models: Vec<AvailableModel> = models_map.into_values().collect();
+    merge_custom_models(&mut models, custom_models, &enabled_set);
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models
 }
 
 fn model_caps_provider_model_id<'a>(
