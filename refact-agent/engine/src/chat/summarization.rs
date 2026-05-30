@@ -19,6 +19,7 @@ const SEGMENT_SUMMARY_OVERHEAD_TOKENS: usize = 1024;
 const TOOL_CALL_ARGUMENTS_MAX_CHARS: usize = 1000;
 const SEGMENT_MESSAGE_CONTENT_MAX_CHARS: usize = 6000;
 const SEGMENT_REDACTION_SCAN_EXTRA_CHARS: usize = 4096;
+const PUBLIC_COMPRESSION_FAILURE_MAX_CHARS: usize = 1024;
 const GOAL_HINT_MAX_CHARS: usize = 4_000;
 const GOAL_HINT_BUDGET_CUSHION_CHARS: usize = 256;
 const CONTEXT_FILE_NAME_COMPONENT_MAX_CHARS: usize = 64;
@@ -77,7 +78,22 @@ impl SegmentSummaryFailure {
 }
 
 fn public_compression_failure_text(failure: &SegmentSummaryFailure) -> String {
-    refact_core::string_utils::redact_sensitive(&failure.to_string())
+    let source = failure.to_string();
+    let scan_cap = PUBLIC_COMPRESSION_FAILURE_MAX_CHARS
+        .saturating_add(SEGMENT_REDACTION_SCAN_EXTRA_CHARS);
+    let (window, truncated) = bounded_redaction_window(&source, scan_cap);
+    let mut redacted = refact_core::string_utils::redact_sensitive(window);
+    if truncated {
+        if window.is_empty() {
+            redacted.push_str(&omitted_long_token_marker(source.chars().count()));
+        } else {
+            redacted.push_str(MESSAGE_CONTENT_TRUNCATED_MARKER);
+        }
+    }
+    if redacted.trim().is_empty() {
+        redacted = "details omitted".to_string();
+    }
+    cap_redacted_message_content(&redacted, PUBLIC_COMPRESSION_FAILURE_MAX_CHARS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1806,6 +1822,33 @@ mod tests {
             payload_failure.contains("api_key=[REDACTED]")
                 || payload_failure.contains("[REDACTED_SK_TOKEN]")
         );
+        assert_no_raw_secrets(&content);
+        assert_no_raw_secrets(payload_failure);
+    }
+
+    #[test]
+    fn append_compression_failure_event_caps_huge_transient_failure() {
+        let mut session = ChatSession::new("compression-failure-capped".to_string());
+        let failure = SegmentSummaryFailure::Transient(format!(
+            "provider failed with Bearer secret-bearer-value api_key=sk-abcdefghijklmnop {}",
+            "tail ".repeat(PUBLIC_COMPRESSION_FAILURE_MAX_CHARS * 20)
+        ));
+
+        append_compression_failure_event(&mut session, &failure);
+
+        let message = &session.messages[0];
+        let content = message.content.content_text_only();
+        let payload_failure = message.extra["event"]["payload"]["failure"]
+            .as_str()
+            .unwrap();
+        assert!(payload_failure.len() <= PUBLIC_COMPRESSION_FAILURE_MAX_CHARS);
+        assert!(
+            content.len()
+                <= "Context compression failed: ".len() + PUBLIC_COMPRESSION_FAILURE_MAX_CHARS
+        );
+        assert!(content.contains("Context compression failed"));
+        assert!(payload_failure.contains(MESSAGE_CONTENT_TRUNCATED_MARKER));
+        assert!(content.contains(MESSAGE_CONTENT_TRUNCATED_MARKER));
         assert_no_raw_secrets(&content);
         assert_no_raw_secrets(payload_failure);
     }
