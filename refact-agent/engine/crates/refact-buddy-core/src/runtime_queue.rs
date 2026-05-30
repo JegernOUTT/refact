@@ -5,6 +5,10 @@ use crate::types::BuddyRuntimeEvent;
 
 const MAX_QUEUE_SIZE: usize = 100;
 const PERSONALITY_RESERVED_SLOTS: usize = 8;
+const DISMISSED_NO_TTL_RETENTION_MINUTES: i64 = 15;
+const COMPLETED_NO_TTL_RETENTION_HOURS: i64 = 1;
+const FAILED_NO_TTL_RETENTION_HOURS: i64 = 24;
+const ACTIVE_NO_TTL_RETENTION_HOURS: i64 = 24;
 
 pub fn is_personality_runtime_event(event: &BuddyRuntimeEvent) -> bool {
     event.source == "chat_reactions"
@@ -45,17 +49,6 @@ fn newer_runtime_event_position(
 }
 
 pub fn runtime_event_expired_at(event: &BuddyRuntimeEvent, now: DateTime<Utc>) -> bool {
-    if event.persistent || event.ttl_ms.is_none() {
-        return false;
-    }
-    if event.progress.is_some()
-        || matches!(event.status.as_str(), "started" | "progress" | "active")
-    {
-        return false;
-    }
-    let Some(ttl_ms) = event.ttl_ms else {
-        return false;
-    };
     let Ok(created_at) = DateTime::parse_from_rfc3339(&event.created_at) else {
         return false;
     };
@@ -63,12 +56,82 @@ pub fn runtime_event_expired_at(event: &BuddyRuntimeEvent, now: DateTime<Utc>) -
     if created_at > now {
         return false;
     }
-    let Ok(ttl) = chrono::Duration::from_std(std::time::Duration::from_millis(ttl_ms)) else {
+    if let Some(ttl_ms) = event.ttl_ms {
+        if event.progress.is_some() || runtime_event_is_active(event) {
+            return false;
+        }
+        if event.persistent {
+            return false;
+        }
+        let Ok(ttl) = chrono::Duration::from_std(std::time::Duration::from_millis(ttl_ms)) else {
+            return false;
+        };
+        return created_at
+            .checked_add_signed(ttl)
+            .is_some_and(|expires_at| expires_at <= now);
+    }
+    runtime_event_stale_without_ttl_at(event, created_at, now)
+}
+
+fn runtime_event_is_active(event: &BuddyRuntimeEvent) -> bool {
+    matches!(
+        event.status.as_str(),
+        "started" | "progress" | "active" | "streaming" | "paused"
+    )
+}
+
+fn runtime_event_stale_without_ttl_at(
+    event: &BuddyRuntimeEvent,
+    created_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    if event.dismissed {
+        return created_at
+            .checked_add_signed(chrono::Duration::minutes(DISMISSED_NO_TTL_RETENTION_MINUTES))
+            .is_some_and(|expires_at| expires_at <= now);
+    }
+    if event.persistent {
+        return false;
+    }
+    if event.progress.is_some() || runtime_event_is_active(event) {
+        return created_at
+            .checked_add_signed(chrono::Duration::hours(ACTIVE_NO_TTL_RETENTION_HOURS))
+            .is_some_and(|expires_at| expires_at <= now);
+    }
+    let retention = if runtime_event_is_failed(event) {
+        chrono::Duration::hours(FAILED_NO_TTL_RETENTION_HOURS)
+    } else if runtime_event_is_completed(event) {
+        chrono::Duration::hours(COMPLETED_NO_TTL_RETENTION_HOURS)
+    } else {
         return false;
     };
     created_at
-        .checked_add_signed(ttl)
+        .checked_add_signed(retention)
         .is_some_and(|expires_at| expires_at <= now)
+}
+
+fn runtime_event_is_completed(event: &BuddyRuntimeEvent) -> bool {
+    matches!(
+        event.status.as_str(),
+        "completed" | "complete" | "done" | "success" | "succeeded"
+    ) || matches!(
+        event.signal_type.as_str(),
+        "chat_completed"
+            | "checkpoint_saved"
+            | "task_completed"
+            | "git_commit"
+            | "connection_restored"
+    )
+}
+
+fn runtime_event_is_failed(event: &BuddyRuntimeEvent) -> bool {
+    matches!(
+        event.status.as_str(),
+        "failed" | "error" | "errored" | "failure"
+    ) || event.signal_type.contains("error")
+        || event.signal_type.ends_with("_failed")
+        || event.failure_category.is_some()
+        || event.failure_summary.is_some()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -318,7 +381,7 @@ mod tests {
             progress: None,
             dedupe_key: Some(dedupe_key.to_string()),
             priority: "normal".to_string(),
-            created_at: "2024-01-01T00:00:00Z".to_string(),
+            created_at: Utc::now().to_rfc3339(),
             ttl_ms: None,
             bubble_policy: None,
             speech_text: None,
@@ -414,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_queue_keeps_event_with_no_ttl() {
+    fn runtime_queue_keeps_recent_completed_event_with_no_ttl() {
         let now = DateTime::parse_from_rfc3339("2024-01-01T00:00:10Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -429,6 +492,146 @@ mod tests {
 
         assert!(removed.is_empty());
         assert_eq!(queue.items.len(), 1);
+    }
+
+    #[test]
+    fn runtime_queue_prunes_old_completed_no_ttl_events() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-completed", "completed-key");
+        event.status = "completed".to_string();
+        event.signal_type = "chat_completed".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.ttl_ms = None;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert_eq!(removed, vec!["ev-completed".to_string()]);
+        assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn runtime_queue_prunes_old_failed_no_ttl_events_after_retention() {
+        let now = DateTime::parse_from_rfc3339("2024-01-02T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-failed", "failed-key");
+        event.status = "failed".to_string();
+        event.signal_type = "chat_error".to_string();
+        event.priority = "high".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.ttl_ms = None;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert_eq!(removed, vec!["ev-failed".to_string()]);
+        assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn runtime_queue_keeps_recent_critical_failure() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T23:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-critical", "critical-key");
+        event.status = "failed".to_string();
+        event.signal_type = "error".to_string();
+        event.priority = "critical".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.ttl_ms = None;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert!(removed.is_empty());
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].id, "ev-critical");
+    }
+
+    #[test]
+    fn runtime_queue_keeps_recent_active_streaming_without_ttl() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T00:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-streaming", "streaming-key");
+        event.status = "started".to_string();
+        event.signal_type = "streaming".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.ttl_ms = None;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert!(removed.is_empty());
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].id, "ev-streaming");
+    }
+
+    #[test]
+    fn runtime_queue_prunes_old_dismissed_no_ttl_events() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T00:16:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-dismissed", "dismissed-key");
+        event.status = "info".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.ttl_ms = None;
+        event.dismissed = true;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert_eq!(removed, vec!["ev-dismissed".to_string()]);
+        assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn runtime_queue_keeps_persistent_no_ttl_event() {
+        let now = DateTime::parse_from_rfc3339("2024-01-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-persistent", "persistent-key");
+        event.status = "failed".to_string();
+        event.signal_type = "connection_lost".to_string();
+        event.priority = "critical".to_string();
+        event.persistent = true;
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.ttl_ms = None;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert!(removed.is_empty());
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].id, "ev-persistent");
+    }
+
+    #[test]
+    fn runtime_queue_prunes_stale_active_no_ttl_events() {
+        let now = DateTime::parse_from_rfc3339("2024-01-02T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-active", "active-key");
+        event.status = "started".to_string();
+        event.signal_type = "streaming".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.ttl_ms = None;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert_eq!(removed, vec!["ev-active".to_string()]);
+        assert!(queue.items.is_empty());
     }
 
     #[test]

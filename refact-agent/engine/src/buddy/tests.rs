@@ -2676,6 +2676,63 @@ fn buddy_service_expire_runtime_events_persists_removed_tombstones() {
     assert!(saw_tombstone);
 }
 
+#[test]
+fn buddy_service_stale_runtime_prune_persists_removed_tombstones() {
+    use super::actor::{make_runtime_event, RuntimeQueueWriteOp};
+    use super::storage::RuntimeQueueRecord;
+
+    let (events_tx, _) = broadcast::channel(16);
+    let (queue_tx, mut queue_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        super::runtime_queue::RuntimeQueue::new(),
+        events_tx,
+        Some(queue_tx),
+    );
+    let mut stale = make_runtime_event(
+        "chat_completed",
+        "old completed chat",
+        "chat",
+        "stale-runtime-key",
+        "completed",
+        Some("normal"),
+    );
+    stale.id = "stale-runtime-event".to_string();
+    stale.created_at = "2024-01-01T00:00:00Z".to_string();
+    stale.ttl_ms = None;
+    svc.enqueue_runtime_event(stale);
+
+    let now = chrono::DateTime::parse_from_rfc3339("2024-01-01T02:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let removed = svc.expire_runtime_events_at(now);
+
+    assert_eq!(removed, vec!["stale-runtime-event".to_string()]);
+    assert!(svc.runtime_queue.items.is_empty());
+    let mut saw_event_append = false;
+    let mut saw_tombstone = false;
+    while let Ok(op) = queue_rx.try_recv() {
+        match op {
+            RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Event { event }) => {
+                if event.id == "stale-runtime-event" {
+                    saw_event_append = true;
+                }
+            }
+            RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Removed { id }) => {
+                if id == "stale-runtime-event" {
+                    saw_tombstone = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_event_append);
+    assert!(saw_tombstone);
+}
+
 /// Backward-compat: legacy logs that contain bare `BuddyRuntimeEvent` JSON
 /// objects (no `kind` tag) must still load successfully.
 #[tokio::test]
@@ -2706,6 +2763,37 @@ async fn test_runtime_queue_loads_legacy_format() {
         queue.items.iter().any(|e| e.id == id),
         "legacy bare-event line must be readable"
     );
+}
+
+#[tokio::test]
+async fn test_stale_runtime_load_pruning_compacts_removed_records() {
+    use super::actor::make_runtime_event;
+    use super::storage::{append_runtime_record, load_runtime_queue, RuntimeQueueRecord};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut stale = make_runtime_event(
+        "chat_completed",
+        "old completed chat",
+        "chat",
+        "stale-load-key",
+        "completed",
+        Some("normal"),
+    );
+    stale.id = "stale-load-event".to_string();
+    stale.created_at = (chrono::Utc::now() - Duration::hours(2)).to_rfc3339();
+    stale.ttl_ms = None;
+    append_runtime_record(root, &RuntimeQueueRecord::Event { event: stale })
+        .await
+        .unwrap();
+
+    let queue = load_runtime_queue(root).await;
+
+    assert!(queue.items.is_empty());
+    let content = tokio::fs::read_to_string(root.join(".refact/buddy/runtime_queue.jsonl"))
+        .await
+        .unwrap();
+    assert!(!content.contains("stale-load-event"));
 }
 
 // =============================================================================

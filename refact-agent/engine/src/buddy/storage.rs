@@ -401,6 +401,12 @@ pub async fn load_runtime_queue(project_root: &Path) -> RuntimeQueue {
         queue.items.push_back(ev);
     }
     queue.now_playing = now_playing;
+    let removed = queue.prune_expired_at(Utc::now());
+    if skip > 0 || !removed.is_empty() {
+        if let Err(err) = compact_runtime_queue(project_root, &queue).await {
+            warn!("buddy: failed to compact runtime queue after load pruning: {}", err);
+        }
+    }
     queue
 }
 
