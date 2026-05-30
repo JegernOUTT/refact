@@ -211,9 +211,10 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   useDiffFileReload();
 
   const showLoading =
-    switching ||
-    (!snapshotReceived && messages.length === 0) ||
-    (sseStatus === "connecting" && messages.length === 0);
+    !isCompressing &&
+    (switching ||
+      (!snapshotReceived && messages.length === 0) ||
+      (sseStatus === "connecting" && messages.length === 0));
 
   const displayItems = useMemo(() => {
     const prevMessages = prevDisplayMessagesRef.current;
@@ -400,7 +401,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     );
   }
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !isCompressing) {
     return (
       <Flex
         direction="column"
