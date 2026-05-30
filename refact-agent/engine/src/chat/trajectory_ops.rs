@@ -219,6 +219,41 @@ mod tests {
         }
     }
 
+    fn make_segment_summary_msg() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "schema_version": 2,
+                "kind": "llm_segment_summary",
+                "source_hash": "hash",
+                "source_message_ids": ["source-id"],
+                "created_at": "now",
+                "summary_model": "test-model",
+            }),
+        );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("summary".to_string()),
+            summarization_tier: Some("llm_segment_summary".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn assert_only_segment_summary_extra(message: &ChatMessage) {
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.content.content_text_only(), "summary");
+        assert_eq!(
+            message.extra["compression"]["kind"],
+            serde_json::json!("llm_segment_summary")
+        );
+        assert_eq!(message.extra["compression"]["summary_model"], "test-model");
+        assert_eq!(message.extra.len(), 1);
+        assert!(!message.extra.contains_key("unrelated"));
+    }
+
     fn make_tool_msg(tool_call_id: &str, content: &str) -> ChatMessage {
         ChatMessage {
             role: "tool".to_string(),
@@ -390,6 +425,32 @@ mod tests {
         assert_eq!(selected[0].role, "user");
         assert_eq!(selected[1].role, "assistant");
         assert_eq!(selected[2].role, "user");
+    }
+
+    #[tokio::test]
+    async fn test_handoff_preserves_segment_summary_extra_after_sanitize() {
+        let messages = vec![
+            make_system_msg("s"),
+            make_user_msg("first question"),
+            make_assistant_msg("first answer"),
+            make_user_msg("second question"),
+            make_segment_summary_msg(),
+        ];
+        let opts = HandoffOptions {
+            include_last_user_plus: true,
+            ..Default::default()
+        };
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id")
+            .await
+            .unwrap();
+        let sanitized = sanitize_messages_for_new_thread(&selected);
+
+        let summary = sanitized
+            .iter()
+            .find(|message| message.content.content_text_only() == "summary")
+            .expect("expected selected summary");
+        assert_only_segment_summary_extra(summary);
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ use uuid::Uuid;
 use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile};
 
 const UI_ONLY_MARKER: &str = "_ui_only";
+const LLM_SEGMENT_SUMMARY_KIND: &str = "llm_segment_summary";
 
 pub fn is_ui_only_message(msg: &ChatMessage) -> bool {
     msg.extra.get(UI_ONLY_MARKER).and_then(|v| v.as_bool()) == Some(true)
@@ -45,7 +46,24 @@ fn preserve_hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serd
         "plan" => preserve_extra_key(&msg.extra, "plan"),
         "event" => preserve_extra_key(&msg.extra, "event"),
         COMPRESSION_REPORT_ROLE => preserve_extra_key(&msg.extra, "compression_report"),
+        "assistant" => preserve_assistant_compression_extra(msg),
         _ => serde_json::Map::new(),
+    }
+}
+
+fn preserve_assistant_compression_extra(
+    msg: &ChatMessage,
+) -> serde_json::Map<String, serde_json::Value> {
+    let is_segment_summary = msg
+        .extra
+        .get("compression")
+        .and_then(|value| value.get("kind"))
+        .and_then(|value| value.as_str())
+        == Some(LLM_SEGMENT_SUMMARY_KIND);
+    if is_segment_summary {
+        preserve_extra_key(&msg.extra, "compression")
+    } else {
+        serde_json::Map::new()
     }
 }
 
@@ -742,6 +760,52 @@ mod tests {
         }
     }
 
+    fn make_segment_summary_msg() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "schema_version": 2,
+                "kind": LLM_SEGMENT_SUMMARY_KIND,
+                "source_hash": "hash",
+                "source_message_ids": ["source-id"],
+                "created_at": "now",
+                "summary_model": "test-model",
+            }),
+        );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("summary".to_string()),
+            summarization_tier: Some(LLM_SEGMENT_SUMMARY_KIND.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn make_assistant_with_extra() -> ChatMessage {
+        let mut message = make_assistant_msg("response");
+        message
+            .extra
+            .insert("unrelated".to_string(), serde_json::json!({"keep": false}));
+        message
+            .extra
+            .insert("cache".to_string(), serde_json::json!(true));
+        message
+    }
+
+    fn make_assistant_with_non_summary_compression() -> ChatMessage {
+        let mut message = make_assistant_msg("response");
+        message.extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "kind": "other_compression",
+                "source_hash": "hash",
+            }),
+        );
+        message
+    }
+
     fn assert_only_hidden_plan_extra(message: &ChatMessage) {
         assert_eq!(message.role, "plan");
         assert_eq!(message.extra["plan"]["version"], serde_json::json!(1));
@@ -755,6 +819,17 @@ mod tests {
             message.extra["event"]["subkind"],
             serde_json::json!("plan_delta")
         );
+        assert_eq!(message.extra.len(), 1);
+        assert!(!message.extra.contains_key("unrelated"));
+    }
+
+    fn assert_only_segment_summary_extra(message: &ChatMessage) {
+        assert_eq!(message.role, "assistant");
+        assert_eq!(
+            message.extra["compression"]["kind"],
+            serde_json::json!(LLM_SEGMENT_SUMMARY_KIND)
+        );
+        assert_eq!(message.extra["compression"]["summary_model"], "test-model");
         assert_eq!(message.extra.len(), 1);
         assert!(!message.extra.contains_key("unrelated"));
     }
@@ -840,6 +915,22 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_messages_for_new_thread_preserves_assistant_segment_summary_extra_only() {
+        let messages = vec![
+            make_segment_summary_msg(),
+            make_assistant_with_extra(),
+            make_assistant_with_non_summary_compression(),
+        ];
+
+        let sanitized = sanitize_messages_for_new_thread(&messages);
+
+        assert_eq!(sanitized.len(), 3);
+        assert_only_segment_summary_extra(&sanitized[0]);
+        assert!(sanitized[1].extra.is_empty());
+        assert!(sanitized[2].extra.is_empty());
+    }
+
+    #[test]
     fn sanitize_messages_for_model_switch_preserves_hidden_role_extra_only() {
         let mut messages = vec![make_plan_msg(), make_plan_delta_event()];
 
@@ -848,6 +939,22 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_only_hidden_plan_extra(&messages[0]);
         assert_only_hidden_event_extra(&messages[1]);
+    }
+
+    #[test]
+    fn sanitize_messages_for_model_switch_preserves_assistant_segment_summary_extra_only() {
+        let mut messages = vec![
+            make_segment_summary_msg(),
+            make_assistant_with_extra(),
+            make_assistant_with_non_summary_compression(),
+        ];
+
+        sanitize_messages_for_model_switch(&mut messages);
+
+        assert_eq!(messages.len(), 3);
+        assert_only_segment_summary_extra(&messages[0]);
+        assert!(messages[1].extra.is_empty());
+        assert!(messages[2].extra.is_empty());
     }
 
     #[test]
@@ -867,6 +974,30 @@ mod tests {
         assert_eq!(persisted.len(), 2);
         assert_only_hidden_plan_extra(persisted[0]);
         assert_only_hidden_event_extra(persisted[1]);
+    }
+
+    #[test]
+    fn compress_in_place_strip_metering_preserves_assistant_segment_summary_extra_only() {
+        let mut messages = vec![
+            make_segment_summary_msg(),
+            make_assistant_with_extra(),
+            make_assistant_with_non_summary_compression(),
+        ];
+        let opts = CompressOptions {
+            strip_metering: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let persisted: Vec<_> = messages
+            .iter()
+            .filter(|msg| msg.role != COMPRESSION_REPORT_ROLE)
+            .collect();
+        assert_eq!(persisted.len(), 3);
+        assert_only_segment_summary_extra(persisted[0]);
+        assert!(persisted[1].extra.is_empty());
+        assert!(persisted[2].extra.is_empty());
     }
 
     #[test]
