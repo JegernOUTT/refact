@@ -46,7 +46,6 @@ mod tool_rm;
 mod tool_search;
 mod tool_search_trajectories;
 mod tool_set_plan;
-pub mod tool_update_plan;
 mod tool_shell;
 mod tool_sleep;
 mod tool_spawn_ab;
@@ -55,6 +54,7 @@ mod tool_subagent;
 mod tool_swarm_investigate;
 mod tool_trajectory_context;
 mod tool_tree;
+pub mod tool_update_plan;
 mod tool_web;
 mod tool_web_search;
 

@@ -307,9 +307,7 @@ impl Tool for ToolHandoffToMode {
                 .collect();
             let result_ids: std::collections::HashSet<&str> = messages
                 .iter()
-                .filter(|m| {
-                    (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty()
-                })
+                .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
                 .map(|m| m.tool_call_id.as_str())
                 .collect();
             let mut missing_ids: Vec<&str> = call_ids.difference(&result_ids).copied().collect();

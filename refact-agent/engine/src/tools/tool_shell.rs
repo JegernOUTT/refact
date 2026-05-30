@@ -1356,12 +1356,15 @@ mod tests {
         let desc = tool.tool_description();
         let timeout_schema = &desc.input_schema["properties"]["timeout"];
         let one_of = timeout_schema["oneOf"].as_array().unwrap();
-        let types: Vec<&str> = one_of
-            .iter()
-            .map(|v| v["type"].as_str().unwrap())
-            .collect();
-        assert!(types.contains(&"integer"), "expected integer in oneOf: {types:?}");
-        assert!(types.contains(&"string"), "expected string in oneOf: {types:?}");
+        let types: Vec<&str> = one_of.iter().map(|v| v["type"].as_str().unwrap()).collect();
+        assert!(
+            types.contains(&"integer"),
+            "expected integer in oneOf: {types:?}"
+        );
+        assert!(
+            types.contains(&"string"),
+            "expected string in oneOf: {types:?}"
+        );
     }
 
     #[tokio::test]

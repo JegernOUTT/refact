@@ -3002,12 +3002,8 @@ mod tests {
     #[tokio::test]
     async fn process_read_from_disk_rejects_stdout_stream() {
         let (gcx, ccx) = test_ccx().await;
-        let process_id =
-            register_test_process(&gcx, "exec_disk_reject_stdout", "chat", None).await;
-        gcx.exec_registry
-            .mark_started(&process_id)
-            .await
-            .unwrap();
+        let process_id = register_test_process(&gcx, "exec_disk_reject_stdout", "chat", None).await;
+        gcx.exec_registry.mark_started(&process_id).await.unwrap();
 
         let mut read = ToolProcessRead {
             config_path: String::new(),
@@ -3036,12 +3032,8 @@ mod tests {
     #[tokio::test]
     async fn process_read_from_disk_rejects_stderr_stream() {
         let (gcx, ccx) = test_ccx().await;
-        let process_id =
-            register_test_process(&gcx, "exec_disk_reject_stderr", "chat", None).await;
-        gcx.exec_registry
-            .mark_started(&process_id)
-            .await
-            .unwrap();
+        let process_id = register_test_process(&gcx, "exec_disk_reject_stderr", "chat", None).await;
+        gcx.exec_registry.mark_started(&process_id).await.unwrap();
 
         let mut read = ToolProcessRead {
             config_path: String::new(),
@@ -3110,7 +3102,10 @@ mod tests {
         .await
         .unwrap();
         let body = text(&message);
-        assert!(body.contains("combined"), "output should be labeled combined");
+        assert!(
+            body.contains("combined"),
+            "output should be labeled combined"
+        );
         assert!(body.contains(marker), "output should contain appended data");
     }
 

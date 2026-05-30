@@ -2896,14 +2896,7 @@ mod tests {
             });
         }
 
-        assert!(
-            !remove_idle_session_if_safe(
-                &sessions,
-                chat_id,
-                session_arc.clone(),
-            )
-            .await
-        );
+        assert!(!remove_idle_session_if_safe(&sessions, chat_id, session_arc.clone(),).await);
         assert!(sessions.read().await.get(chat_id).is_some());
         let session = session_arc.lock().await;
         assert!(session
@@ -2929,14 +2922,7 @@ mod tests {
             .insert(chat_id.to_string(), session_arc.clone());
         let delayed_enqueue_ref = session_arc.clone();
 
-        assert!(
-            !remove_idle_session_if_safe(
-                &sessions,
-                chat_id,
-                session_arc.clone(),
-            )
-            .await
-        );
+        assert!(!remove_idle_session_if_safe(&sessions, chat_id, session_arc.clone(),).await);
 
         {
             let mut session = delayed_enqueue_ref.lock().await;

@@ -782,12 +782,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let process_id = ExecProcessId("exec_backfill_ring".to_string());
         let target = SpillTarget::with_root(temp.path().to_path_buf(), "chat-br", &process_id);
-        let mut t = ExecTranscript::new_with_spill(
-            process_id.clone(),
-            12,
-            Some("chat-br".to_string()),
-            25,
-        );
+        let mut t =
+            ExecTranscript::new_with_spill(process_id.clone(), 12, Some("chat-br".to_string()), 25);
         t.set_spill_target_for_test(target);
 
         let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, "chunk_one".to_string());
@@ -795,7 +791,10 @@ mod tests {
         let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, "chunk_two".to_string());
         assert!(sa.is_none());
         let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, "big_chunk".to_string());
-        let result = sa.expect("spill fires when threshold crossed").write().await;
+        let result = sa
+            .expect("spill fires when threshold crossed")
+            .write()
+            .await;
         t.record_spill_result(&result);
         assert!(result.is_ok());
 
@@ -809,12 +808,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let process_id = ExecProcessId("exec_backfill_once".to_string());
         let target = SpillTarget::with_root(temp.path().to_path_buf(), "chat-bo", &process_id);
-        let mut t = ExecTranscript::new_with_spill(
-            process_id.clone(),
-            12,
-            Some("chat-bo".to_string()),
-            25,
-        );
+        let mut t =
+            ExecTranscript::new_with_spill(process_id.clone(), 12, Some("chat-bo".to_string()), 25);
         t.set_spill_target_for_test(target);
 
         let (_c, sa) = t.append_chunk(ExecOutputStream::Stdout, "chunk_one".to_string());

@@ -466,10 +466,7 @@ async fn run_verification_argv_impl(
                 command: command.to_string(),
                 exit_code: None,
                 passed: false,
-                output_tail: format!(
-                    "command timed out after {} seconds",
-                    timeout.as_secs()
-                ),
+                output_tail: format!("command timed out after {} seconds", timeout.as_secs()),
             };
         }
     };
@@ -902,7 +899,11 @@ mod tests {
                 temp.path(),
                 "bash -c 'sleep 60 &'",
                 None,
-                vec!["bash".to_string(), "-c".to_string(), "sleep 60 &".to_string()],
+                vec![
+                    "bash".to_string(),
+                    "-c".to_string(),
+                    "sleep 60 &".to_string(),
+                ],
                 Duration::from_secs(30),
                 Duration::from_millis(500),
             ),

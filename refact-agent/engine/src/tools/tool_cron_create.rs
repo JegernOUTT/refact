@@ -189,7 +189,12 @@ fn runtime_for_project(
 
 async fn cron_tool_context(
     ccx: Arc<AMutex<AtCommandsContext>>,
-) -> (crate::app_state::AppState, String, Option<PathBuf>, Option<String>) {
+) -> (
+    crate::app_state::AppState,
+    String,
+    Option<PathBuf>,
+    Option<String>,
+) {
     let (app, gcx, chat_id, scoped_root) = {
         let locked = ccx.lock().await;
         (
@@ -213,7 +218,11 @@ async fn cron_tool_context(
     let mode = if let Some(session_arc) = session_arc {
         let session = session_arc.lock().await;
         let mode = session.thread.mode.clone();
-        if mode.is_empty() { None } else { Some(mode) }
+        if mode.is_empty() {
+            None
+        } else {
+            Some(mode)
+        }
     } else {
         None
     };

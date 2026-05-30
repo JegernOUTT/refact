@@ -9501,9 +9501,9 @@ fn broken_ref_per_field_distinct_opportunities() {
     assert!(broken
         .iter()
         .any(|(opp, _)| opp.cooldown_key == "provider:broken_ref:missing-default"));
-    assert!(broken.iter().any(|(opp, _)| {
-        opp.cooldown_key == "provider:broken_ref:missing-thinking"
-    }));
+    assert!(broken
+        .iter()
+        .any(|(opp, _)| { opp.cooldown_key == "provider:broken_ref:missing-thinking" }));
 }
 
 #[test]

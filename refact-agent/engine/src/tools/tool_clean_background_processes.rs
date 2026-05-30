@@ -578,7 +578,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(workspace_result.result, MatchConfirmDenyResult::CONFIRMATION);
+        assert_eq!(
+            workspace_result.result,
+            MatchConfirmDenyResult::CONFIRMATION
+        );
         assert_eq!(chat_result.result, MatchConfirmDenyResult::PASS);
     }
 
@@ -738,7 +741,8 @@ mod tests {
             "scope description must mention planner/admin restriction: {scope_desc}"
         );
         assert!(!scope_desc.contains("confirmation"));
-        let include_services_desc = desc.input_schema["properties"]["include_services"]["description"]
+        let include_services_desc = desc.input_schema["properties"]["include_services"]
+            ["description"]
             .as_str()
             .unwrap();
         assert!(

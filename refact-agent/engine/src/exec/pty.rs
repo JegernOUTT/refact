@@ -82,7 +82,10 @@ mod tests {
         let mut child = pair.slave.spawn_command(cmd).unwrap();
         let pid = child.process_id().expect("child has pid");
 
-        assert!(unsafe { libc::kill(pid as i32, 0) == 0 }, "child should be alive before cleanup");
+        assert!(
+            unsafe { libc::kill(pid as i32, 0) == 0 },
+            "child should be alive before cleanup"
+        );
 
         let _ = child.kill();
         let _ = child.wait();

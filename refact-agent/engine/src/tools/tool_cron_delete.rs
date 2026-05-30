@@ -215,11 +215,8 @@ mod tests {
             .await
             .unwrap();
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
-        let mut tool = ToolCronDelete::with_stores(
-            String::new(),
-            session_store,
-            Some(durable_store.clone()),
-        );
+        let mut tool =
+            ToolCronDelete::with_stores(String::new(), session_store, Some(durable_store.clone()));
         let ccx = test_ccx().await;
 
         let result = run_tool(&mut tool, ccx, "cron_del_dur").await;
@@ -260,7 +257,9 @@ mod tests {
             let ContextEnum::ChatMessage(m) = msgs.into_iter().next().unwrap() else {
                 panic!()
             };
-            let ChatContent::SimpleText(t) = m.content else { panic!() };
+            let ChatContent::SimpleText(t) = m.content else {
+                panic!()
+            };
             serde_json::from_str::<Vec<Value>>(&t).unwrap()
         };
         assert_eq!(before.len(), 1);
@@ -278,7 +277,9 @@ mod tests {
             let ContextEnum::ChatMessage(m) = msgs.into_iter().next().unwrap() else {
                 panic!()
             };
-            let ChatContent::SimpleText(t) = m.content else { panic!() };
+            let ChatContent::SimpleText(t) = m.content else {
+                panic!()
+            };
             serde_json::from_str::<Vec<Value>>(&t).unwrap()
         };
         assert!(after.is_empty());

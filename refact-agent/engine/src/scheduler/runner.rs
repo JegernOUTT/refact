@@ -991,7 +991,9 @@ mod tests {
             "durable one-shot must remain in store when no trajectory exists"
         );
         assert!(
-            runner.deferred_until_ms.contains_key("cron_durable_no_traj"),
+            runner
+                .deferred_until_ms
+                .contains_key("cron_durable_no_traj"),
             "durable one-shot must be deferred when no trajectory exists"
         );
         let sessions = gcx.chat_sessions.read().await;
@@ -1016,7 +1018,10 @@ mod tests {
 
         let stored = store.list().await;
         assert_eq!(stored.len(), 1, "recurring task should remain in store");
-        assert_eq!(stored[0].fire_count, 0, "task must not fire when no trajectory exists");
+        assert_eq!(
+            stored[0].fire_count, 0,
+            "task must not fire when no trajectory exists"
+        );
         assert!(
             runner
                 .deferred_until_ms
@@ -1060,7 +1065,10 @@ mod tests {
         let fire_event = session.messages.iter().find(|m| {
             m.role == EVENT_ROLE && m.extra["event"]["subkind"].as_str() == Some("cron_fire")
         });
-        assert!(fire_event.is_some(), "catch-up should inject cron_fire event");
+        assert!(
+            fire_event.is_some(),
+            "catch-up should inject cron_fire event"
+        );
         assert_eq!(
             fire_event.unwrap().extra["event"]["payload"]["missed"],
             json!(true),
@@ -1111,10 +1119,14 @@ mod tests {
             matches!(&req.command, ChatCommand::SetParams { patch }
                 if patch.get("mode").and_then(|v| v.as_str()) == Some("explore"))
         });
-        let user_message_idx = session.command_queue.iter().position(|req| {
-            matches!(&req.command, ChatCommand::UserMessage { .. })
-        });
-        assert!(set_params_idx.is_some(), "SetParams must be in queue for task with mode");
+        let user_message_idx = session
+            .command_queue
+            .iter()
+            .position(|req| matches!(&req.command, ChatCommand::UserMessage { .. }));
+        assert!(
+            set_params_idx.is_some(),
+            "SetParams must be in queue for task with mode"
+        );
         assert!(user_message_idx.is_some(), "UserMessage must be in queue");
         assert!(
             set_params_idx.unwrap() < user_message_idx.unwrap(),
@@ -1140,7 +1152,10 @@ mod tests {
             .command_queue
             .iter()
             .any(|req| matches!(&req.command, ChatCommand::SetParams { .. }));
-        assert!(!has_set_params, "No SetParams should be in queue when task has no mode");
+        assert!(
+            !has_set_params,
+            "No SetParams should be in queue when task has no mode"
+        );
     }
 
     #[tokio::test]
@@ -1170,7 +1185,11 @@ mod tests {
         let session_arc = session(&gcx).await;
         let session = session_arc.lock().await;
         let queue: Vec<_> = session.command_queue.iter().collect();
-        assert_eq!(queue.len(), 3, "queue must have pre-existing + SetParams(mode) + UserMessage");
+        assert_eq!(
+            queue.len(),
+            3,
+            "queue must have pre-existing + SetParams(mode) + UserMessage"
+        );
         assert!(
             matches!(&queue[0].command, ChatCommand::SetParams { patch }
                 if patch.get("temperature").is_some()),
@@ -1244,7 +1263,9 @@ mod tests {
         runner.fire_due_tasks(now).await;
 
         assert!(
-            runner.deferred_until_ms.contains_key("cron_defer_non_priority"),
+            runner
+                .deferred_until_ms
+                .contains_key("cron_defer_non_priority"),
             "cron must be deferred when non-priority message is in queue"
         );
 
