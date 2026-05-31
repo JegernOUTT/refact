@@ -357,7 +357,7 @@ fn memory_path_marker_present(text: &str) -> bool {
         || normalized.ends_with(".refact/tasks")
 }
 
-fn is_memory_path(path: &str) -> bool {
+pub fn is_memory_path(path: &str) -> bool {
     let normalized = normalize_path_text(path);
     let parts: Vec<&str> = normalized
         .split('/')

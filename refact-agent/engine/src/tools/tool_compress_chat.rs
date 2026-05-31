@@ -13,7 +13,10 @@ use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use refact_chat_history::history_limit::{compress_duplicate_context_files, compute_context_budget};
-use refact_chat_history::trajectory_ops::{build_compression_report_message, TOOLS_TO_PRESERVE};
+use refact_chat_history::trajectory_ops::{
+    build_compression_report_message, is_memory_path, TOOLS_TO_PRESERVE,
+};
+use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
 
 const TOOL_OUTPUT_TRUNCATE_LIMIT: usize = 200;
@@ -286,7 +289,8 @@ fn compress_chat_apply_head_messages(
             }
             let content = msg.content.content_text_only();
             if content.len() > TOOL_OUTPUT_TRUNCATE_LIMIT {
-                let preview: String = content.chars().take(TOOL_OUTPUT_TRUNCATE_LIMIT).collect();
+                let redacted = redact_sensitive(&content);
+                let preview: String = redacted.chars().take(TOOL_OUTPUT_TRUNCATE_LIMIT).collect();
                 msg.content =
                     ChatContent::SimpleText(format!("Tool result compressed: {}...", preview));
                 stats.tool_truncated += 1;
@@ -769,6 +773,196 @@ mod tests {
     }
 
     #[test]
+    fn apply_tool_truncate_preview_redacts_bearer_token() {
+        let secret = "secret-token-123";
+        let messages = vec![
+            user_message("old user"),
+            assistant_tool_call_message("old_call", "shell"),
+            tool_message(
+                "old_call",
+                &format!("request failed with Bearer {} {}", secret, "x".repeat(1000)),
+            ),
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::from(["old_call".to_string()]);
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::from([("old_call".to_string(), "shell".to_string())]);
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.tool_truncated, 1);
+        let tool_text = after
+            .iter()
+            .find(|message| message.role == "tool")
+            .unwrap()
+            .content
+            .content_text_only();
+        assert!(tool_text.contains("Bearer [REDACTED]"));
+        assert!(!tool_text.contains(secret));
+    }
+
+    #[test]
+    fn apply_tool_truncate_preview_redacts_api_key() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz";
+        let messages = vec![
+            user_message("old user"),
+            assistant_tool_call_message("old_call", "shell"),
+            tool_message(
+                "old_call",
+                &format!(
+                    "request failed with api_key={} {}",
+                    secret,
+                    "x".repeat(1000)
+                ),
+            ),
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::from(["old_call".to_string()]);
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::from([("old_call".to_string(), "shell".to_string())]);
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.tool_truncated, 1);
+        let tool_text = after
+            .iter()
+            .find(|message| message.role == "tool")
+            .unwrap()
+            .content
+            .content_text_only();
+        assert!(tool_text.contains("api_key=[REDACTED]"));
+        assert!(!tool_text.contains(secret));
+    }
+
+    #[test]
+    fn apply_drop_all_memories_detects_relative_memory_path() {
+        let messages = vec![
+            context_file_message("memory", ".refact/knowledge/foo.md", "memory"),
+            context_file_message("source", "src/lib.rs", "source"),
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.drop_all_memories = true;
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.memory_dropped, 1);
+        assert!(!after
+            .iter()
+            .any(|message| message.content.content_text_only().contains("foo.md")));
+        assert!(after
+            .iter()
+            .any(|message| message.content.content_text_only().contains("source")));
+    }
+
+    #[test]
+    fn apply_drop_all_memories_detects_windows_task_path() {
+        let messages = vec![
+            context_file_message(
+                "memory",
+                r#"C:\repo\.refact\tasks\task-id\memories\note.md"#,
+                "memory",
+            ),
+            context_file_message("source", "src/lib.rs", "source"),
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.drop_all_memories = true;
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.memory_dropped, 1);
+        assert!(!after
+            .iter()
+            .any(|message| message.content.content_text_only().contains("note.md")));
+        assert!(after
+            .iter()
+            .any(|message| message.content.content_text_only().contains("source")));
+    }
+
+    #[test]
+    fn apply_drop_all_memories_preserves_non_memory_paths() {
+        let messages = vec![context_file_message(
+            "source",
+            "tests/.refact_fixture/tasks/example.rs",
+            "fixture source",
+        )];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.drop_all_memories = true;
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.memory_dropped, 0);
+        assert!(after.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("fixture source")));
+        assert_eq!(compression_report_count(&after), 0);
+    }
+
+    #[test]
     fn apply_inserts_compression_report_before_preserved_tail() {
         let messages = vec![
             user_message("old user"),
@@ -915,12 +1109,6 @@ fn extract_context_files(message: &ChatMessage) -> Vec<ContextFile> {
         ChatContent::SimpleText(text) => serde_json::from_str(text).unwrap_or_default(),
         _ => vec![],
     }
-}
-
-fn is_memory_path(path: &str) -> bool {
-    path.contains("/.refact/knowledge/")
-        || path.contains("/.refact/trajectories/")
-        || path.contains("/.refact/tasks/")
 }
 
 fn parse_bool(args: &HashMap<String, Value>, key: &str) -> bool {
