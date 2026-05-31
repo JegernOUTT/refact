@@ -4315,7 +4315,6 @@ async fn enrich_with_session_state(app: AppState, trajectories: &mut Vec<Traject
     for (idx, session_arc) in session_arcs {
         let session = session_arc.lock().await;
         if is_active_buddy_session(&session) {
-            trajectories[idx].session_state = Some(SessionState::Idle.to_string());
             continue;
         }
         trajectories[idx].session_state = Some(session.runtime.state.to_string());
@@ -5777,6 +5776,15 @@ mod tests {
             "2024-01-01T00:00:01Z",
         )
         .await;
+        let listed_without_session = list_all_trajectories_meta(app.clone()).await.unwrap();
+        let item_without_session = listed_without_session
+            .iter()
+            .find(|item| item.id == chat_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(item_without_session.session_state, None);
+        assert!(item_without_session.worktree.is_none());
+
         let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
         {
             let mut session = session_arc.lock().await;
@@ -5793,10 +5801,18 @@ mod tests {
             .insert(chat_id.to_string(), session_arc);
 
         let listed = list_all_trajectories_meta(app).await.unwrap();
-        let item = listed.iter().find(|item| item.id == chat_id).unwrap();
+        let item = listed
+            .iter()
+            .find(|item| item.id == chat_id)
+            .cloned()
+            .unwrap();
 
-        assert_eq!(item.session_state.as_deref(), Some("idle"));
+        assert_eq!(item.session_state, None);
         assert!(item.worktree.is_none());
+        assert_eq!(
+            serde_json::to_value(&item).unwrap(),
+            serde_json::to_value(&item_without_session).unwrap()
+        );
     }
 
     #[tokio::test]
