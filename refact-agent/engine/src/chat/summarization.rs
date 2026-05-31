@@ -256,6 +256,9 @@ fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
 fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
     let mut completed_after_call = HashSet::new();
     for message in messages.iter().rev() {
+        if is_ui_only_message(message) {
+            continue;
+        }
         match message.role.as_str() {
             "tool" | "diff" if !message.tool_call_id.is_empty() => {
                 completed_after_call.insert(message.tool_call_id.as_str());
@@ -281,6 +284,14 @@ fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
         }
     }
     false
+}
+
+fn current_tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
+    let start = messages
+        .iter()
+        .rposition(|message| message.role == "user")
+        .map_or(0, |idx| idx + 1);
+    tail_has_pending_tool_calls(&messages[start..])
 }
 
 fn is_trimmable_tail_diagnostic(message: &ChatMessage) -> bool {
@@ -337,6 +348,9 @@ pub fn eligible_tail_non_user_segment(messages: &[ChatMessage]) -> Option<Summar
 }
 
 fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
+    if current_tail_has_pending_tool_calls(messages) {
+        return None;
+    }
     closed_non_user_segments(messages)
         .into_iter()
         .find(|segment| !segment_is_matching_summary(messages, *segment))
@@ -925,21 +939,6 @@ fn effective_n_ctx_for_resolved_summary_model(
     }
 }
 
-fn last_visible_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
-    messages
-        .iter()
-        .rev()
-        .find(|message| !is_ui_only_message(message))
-        .map(|message| {
-            message.role == "assistant"
-                && message
-                    .tool_calls
-                    .as_ref()
-                    .map_or(false, |calls| !calls.is_empty())
-        })
-        .unwrap_or(false)
-}
-
 fn replace_segment(messages: &mut Vec<ChatMessage>, segment: SummarySegment, summary: ChatMessage) {
     messages.splice(segment.start..=segment.end, [summary]);
 }
@@ -1216,7 +1215,7 @@ pub async fn apply_segment_summarization(
             emit_compression_skipped(&mut session, CompressionReason::NoEligibleSegment);
             return false;
         }
-        if last_visible_has_pending_tool_calls(&session.messages) {
+        if current_tail_has_pending_tool_calls(&session.messages) {
             emit_compression_skipped(&mut session, CompressionReason::PendingToolCalls);
             return false;
         }
@@ -1805,6 +1804,104 @@ mod tests {
         ));
         assert_eq!(messages[1].content.content_text_only(), "closed summary");
         assert_eq!(messages[3].content.content_text_only(), "tail new");
+    }
+
+    #[test]
+    fn current_tail_finish_reason_only_pending_blocks_closed_segment() {
+        let mut pending = assistant("");
+        pending.finish_reason = Some("tool_calls".to_string());
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            pending,
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 1, end: 1 }]
+        );
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn current_tail_empty_tool_calls_finish_reason_blocks_closed_segment() {
+        let mut pending = assistant("");
+        pending.finish_reason = Some("tool_calls".to_string());
+        pending.tool_calls = Some(Vec::new());
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            pending,
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 1, end: 1 }]
+        );
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn current_tail_completed_tool_call_allows_closed_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant_with_tool_call_id("call_done"),
+            tool_with_id("call_done", "done"),
+        ];
+
+        assert!(!current_tail_has_pending_tool_calls(&messages));
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "closed summary",
+            "test-model",
+        ));
+        assert_eq!(messages[1].content.content_text_only(), "closed summary");
+        assert_eq!(messages[3].role, "assistant");
+        assert_eq!(messages[4].role, "tool");
+    }
+
+    #[test]
+    fn current_tail_ui_only_messages_do_not_hide_pending_assistant() {
+        let mut pending = assistant("");
+        pending.finish_reason = Some("tool_calls".to_string());
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            pending,
+            ui_only_event("diagnostic"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
     }
 
     #[test]
