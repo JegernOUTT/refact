@@ -191,6 +191,27 @@ async fn get_generic_session_state_for_chat(
     }
 }
 
+async fn get_generic_session_state_for_source(
+    sessions: &SessionsMap,
+    chat_id: &str,
+    source: &TrajectorySourceIdentity,
+) -> (String, Option<String>) {
+    let session_arc = sessions.read().await.get(chat_id).cloned();
+    match session_arc {
+        Some(arc) => {
+            let session = arc.lock().await;
+            if !source.matches_session_for_delete(&session) {
+                return (SessionState::Idle.to_string(), None);
+            }
+            (
+                session.runtime.state.to_string(),
+                session.runtime.error.clone(),
+            )
+        }
+        None => (SessionState::Idle.to_string(), None),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrajectoryMeta {
     pub id: String,
@@ -1159,7 +1180,7 @@ async fn resolve_trajectory_data_save_path(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TrajectoryTitleSource {
+enum TrajectorySourceIdentity {
     Normal,
     Task {
         task_id: String,
@@ -1171,15 +1192,31 @@ enum TrajectoryTitleSource {
     Buddy,
 }
 
-impl TrajectoryTitleSource {
-    fn from_task_meta(task_meta: &super::types::TaskMeta) -> Self {
+impl TrajectorySourceIdentity {
+    fn task(
+        task_id: String,
+        role: String,
+        agent_id: Option<String>,
+        card_id: Option<String>,
+        planner_chat_id: Option<String>,
+    ) -> Self {
         Self::Task {
-            task_id: task_meta.task_id.clone(),
-            role: task_meta.role.clone(),
-            agent_id: task_meta.agent_id.clone(),
-            card_id: task_meta.card_id.clone(),
-            planner_chat_id: task_meta.planner_chat_id.clone(),
+            task_id,
+            role,
+            agent_id,
+            card_id,
+            planner_chat_id,
         }
+    }
+
+    fn from_task_meta(task_meta: &super::types::TaskMeta) -> Self {
+        Self::task(
+            task_meta.task_id.clone(),
+            task_meta.role.clone(),
+            task_meta.agent_id.clone(),
+            task_meta.card_id.clone(),
+            task_meta.planner_chat_id.clone(),
+        )
     }
 
     fn from_extra(extra: &serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
@@ -1209,25 +1246,68 @@ impl TrajectoryTitleSource {
         Self::from_extra(root)
     }
 
-    fn from_session(session: &ChatSession) -> Self {
-        if is_active_buddy_session(session) {
+    fn from_session_parts(thread: &ThreadParams) -> Self {
+        if thread.buddy_meta.is_some() {
             Self::Buddy
-        } else if let Some(task_meta) = session.thread.task_meta.as_ref() {
+        } else if let Some(task_meta) = thread.task_meta.as_ref() {
             Self::from_task_meta(task_meta)
         } else {
             Self::Normal
         }
     }
 
+    fn from_session(session: &ChatSession) -> Self {
+        Self::from_session_parts(&session.thread)
+    }
+
     fn emits_generic_event(&self) -> bool {
         !matches!(self, Self::Buddy)
+    }
+
+    fn matches_session(&self, session: &ChatSession) -> bool {
+        &Self::from_session(session) == self
+    }
+
+    fn matches_session_for_delete(&self, session: &ChatSession) -> bool {
+        let active_source = Self::from_session(session);
+        match (self, active_source) {
+            (
+                Self::Task {
+                    task_id,
+                    role,
+                    agent_id,
+                    card_id,
+                    planner_chat_id,
+                },
+                Self::Task {
+                    task_id: active_task_id,
+                    role: active_role,
+                    agent_id: active_agent_id,
+                    card_id: active_card_id,
+                    planner_chat_id: active_planner_chat_id,
+                },
+            ) => {
+                task_id == &active_task_id
+                    && role == &active_role
+                    && agent_id
+                        .as_ref()
+                        .is_none_or(|agent_id| Some(agent_id) == active_agent_id.as_ref())
+                    && card_id
+                        .as_ref()
+                        .is_none_or(|card_id| Some(card_id) == active_card_id.as_ref())
+                    && planner_chat_id.as_ref().is_none_or(|planner_chat_id| {
+                        Some(planner_chat_id) == active_planner_chat_id.as_ref()
+                    })
+            }
+            (left, right) => left == &right,
+        }
     }
 }
 
 async fn title_generation_backing_file_matches(
     file_path: &Path,
     chat_id: &str,
-    source: &TrajectoryTitleSource,
+    source: &TrajectorySourceIdentity,
 ) -> bool {
     let content = match fs::read_to_string(file_path).await {
         Ok(content) => content,
@@ -1254,7 +1334,7 @@ async fn title_generation_backing_file_matches(
     if !trajectory_root_id_matches(&json, chat_id, file_path) {
         return false;
     }
-    let actual_source = match TrajectoryTitleSource::from_json(&json) {
+    let actual_source = match TrajectorySourceIdentity::from_json(&json) {
         Ok(source) => source,
         Err(e) => {
             warn!(
@@ -1826,6 +1906,37 @@ pub async fn load_generic_trajectory_for_chat(
     load_trajectory_candidate(gcx, chat_id, candidate).await
 }
 
+async fn load_generic_trajectory_for_chat_matching_source(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    source: &TrajectorySourceIdentity,
+) -> Option<LoadedTrajectory> {
+    validate_trajectory_id(chat_id).ok()?;
+    let paths = trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    for path in paths {
+        let Some(candidate) = read_valid_trajectory_candidate(path, chat_id).await else {
+            continue;
+        };
+        let candidate_source = match TrajectorySourceIdentity::from_json(&candidate.json) {
+            Ok(candidate_source) => candidate_source,
+            Err(e) => {
+                warn!(
+                    "Skipping trajectory candidate {} for chat {}: invalid source: {}",
+                    candidate.path.display(),
+                    chat_id,
+                    e
+                );
+                continue;
+            }
+        };
+        if candidate_source != *source {
+            continue;
+        }
+        return load_trajectory_candidate(gcx, chat_id, candidate).await;
+    }
+    None
+}
+
 pub async fn save_initial_planner_trajectory(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -2182,7 +2293,7 @@ pub async fn save_trajectory_snapshot(
                 snapshot.chat_id.clone(),
                 messages_json,
                 file_path.clone(),
-                TrajectoryTitleSource::Normal,
+                TrajectorySourceIdentity::Normal,
             );
         }
     } else if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_some() {
@@ -2196,7 +2307,7 @@ pub async fn save_trajectory_snapshot(
                 snapshot.chat_id.clone(),
                 messages_json,
                 file_path.clone(),
-                TrajectoryTitleSource::Buddy,
+                TrajectorySourceIdentity::Buddy,
             );
         }
     } else if let Some(ref task_meta) = snapshot.task_meta {
@@ -2210,7 +2321,7 @@ pub async fn save_trajectory_snapshot(
                 snapshot.chat_id.clone(),
                 messages_json.clone(),
                 file_path.clone(),
-                TrajectoryTitleSource::from_task_meta(task_meta),
+                TrajectorySourceIdentity::from_task_meta(task_meta),
             );
         }
 
@@ -2403,6 +2514,7 @@ async fn apply_loaded_external_update_with_repair(
     pending_if_not_reloadable: Option<ExternalReloadPending>,
     log_message: &str,
 ) -> bool {
+    let loaded_source = TrajectorySourceIdentity::from_session_parts(&loaded.thread);
     let transition_identity_repaired = loaded.transition_identity_repaired;
     apply_mode_defaults_to_thread(
         gcx.clone(),
@@ -2413,6 +2525,7 @@ async fn apply_loaded_external_update_with_repair(
     .await;
     let repair_patch = loaded.repair_patch();
     let mut skipped_active_buddy = false;
+    let mut skipped_source_mismatch = false;
     let repaired_version = {
         let mut session = session_arc.lock().await;
         if let Some(expected) = expected_pending {
@@ -2420,7 +2533,10 @@ async fn apply_loaded_external_update_with_repair(
                 return false;
             }
         }
-        if is_active_buddy_session(&session) {
+        if !loaded_source.matches_session(&session) {
+            skipped_source_mismatch = true;
+            None
+        } else if is_active_buddy_session(&session) {
             skipped_active_buddy = true;
             None
         } else if !can_apply_external_reload(&session) {
@@ -2437,7 +2553,7 @@ async fn apply_loaded_external_update_with_repair(
             )
         }
     };
-    if skipped_active_buddy {
+    if skipped_active_buddy || skipped_source_mismatch {
         if transition_identity_repaired {
             if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
                 warn!(
@@ -2480,8 +2596,26 @@ async fn apply_external_delete_with_revalidation(
     session_arc: Arc<AMutex<ChatSession>>,
     chat_id: &str,
     expected_pending: Option<ExternalReloadPending>,
+    deleted_source: Option<TrajectorySourceIdentity>,
 ) -> ExternalDeleteRevalidationOutcome {
-    if let Some(mut loaded) = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await {
+    {
+        let session = session_arc.lock().await;
+        if let Some(deleted_source) = deleted_source.as_ref() {
+            if !deleted_source.matches_session_for_delete(&session) {
+                return ExternalDeleteRevalidationOutcome::Deleted {
+                    applied_to_session: false,
+                };
+            }
+        }
+    }
+    let loaded = match deleted_source.as_ref() {
+        Some(source) => {
+            load_generic_trajectory_for_chat_matching_source(gcx.clone(), chat_id, source).await
+        }
+        None => load_generic_trajectory_for_chat(gcx.clone(), chat_id).await,
+    };
+
+    if let Some(mut loaded) = loaded {
         let transition_identity_repaired = loaded.transition_identity_repaired;
         apply_mode_defaults_to_thread(
             gcx.clone(),
@@ -2499,6 +2633,25 @@ async fn apply_external_delete_with_revalidation(
                 if session.external_reload_pending != Some(expected) {
                     return ExternalDeleteRevalidationOutcome::NoopStalePending;
                 }
+            }
+            if !TrajectorySourceIdentity::from_session_parts(&loaded.thread)
+                .matches_session(&session)
+            {
+                drop(session);
+                if transition_identity_repaired {
+                    if let Err(e) =
+                        persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await
+                    {
+                        warn!(
+                            "Failed to persist repaired trajectory for {}: {}",
+                            chat_id, e
+                        );
+                    }
+                }
+                return ExternalDeleteRevalidationOutcome::Updated {
+                    loaded: outcome_loaded,
+                    applied_to_session: false,
+                };
             }
             if is_active_buddy_session(&session) {
                 skipped_active_buddy = true;
@@ -2562,6 +2715,19 @@ async fn apply_external_delete_with_revalidation(
             return ExternalDeleteRevalidationOutcome::NoopStalePending;
         }
     }
+    if deleted_source
+        .as_ref()
+        .is_some_and(|source| !source.matches_session_for_delete(&session))
+    {
+        return ExternalDeleteRevalidationOutcome::Deleted {
+            applied_to_session: false,
+        };
+    }
+    if deleted_source.is_none() && !TrajectorySourceIdentity::Normal.matches_session(&session) {
+        return ExternalDeleteRevalidationOutcome::Deleted {
+            applied_to_session: false,
+        };
+    }
     if is_active_buddy_session(&session) {
         return ExternalDeleteRevalidationOutcome::Deleted {
             applied_to_session: false,
@@ -2605,6 +2771,7 @@ pub async fn check_external_reload_pending(
                 session_arc.clone(),
                 &chat_id,
                 Some(ExternalReloadPending::Delete),
+                None,
             )
             .await;
         }
@@ -2637,7 +2804,17 @@ pub async fn check_external_reload_pending(
     }
 }
 
+#[cfg(test)]
 async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_remove: bool) {
+    process_trajectory_change_for_source(gcx, chat_id, is_remove, None).await;
+}
+
+async fn process_trajectory_change_for_source(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    is_remove: bool,
+    changed_source: Option<TrajectorySourceIdentity>,
+) {
     let app = AppState::from_gcx(gcx.clone()).await;
     let sessions = app.chat.sessions.clone();
 
@@ -2647,8 +2824,20 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             sessions_read.get(chat_id).cloned()
         };
         let outcome = if let Some(session_arc) = session_arc {
-            apply_external_delete_with_revalidation(gcx.clone(), session_arc, chat_id, None).await
-        } else if let Some(loaded) = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await {
+            apply_external_delete_with_revalidation(
+                gcx.clone(),
+                session_arc,
+                chat_id,
+                None,
+                changed_source.clone(),
+            )
+            .await
+        } else if let Some(loaded) = match changed_source.as_ref() {
+            Some(source) => {
+                load_generic_trajectory_for_chat_matching_source(gcx.clone(), chat_id, source).await
+            }
+            None => load_generic_trajectory_for_chat(gcx.clone(), chat_id).await,
+        } {
             if loaded.transition_identity_repaired {
                 persist_loaded_trajectory_repair(gcx.clone(), loaded.clone()).await;
             }
@@ -2671,8 +2860,9 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
                     chat_id, applied_to_session
                 );
                 let task_roots = get_all_task_roots(gcx.clone()).await;
+                let loaded_source = TrajectorySourceIdentity::from_session_parts(&loaded.thread);
                 let (session_state, session_error) =
-                    get_generic_session_state_for_chat(&sessions, chat_id).await;
+                    get_generic_session_state_for_source(&sessions, chat_id, &loaded_source).await;
                 let is_title_generated = loaded.thread.is_title_generated;
                 updated_trajectory_event_from_meta(
                     loaded_trajectory_to_meta(&loaded, &task_roots),
@@ -2704,8 +2894,9 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
     if let Some(session_arc) = session_arc {
         if let Some(t) = loaded.as_ref() {
             let task_roots = get_all_task_roots(gcx.clone()).await;
+            let loaded_source = TrajectorySourceIdentity::from_session_parts(&t.thread);
             let (session_state, session_error) =
-                get_generic_session_state_for_chat(&sessions, chat_id).await;
+                get_generic_session_state_for_source(&sessions, chat_id, &loaded_source).await;
             let is_title_generated = t.thread.is_title_generated;
             let event = updated_trajectory_event_from_meta(
                 loaded_trajectory_to_meta(t, &task_roots),
@@ -2716,11 +2907,14 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             let _ = app.chat.trajectory_events_tx.send(event);
         }
 
-        let active_buddy_collision = {
+        let source_collision = {
             let session = session_arc.lock().await;
-            is_active_buddy_session(&session)
+            loaded.as_ref().is_some_and(|loaded| {
+                !TrajectorySourceIdentity::from_session_parts(&loaded.thread)
+                    .matches_session(&session)
+            })
         };
-        if active_buddy_collision {
+        if source_collision {
             if let Some(loaded) = loaded.take() {
                 if loaded.transition_identity_repaired {
                     persist_loaded_trajectory_repair(gcx.clone(), loaded).await;
@@ -2742,6 +2936,9 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             .await;
         } else {
             let mut session = session_arc.lock().await;
+            if !TrajectorySourceIdentity::Normal.matches_session(&session) {
+                return;
+            }
             if !can_apply_external_reload(&session) {
                 session.external_reload_pending = Some(ExternalReloadPending::Update);
             }
@@ -2821,6 +3018,24 @@ fn should_dispatch_trajectory_path(path: &Path, task_roots: &[PathBuf]) -> bool 
     task_trajectory_context_from_path(path, task_roots).is_some()
 }
 
+fn trajectory_source_identity_from_path(
+    path: &Path,
+    task_roots: &[PathBuf],
+) -> TrajectorySourceIdentity {
+    task_trajectory_context_from_path(path, task_roots)
+        .map(|(task_id, role, agent_id)| {
+            let planner_chat_id = if role == "planner" {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(ToString::to_string)
+            } else {
+                None
+            };
+            TrajectorySourceIdentity::task(task_id, role, agent_id, None, planner_chat_id)
+        })
+        .unwrap_or(TrajectorySourceIdentity::Normal)
+}
+
 async fn collect_task_trajectory_chat_ids_under_path(
     path: &Path,
     task_roots: &[PathBuf],
@@ -2855,7 +3070,11 @@ async fn collect_task_trajectory_chat_ids_under_path(
 }
 
 enum TrajectoryWatcherMessage {
-    Trajectory { chat_id: String, is_remove: bool },
+    Trajectory {
+        chat_id: String,
+        is_remove: bool,
+        source: TrajectorySourceIdentity,
+    },
     ScanPath(PathBuf),
 }
 
@@ -2905,6 +3124,10 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                             let _ = tx_clone.send(TrajectoryWatcherMessage::Trajectory {
                                 chat_id: chat_id.to_string(),
                                 is_remove,
+                                source: trajectory_source_identity_from_path(
+                                    &path,
+                                    &task_roots_for_callback,
+                                ),
                             });
                         }
                     } else if !is_remove && is_under_task_root(&path, &task_roots_for_callback) {
@@ -2942,8 +3165,10 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             task_roots.len()
         );
 
-        let mut pending: std::collections::HashMap<String, (Instant, bool)> =
-            std::collections::HashMap::new();
+        let mut pending: std::collections::HashMap<
+            String,
+            (Instant, bool, TrajectorySourceIdentity),
+        > = std::collections::HashMap::new();
         let mut pending_scans: std::collections::HashMap<PathBuf, Instant> =
             std::collections::HashMap::new();
         let debounce = timeouts().watcher_debounce;
@@ -2958,8 +3183,12 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             tokio::select! {
                 msg = rx.recv() => {
                     match msg {
-                        Some(TrajectoryWatcherMessage::Trajectory { chat_id, is_remove }) => {
-                            pending.insert(chat_id, (Instant::now(), is_remove));
+                        Some(TrajectoryWatcherMessage::Trajectory {
+                            chat_id,
+                            is_remove,
+                            source,
+                        }) => {
+                            pending.insert(chat_id, (Instant::now(), is_remove, source));
                         }
                         Some(TrajectoryWatcherMessage::ScanPath(path)) => {
                             pending_scans.insert(path, Instant::now());
@@ -2985,21 +3214,25 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                 pending_scans.remove(&path);
                 for chat_id in collect_task_trajectory_chat_ids_under_path(&path, &task_roots).await
                 {
-                    pending.insert(chat_id, (Instant::now(), false));
+                    pending.insert(
+                        chat_id,
+                        (Instant::now(), false, TrajectorySourceIdentity::Normal),
+                    );
                 }
             }
 
             let now = Instant::now();
             let ready: Vec<_> = pending
                 .iter()
-                .filter(|(_, (t, _))| now.duration_since(*t) >= debounce)
-                .map(|(k, v)| (k.clone(), v.1))
+                .filter(|(_, (t, _, _))| now.duration_since(*t) >= debounce)
+                .map(|(k, v)| (k.clone(), v.1, v.2.clone()))
                 .collect();
 
-            for (chat_id, is_remove) in ready {
+            for (chat_id, is_remove, source) in ready {
                 pending.remove(&chat_id);
                 if let Some(gcx) = gcx_weak.upgrade() {
-                    process_trajectory_change(gcx, &chat_id, is_remove).await;
+                    process_trajectory_change_for_source(gcx, &chat_id, is_remove, Some(source))
+                        .await;
                 }
             }
         }
@@ -3270,7 +3503,7 @@ fn spawn_title_generation_task(
     id: String,
     messages: Vec<serde_json::Value>,
     file_path: PathBuf,
-    source: TrajectoryTitleSource,
+    source: TrajectorySourceIdentity,
 ) {
     tokio::spawn(async move {
         let app = AppState::from_gcx(gcx.clone()).await;
@@ -3299,7 +3532,7 @@ fn spawn_title_generation_task(
         };
         if let Some(session_arc) = maybe_session_arc {
             let mut session = session_arc.lock().await;
-            if TrajectoryTitleSource::from_session(&session) != source {
+            if TrajectorySourceIdentity::from_session(&session) != source {
                 drop(session);
             } else {
                 if session.thread.is_title_generated {
@@ -3307,7 +3540,7 @@ fn spawn_title_generation_task(
                     return;
                 }
                 let suppressed_trajectory_events_tx =
-                    if matches!(source, TrajectoryTitleSource::Buddy) {
+                    if matches!(source, TrajectorySourceIdentity::Buddy) {
                         session.trajectory_events_tx.take()
                     } else {
                         None
@@ -3344,7 +3577,7 @@ fn spawn_title_generation_task(
             );
             return;
         }
-        let actual_source = match TrajectoryTitleSource::from_extra(&data.extra) {
+        let actual_source = match TrajectorySourceIdentity::from_extra(&data.extra) {
             Ok(actual_source) => actual_source,
             Err(e) => {
                 warn!(
@@ -4654,7 +4887,7 @@ pub async fn handle_v1_trajectories_save(
         let _ = app.chat.trajectory_events_tx.send(event);
     }
     if should_generate_title {
-        let source = TrajectoryTitleSource::from_extra(&data.extra).map_err(|e| {
+        let source = TrajectorySourceIdentity::from_extra(&data.extra).map_err(|e| {
             ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Invalid trajectory source for title generation: {}", e),
@@ -7037,7 +7270,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":"Generate guarded title"})],
             path.clone(),
-            TrajectoryTitleSource::Normal,
+            TrajectorySourceIdentity::Normal,
         );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -7069,7 +7302,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":"Generate guarded active title"})],
             path.clone(),
-            TrajectoryTitleSource::Normal,
+            TrajectorySourceIdentity::Normal,
         );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -7108,7 +7341,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::Normal,
+            TrajectorySourceIdentity::Normal,
         );
 
         wait_for_file_title(&path, expected_title).await;
@@ -7155,7 +7388,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::Buddy,
+            TrajectorySourceIdentity::Buddy,
         );
 
         wait_for_file_title(&path, expected_title).await;
@@ -7215,7 +7448,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::from_task_meta(&task_meta),
+            TrajectorySourceIdentity::from_task_meta(&task_meta),
         );
 
         wait_for_file_title(&path, expected_title).await;
@@ -7261,7 +7494,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::Normal,
+            TrajectorySourceIdentity::Normal,
         );
 
         wait_for_file_title(&path, expected_title).await;
@@ -7306,7 +7539,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::Normal,
+            TrajectorySourceIdentity::Normal,
         );
 
         wait_for_session_title(&session_arc, expected_title).await;
@@ -7368,7 +7601,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::from_task_meta(&task_meta),
+            TrajectorySourceIdentity::from_task_meta(&task_meta),
         );
 
         wait_for_session_title(&session_arc, expected_title).await;
@@ -7414,7 +7647,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::Buddy,
+            TrajectorySourceIdentity::Buddy,
         );
 
         wait_for_session_title(&session_arc, expected_title).await;
@@ -7461,7 +7694,7 @@ mod tests {
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
             path.clone(),
-            TrajectoryTitleSource::Buddy,
+            TrajectorySourceIdentity::Buddy,
         );
 
         wait_for_session_title(&session_arc, expected_title).await;
@@ -7488,7 +7721,7 @@ mod tests {
             Some("card-title-source"),
             None,
         );
-        let task_source = TrajectoryTitleSource::from_task_meta(&task_meta);
+        let task_source = TrajectorySourceIdentity::from_task_meta(&task_meta);
         write_trajectory_file(
             &generic_path,
             chat_id,
@@ -7516,7 +7749,7 @@ mod tests {
             title_generation_backing_file_matches(
                 &generic_path,
                 chat_id,
-                &TrajectoryTitleSource::Normal,
+                &TrajectorySourceIdentity::Normal,
             )
             .await
         );
@@ -7524,7 +7757,7 @@ mod tests {
             title_generation_backing_file_matches(
                 &buddy_path,
                 chat_id,
-                &TrajectoryTitleSource::Buddy,
+                &TrajectorySourceIdentity::Buddy,
             )
             .await
         );
@@ -7533,7 +7766,7 @@ mod tests {
             !title_generation_backing_file_matches(
                 &generic_path,
                 chat_id,
-                &TrajectoryTitleSource::Buddy,
+                &TrajectorySourceIdentity::Buddy,
             )
             .await
         );
@@ -7541,7 +7774,7 @@ mod tests {
             !title_generation_backing_file_matches(
                 &buddy_path,
                 chat_id,
-                &TrajectoryTitleSource::Normal,
+                &TrajectorySourceIdentity::Normal,
             )
             .await
         );
@@ -7549,7 +7782,7 @@ mod tests {
             !title_generation_backing_file_matches(
                 &task_path,
                 chat_id,
-                &TrajectoryTitleSource::Normal,
+                &TrajectorySourceIdentity::Normal,
             )
             .await
         );
@@ -8496,6 +8729,7 @@ mod tests {
             session_arc.clone(),
             chat_id,
             Some(ExternalReloadPending::Delete),
+            None,
         )
         .await;
 
@@ -8544,6 +8778,7 @@ mod tests {
             session_arc.clone(),
             chat_id,
             Some(ExternalReloadPending::Delete),
+            None,
         )
         .await;
 
@@ -9151,6 +9386,412 @@ mod tests {
         assert!(raw.get("previous_response_id").is_none());
         assert_eq!(raw["custom_future_field"]["keep"], true);
         assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn task_update_with_active_normal_same_id_emits_update_without_session_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "task-update-active-normal-collision";
+        let task_meta = task_meta(
+            "task-update-normal-collision",
+            "agents",
+            Some("agent-1"),
+            Some("card-1"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-update-normal-collision")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-1")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Updated",
+            "task replacement message",
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Normal".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active normal".to_string(),
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            false,
+            Some(TrajectorySourceIdentity::from_task_meta(&task_meta)),
+        )
+        .await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Task Updated"));
+        assert_eq!(
+            event.task_id.as_deref(),
+            Some("task-update-normal-collision")
+        );
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Normal");
+        assert!(session.thread.task_meta.is_none());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active normal"
+        );
+        drop(session);
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn normal_update_with_active_task_same_id_emits_update_without_session_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "normal-update-active-task-collision";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Updated",
+            "normal replacement message",
+        )
+        .await;
+        let active_task_meta = task_meta(
+            "task-active-normal-update-collision",
+            "agents",
+            Some("agent-2"),
+            Some("card-2"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Task".to_string();
+            session.thread.task_meta = Some(active_task_meta.clone());
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active task".to_string(),
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            false,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Normal Updated"));
+        assert_eq!(event.task_id, None);
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Task");
+        assert_eq!(session.thread.task_meta, Some(active_task_meta));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active task"
+        );
+        drop(session);
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn task_delete_with_active_normal_same_id_does_not_clear_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "task-delete-active-normal-collision";
+        let task_meta = task_meta(
+            "task-delete-normal-collision",
+            "agents",
+            Some("agent-3"),
+            Some("card-3"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Normal Delete".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep normal during task delete".to_string(),
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            true,
+            Some(TrajectorySourceIdentity::from_task_meta(&task_meta)),
+        )
+        .await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Normal Delete");
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep normal during task delete"
+        );
+        drop(session);
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn normal_delete_with_active_task_same_id_does_not_clear_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "normal-delete-active-task-collision";
+        let active_task_meta = task_meta(
+            "task-active-normal-delete-collision",
+            "agents",
+            Some("agent-4"),
+            Some("card-4"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Task Delete".to_string();
+            session.thread.task_meta = Some(active_task_meta.clone());
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep task during normal delete".to_string(),
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            true,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Task Delete");
+        assert_eq!(session.thread.task_meta, Some(active_task_meta));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep task during normal delete"
+        );
+        drop(session);
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn same_task_identity_update_and_delete_still_mutate_or_pend_active_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "same-task-update-delete";
+        let task_meta = task_meta(
+            "task-same-source",
+            "agents",
+            Some("agent-5"),
+            Some("card-5"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-same-source")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-5")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Same Task Updated",
+            "same task replacement",
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta.clone());
+            session.thread.title = "Old Same Task".to_string();
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx.clone(),
+            chat_id,
+            false,
+            Some(TrajectorySourceIdentity::from_task_meta(&task_meta)),
+        )
+        .await;
+        {
+            let session = session_arc.lock().await;
+            assert_eq!(session.external_reload_pending, None);
+            assert_eq!(session.thread.title, "Same Task Updated");
+            assert_eq!(session.thread.task_meta, Some(task_meta.clone()));
+            assert_eq!(
+                session.messages[0].content.content_text_only(),
+                "same task replacement"
+            );
+        }
+        tokio::fs::remove_file(&task_path).await.unwrap();
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+        }
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            true,
+            Some(TrajectorySourceIdentity::from_task_meta(&task_meta)),
+        )
+        .await;
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::Delete)
+        );
+        assert_eq!(session.thread.title, "Same Task Updated");
+    }
+
+    #[tokio::test]
+    async fn same_normal_identity_update_and_delete_still_mutate_or_pend_active_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "same-normal-update-delete";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Same Normal Updated",
+            "same normal replacement",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Old Same Normal".to_string();
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx.clone(),
+            chat_id,
+            false,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await;
+        {
+            let session = session_arc.lock().await;
+            assert_eq!(session.external_reload_pending, None);
+            assert_eq!(session.thread.title, "Same Normal Updated");
+            assert!(session.thread.task_meta.is_none());
+            assert_eq!(
+                session.messages[0].content.content_text_only(),
+                "same normal replacement"
+            );
+        }
+        tokio::fs::remove_file(&normal_path).await.unwrap();
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+        }
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            true,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await;
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::Delete)
+        );
+        assert_eq!(session.thread.title, "Same Normal Updated");
     }
 
     #[tokio::test]
