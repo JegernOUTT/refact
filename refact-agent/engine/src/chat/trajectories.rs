@@ -2504,127 +2504,71 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
 
     let mut loaded = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await;
 
-    let (
-        updated_at,
-        title,
-        is_title_generated,
-        message_count,
-        parent_id,
-        link_type,
-        root_chat_id,
-        model,
-        mode,
-        worktree,
-        total_lines_added,
-        total_lines_removed,
-        tasks_total,
-        tasks_done,
-        tasks_failed,
-        token_totals,
-    ) = if let Some(t) = loaded.as_ref() {
-        let effective_root = t
-            .thread
-            .root_chat_id
-            .clone()
-            .unwrap_or_else(|| t.thread.id.clone());
-        let (lines_added, lines_removed) = calculate_line_changes_from_chat_messages(&t.messages);
-        let (t_total, t_done, t_failed) = calculate_task_progress_from_chat_messages(&t.messages);
-        let tok = calculate_token_totals_from_chat_messages(&t.messages);
-        (
-            Some(t.updated_at.clone()),
-            Some(trajectory_meta_title(&t.thread.title)),
-            Some(t.thread.is_title_generated),
-            Some(t.messages.len()),
-            t.thread.parent_id.clone(),
-            t.thread.link_type.clone(),
-            Some(effective_root),
-            Some(t.thread.model.clone()),
-            Some(t.thread.mode.clone()),
-            t.thread.worktree.clone(),
-            Some(lines_added),
-            Some(lines_removed),
-            Some(t_total),
-            Some(t_done),
-            Some(t_failed),
-            Some(tok),
-        )
-    } else {
-        (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None,
-        )
-    };
-    let (session_state, session_error) =
-        get_generic_session_state_for_chat(&sessions, chat_id).await;
-    let _ = app.chat.trajectory_events_tx.send(TrajectoryEvent {
-        event_type: "updated".to_string(),
-        id: chat_id.to_string(),
-        updated_at,
-        title,
-        is_title_generated,
-        session_state: Some(session_state),
-        error: session_error,
-        message_count,
-        parent_id,
-        link_type,
-        root_chat_id,
-        task_id: None,
-        task_role: None,
-        agent_id: None,
-        card_id: None,
-        model,
-        mode,
-        worktree,
-        total_lines_added,
-        total_lines_removed,
-        tasks_total,
-        tasks_done,
-        tasks_failed,
-        total_prompt_tokens: token_totals.as_ref().map(|t| t.prompt_tokens),
-        total_completion_tokens: token_totals.as_ref().map(|t| t.completion_tokens),
-        total_tokens: token_totals.as_ref().map(|t| t.total_tokens),
-        total_cache_read_tokens: token_totals.as_ref().map(|t| t.cache_read_tokens),
-        total_cache_creation_tokens: token_totals.as_ref().map(|t| t.cache_creation_tokens),
-        total_cost_usd: token_totals.and_then(|t| t.cost_usd),
-    });
-
     let session_arc = {
         let sessions_read = sessions.read().await;
         sessions_read.get(chat_id).cloned()
     };
 
-    let Some(session_arc) = session_arc else {
+    if let Some(session_arc) = session_arc {
+        if let Some(t) = loaded.as_ref() {
+            let task_roots = get_all_task_roots(gcx.clone()).await;
+            let (session_state, session_error) =
+                get_generic_session_state_for_chat(&sessions, chat_id).await;
+            let is_title_generated = t.thread.is_title_generated;
+            let event = updated_trajectory_event_from_meta(
+                loaded_trajectory_to_meta(t, &task_roots),
+                Some(is_title_generated),
+                session_state,
+                session_error,
+            );
+            let _ = app.chat.trajectory_events_tx.send(event);
+        }
+
+        {
+            let session = session_arc.lock().await;
+            if is_active_buddy_session(&session) {
+                return;
+            }
+        }
+
         if let Some(loaded) = loaded.take() {
-            if loaded.transition_identity_repaired {
-                persist_loaded_trajectory_repair(gcx, loaded).await;
+            apply_loaded_external_update_with_repair(
+                gcx.clone(),
+                session_arc.clone(),
+                chat_id,
+                loaded,
+                None,
+                Some(ExternalReloadPending::Update),
+                &format!("Reloading trajectory for {} from external change", chat_id),
+            )
+            .await;
+        } else {
+            let mut session = session_arc.lock().await;
+            if !can_apply_external_reload(&session) {
+                session.external_reload_pending = Some(ExternalReloadPending::Update);
             }
         }
         return;
-    };
-
-    {
-        let session = session_arc.lock().await;
-        if is_active_buddy_session(&session) {
-            return;
-        }
     }
 
-    if let Some(loaded) = loaded.take() {
-        apply_loaded_external_update_with_repair(
-            gcx.clone(),
-            session_arc.clone(),
-            chat_id,
-            loaded,
-            None,
-            Some(ExternalReloadPending::Update),
-            &format!("Reloading trajectory for {} from external change", chat_id),
-        )
-        .await;
-    } else {
-        let mut session = session_arc.lock().await;
-        if !can_apply_external_reload(&session) {
-            session.external_reload_pending = Some(ExternalReloadPending::Update);
-        }
+    let Some(loaded) = loaded.take() else {
+        return;
+    };
+
+    let task_roots = get_all_task_roots(gcx.clone()).await;
+    let (session_state, session_error) =
+        get_generic_session_state_for_chat(&sessions, chat_id).await;
+    let is_title_generated = loaded.thread.is_title_generated;
+    let event = updated_trajectory_event_from_meta(
+        loaded_trajectory_to_meta(&loaded, &task_roots),
+        Some(is_title_generated),
+        session_state,
+        session_error,
+    );
+    let _ = app.chat.trajectory_events_tx.send(event);
+
+    if loaded.transition_identity_repaired {
+        persist_loaded_trajectory_repair(gcx, loaded).await;
     }
 }
 
@@ -8056,6 +8000,151 @@ mod tests {
         drop(session);
 
         assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_missing_file_emits_no_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+
+        process_trajectory_change(gcx, "missing-update-no-event", false).await;
+
+        assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_schema_incomplete_file_emits_no_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "schema-update-no-event";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_schema_incomplete_trajectory_file(&path, chat_id).await;
+
+        process_trajectory_change(gcx, chat_id, false).await;
+
+        assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_id_mismatched_file_emits_no_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "mismatch-update-no-event";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&path, "other-chat", "Mismatched", "2024-01-01T00:00:01Z").await;
+
+        process_trajectory_change(gcx, chat_id, false).await;
+
+        assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_valid_file_emits_metadata_rich_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "valid-update-rich-event";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-update-rich")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_metadata(
+            &path,
+            chat_id,
+            "Watcher Update Rich",
+            "2024-01-01T00:00:01Z",
+            "valid update message",
+        )
+        .await;
+
+        process_trajectory_change(gcx, chat_id, false).await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.updated_at.as_deref(), Some("2024-01-01T00:00:01Z"));
+        assert_eq!(event.title.as_deref(), Some("Watcher Update Rich"));
+        assert_eq!(event.is_title_generated, Some(true));
+        assert_eq!(event.message_count, Some(1));
+        assert_eq!(event.parent_id.as_deref(), Some("parent-fallback"));
+        assert_eq!(event.link_type.as_deref(), Some("handoff"));
+        assert_eq!(event.root_chat_id.as_deref(), Some("root-fallback"));
+        assert_eq!(event.task_id.as_deref(), Some("task-update-rich"));
+        assert_eq!(event.task_role.as_deref(), Some("planner"));
+        assert_eq!(event.model.as_deref(), Some("fallback-model"));
+        assert_eq!(event.mode.as_deref(), Some("task_planner"));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_missing_file_busy_generic_sets_pending_without_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "missing-update-busy-pending";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx, chat_id, false).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::Update)
+        );
+        drop(session);
+        assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_missing_file_active_buddy_sets_no_pending_or_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "missing-update-active-buddy-noop";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx, chat_id, false).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        drop(session);
+        assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(100)).await;
     }
 
     #[tokio::test]
