@@ -277,18 +277,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         : liveTranscript
       : value;
 
-  const collapsedPreviewText = useMemo(() => {
-    const trimmed = displayedInputValue.trimEnd();
-    if (!trimmed) return "";
-
-    const lines = trimmed.split(/\r?\n/);
-    if (lines.length <= 2) return trimmed;
-
-    const lastTwoLines = lines.slice(-2);
-    lastTwoLines[0] = `… ${lastTwoLines[0]}`;
-    return lastTwoLines.join("\n");
-  }, [displayedInputValue]);
-
   const valueRef = React.useRef(value);
   valueRef.current = value;
 
@@ -441,14 +429,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       if (isComposerExpanded) return;
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      const actionButton = target.closest("button");
-      if (actionButton && target.closest(`.${styles.bottomActionControls}`)) {
-        if (
-          actionButton.getAttribute("aria-label") !== "Resend last messages"
-        ) {
-          return;
-        }
-      }
+      if (target.closest("button, a, input")) return;
 
       event.preventDefault();
       focusComposerInput();
@@ -623,7 +604,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       {...props}
                       host={host}
                       onOpenFile={queryPathThenOpenFile}
-                      autoFocus={autoFocus}
+                      autoFocus={isComposerExpanded && autoFocus}
                       readOnly={isVoiceActive}
                       style={{ boxShadow: "none", outline: "none" }}
                       onPaste={handlePastingFile}
@@ -633,11 +614,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               </Box>
             </Box>
           </Box>
-          {collapsedPreviewText && (
-            <Box className={styles.collapsedInputPreview} aria-hidden="true">
-              {collapsedPreviewText}
-            </Box>
-          )}
           <Flex
             gap="2"
             wrap="nowrap"

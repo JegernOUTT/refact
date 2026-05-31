@@ -94,18 +94,26 @@
   --chat-input-padding: var(--space-3);
 }
 
+.chatForm__form {
+  transition:
+    min-height 0.24s ease,
+    border-color 0.18s ease;
+}
+
 .expandedComposerContent {
   display: grid;
   grid-template-rows: 1fr;
   opacity: 1;
   transition:
-    grid-template-rows 0.2s ease,
-    opacity 0.16s ease;
+    grid-template-rows 0.24s ease,
+    max-height 0.24s ease,
+    opacity 0.18s ease;
 }
 
 .expandedComposerContentInner {
   min-height: 0;
   overflow: hidden;
+  transition: max-height 0.24s ease;
 }
 
 .chatFormCollapsed .expandedComposerContent {
@@ -116,8 +124,16 @@
   max-height: calc(var(--line-height-2, 20px) * 2 + var(--space-2));
 }
 
+.chatFormExpanded .expandedComposerContentInner {
+  max-height: 220px;
+}
+
 .chatFormCollapsed .inputHeader {
   display: none;
+}
+
+.chatFormExpanded .inputHeader {
+  animation: composerHeaderFadeIn 0.16s ease both;
 }
 
 .chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput) {
@@ -136,47 +152,12 @@
   opacity: 0.7;
 }
 
-.collapsedInputPreview {
-  display: none;
+.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaRoot) {
+  max-height: calc(var(--line-height-2, 20px) * 2 + var(--space-2));
 }
 
-.chatFormCollapsed .collapsedInputPreview {
-  display: -webkit-box;
-  padding: 0 var(--chat-input-padding, var(--space-3)) var(--space-1);
-  color: var(--gray-11);
-  font-size: var(--font-size-2);
-  line-height: var(--line-height-2, 20px);
-  white-space: pre-wrap;
-  overflow: hidden;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  pointer-events: none;
-}
-
-.chatFormCollapsed .expandedComposerContent:has(+ .collapsedInputPreview) {
-  display: none;
-}
-
-.chatFormCollapsed .bottomModelControl,
-.chatFormCollapsed .bottomModeControl,
-.chatFormCollapsed .bottomWorkspaceControl {
-  opacity: 0.45;
-}
-
-.chatFormCollapsed .bottomModelControl,
-.chatFormCollapsed .bottomModeControl,
-.chatFormCollapsed .bottomWorkspaceControl {
-  pointer-events: none;
-}
-
-.chatFormCollapsed .bottomActionControls > span {
-  opacity: 0.45;
-  pointer-events: none;
-}
-
-.chatFormCollapsed .bottomActionControls > :last-child {
-  pointer-events: auto;
+.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput) {
+  mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
 }
 
 .collapsedStatusControl {
@@ -196,6 +177,17 @@
   display: none;
 }
 
+@keyframes composerHeaderFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .textareaWrapper :global(.rt-TextAreaInput) {
   min-height: 100px;
   padding: var(--chat-input-padding);
@@ -203,13 +195,14 @@
 
 .chatFormExpanded .textareaWrapper :global(.rt-TextAreaInput) {
   display: block;
-  max-height: none;
+  max-height: 50vh;
+  max-height: 50dvh;
   -webkit-line-clamp: initial;
   line-clamp: initial;
 }
 
-.chatFormExpanded .collapsedInputPreview {
-  display: none;
+.chatFormExpanded .textareaWrapper :global(.rt-TextAreaInput) {
+  mask-image: none;
 }
 
 .file_name_ellipsis_rtl {
@@ -288,6 +281,14 @@
 
 .bottomControlsRow {
   overflow: hidden;
+}
+
+.chatFormCollapsed .bottomControlsRow {
+  padding-top: var(--space-1);
+}
+
+.chatFormExpanded .bottomControlsRow {
+  transition: padding 0.18s ease;
 }
 
 .bottomModelControl,
