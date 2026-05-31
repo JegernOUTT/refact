@@ -314,6 +314,13 @@ impl ChatSession {
         self.tier1_compaction_disabled = false;
         self.thread.previous_response_id = None;
         self.cache_guard_force_next = true;
+        self.is_compressing = false;
+        self.runtime.is_compressing = false;
+        self.compression_phase = None;
+        self.runtime.compression_phase = None;
+        self.compression_reason = None;
+        self.runtime.compression_reason = None;
+        self.active_compression_attempt = None;
     }
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {

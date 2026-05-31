@@ -2386,6 +2386,7 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             id: chat_id.to_string(),
             ..Default::default()
         };
+        session.reset_compaction_runtime_state();
         let snapshot = session.snapshot();
         session.emit(snapshot);
         return;
@@ -4222,7 +4223,10 @@ pub async fn handle_v1_trajectories_subscribe(
 mod tests {
     use super::*;
     use crate::chat::diagnostics::{is_ui_only_message, make_ui_only_error_message};
-    use crate::chat::types::{ActiveCommandContext, BurstGuard};
+    use crate::chat::types::{
+        ActiveCommandContext, BurstGuard, ChatEvent, CompressionPhase, CompressionReason,
+        EventEnvelope,
+    };
     use refact_chat_api::{ClaudeCodeIdentity, FrozenRequestPrefix};
     use serial_test::serial;
     use std::path::Path;
@@ -6598,6 +6602,76 @@ mod tests {
         assert!(json.get("total_cache_read_tokens").is_none());
         assert!(json.get("total_cache_creation_tokens").is_none());
         assert!(json.get("total_cost_usd").is_none());
+    }
+
+    fn mark_active_compression(session: &mut ChatSession, phase: CompressionPhase) {
+        session.is_compressing = true;
+        session.runtime.is_compressing = true;
+        session.compression_phase = Some(phase);
+        session.runtime.compression_phase = Some(phase);
+        session.compression_reason = Some(CompressionReason::PressureLow);
+        session.runtime.compression_reason = Some(CompressionReason::PressureLow);
+        session.compression_attempt_generation = 9;
+        session.active_compression_attempt = Some(9);
+    }
+
+    async fn assert_external_remove_clears_active_compression(phase: CompressionPhase) {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = format!("external-remove-{:?}", phase).to_lowercase();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.clone())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "before delete".to_string(),
+            ));
+            mark_active_compression(&mut session, phase);
+            session.trajectory_dirty = false;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session_arc.clone());
+
+        process_trajectory_change(gcx, &chat_id, true).await;
+
+        let session = session_arc.lock().await;
+        assert!(session.messages.is_empty());
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, None);
+        assert_eq!(session.runtime.compression_phase, None);
+        assert_eq!(session.compression_reason, None);
+        assert_eq!(session.runtime.compression_reason, None);
+        assert_eq!(session.active_compression_attempt, None);
+        drop(session);
+
+        let json = chat_rx.recv().await.unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::Snapshot {
+                runtime, messages, ..
+            } => {
+                assert!(messages.is_empty());
+                assert!(!runtime.is_compressing);
+                assert_eq!(runtime.compression_phase, None);
+                assert_eq!(runtime.compression_reason, None);
+            }
+            other => panic!("expected Snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn external_remove_clears_checking_compression_state_and_snapshot() {
+        assert_external_remove_clears_active_compression(CompressionPhase::Checking).await;
+    }
+
+    #[tokio::test]
+    async fn external_remove_clears_running_compression_state_and_snapshot() {
+        assert_external_remove_clears_active_compression(CompressionPhase::Running).await;
     }
 
     #[test]
