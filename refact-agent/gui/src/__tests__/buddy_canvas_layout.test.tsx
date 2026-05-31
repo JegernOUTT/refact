@@ -151,6 +151,9 @@ describe("BuddyCanvas compact speech layout", () => {
         "max-width: min(460px, 72vw)",
       );
       expect(bubbleElement?.getAttribute("style")).toContain(
+        "right: calc(78% - 0px)",
+      );
+      expect(bubbleElement?.getAttribute("style")).toContain(
         "white-space: normal",
       );
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");

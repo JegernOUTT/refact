@@ -278,9 +278,9 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         const isMediumText = text.length > 34;
         const fixedWidth = hasControls || isLongText || chatCompanionBubble;
         const width: BubbleView["width"] = chatCompanionBubble
-          ? isVeryLongText || hasControls
+          ? isVeryLongText
             ? "330px"
-            : isLongText
+            : isLongText || hasControls
               ? "300px"
               : isMediumText
                 ? "260px"
@@ -504,13 +504,13 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
             ? bubbleView.position === "left"
               ? {
                   right: chatCompanionBubble
-                    ? "calc(56% - var(--buddy-walk-x, 0px))"
+                    ? `calc(78% - ${bubbleView.walkOffsetPx}px)`
                     : "calc(86% - var(--buddy-walk-x, 0px))",
                 }
               : bubbleView.position === "right"
                 ? {
                     left: chatCompanionBubble
-                      ? "calc(56% + var(--buddy-walk-x, 0px))"
+                      ? `calc(78% + ${bubbleView.walkOffsetPx}px)`
                       : "calc(86% + var(--buddy-walk-x, 0px))",
                   }
                 : {}
