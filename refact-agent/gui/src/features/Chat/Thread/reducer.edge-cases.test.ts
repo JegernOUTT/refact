@@ -2,7 +2,13 @@
 import { expect, test, describe, beforeEach } from "vitest";
 import { chatReducer } from "./reducer";
 import type { Chat } from "./types";
-import { newChatAction, applyChatEvent, markThreadSseError } from "./actions";
+import type { ChatHistoryItem } from "../../History/historySlice";
+import {
+  newChatAction,
+  applyChatEvent,
+  markThreadSseError,
+  restoreChat,
+} from "./actions";
 import type { ChatEventEnvelope } from "../../../services/refact/chatSubscription";
 import type { ChatMessage } from "../../../services/refact/types";
 
@@ -492,6 +498,49 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       expect(selectCompression(state)).toBe(false);
       expect(selectCompressionPhase(state)).toBeUndefined();
       expect(selectCompressionReason(state)).toBeUndefined();
+    });
+
+    test("restore clears active compression state", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "generating",
+          is_compressing: true,
+          compression_phase: "checking",
+          compression_reason: "effective_context_unknown",
+        }),
+      );
+      expect(selectCompression(state)).toBe(true);
+      expect(selectCompressionPhase(state)).toBe("checking");
+
+      const restored: ChatHistoryItem = {
+        id: chatId,
+        messages: [{ role: "user", content: "Restored prompt" }],
+        model: "gpt-4o",
+        title: "Restored chat",
+        tool_use: "agent",
+        mode: "agent",
+        createdAt: "2026-05-31T00:00:00.000Z",
+        updatedAt: "2026-05-31T00:01:00.000Z",
+        boost_reasoning: false,
+        include_project_info: true,
+        increase_max_tokens: false,
+        context_tokens_cap: undefined,
+        last_user_message_id: "",
+      };
+
+      state = chatReducer(state, restoreChat(restored));
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBeUndefined();
+      expect(selectCompressionReason(state)).toBeUndefined();
+      expect(state.threads[chatId]!.thread.title).toBe("Restored chat");
+      expect(state.threads[chatId]!.thread.messages).toHaveLength(1);
     });
   });
 

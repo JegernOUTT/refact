@@ -1,7 +1,11 @@
-import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatContent } from "./ChatContent";
-import { createDefaultChatState, render, screen } from "../../utils/test-utils";
+import {
+  act,
+  createDefaultChatState,
+  render,
+  screen,
+} from "../../utils/test-utils";
 import type { RootState } from "../../app/store";
 import type { ChatMessages } from "../../services/refact";
 import { switchToThread } from "../../features/Chat/Thread/actions";

@@ -475,6 +475,7 @@ function applyRestoredThread(
   rt.confirmation.pause_reasons = [];
   rt.confirmation.status.wasInteracted = false;
   rt.confirmation.status.confirmationStatus = true;
+  clearCompressionState(rt);
   rt.message_index_by_id = rebuildMessageIndexById(messages);
 }
 
