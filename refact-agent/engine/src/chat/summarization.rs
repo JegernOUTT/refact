@@ -1021,6 +1021,10 @@ fn reserve_compression_attempt(session: &mut ChatSession) -> u64 {
 
 fn owns_compression_attempt(session: &ChatSession, attempt: u64) -> bool {
     session.active_compression_attempt == Some(attempt)
+        && matches!(
+            session.compression_phase,
+            Some(CompressionPhase::Checking | CompressionPhase::Running)
+        )
 }
 
 fn emit_compression_running_if_owned(session: &mut ChatSession, attempt: u64) -> bool {
@@ -2518,6 +2522,142 @@ mod tests {
 
         assert_eq!(session.active_compression_attempt, None);
         assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+    }
+
+    fn summary_apply_fixture() -> (ChatSession, String, ChatMessage) {
+        let mut session = ChatSession::new("compression-apply-fixture".to_string());
+        session.messages = vec![user("first"), assistant("old answer"), user("second")];
+        let segment = first_eligible_segment(&session.messages).unwrap();
+        let source_messages = session.messages[segment.start..=segment.end].to_vec();
+        let source_hash = source_hash_for_messages(&source_messages);
+        let summary = make_segment_summary_message(
+            "compressed summary".to_string(),
+            &source_messages,
+            "test-model",
+        );
+        (session, source_hash, summary)
+    }
+
+    fn set_stale_matching_attempt(session: &mut ChatSession, phase: Option<CompressionPhase>) {
+        session.compression_attempt_generation = 42;
+        session.active_compression_attempt = Some(42);
+        session.compression_phase = phase;
+        session.runtime.compression_phase = phase;
+        session.is_compressing = false;
+        session.runtime.is_compressing = false;
+    }
+
+    fn assert_stale_matching_attempt_cannot_skip_fail_or_apply(phase: Option<CompressionPhase>) {
+        let (mut skip_session, _, _) = summary_apply_fixture();
+        set_stale_matching_attempt(&mut skip_session, phase);
+        let original_phase = skip_session.compression_phase;
+        assert!(!emit_compression_skipped_if_owned(
+            &mut skip_session,
+            42,
+            CompressionReason::PressureLow,
+        ));
+        assert_eq!(skip_session.active_compression_attempt, Some(42));
+        assert_eq!(skip_session.compression_phase, original_phase);
+        assert_eq!(skip_session.compression_reason, None);
+
+        let (mut fail_session, _, _) = summary_apply_fixture();
+        set_stale_matching_attempt(&mut fail_session, phase);
+        let failure = SegmentSummaryFailure::Transient("network failed".to_string());
+        assert!(!finish_compression_failure_if_owned(
+            &mut fail_session,
+            42,
+            &failure,
+        ));
+        assert!(fail_session.messages.iter().all(|message| message.role != "event"));
+        assert_eq!(fail_session.tier1_compact_attempts, 0);
+        assert_eq!(fail_session.compression_phase, phase);
+        assert_eq!(fail_session.compression_reason, None);
+
+        let (mut apply_session, source_hash, summary) = summary_apply_fixture();
+        set_stale_matching_attempt(&mut apply_session, phase);
+        assert!(!apply_resolved_segment_summary(
+            &mut apply_session,
+            &source_hash,
+            summary,
+            Some(42),
+        ));
+        assert_eq!(apply_session.messages.len(), 3);
+        assert_eq!(
+            apply_session.messages[1].content.content_text_only(),
+            "old answer"
+        );
+        assert_eq!(apply_session.compression_phase, phase);
+        assert_eq!(apply_session.compression_reason, None);
+    }
+
+    #[test]
+    fn stale_matching_token_with_no_phase_cannot_skip_fail_or_apply() {
+        assert_stale_matching_attempt_cannot_skip_fail_or_apply(None);
+    }
+
+    #[test]
+    fn stale_matching_token_with_terminal_phase_cannot_skip_fail_or_apply() {
+        for phase in [
+            CompressionPhase::Applied,
+            CompressionPhase::Skipped,
+            CompressionPhase::Failed,
+        ] {
+            assert_stale_matching_attempt_cannot_skip_fail_or_apply(Some(phase));
+        }
+    }
+
+    #[test]
+    fn active_checking_token_can_skip() {
+        let mut session = ChatSession::new("compression-checking-owned".to_string());
+        let attempt = reserve_compression_attempt(&mut session);
+
+        assert!(emit_compression_skipped_if_owned(
+            &mut session,
+            attempt,
+            CompressionReason::PressureLow,
+        ));
+
+        assert_eq!(session.active_compression_attempt, None);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::PressureLow)
+        );
+    }
+
+    #[test]
+    fn active_running_token_can_fail_and_apply() {
+        let mut fail_session = ChatSession::new("compression-running-owned-fail".to_string());
+        let fail_attempt = reserve_compression_attempt(&mut fail_session);
+        assert!(emit_compression_running_if_owned(&mut fail_session, fail_attempt));
+        let failure = SegmentSummaryFailure::Transient("network failed".to_string());
+
+        assert!(finish_compression_failure_if_owned(
+            &mut fail_session,
+            fail_attempt,
+            &failure,
+        ));
+        assert_eq!(fail_session.active_compression_attempt, None);
+        assert_eq!(fail_session.compression_phase, Some(CompressionPhase::Failed));
+        assert_eq!(
+            fail_session.compression_reason,
+            Some(CompressionReason::TransientFailure)
+        );
+        assert_eq!(fail_session.tier1_compact_attempts, 1);
+
+        let (mut apply_session, source_hash, summary) = summary_apply_fixture();
+        let apply_attempt = reserve_compression_attempt(&mut apply_session);
+        assert!(emit_compression_running_if_owned(&mut apply_session, apply_attempt));
+
+        assert!(apply_resolved_segment_summary(
+            &mut apply_session,
+            &source_hash,
+            summary,
+            Some(apply_attempt),
+        ));
+        assert_eq!(apply_session.active_compression_attempt, None);
+        assert_eq!(apply_session.compression_phase, Some(CompressionPhase::Applied));
+        assert!(is_segment_summary(&apply_session.messages[1]));
     }
 
     #[test]
