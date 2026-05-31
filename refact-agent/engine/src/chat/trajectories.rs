@@ -1116,45 +1116,76 @@ async fn resolve_trajectory_data_save_path(
     safe_new_trajectory_file_in_dir(&trajectories_dir, id).await
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TrajectoryTitleNamespace {
-    Generic,
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrajectoryTitleSource {
+    Normal,
+    Task {
+        task_id: String,
+        role: String,
+        agent_id: Option<String>,
+        card_id: Option<String>,
+        planner_chat_id: Option<String>,
+    },
     Buddy,
 }
 
-impl TrajectoryTitleNamespace {
-    fn from_extra(extra: &serde_json::Map<String, serde_json::Value>) -> Self {
-        if extra
-            .get("buddy_meta")
-            .is_some_and(|value| !value.is_null())
-        {
-            Self::Buddy
-        } else {
-            Self::Generic
+impl TrajectoryTitleSource {
+    fn from_task_meta(task_meta: &super::types::TaskMeta) -> Self {
+        Self::Task {
+            task_id: task_meta.task_id.clone(),
+            role: task_meta.role.clone(),
+            agent_id: task_meta.agent_id.clone(),
+            card_id: task_meta.card_id.clone(),
+            planner_chat_id: task_meta.planner_chat_id.clone(),
         }
     }
 
-    fn from_json(json: &serde_json::Value) -> Self {
-        if json.get("buddy_meta").is_some_and(|value| !value.is_null()) {
-            Self::Buddy
-        } else {
-            Self::Generic
+    fn from_extra(extra: &serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
+        let buddy_meta_present = extra
+            .get("buddy_meta")
+            .is_some_and(|value| !value.is_null());
+        let task_meta_value = extra.get("task_meta").filter(|value| !value.is_null());
+
+        if buddy_meta_present && task_meta_value.is_some() {
+            return Err("trajectory cannot contain both task_meta and buddy_meta".to_string());
         }
+        if buddy_meta_present {
+            return Ok(Self::Buddy);
+        }
+        if let Some(value) = task_meta_value {
+            let task_meta = serde_json::from_value::<super::types::TaskMeta>(value.clone())
+                .map_err(|e| format!("invalid task_meta: {}", e))?;
+            return Ok(Self::from_task_meta(&task_meta));
+        }
+        Ok(Self::Normal)
+    }
+
+    fn from_json(json: &serde_json::Value) -> Result<Self, String> {
+        let Some(root) = json.as_object() else {
+            return Err("trajectory JSON root must be an object".to_string());
+        };
+        Self::from_extra(root)
     }
 
     fn from_session(session: &ChatSession) -> Self {
         if is_active_buddy_session(session) {
             Self::Buddy
+        } else if let Some(task_meta) = session.thread.task_meta.as_ref() {
+            Self::from_task_meta(task_meta)
         } else {
-            Self::Generic
+            Self::Normal
         }
+    }
+
+    fn emits_generic_event(&self) -> bool {
+        !matches!(self, Self::Buddy)
     }
 }
 
 async fn title_generation_backing_file_matches(
     file_path: &Path,
     chat_id: &str,
-    namespace: TrajectoryTitleNamespace,
+    source: &TrajectoryTitleSource,
 ) -> bool {
     let content = match fs::read_to_string(file_path).await {
         Ok(content) => content,
@@ -1181,13 +1212,23 @@ async fn title_generation_backing_file_matches(
     if !trajectory_root_id_matches(&json, chat_id, file_path) {
         return false;
     }
-    let actual_namespace = TrajectoryTitleNamespace::from_json(&json);
-    if actual_namespace != namespace {
+    let actual_source = match TrajectoryTitleSource::from_json(&json) {
+        Ok(source) => source,
+        Err(e) => {
+            warn!(
+                "Skipping title update for {}: backing trajectory source is invalid: {}",
+                file_path.display(),
+                e
+            );
+            return false;
+        }
+    };
+    if &actual_source != source {
         warn!(
-            "Skipping title update for {}: backing trajectory namespace mismatch, expected {:?}, found {:?}",
+            "Skipping title update for {}: backing trajectory source mismatch, expected {:?}, found {:?}",
             file_path.display(),
-            namespace,
-            actual_namespace
+            source,
+            actual_source
         );
         return false;
     }
@@ -2094,16 +2135,12 @@ pub async fn save_trajectory_snapshot(
             && !snapshot.messages.is_empty();
 
         if should_generate_title {
-            let trajectories_dir = file_path
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| "Trajectory file path has no parent directory".to_string())?;
             let _ = spawn_title_generation_task(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
                 messages_json,
-                trajectories_dir,
-                TrajectoryTitleNamespace::Generic,
+                file_path.clone(),
+                TrajectoryTitleSource::Normal,
             );
         }
     } else if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_some() {
@@ -2112,19 +2149,29 @@ pub async fn save_trajectory_snapshot(
             && !snapshot.messages.is_empty();
 
         if should_generate_title {
-            let trajectories_dir = file_path
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| "Trajectory file path has no parent directory".to_string())?;
             let _ = spawn_title_generation_task(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
                 messages_json,
-                trajectories_dir,
-                TrajectoryTitleNamespace::Buddy,
+                file_path.clone(),
+                TrajectoryTitleSource::Buddy,
             );
         }
     } else if let Some(ref task_meta) = snapshot.task_meta {
+        let should_generate_title = is_placeholder_title(&snapshot.title)
+            && !snapshot.is_title_generated
+            && !snapshot.messages.is_empty();
+
+        if should_generate_title {
+            let _ = spawn_title_generation_task(
+                gcx.clone(),
+                snapshot.chat_id.clone(),
+                messages_json.clone(),
+                file_path.clone(),
+                TrajectoryTitleSource::from_task_meta(task_meta),
+            );
+        }
+
         if task_meta.role == "planner" {
             let user_message_count = count_user_messages(&messages_json);
             if user_message_count >= 1 {
@@ -3142,8 +3189,8 @@ fn spawn_title_generation_task(
     gcx: Arc<GlobalContext>,
     id: String,
     messages: Vec<serde_json::Value>,
-    trajectories_dir: PathBuf,
-    namespace: TrajectoryTitleNamespace,
+    file_path: PathBuf,
+    source: TrajectoryTitleSource,
 ) {
     tokio::spawn(async move {
         let app = AppState::from_gcx(gcx.clone()).await;
@@ -3163,8 +3210,7 @@ fn spawn_title_generation_task(
             },
         };
         let sessions = app.chat.sessions.clone();
-        let file_path = trajectories_dir.join(format!("{}.json", id));
-        if !title_generation_backing_file_matches(&file_path, &id, namespace).await {
+        if !title_generation_backing_file_matches(&file_path, &id, &source).await {
             return;
         }
         let maybe_session_arc = {
@@ -3173,20 +3219,22 @@ fn spawn_title_generation_task(
         };
         if let Some(session_arc) = maybe_session_arc {
             let mut session = session_arc.lock().await;
-            if TrajectoryTitleNamespace::from_session(&session) != namespace {
+            if TrajectoryTitleSource::from_session(&session) != source {
                 drop(session);
             } else {
                 if session.thread.is_title_generated {
                     info!("Title already generated for {}, skipping", id);
                     return;
                 }
-                if namespace == TrajectoryTitleNamespace::Buddy {
-                    session.thread.title = title.clone();
-                    session.thread.is_title_generated = true;
-                    session.increment_version();
-                    session.touch();
-                } else {
-                    session.set_title(title.clone(), true);
+                let suppressed_trajectory_events_tx =
+                    if matches!(source, TrajectoryTitleSource::Buddy) {
+                        session.trajectory_events_tx.take()
+                    } else {
+                        None
+                    };
+                session.set_title(title.clone(), true);
+                if let Some(tx) = suppressed_trajectory_events_tx {
+                    session.trajectory_events_tx = Some(tx);
                 }
                 drop(session);
                 maybe_save_trajectory(app.clone(), session_arc).await;
@@ -3216,9 +3264,20 @@ fn spawn_title_generation_task(
             );
             return;
         }
-        if TrajectoryTitleNamespace::from_extra(&data.extra) != namespace {
+        let actual_source = match TrajectoryTitleSource::from_extra(&data.extra) {
+            Ok(actual_source) => actual_source,
+            Err(e) => {
+                warn!(
+                    "Skipping title update for {}: trajectory source is invalid before write: {}",
+                    file_path.display(),
+                    e
+                );
+                return;
+            }
+        };
+        if actual_source != source {
             warn!(
-                "Skipping title update for {}: trajectory namespace changed before write",
+                "Skipping title update for {}: trajectory source changed before write",
                 file_path.display()
             );
             return;
@@ -3242,7 +3301,7 @@ fn spawn_title_generation_task(
             return;
         }
         info!("Updated trajectory {} with generated title: {}", id, title);
-        if namespace == TrajectoryTitleNamespace::Buddy {
+        if !source.emits_generic_event() {
             return;
         }
         let (session_state, session_error) =
@@ -3252,6 +3311,28 @@ fn spawn_title_generation_task(
         } else {
             None
         };
+        let (task_id, task_role, agent_id, card_id) = data
+            .extra
+            .get("task_meta")
+            .and_then(|value| serde_json::from_value::<super::types::TaskMeta>(value.clone()).ok())
+            .map(|meta| task_context_from_task_meta(Some(&meta)))
+            .unwrap_or((None, None, None, None));
+        let parent_id = data
+            .extra
+            .get("parent_id")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
+        let link_type = data
+            .extra
+            .get("link_type")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
+        let root_chat_id = data
+            .extra
+            .get("root_chat_id")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| id.clone());
         let event = TrajectoryEvent {
             event_type: "updated".to_string(),
             id: id.clone(),
@@ -3260,16 +3341,16 @@ fn spawn_title_generation_task(
             is_title_generated: Some(true),
             session_state: Some(session_state),
             error: session_error,
-            message_count: None,
-            parent_id: None,
-            link_type: None,
-            root_chat_id: None,
-            task_id: None,
-            task_role: None,
-            agent_id: None,
-            card_id: None,
-            model: None,
-            mode: None,
+            message_count: Some(data.messages.len()),
+            parent_id,
+            link_type,
+            root_chat_id: Some(root_chat_id),
+            task_id,
+            task_role,
+            agent_id,
+            card_id,
+            model: Some(data.model.clone()),
+            mode: Some(data.mode.clone()),
             worktree,
             total_lines_added: None,
             total_lines_removed: None,
@@ -4470,18 +4551,18 @@ pub async fn handle_v1_trajectories_save(
         let _ = app.chat.trajectory_events_tx.send(event);
     }
     if should_generate_title {
-        let trajectories_dir = file_path.parent().map(Path::to_path_buf).ok_or_else(|| {
+        let source = TrajectoryTitleSource::from_extra(&data.extra).map_err(|e| {
             ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Trajectory file path has no parent directory".to_string(),
+                format!("Invalid trajectory source for title generation: {}", e),
             )
         })?;
         spawn_title_generation_task(
             gcx.clone(),
             id.clone(),
             data.messages.clone(),
-            trajectories_dir,
-            TrajectoryTitleNamespace::from_extra(&data.extra),
+            file_path.clone(),
+            source,
         );
     }
     Ok(Response::builder()
@@ -4711,6 +4792,40 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    fn task_meta(
+        task_id: &str,
+        role: &str,
+        agent_id: Option<&str>,
+        card_id: Option<&str>,
+        planner_chat_id: Option<&str>,
+    ) -> crate::chat::types::TaskMeta {
+        crate::chat::types::TaskMeta {
+            task_id: task_id.to_string(),
+            role: role.to_string(),
+            agent_id: agent_id.map(ToString::to_string),
+            card_id: card_id.map(ToString::to_string),
+            planner_chat_id: planner_chat_id.map(ToString::to_string),
+        }
+    }
+
+    async fn write_task_trajectory_file_with_user_message(
+        path: &Path,
+        id: &str,
+        title: &str,
+        message: &str,
+        task_meta: &crate::chat::types::TaskMeta,
+    ) {
+        let mut trajectory = sample_trajectory(id, title, "2024-01-01T00:00:01Z");
+        trajectory["messages"] = json!([{ "role": "user", "content": message }]);
+        trajectory["task_meta"] = serde_json::to_value(task_meta).unwrap();
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
     }
 
     fn buddy_thread_meta() -> BuddyThreadMeta {
@@ -6744,8 +6859,8 @@ mod tests {
             gcx,
             chat_id.to_string(),
             vec![json!({"role":"user","content":"Generate guarded title"})],
-            trajectories_dir,
-            TrajectoryTitleNamespace::Generic,
+            path.clone(),
+            TrajectoryTitleSource::Normal,
         );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -6776,8 +6891,8 @@ mod tests {
             gcx,
             chat_id.to_string(),
             vec![json!({"role":"user","content":"Generate guarded active title"})],
-            trajectories_dir,
-            TrajectoryTitleNamespace::Generic,
+            path.clone(),
+            TrajectoryTitleSource::Normal,
         );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -6815,8 +6930,8 @@ mod tests {
             gcx,
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
-            trajectories_dir,
-            TrajectoryTitleNamespace::Generic,
+            path.clone(),
+            TrajectoryTitleSource::Normal,
         );
 
         wait_for_file_title(&path, expected_title).await;
@@ -6862,8 +6977,8 @@ mod tests {
             gcx,
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
-            buddy_dir,
-            TrajectoryTitleNamespace::Buddy,
+            path.clone(),
+            TrajectoryTitleSource::Buddy,
         );
 
         wait_for_file_title(&path, expected_title).await;
@@ -6872,6 +6987,114 @@ mod tests {
         assert!(!session.thread.is_title_generated);
         drop(session);
         assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn task_title_generation_with_active_normal_updates_task_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "title-task-active-normal";
+        let task_meta = task_meta(
+            "task-title-normal",
+            "agents",
+            Some("agent-1"),
+            Some("card-1"),
+            None,
+        );
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-title-normal")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-1")
+            .join(format!("{chat_id}.json"));
+        let expected_title = "Task collision request";
+        write_task_trajectory_file_with_user_message(
+            &path,
+            chat_id,
+            "New Chat",
+            expected_title,
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Normal Session Title".to_string();
+            session.thread.is_title_generated = false;
+            session.trajectory_events_tx = Some(app.chat.trajectory_events_tx.clone());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        spawn_title_generation_task(
+            gcx,
+            chat_id.to_string(),
+            vec![json!({"role":"user","content":expected_title})],
+            path.clone(),
+            TrajectoryTitleSource::from_task_meta(&task_meta),
+        );
+
+        wait_for_file_title(&path, expected_title).await;
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some(expected_title));
+        assert_eq!(event.task_id.as_deref(), Some("task-title-normal"));
+        assert_eq!(event.task_role.as_deref(), Some("agents"));
+        assert_eq!(event.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(event.card_id.as_deref(), Some("card-1"));
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.title, "Normal Session Title");
+        assert!(!session.thread.is_title_generated);
+    }
+
+    #[tokio::test]
+    async fn normal_title_generation_with_active_task_updates_normal_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "title-normal-active-task";
+        let trajectories_dir = dir.path().join(".refact").join("trajectories");
+        let path = trajectories_dir.join(format!("{chat_id}.json"));
+        let expected_title = "Normal collision request";
+        write_trajectory_file_with_user_message(&path, chat_id, "New Chat", expected_title).await;
+        let active_task_meta = task_meta("task-active-title", "planner", None, None, Some(chat_id));
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Task Session Title".to_string();
+            session.thread.task_meta = Some(active_task_meta);
+            session.thread.is_title_generated = false;
+            session.trajectory_events_tx = Some(app.chat.trajectory_events_tx.clone());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        spawn_title_generation_task(
+            gcx,
+            chat_id.to_string(),
+            vec![json!({"role":"user","content":expected_title})],
+            path.clone(),
+            TrajectoryTitleSource::Normal,
+        );
+
+        wait_for_file_title(&path, expected_title).await;
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some(expected_title));
+        assert_eq!(event.task_id, None);
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.title, "Task Session Title");
+        assert!(!session.thread.is_title_generated);
     }
 
     #[tokio::test]
@@ -6905,14 +7128,74 @@ mod tests {
             gcx,
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
-            trajectories_dir,
-            TrajectoryTitleNamespace::Generic,
+            path.clone(),
+            TrajectoryTitleSource::Normal,
         );
 
         wait_for_session_title(&session_arc, expected_title).await;
         wait_for_file_title(&path, expected_title).await;
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.title.as_deref(), Some(expected_title));
+    }
+
+    #[tokio::test]
+    async fn task_title_generation_with_matching_active_task_updates_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "title-task-active-task";
+        let task_meta = task_meta(
+            "task-title-active",
+            "agents",
+            Some("agent-2"),
+            Some("card-2"),
+            None,
+        );
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-title-active")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-2")
+            .join(format!("{chat_id}.json"));
+        let expected_title = "Task active request";
+        write_task_trajectory_file_with_user_message(
+            &path,
+            chat_id,
+            "New Chat",
+            expected_title,
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "New Chat".to_string();
+            session.thread.task_meta = Some(task_meta.clone());
+            session.thread.is_title_generated = false;
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                expected_title.to_string(),
+            ));
+            session.trajectory_events_tx = Some(app.chat.trajectory_events_tx.clone());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        spawn_title_generation_task(
+            gcx,
+            chat_id.to_string(),
+            vec![json!({"role":"user","content":expected_title})],
+            path.clone(),
+            TrajectoryTitleSource::from_task_meta(&task_meta),
+        );
+
+        wait_for_session_title(&session_arc, expected_title).await;
+        wait_for_file_title(&path, expected_title).await;
     }
 
     #[tokio::test]
@@ -6953,8 +7236,8 @@ mod tests {
             gcx,
             chat_id.to_string(),
             vec![json!({"role":"user","content":expected_title})],
-            buddy_dir,
-            TrajectoryTitleNamespace::Buddy,
+            path.clone(),
+            TrajectoryTitleSource::Buddy,
         );
 
         wait_for_session_title(&session_arc, expected_title).await;
@@ -6963,11 +7246,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn title_generation_backing_file_matcher_rejects_namespace_mismatch() {
+    async fn active_buddy_title_generation_uses_set_title_side_effects_without_generic_sse() {
         let dir = tempfile::tempdir().unwrap();
-        let chat_id = "title-namespace-match";
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut trajectory_rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "title-buddy-set-title-event";
+        let buddy_dir = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations");
+        let path = buddy_dir.join(format!("{chat_id}.json"));
+        let expected_title = "Buddy event request";
+        write_buddy_conversation_file(&path, chat_id, "New Chat").await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "New Chat".to_string();
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.thread.is_title_generated = false;
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                expected_title.to_string(),
+            ));
+            session.trajectory_events_tx = Some(app.chat.trajectory_events_tx.clone());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        spawn_title_generation_task(
+            gcx,
+            chat_id.to_string(),
+            vec![json!({"role":"user","content":expected_title})],
+            path.clone(),
+            TrajectoryTitleSource::Buddy,
+        );
+
+        wait_for_session_title(&session_arc, expected_title).await;
+        {
+            let session = session_arc.lock().await;
+            assert!(session.trajectory_version > 0);
+        }
+        assert_no_trajectory_event_for(&mut trajectory_rx, std::time::Duration::from_millis(200))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn title_generation_backing_file_matcher_rejects_source_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_id = "title-source-match";
         let generic_path = dir.path().join("generic.json");
         let buddy_path = dir.path().join("buddy.json");
+        let task_path = dir.path().join("task.json");
+        let invalid_path = dir.path().join("invalid.json");
+        let task_meta = task_meta(
+            "task-title-source",
+            "agents",
+            Some("agent-title-source"),
+            Some("card-title-source"),
+            None,
+        );
+        let task_source = TrajectoryTitleSource::from_task_meta(&task_meta);
         write_trajectory_file(
             &generic_path,
             chat_id,
@@ -6976,12 +7320,26 @@ mod tests {
         )
         .await;
         write_buddy_conversation_file(&buddy_path, chat_id, "Buddy Title").await;
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Title",
+            "task title source",
+            &task_meta,
+        )
+        .await;
+        let mut invalid = sample_trajectory(chat_id, "Invalid", "2024-01-01T00:00:00Z");
+        invalid["task_meta"] = serde_json::to_value(&task_meta).unwrap();
+        invalid["buddy_meta"] = json!({"is_buddy_chat": true, "buddy_chat_kind": "investigation"});
+        tokio::fs::write(&invalid_path, serde_json::to_string(&invalid).unwrap())
+            .await
+            .unwrap();
 
         assert!(
             title_generation_backing_file_matches(
                 &generic_path,
                 chat_id,
-                TrajectoryTitleNamespace::Generic,
+                &TrajectoryTitleSource::Normal,
             )
             .await
         );
@@ -6989,15 +7347,16 @@ mod tests {
             title_generation_backing_file_matches(
                 &buddy_path,
                 chat_id,
-                TrajectoryTitleNamespace::Buddy,
+                &TrajectoryTitleSource::Buddy,
             )
             .await
         );
+        assert!(title_generation_backing_file_matches(&task_path, chat_id, &task_source).await);
         assert!(
             !title_generation_backing_file_matches(
                 &generic_path,
                 chat_id,
-                TrajectoryTitleNamespace::Buddy,
+                &TrajectoryTitleSource::Buddy,
             )
             .await
         );
@@ -7005,10 +7364,19 @@ mod tests {
             !title_generation_backing_file_matches(
                 &buddy_path,
                 chat_id,
-                TrajectoryTitleNamespace::Generic,
+                &TrajectoryTitleSource::Normal,
             )
             .await
         );
+        assert!(
+            !title_generation_backing_file_matches(
+                &task_path,
+                chat_id,
+                &TrajectoryTitleSource::Normal,
+            )
+            .await
+        );
+        assert!(!title_generation_backing_file_matches(&invalid_path, chat_id, &task_source).await);
     }
 
     #[test]
