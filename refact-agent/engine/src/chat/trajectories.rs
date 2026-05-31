@@ -2165,6 +2165,9 @@ fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
         id: chat_id.to_string(),
         ..Default::default()
     };
+    session.created_at = chrono::Utc::now().to_rfc3339();
+    session.wake_up_at = None;
+    session.waiting_for_card_ids.clear();
     session.reset_compaction_runtime_state();
     session.external_reload_pending = None;
     let snapshot = session.snapshot();
@@ -6820,6 +6823,10 @@ mod tests {
                 "before deferred delete".to_string(),
             ));
             session.thread.title = "Delete Pending".to_string();
+            session.thread.reactive_compact_attempts = Some(2);
+            session.created_at = "2024-01-01T00:00:00Z".to_string();
+            session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
+            session.waiting_for_card_ids = vec!["card-stale".to_string()];
             session.runtime.state = SessionState::Generating;
             session.trajectory_dirty = true;
             mark_active_compression(&mut session, CompressionPhase::Running);
@@ -6854,6 +6861,10 @@ mod tests {
         assert!(session.messages.is_empty());
         assert_eq!(session.thread.id, chat_id);
         assert_eq!(session.thread.title, ThreadParams::default().title);
+        assert_eq!(session.thread.reactive_compact_attempts, None);
+        assert_ne!(session.created_at, "2024-01-01T00:00:00Z");
+        assert!(session.wake_up_at.is_none());
+        assert!(session.waiting_for_card_ids.is_empty());
         assert!(!session.is_compressing);
         assert!(!session.runtime.is_compressing);
         assert_eq!(session.compression_phase, None);
@@ -6861,6 +6872,8 @@ mod tests {
         assert_eq!(session.compression_reason, None);
         assert_eq!(session.runtime.compression_reason, None);
         assert_eq!(session.active_compression_attempt, None);
+        assert_eq!(session.tier1_compact_attempts, 0);
+        assert!(!session.tier1_compaction_disabled);
         drop(session);
 
         let json = chat_rx.recv().await.unwrap();
@@ -6873,6 +6886,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(thread.id, chat_id);
+                assert_eq!(thread.reactive_compact_attempts, None);
                 assert!(messages.is_empty());
                 assert!(!runtime.is_compressing);
                 assert_eq!(runtime.compression_phase, None);
@@ -6981,6 +6995,11 @@ mod tests {
                 session.external_reload_pending = Some(pending);
                 session.runtime.state = SessionState::Idle;
                 session.trajectory_dirty = false;
+                session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
+                session.waiting_for_card_ids = vec!["card-waiting".to_string()];
+                session.tier1_compact_attempts = 2;
+                session.tier1_compaction_disabled = true;
+                session.thread.reactive_compact_attempts = Some(2);
             }
             app.chat
                 .sessions
@@ -6994,7 +7013,66 @@ mod tests {
             assert_eq!(session.external_reload_pending, None);
             assert!(session.messages.is_empty());
             assert_eq!(session.thread.id, chat_id);
+            assert!(session.wake_up_at.is_none());
+            assert!(session.waiting_for_card_ids.is_empty());
+            assert_eq!(session.tier1_compact_attempts, 0);
+            assert!(!session.tier1_compaction_disabled);
+            assert_eq!(session.thread.reactive_compact_attempts, None);
         }
+    }
+
+    #[tokio::test]
+    async fn external_delete_then_save_does_not_persist_stale_delete_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "external-delete-save-fresh-metadata";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let stale_created_at = "2024-01-01T00:00:00Z";
+        {
+            let mut session = session_arc.lock().await;
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "before external delete".to_string(),
+            ));
+            session.created_at = stale_created_at.to_string();
+            session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
+            session.waiting_for_card_ids = vec!["card-stale".to_string()];
+            session.tier1_compact_attempts = 2;
+            session.tier1_compaction_disabled = true;
+            session.thread.reactive_compact_attempts = Some(2);
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx.clone(), chat_id, true).await;
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new(
+                "user".to_string(),
+                "after external delete".to_string(),
+            ));
+        }
+        try_save_trajectory(app, session_arc.clone()).await.unwrap();
+
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+
+        assert_ne!(saved["created_at"].as_str(), Some(stale_created_at));
+        assert!(saved.get("wake_up_at").is_none());
+        assert!(saved.get("waiting_for_card_ids").is_none());
+        assert!(saved.get("reactive_compact_attempts").is_none());
+        assert_eq!(saved["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["messages"][0]["content"], "after external delete");
     }
 
     #[tokio::test]
