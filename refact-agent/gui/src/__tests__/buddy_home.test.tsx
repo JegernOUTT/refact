@@ -944,9 +944,7 @@ describe("BuddyHome_renders_all_sections", () => {
         http.get("*/v1/buddy/opportunities", () =>
           HttpResponse.json({ opportunities: [] }),
         ),
-        http.get("*/v1/buddy/conversations", () =>
-          HttpResponse.json([]),
-        ),
+        http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
         http.get("*/v1/stats/llm/summary", () =>
           HttpResponse.json({
             totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -998,9 +996,7 @@ describe("BuddyHome_renders_all_sections", () => {
         http.get("*/v1/buddy/opportunities", () =>
           HttpResponse.json({ opportunities: [] }),
         ),
-        http.get("*/v1/buddy/conversations", () =>
-          HttpResponse.json([]),
-        ),
+        http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
         http.get("*/v1/stats/llm/summary", () =>
           HttpResponse.json({
             totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -3061,13 +3057,10 @@ describe("BuddySettingsPanel_autosave", () => {
     (invalidValue) => {
       const capturedBodies: unknown[] = [];
       server.use(
-        http.post(
-          "*/v1/buddy/settings",
-          async ({ request }) => {
-            capturedBodies.push(await request.json());
-            return HttpResponse.json(makeSnapshot().settings);
-          },
-        ),
+        http.post("*/v1/buddy/settings", async ({ request }) => {
+          capturedBodies.push(await request.json());
+          return HttpResponse.json(makeSnapshot().settings);
+        }),
       );
 
       const store = setUpStore({ ...CONFIG_STATE });
