@@ -9009,6 +9009,91 @@ async fn maybe_enqueue_chat_reaction_records_event_id_in_debug() {
 }
 
 #[tokio::test]
+async fn maybe_enqueue_chat_reaction_records_not_queued_and_rolls_back_when_runtime_queue_drops_event(
+) {
+    use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
+    use crate::call_validation::ChatContent;
+    use crate::chat::types::ThreadParams;
+
+    let generated = "Tiny queued rollback probe speech.";
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![
+            Some(generated.to_string()),
+            Some(generated.to_string()),
+        ]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app = make_gcx_with_buddy().await;
+    let chat_id = "not-queued-rollback-chat".to_string();
+    let content = "please design a private customer architecture carefully".to_string();
+
+    {
+        let mut lock = app.buddy.buddy.lock().await;
+        lock.as_mut().unwrap().force_next_runtime_enqueue_drop = true;
+    }
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(content.clone()),
+        },
+    )
+    .await;
+
+    let first_debug = wait_for_chat_reaction_debug_attempt(&app, "not_queued").await;
+    let first_attempt = first_debug
+        .recent_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.result == "not_queued")
+        .expect("not_queued attempt must be recorded");
+    assert_eq!(first_attempt.chat_id, chat_id);
+    assert_eq!(first_attempt.signal_type.as_deref(), Some("speech_insight"));
+    assert_eq!(first_attempt.queued, Some(false));
+    assert!(first_attempt.event_id.is_none());
+    assert_eq!(first_debug.counts_by_result.get("not_queued"), Some(&1));
+    assert!(first_debug.counts_by_result.get("emitted").is_none());
+    assert!(!first_debug
+        .recent_attempts
+        .iter()
+        .any(|attempt| attempt.result == "emitted"));
+    let first_debug_json = serde_json::to_string(&first_debug).unwrap();
+    assert!(!first_debug_json.contains("private customer architecture"));
+    assert!(!first_debug_json.contains(generated));
+    {
+        let lock = app.buddy.buddy.lock().await;
+        assert!(lock.as_ref().unwrap().runtime_queue.items.is_empty());
+    }
+
+    maybe_enqueue_chat_reaction(
+        app.clone(),
+        AcceptedUserMessage {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+            content: ChatContent::SimpleText(content),
+        },
+    )
+    .await;
+
+    let ev = wait_for_runtime_event(&app, "speech_insight").await;
+    assert_eq!(ev.chat_id.as_deref(), Some(chat_id.as_str()));
+    assert_eq!(ev.speech_text.as_deref(), Some(generated));
+    let second_debug = wait_for_chat_reaction_debug_attempt(&app, "emitted").await;
+    assert_eq!(second_debug.counts_by_result.get("not_queued"), Some(&1));
+    assert_eq!(second_debug.counts_by_result.get("emitted"), Some(&1));
+    let emitted = second_debug
+        .recent_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.result == "emitted")
+        .expect("retry must emit after rollback");
+    assert_eq!(emitted.chat_id, chat_id);
+    assert_eq!(emitted.event_id.as_deref(), Some(ev.id.as_str()));
+    assert_eq!(emitted.queued, Some(true));
+}
+
+#[tokio::test]
 async fn chat_reaction_runtime_queue_jsonl_round_trips_frontend_fields() {
     use super::chat_reactions::{build_reaction_event, ChatReaction, ChatReactionKind};
     use super::storage::{append_runtime_record, load_runtime_queue, RuntimeQueueRecord};

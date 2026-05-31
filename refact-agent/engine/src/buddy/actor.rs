@@ -252,6 +252,8 @@ pub struct BuddyService {
     pub observers: Vec<Arc<dyn BuddyObserver>>,
     pub chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter,
     pub chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState,
+    #[cfg(test)]
+    pub force_next_runtime_enqueue_drop: bool,
 }
 
 fn normalize_generated_buddy_text(raw: &str) -> String {
@@ -476,6 +478,8 @@ impl BuddyService {
             observers: build_observer_registry(),
             chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter::new(),
             chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState::new(),
+            #[cfg(test)]
+            force_next_runtime_enqueue_drop: false,
         }
     }
 
@@ -727,6 +731,11 @@ impl BuddyService {
         &mut self,
         event: BuddyRuntimeEvent,
     ) -> Option<BuddyRuntimeEvent> {
+        #[cfg(test)]
+        if self.force_next_runtime_enqueue_drop {
+            self.force_next_runtime_enqueue_drop = false;
+            return None;
+        }
         let event = self.apply_runtime_dismissal_memory(event);
         let dedupe_key = event.dedupe_key.clone();
         let input_id = event.id.clone();
