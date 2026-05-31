@@ -32,6 +32,8 @@ function getMessageKey(message: ChatMessages[number], index: number): string {
   return `${message.role}-${index}`;
 }
 
+// Keep this set in sync with engine summarization is_read_like_tool_name;
+// engine tests guard the shared matrix.
 const READ_TOOLS = new Set([
   "cat",
   "tree",

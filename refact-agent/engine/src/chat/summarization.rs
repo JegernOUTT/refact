@@ -254,6 +254,8 @@ fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
 }
 
 fn is_read_like_tool_name(tool_name: &str) -> bool {
+    // Keep this predicate in sync with GUI ChatContentDisplayItems READ_TOOLS; engine tests
+    // guard the shared matrix.
     let normalized =
         crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(tool_name.trim());
     matches!(
@@ -1543,6 +1545,60 @@ mod tests {
             !text.contains("secret-bearer-value"),
             "bearer leaked: {text}"
         );
+    }
+
+    #[test]
+    fn read_like_tool_name_accepts_gui_read_tools_matrix() {
+        for tool_name in [
+            "cat",
+            "tree",
+            "search_pattern",
+            "search_semantic",
+            "search_symbol_definition",
+            "web",
+            "web_search",
+            "knowledge",
+            "search_trajectories",
+            "get_trajectory_context",
+            "t_cat",
+            "t_tree",
+            "t_search_pattern",
+            "t_search_semantic",
+            "t_search_symbol_definition",
+            "t_web",
+            "t_web_search",
+            "t_knowledge",
+            "t_hist_search",
+            "t_hist_get",
+        ] {
+            assert!(
+                is_read_like_tool_name(tool_name),
+                "expected {tool_name} to be read-like"
+            );
+        }
+    }
+
+    #[test]
+    fn read_like_tool_name_rejects_non_read_tools_matrix() {
+        for tool_name in [
+            "shell",
+            "bash",
+            "apply_patch",
+            "create_textdoc",
+            "update_textdoc",
+            "rm",
+            "t_patch",
+            "t_write",
+            "activate_skill",
+            "ask_questions",
+            "tasks_set",
+            "",
+        ] {
+            assert!(
+                !is_read_like_tool_name(tool_name),
+                "expected {tool_name:?} to be non-read"
+            );
+        }
     }
 
     #[test]
