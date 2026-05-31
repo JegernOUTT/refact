@@ -1,6 +1,6 @@
 import { RootState } from "../../app/store";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
-import { buildApiUrlFromState } from "./apiUrl";
+import { buildApiUrlFromState, hasUsableEngineEndpoint } from "./apiUrl";
 
 export type ChatModeThreadDefaults = {
   include_project_info: boolean;
@@ -48,9 +48,10 @@ export const chatModesApi = createApi({
     getChatModes: builder.query<ChatModesResponse, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        if (!port) {
-          return { error: { status: 500, data: "Missing lspPort in config" } };
+        if (!hasUsableEngineEndpoint(state.config)) {
+          return {
+            error: { status: 500, data: "Missing engine endpoint in config" },
+          };
         }
 
         const result = await baseQuery({

@@ -1,6 +1,6 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
-import { buildApiUrlFromState } from "./apiUrl";
+import { buildApiUrlFromState, hasUsableEngineEndpoint } from "./apiUrl";
 
 export type SetupStatusDetail = {
   project_root?: string | null;
@@ -31,9 +31,10 @@ export const setupStatusApi = createApi({
     getSetupStatus: builder.query<SetupStatusResponse, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const port = state.config.lspPort;
-        if (!port) {
-          return { error: { status: 500, data: "Missing lspPort in config" } };
+        if (!hasUsableEngineEndpoint(state.config)) {
+          return {
+            error: { status: 500, data: "Missing engine endpoint in config" },
+          };
         }
         const result = await baseQuery({
           url: buildApiUrlFromState(state, "/v1/setup/status"),
