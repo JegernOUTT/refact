@@ -171,44 +171,25 @@ pub async fn get_session_state_for_chat(
     }
 }
 
-async fn get_generic_session_state_for_chat(
-    sessions: &SessionsMap,
-    chat_id: &str,
-) -> (String, Option<String>) {
-    let session_arc = sessions.read().await.get(chat_id).cloned();
-    match session_arc {
-        Some(arc) => {
-            let session = arc.lock().await;
-            if is_active_buddy_session(&session) {
-                return (SessionState::Idle.to_string(), None);
-            }
-            (
-                session.runtime.state.to_string(),
-                session.runtime.error.clone(),
-            )
-        }
-        None => (SessionState::Idle.to_string(), None),
-    }
-}
-
-async fn get_generic_session_state_for_source(
+async fn get_session_runtime_for_trajectory_source(
     sessions: &SessionsMap,
     chat_id: &str,
     source: &TrajectorySourceIdentity,
-) -> (String, Option<String>) {
+) -> (String, Option<String>, Option<WorktreeMeta>) {
     let session_arc = sessions.read().await.get(chat_id).cloned();
     match session_arc {
         Some(arc) => {
             let session = arc.lock().await;
-            if !source.matches_session_for_delete(&session) {
-                return (SessionState::Idle.to_string(), None);
+            if !source.emits_generic_event() || !source.matches_session(&session) {
+                return (SessionState::Idle.to_string(), None, None);
             }
             (
                 session.runtime.state.to_string(),
                 session.runtime.error.clone(),
+                session.thread.worktree.clone(),
             )
         }
-        None => (SessionState::Idle.to_string(), None),
+        None => (SessionState::Idle.to_string(), None, None),
     }
 }
 
@@ -261,6 +242,8 @@ pub struct TrajectoryMeta {
     pub total_cache_creation_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_cost_usd: Option<f64>,
+    #[serde(skip)]
+    source: TrajectorySourceIdentity,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1179,8 +1162,9 @@ async fn resolve_trajectory_data_save_path(
     safe_new_trajectory_file_in_dir(&trajectories_dir, id).await
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum TrajectorySourceIdentity {
+    #[default]
     Normal,
     Task {
         task_id: String,
@@ -2240,8 +2224,9 @@ pub async fn save_trajectory_snapshot(
             .clone()
             .unwrap_or_else(|| snapshot.chat_id.clone());
         let sessions = app.chat.sessions.clone();
-        let (session_state, session_error) =
-            get_generic_session_state_for_chat(&sessions, &snapshot.chat_id).await;
+        let source = TrajectorySourceIdentity::Normal;
+        let (session_state, session_error, session_worktree) =
+            get_session_runtime_for_trajectory_source(&sessions, &snapshot.chat_id, &source).await;
         let (total_lines_added, total_lines_removed) =
             calculate_line_changes_from_chat_messages(&snapshot.messages);
         let (tasks_total, tasks_done, tasks_failed) =
@@ -2267,7 +2252,7 @@ pub async fn save_trajectory_snapshot(
                 card_id: None,
                 model: Some(snapshot.model.clone()),
                 mode: Some(snapshot.mode.clone()),
-                worktree: snapshot.worktree.clone(),
+                worktree: snapshot.worktree.clone().or(session_worktree),
                 total_lines_added: Some(total_lines_added),
                 total_lines_removed: Some(total_lines_removed),
                 tasks_total: Some(tasks_total),
@@ -2860,12 +2845,13 @@ async fn process_trajectory_change_for_source(
                     chat_id, applied_to_session
                 );
                 let task_roots = get_all_task_roots(gcx.clone()).await;
-                let loaded_source = TrajectorySourceIdentity::from_session_parts(&loaded.thread);
-                let (session_state, session_error) =
-                    get_generic_session_state_for_source(&sessions, chat_id, &loaded_source).await;
+                let meta = loaded_trajectory_to_meta(&loaded, &task_roots);
+                let (session_state, session_error, _) =
+                    get_session_runtime_for_trajectory_source(&sessions, chat_id, &meta.source)
+                        .await;
                 let is_title_generated = loaded.thread.is_title_generated;
                 updated_trajectory_event_from_meta(
-                    loaded_trajectory_to_meta(&loaded, &task_roots),
+                    meta,
                     Some(is_title_generated),
                     session_state,
                     session_error,
@@ -2894,12 +2880,12 @@ async fn process_trajectory_change_for_source(
     if let Some(session_arc) = session_arc {
         if let Some(t) = loaded.as_ref() {
             let task_roots = get_all_task_roots(gcx.clone()).await;
-            let loaded_source = TrajectorySourceIdentity::from_session_parts(&t.thread);
-            let (session_state, session_error) =
-                get_generic_session_state_for_source(&sessions, chat_id, &loaded_source).await;
+            let meta = loaded_trajectory_to_meta(t, &task_roots);
+            let (session_state, session_error, _) =
+                get_session_runtime_for_trajectory_source(&sessions, chat_id, &meta.source).await;
             let is_title_generated = t.thread.is_title_generated;
             let event = updated_trajectory_event_from_meta(
-                loaded_trajectory_to_meta(t, &task_roots),
+                meta,
                 Some(is_title_generated),
                 session_state,
                 session_error,
@@ -2951,11 +2937,12 @@ async fn process_trajectory_change_for_source(
     };
 
     let task_roots = get_all_task_roots(gcx.clone()).await;
-    let (session_state, session_error) =
-        get_generic_session_state_for_chat(&sessions, chat_id).await;
+    let meta = loaded_trajectory_to_meta(&loaded, &task_roots);
+    let (session_state, session_error, _) =
+        get_session_runtime_for_trajectory_source(&sessions, chat_id, &meta.source).await;
     let is_title_generated = loaded.thread.is_title_generated;
     let event = updated_trajectory_event_from_meta(
-        loaded_trajectory_to_meta(&loaded, &task_roots),
+        meta,
         Some(is_title_generated),
         session_state,
         session_error,
@@ -3617,12 +3604,12 @@ fn spawn_title_generation_task(
         if !source.emits_generic_event() {
             return;
         }
-        let (session_state, session_error) =
-            get_generic_session_state_for_chat(&sessions, &id).await;
+        let (session_state, session_error, session_worktree) =
+            get_session_runtime_for_trajectory_source(&sessions, &id, &source).await;
         let worktree = if let Some(candidate) = trajectory_worktree_from_extra(&data.extra) {
             validate_loaded_worktree_strict(app.clone(), &id, candidate).await
         } else {
-            None
+            session_worktree
         };
         let (task_id, task_role, agent_id, card_id) = data
             .extra
@@ -4110,6 +4097,7 @@ fn trajectory_data_to_meta(data: &TrajectoryData) -> TrajectoryMeta {
         total_cache_read_tokens: token_totals.cache_read_tokens,
         total_cache_creation_tokens: token_totals.cache_creation_tokens,
         total_cost_usd: token_totals.cost_usd,
+        source: TrajectorySourceIdentity::from_extra(&data.extra).unwrap_or_default(),
     }
 }
 
@@ -4162,6 +4150,15 @@ fn loaded_trajectory_to_meta(loaded: &LoadedTrajectory, task_roots: &[PathBuf]) 
         .root_chat_id
         .clone()
         .unwrap_or_else(|| loaded.thread.id.clone());
+    let loaded_source = TrajectorySourceIdentity::from_session_parts(&loaded.thread);
+    let path_source = trajectory_source_identity_from_path(&loaded.source_path, task_roots);
+    let source = if matches!(&loaded_source, TrajectorySourceIdentity::Normal)
+        && !matches!(&path_source, TrajectorySourceIdentity::Normal)
+    {
+        path_source
+    } else {
+        loaded_source
+    };
     let (task_id, task_role, agent_id, card_id) =
         task_context_from_task_meta(loaded.thread.task_meta.as_ref());
     let (total_lines_added, total_lines_removed) =
@@ -4198,6 +4195,7 @@ fn loaded_trajectory_to_meta(loaded: &LoadedTrajectory, task_roots: &[PathBuf]) 
         total_cache_read_tokens: token_totals.cache_read_tokens,
         total_cache_creation_tokens: token_totals.cache_creation_tokens,
         total_cost_usd: token_totals.cost_usd,
+        source,
     };
     apply_task_trajectory_context(&loaded.source_path, task_roots, &mut meta);
     meta
@@ -4243,6 +4241,22 @@ fn updated_trajectory_event_from_meta(
     session_state: String,
     session_error: Option<String>,
 ) -> TrajectoryEvent {
+    updated_trajectory_event_from_meta_with_worktree(
+        meta,
+        is_title_generated,
+        session_state,
+        session_error,
+        None,
+    )
+}
+
+fn updated_trajectory_event_from_meta_with_worktree(
+    meta: TrajectoryMeta,
+    is_title_generated: Option<bool>,
+    session_state: String,
+    session_error: Option<String>,
+    session_worktree: Option<WorktreeMeta>,
+) -> TrajectoryEvent {
     TrajectoryEvent {
         event_type: "updated".to_string(),
         id: meta.id,
@@ -4261,7 +4275,7 @@ fn updated_trajectory_event_from_meta(
         card_id: meta.card_id,
         model: Some(meta.model),
         mode: Some(meta.mode),
-        worktree: meta.worktree,
+        worktree: meta.worktree.or(session_worktree),
         total_lines_added: Some(meta.total_lines_added),
         total_lines_removed: Some(meta.total_lines_removed),
         tasks_total: Some(meta.tasks_total),
@@ -4278,6 +4292,9 @@ fn updated_trajectory_event_from_meta(
 
 fn apply_task_trajectory_context(path: &Path, task_roots: &[PathBuf], meta: &mut TrajectoryMeta) {
     if let Some((task_id, role, agent_id)) = task_trajectory_context_from_path(path, task_roots) {
+        if matches!(&meta.source, TrajectorySourceIdentity::Normal) {
+            meta.source = trajectory_source_identity_from_path(path, task_roots);
+        }
         if meta.task_id.is_none() {
             meta.task_id = Some(task_id);
         }
@@ -4731,7 +4748,7 @@ async fn enrich_with_session_state(app: AppState, trajectories: &mut Vec<Traject
 
     for (idx, session_arc) in session_arcs {
         let session = session_arc.lock().await;
-        if is_active_buddy_session(&session) {
+        if !trajectories[idx].source.matches_session(&session) {
             continue;
         }
         trajectories[idx].session_state = Some(session.runtime.state.to_string());
@@ -4836,7 +4853,14 @@ pub async fn handle_v1_trajectories_save(
         .map(|s| s.to_string())
         .unwrap_or_else(|| id.clone());
     let sessions = app.chat.sessions.clone();
-    let (session_state, session_error) = get_generic_session_state_for_chat(&sessions, &id).await;
+    let source = TrajectorySourceIdentity::from_extra(&data.extra).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Invalid trajectory source for session enrichment: {}", e),
+        )
+    })?;
+    let (session_state, session_error, session_worktree) =
+        get_session_runtime_for_trajectory_source(&sessions, &id, &source).await;
     let (total_lines_added, total_lines_removed) =
         calculate_line_changes_from_messages(&data.messages);
     let (tasks_total, tasks_done, tasks_failed) =
@@ -4871,7 +4895,7 @@ pub async fn handle_v1_trajectories_save(
             card_id,
             model: Some(data.model.clone()),
             mode: Some(data.mode.clone()),
-            worktree,
+            worktree: worktree.or(session_worktree),
             total_lines_added: Some(total_lines_added),
             total_lines_removed: Some(total_lines_removed),
             tasks_total: Some(tasks_total),
@@ -4925,18 +4949,21 @@ pub async fn handle_v1_trajectories_delete(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let sessions = app.chat.sessions.clone();
-    let (session_state, session_error) = get_generic_session_state_for_chat(&sessions, &id).await;
     let fallback = match find_trajectory_file(gcx.clone(), &id).await {
         Some(candidate) => load_trajectory_candidate(gcx.clone(), &id, candidate).await,
         None => None,
     };
     let event = if let Some(fallback) = fallback {
         let task_roots = get_all_task_roots(gcx).await;
-        updated_trajectory_event_from_meta(
-            loaded_trajectory_to_meta(&fallback, &task_roots),
+        let meta = loaded_trajectory_to_meta(&fallback, &task_roots);
+        let (session_state, session_error, session_worktree) =
+            get_session_runtime_for_trajectory_source(&sessions, &id, &meta.source).await;
+        updated_trajectory_event_from_meta_with_worktree(
+            meta,
             Some(fallback.thread.is_title_generated),
             session_state,
             session_error,
+            session_worktree,
         )
     } else {
         deleted_trajectory_event(id.clone())
@@ -6381,6 +6408,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_list_normal_trajectory_ignores_active_task_state_error_and_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "list-normal-active-task-clean";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Normal Collision List Item",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        let task_meta = task_meta(
+            "task-list-normal-collision",
+            "agents",
+            Some("agent-list-normal"),
+            Some("card-list-normal"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta);
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("task-list-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("task list error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let item = listed.iter().find(|item| item.id == chat_id).unwrap();
+
+        assert_eq!(item.session_state, None);
+        assert!(item.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn generic_list_task_trajectory_ignores_active_normal_state_error_and_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "list-task-active-normal-clean";
+        let task_meta = task_meta(
+            "task-list-active-normal",
+            "agents",
+            Some("agent-list-task"),
+            Some("card-list-task"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-list-active-normal")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-list-task")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Collision List Item",
+            "task list message",
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("normal-list-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("normal list error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let item = listed.iter().find(|item| item.id == chat_id).unwrap();
+
+        assert_eq!(item.task_id.as_deref(), Some("task-list-active-normal"));
+        assert_eq!(item.task_role.as_deref(), Some("agents"));
+        assert_eq!(item.session_state, None);
+        assert!(item.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn generic_list_keeps_task_active_session_state_and_worktree_enrichment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "list-task-active-enriched";
+        let task_meta = task_meta(
+            "task-list-active-enriched",
+            "agents",
+            Some("agent-list-enriched"),
+            Some("card-list-enriched"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-list-active-enriched")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-list-enriched")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task List Item",
+            "task list message",
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta);
+            session.thread.worktree =
+                Some(trajectory_worktree_sample_with_id("task-list-enriched-wt"));
+            session.runtime.state = SessionState::Generating;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let item = listed.iter().find(|item| item.id == chat_id).unwrap();
+
+        assert_eq!(item.session_state.as_deref(), Some("generating"));
+        assert_eq!(
+            item.worktree.as_ref().map(|meta| meta.id.as_str()),
+            Some("task-list-enriched-wt")
+        );
+    }
+
+    #[tokio::test]
     async fn http_delete_higher_priority_trajectory_emits_updated_from_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let (_gcx, app) = make_app_with_workspace(dir.path()).await;
@@ -6417,6 +6593,7 @@ mod tests {
         let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
         {
             let mut session = session_arc.lock().await;
+            session.thread.title = "Active Normal Collision".to_string();
             session.runtime.state = SessionState::Generating;
             session.runtime.error = Some("busy fallback state".to_string());
         }
@@ -6444,8 +6621,9 @@ mod tests {
         assert_eq!(event.card_id, None);
         assert_eq!(event.model.as_deref(), Some("fallback-model"));
         assert_eq!(event.mode.as_deref(), Some("task_planner"));
-        assert_eq!(event.session_state.as_deref(), Some("generating"));
-        assert_eq!(event.error.as_deref(), Some("busy fallback state"));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert_eq!(event.error, None);
+        assert_ne!(event.title.as_deref(), Some("Active Normal Collision"));
         assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
         assert!(tokio::fs::try_exists(&task_path).await.unwrap());
     }
@@ -9386,6 +9564,204 @@ mod tests {
         assert!(raw.get("previous_response_id").is_none());
         assert_eq!(raw["custom_future_field"]["keep"], true);
         assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn normal_save_sse_ignores_active_task_state_error_and_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "normal-save-active-task-clean";
+        let task_meta = task_meta(
+            "task-normal-save-collision",
+            "agents",
+            Some("agent-save-collision"),
+            Some("card-save-collision"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta);
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("task-save-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("task save error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        save_trajectory_snapshot(
+            gcx,
+            test_snapshot(
+                chat_id,
+                "Normal Save Collision",
+                vec![ChatMessage::new(
+                    "user".to_string(),
+                    "normal save".to_string(),
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert_eq!(event.error, None);
+        assert!(event.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn normal_save_sse_keeps_matching_active_normal_state_error_and_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "normal-save-active-normal-enriched";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id(
+                "normal-save-enriched-wt",
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("normal save enriched error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        save_trajectory_snapshot(
+            gcx,
+            test_snapshot(
+                chat_id,
+                "Normal Save Enriched",
+                vec![ChatMessage::new(
+                    "user".to_string(),
+                    "normal save".to_string(),
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.session_state.as_deref(), Some("generating"));
+        assert_eq!(event.error.as_deref(), Some("normal save enriched error"));
+        assert_eq!(
+            event.worktree.as_ref().map(|worktree| worktree.id.as_str()),
+            Some("normal-save-enriched-wt")
+        );
+    }
+
+    #[tokio::test]
+    async fn task_http_save_sse_ignores_active_normal_state_error_and_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "task-http-save-active-normal-clean";
+        let task_id = "task-http-save-active-normal";
+        tokio::fs::create_dir_all(dir.path().join(".refact").join("tasks").join(task_id))
+            .await
+            .unwrap();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("normal-save-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("normal save error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+        let mut payload = sample_trajectory(chat_id, "Task Http Save", "2024-01-01T00:00:01Z");
+        payload["task_meta"] = json!({
+            "task_id": task_id,
+            "role": "agents",
+            "agent_id": "agent-http-save",
+            "card_id": "card-http-save"
+        });
+
+        handle_v1_trajectories_save(
+            State(app),
+            AxumPath(chat_id.to_string()),
+            hyper::body::Bytes::from(serde_json::to_vec(&payload).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "created");
+        assert_eq!(event.task_id.as_deref(), Some(task_id));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert_eq!(event.error, None);
+        assert!(event.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn task_http_save_sse_keeps_matching_active_task_state_error_and_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "task-http-save-active-task-enriched";
+        let task_id = "task-http-save-active-task";
+        tokio::fs::create_dir_all(dir.path().join(".refact").join("tasks").join(task_id))
+            .await
+            .unwrap();
+        let task_meta = task_meta(
+            task_id,
+            "agents",
+            Some("agent-http-save-enriched"),
+            Some("card-http-save-enriched"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta);
+            session.thread.worktree =
+                Some(trajectory_worktree_sample_with_id("task-save-enriched-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("task save enriched error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+        let mut payload =
+            sample_trajectory(chat_id, "Task Http Save Enriched", "2024-01-01T00:00:01Z");
+        payload["task_meta"] = json!({
+            "task_id": task_id,
+            "role": "agents",
+            "agent_id": "agent-http-save-enriched",
+            "card_id": "card-http-save-enriched"
+        });
+
+        handle_v1_trajectories_save(
+            State(app),
+            AxumPath(chat_id.to_string()),
+            hyper::body::Bytes::from(serde_json::to_vec(&payload).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "created");
+        assert_eq!(event.task_id.as_deref(), Some(task_id));
+        assert_eq!(event.session_state.as_deref(), Some("generating"));
+        assert_eq!(event.error.as_deref(), Some("task save enriched error"));
+        assert_eq!(
+            event.worktree.as_ref().map(|worktree| worktree.id.as_str()),
+            Some("task-save-enriched-wt")
+        );
     }
 
     #[tokio::test]
