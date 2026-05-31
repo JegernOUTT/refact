@@ -85,7 +85,9 @@ async fn atomic_write_json_with_tmp_path(
     result
 }
 
-use super::types::{ChatSession, ExternalReloadPending, SessionState, ThreadParams};
+use super::types::{
+    ChatSession, ExternalReloadPending, SessionState, ThreadParams, TrajectorySourceIdentity,
+};
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
 use super::SessionsMap;
@@ -1160,132 +1162,6 @@ async fn resolve_trajectory_data_save_path(
     }
     let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
     safe_new_trajectory_file_in_dir(&trajectories_dir, id).await
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-enum TrajectorySourceIdentity {
-    #[default]
-    Normal,
-    Task {
-        task_id: String,
-        role: String,
-        agent_id: Option<String>,
-        card_id: Option<String>,
-        planner_chat_id: Option<String>,
-    },
-    Buddy,
-}
-
-impl TrajectorySourceIdentity {
-    fn task(
-        task_id: String,
-        role: String,
-        agent_id: Option<String>,
-        card_id: Option<String>,
-        planner_chat_id: Option<String>,
-    ) -> Self {
-        Self::Task {
-            task_id,
-            role,
-            agent_id,
-            card_id,
-            planner_chat_id,
-        }
-    }
-
-    fn from_task_meta(task_meta: &super::types::TaskMeta) -> Self {
-        Self::task(
-            task_meta.task_id.clone(),
-            task_meta.role.clone(),
-            task_meta.agent_id.clone(),
-            task_meta.card_id.clone(),
-            task_meta.planner_chat_id.clone(),
-        )
-    }
-
-    fn from_extra(extra: &serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
-        let buddy_meta_present = extra
-            .get("buddy_meta")
-            .is_some_and(|value| !value.is_null());
-        let task_meta_value = extra.get("task_meta").filter(|value| !value.is_null());
-
-        if buddy_meta_present && task_meta_value.is_some() {
-            return Err("trajectory cannot contain both task_meta and buddy_meta".to_string());
-        }
-        if buddy_meta_present {
-            return Ok(Self::Buddy);
-        }
-        if let Some(value) = task_meta_value {
-            let task_meta = serde_json::from_value::<super::types::TaskMeta>(value.clone())
-                .map_err(|e| format!("invalid task_meta: {}", e))?;
-            return Ok(Self::from_task_meta(&task_meta));
-        }
-        Ok(Self::Normal)
-    }
-
-    fn from_json(json: &serde_json::Value) -> Result<Self, String> {
-        let Some(root) = json.as_object() else {
-            return Err("trajectory JSON root must be an object".to_string());
-        };
-        Self::from_extra(root)
-    }
-
-    fn from_session_parts(thread: &ThreadParams) -> Self {
-        if thread.buddy_meta.is_some() {
-            Self::Buddy
-        } else if let Some(task_meta) = thread.task_meta.as_ref() {
-            Self::from_task_meta(task_meta)
-        } else {
-            Self::Normal
-        }
-    }
-
-    fn from_session(session: &ChatSession) -> Self {
-        Self::from_session_parts(&session.thread)
-    }
-
-    fn emits_generic_event(&self) -> bool {
-        !matches!(self, Self::Buddy)
-    }
-
-    fn matches_session(&self, session: &ChatSession) -> bool {
-        &Self::from_session(session) == self
-    }
-
-    fn matches_session_for_delete(&self, session: &ChatSession) -> bool {
-        let active_source = Self::from_session(session);
-        match (self, active_source) {
-            (
-                Self::Task {
-                    task_id,
-                    role,
-                    agent_id,
-                    card_id,
-                    planner_chat_id,
-                },
-                Self::Task {
-                    task_id: active_task_id,
-                    role: active_role,
-                    agent_id: active_agent_id,
-                    card_id: active_card_id,
-                    planner_chat_id: active_planner_chat_id,
-                },
-            ) => {
-                task_id == &active_task_id
-                    && role == &active_role
-                    && agent_id
-                        .as_ref()
-                        .is_none_or(|agent_id| Some(agent_id) == active_agent_id.as_ref())
-                    && card_id
-                        .as_ref()
-                        .is_none_or(|card_id| Some(card_id) == active_card_id.as_ref())
-                    && planner_chat_id.as_ref().is_none_or(|planner_chat_id| {
-                        Some(planner_chat_id) == active_planner_chat_id.as_ref()
-                    })
-            }
-            (left, right) => left == &right,
-        }
-    }
 }
 
 async fn title_generation_backing_file_matches(
@@ -2642,7 +2518,9 @@ async fn apply_external_delete_with_revalidation(
                 skipped_active_buddy = true;
                 None
             } else if !can_apply_external_reload(&session) {
-                session.external_reload_pending = Some(ExternalReloadPending::Delete);
+                let pending_source = TrajectorySourceIdentity::from_session(&session);
+                session.external_reload_pending =
+                    Some(ExternalReloadPending::delete(pending_source));
                 return ExternalDeleteRevalidationOutcome::Updated {
                     loaded: outcome_loaded,
                     applied_to_session: false,
@@ -2719,7 +2597,8 @@ async fn apply_external_delete_with_revalidation(
         };
     }
     if !can_apply_external_reload(&session) {
-        session.external_reload_pending = Some(ExternalReloadPending::Delete);
+        let pending_source = TrajectorySourceIdentity::from_session(&session);
+        session.external_reload_pending = Some(ExternalReloadPending::delete(pending_source));
         return ExternalDeleteRevalidationOutcome::Deleted {
             applied_to_session: false,
         };
@@ -2743,31 +2622,36 @@ pub async fn check_external_reload_pending(
         (
             session.chat_id.clone(),
             if can_apply_external_reload(&session) {
-                session.external_reload_pending
+                session.external_reload_pending.clone()
             } else {
                 None
             },
         )
     };
     match pending {
-        Some(ExternalReloadPending::Delete) => {
+        Some(ExternalReloadPending::Delete { source }) => {
+            let expected_pending = ExternalReloadPending::delete(source.clone());
             apply_external_delete_with_revalidation(
                 gcx.clone(),
                 session_arc.clone(),
                 &chat_id,
-                Some(ExternalReloadPending::Delete),
-                None,
+                Some(expected_pending),
+                Some(source),
             )
             .await;
         }
-        Some(ExternalReloadPending::Update) => {
-            if let Some(loaded) = load_generic_trajectory_for_chat(gcx.clone(), &chat_id).await {
+        Some(ExternalReloadPending::Update { source }) => {
+            let expected_pending = ExternalReloadPending::update(source.clone());
+            if let Some(loaded) =
+                load_generic_trajectory_for_chat_matching_source(gcx.clone(), &chat_id, &source)
+                    .await
+            {
                 apply_loaded_external_update_with_repair(
                     gcx.clone(),
                     session_arc.clone(),
                     &chat_id,
                     loaded,
-                    Some(ExternalReloadPending::Update),
+                    Some(expected_pending),
                     None,
                     &format!("Applying pending external reload for {}", chat_id),
                 )
@@ -2775,7 +2659,7 @@ pub async fn check_external_reload_pending(
             } else {
                 let mut session = session_arc.lock().await;
                 if can_apply_external_reload(&session)
-                    && session.external_reload_pending == Some(ExternalReloadPending::Update)
+                    && session.external_reload_pending == Some(expected_pending)
                 {
                     warn!(
                         "Clearing pending external reload for {} because trajectory file is missing",
@@ -2870,7 +2754,12 @@ async fn process_trajectory_change_for_source(
         return;
     }
 
-    let mut loaded = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await;
+    let mut loaded = match changed_source.as_ref() {
+        Some(source) => {
+            load_generic_trajectory_for_chat_matching_source(gcx.clone(), chat_id, source).await
+        }
+        None => load_generic_trajectory_for_chat(gcx.clone(), chat_id).await,
+    };
 
     let session_arc = {
         let sessions_read = sessions.read().await;
@@ -2910,23 +2799,30 @@ async fn process_trajectory_change_for_source(
         }
 
         if let Some(loaded) = loaded.take() {
+            let pending = ExternalReloadPending::update(
+                TrajectorySourceIdentity::from_session_parts(&loaded.thread),
+            );
             apply_loaded_external_update_with_repair(
                 gcx.clone(),
                 session_arc.clone(),
                 chat_id,
                 loaded,
                 None,
-                Some(ExternalReloadPending::Update),
+                Some(pending),
                 &format!("Reloading trajectory for {} from external change", chat_id),
             )
             .await;
         } else {
             let mut session = session_arc.lock().await;
-            if !TrajectorySourceIdentity::Normal.matches_session(&session) {
+            let pending_source = changed_source
+                .clone()
+                .unwrap_or_else(|| TrajectorySourceIdentity::Normal);
+            if !pending_source.matches_session(&session) {
                 return;
             }
             if !can_apply_external_reload(&session) {
-                session.external_reload_pending = Some(ExternalReloadPending::Update);
+                session.external_reload_pending =
+                    Some(ExternalReloadPending::update(pending_source));
             }
         }
         return;
@@ -8981,7 +8877,9 @@ mod tests {
                 "old in-memory message".to_string(),
             ));
             session.thread.title = "Old In Memory".to_string();
-            session.external_reload_pending = Some(ExternalReloadPending::Delete);
+            session.external_reload_pending = Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Normal,
+            ));
             session.runtime.state = SessionState::Idle;
             session.trajectory_dirty = false;
             session.subscribe()
@@ -9083,7 +8981,9 @@ mod tests {
                 "user".to_string(),
                 "keep while busy".to_string(),
             ));
-            session.external_reload_pending = Some(ExternalReloadPending::Delete);
+            session.external_reload_pending = Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Normal,
+            ));
             session.runtime.state = SessionState::Generating;
             session.trajectory_dirty = false;
         }
@@ -9092,7 +8992,9 @@ mod tests {
             gcx,
             session_arc.clone(),
             chat_id,
-            Some(ExternalReloadPending::Delete),
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Normal,
+            )),
             None,
         )
         .await;
@@ -9106,7 +9008,9 @@ mod tests {
         ));
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Delete)
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Normal
+            ))
         );
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.thread.id, chat_id);
@@ -9132,7 +9036,9 @@ mod tests {
         let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
         {
             let mut session = session_arc.lock().await;
-            session.external_reload_pending = Some(ExternalReloadPending::Update);
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Normal,
+            ));
             session.runtime.state = SessionState::Generating;
             session.trajectory_dirty = false;
         }
@@ -9141,7 +9047,9 @@ mod tests {
             gcx,
             session_arc.clone(),
             chat_id,
-            Some(ExternalReloadPending::Delete),
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Normal,
+            )),
             None,
         )
         .await;
@@ -9153,7 +9061,9 @@ mod tests {
         ));
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Update)
+            Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Normal
+            ))
         );
     }
 
@@ -9191,7 +9101,9 @@ mod tests {
             let session = session_arc.lock().await;
             assert_eq!(
                 session.external_reload_pending,
-                Some(ExternalReloadPending::Delete)
+                Some(ExternalReloadPending::delete(
+                    TrajectorySourceIdentity::Normal
+                ))
             );
             assert_eq!(session.messages.len(), 1);
             assert!(session.active_compression_attempt.is_some());
@@ -9275,7 +9187,9 @@ mod tests {
             let session = session_arc.lock().await;
             assert_eq!(
                 session.external_reload_pending,
-                Some(ExternalReloadPending::Delete)
+                Some(ExternalReloadPending::delete(
+                    TrajectorySourceIdentity::Normal
+                ))
             );
             assert_eq!(session.thread.title, "Busy Before Delete");
         }
@@ -9358,7 +9272,9 @@ mod tests {
             session.thread.title = "Active Buddy Session".to_string();
             session.thread.mode = "buddy".to_string();
             session.thread.buddy_meta = Some(buddy_thread_meta());
-            session.external_reload_pending = Some(ExternalReloadPending::Update);
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Buddy,
+            ));
             session.messages.push(ChatMessage::new(
                 "user".to_string(),
                 "keep buddy message".to_string(),
@@ -9383,7 +9299,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Update)
+            Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Buddy
+            ))
         );
         assert_eq!(session.thread.title, "Active Buddy Session");
         assert!(session.thread.buddy_meta.is_some());
@@ -9426,7 +9344,9 @@ mod tests {
             session.thread.mode = "buddy".to_string();
             session.thread.buddy_meta = Some(buddy_thread_meta());
             session.thread.worktree = Some(trajectory_worktree_sample_with_id("buddy-remove-wt"));
-            session.external_reload_pending = Some(ExternalReloadPending::Delete);
+            session.external_reload_pending = Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Buddy,
+            ));
             session.runtime.state = SessionState::Generating;
             session.runtime.error = Some("buddy remove fallback error".to_string());
             session.messages.push(ChatMessage::new(
@@ -9460,7 +9380,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Delete)
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Buddy
+            ))
         );
         assert_eq!(session.thread.title, "Active Buddy Session");
         assert_eq!(session.thread.mode, "buddy");
@@ -9533,7 +9455,9 @@ mod tests {
             session.thread.title = "Active Buddy Session".to_string();
             session.thread.mode = "buddy".to_string();
             session.thread.buddy_meta = Some(buddy_thread_meta());
-            session.external_reload_pending = Some(ExternalReloadPending::Delete);
+            session.external_reload_pending = Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Buddy,
+            ));
             session.messages.push(ChatMessage::new(
                 "user".to_string(),
                 "keep active buddy during repaired fallback".to_string(),
@@ -9565,7 +9489,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Delete)
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Buddy
+            ))
         );
         assert_eq!(session.thread.title, "Active Buddy Session");
         assert_eq!(session.thread.mode, "buddy");
@@ -9701,7 +9627,9 @@ mod tests {
             session.thread.title = "Active Buddy Session".to_string();
             session.thread.mode = "buddy".to_string();
             session.thread.buddy_meta = Some(buddy_thread_meta());
-            session.external_reload_pending = Some(ExternalReloadPending::Update);
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Buddy,
+            ));
             session.messages.push(ChatMessage::new(
                 "user".to_string(),
                 "keep active buddy during repaired update".to_string(),
@@ -9727,7 +9655,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Update)
+            Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Buddy
+            ))
         );
         assert_eq!(session.thread.title, "Active Buddy Session");
         assert_eq!(session.thread.mode, "buddy");
@@ -10100,6 +10030,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn busy_active_task_matching_update_stores_task_pending_source_with_normal_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "busy-task-update-pending-source";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Same Id",
+            "normal same-id collision",
+        )
+        .await;
+        let task_meta = task_meta(
+            "task-pending-source",
+            "agents",
+            Some("agent-pending-source"),
+            Some("card-pending-source"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-pending-source")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-pending-source")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Same Id",
+            "task same-id update",
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta.clone());
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            false,
+            Some(TrajectorySourceIdentity::from_task_meta(&task_meta)),
+        )
+        .await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::from_task_meta(&task_meta)
+            ))
+        );
+        assert_eq!(session.thread.task_meta, Some(task_meta));
+    }
+
+    #[tokio::test]
+    async fn busy_active_normal_matching_update_stores_normal_pending_source_with_task_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "busy-normal-update-pending-source";
+        let task_meta = task_meta(
+            "task-normal-pending-source",
+            "agents",
+            Some("agent-normal-pending"),
+            Some("card-normal-pending"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-normal-pending-source")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-normal-pending")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Same Id",
+            "task same-id collision",
+            &task_meta,
+        )
+        .await;
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Same Id",
+            "normal same-id update",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            false,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Normal
+            ))
+        );
+        assert!(session.thread.task_meta.is_none());
+    }
+
+    #[tokio::test]
     async fn task_delete_with_active_normal_same_id_does_not_clear_session() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
@@ -10283,7 +10356,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Delete)
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::from_task_meta(&task_meta)
+            ))
         );
         assert_eq!(session.thread.title, "Same Task Updated");
     }
@@ -10351,7 +10426,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Delete)
+            Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::Normal
+            ))
         );
         assert_eq!(session.thread.title, "Same Normal Updated");
     }
@@ -10467,7 +10544,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(
             session.external_reload_pending,
-            Some(ExternalReloadPending::Update)
+            Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Normal
+            ))
         );
         drop(session);
         assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(100)).await;
@@ -10509,11 +10588,11 @@ mod tests {
         for (chat_id, pending) in [
             (
                 "immediate-delete-clears-pending-update",
-                ExternalReloadPending::Update,
+                ExternalReloadPending::update(TrajectorySourceIdentity::Normal),
             ),
             (
                 "immediate-delete-clears-pending-delete",
-                ExternalReloadPending::Delete,
+                ExternalReloadPending::delete(TrajectorySourceIdentity::Normal),
             ),
         ] {
             let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
@@ -10618,7 +10697,9 @@ mod tests {
                 "user".to_string(),
                 "keep after missing update".to_string(),
             ));
-            session.external_reload_pending = Some(ExternalReloadPending::Update);
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Normal,
+            ));
             session.runtime.state = SessionState::Idle;
             session.trajectory_dirty = false;
         }
@@ -12707,7 +12788,9 @@ mod tests {
             let session = session_arc.lock().await;
             assert_eq!(
                 session.external_reload_pending,
-                Some(ExternalReloadPending::Update)
+                Some(ExternalReloadPending::update(
+                    TrajectorySourceIdentity::Normal
+                ))
             );
             assert!(session.thread.claude_code_identity.is_none());
             assert!(session.thread.frozen_request_prefix.is_none());

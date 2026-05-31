@@ -82,10 +82,148 @@ impl Default for BurstGuard {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TrajectorySourceIdentity {
+    #[default]
+    Normal,
+    Task {
+        task_id: String,
+        role: String,
+        agent_id: Option<String>,
+        card_id: Option<String>,
+        planner_chat_id: Option<String>,
+    },
+    Buddy,
+}
+
+impl TrajectorySourceIdentity {
+    pub(crate) fn task(
+        task_id: String,
+        role: String,
+        agent_id: Option<String>,
+        card_id: Option<String>,
+        planner_chat_id: Option<String>,
+    ) -> Self {
+        Self::Task {
+            task_id,
+            role,
+            agent_id,
+            card_id,
+            planner_chat_id,
+        }
+    }
+
+    pub(crate) fn from_task_meta(task_meta: &TaskMeta) -> Self {
+        Self::task(
+            task_meta.task_id.clone(),
+            task_meta.role.clone(),
+            task_meta.agent_id.clone(),
+            task_meta.card_id.clone(),
+            task_meta.planner_chat_id.clone(),
+        )
+    }
+
+    pub(crate) fn from_extra(
+        extra: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, String> {
+        let buddy_meta_present = extra
+            .get("buddy_meta")
+            .is_some_and(|value| !value.is_null());
+        let task_meta_value = extra.get("task_meta").filter(|value| !value.is_null());
+
+        if buddy_meta_present && task_meta_value.is_some() {
+            return Err("trajectory cannot contain both task_meta and buddy_meta".to_string());
+        }
+        if buddy_meta_present {
+            return Ok(Self::Buddy);
+        }
+        if let Some(value) = task_meta_value {
+            let task_meta = serde_json::from_value::<TaskMeta>(value.clone())
+                .map_err(|e| format!("invalid task_meta: {}", e))?;
+            return Ok(Self::from_task_meta(&task_meta));
+        }
+        Ok(Self::Normal)
+    }
+
+    pub(crate) fn from_json(json: &serde_json::Value) -> Result<Self, String> {
+        let Some(root) = json.as_object() else {
+            return Err("trajectory JSON root must be an object".to_string());
+        };
+        Self::from_extra(root)
+    }
+
+    pub(crate) fn from_session_parts(thread: &ThreadParams) -> Self {
+        if thread.buddy_meta.is_some() {
+            Self::Buddy
+        } else if let Some(task_meta) = thread.task_meta.as_ref() {
+            Self::from_task_meta(task_meta)
+        } else {
+            Self::Normal
+        }
+    }
+
+    pub(crate) fn from_session(session: &ChatSession) -> Self {
+        Self::from_session_parts(&session.thread)
+    }
+
+    pub(crate) fn emits_generic_event(&self) -> bool {
+        !matches!(self, Self::Buddy)
+    }
+
+    pub(crate) fn matches_session(&self, session: &ChatSession) -> bool {
+        &Self::from_session(session) == self
+    }
+
+    pub(crate) fn matches_session_for_delete(&self, session: &ChatSession) -> bool {
+        let active_source = Self::from_session(session);
+        match (self, active_source) {
+            (
+                Self::Task {
+                    task_id,
+                    role,
+                    agent_id,
+                    card_id,
+                    planner_chat_id,
+                },
+                Self::Task {
+                    task_id: active_task_id,
+                    role: active_role,
+                    agent_id: active_agent_id,
+                    card_id: active_card_id,
+                    planner_chat_id: active_planner_chat_id,
+                },
+            ) => {
+                task_id == &active_task_id
+                    && role == &active_role
+                    && agent_id
+                        .as_ref()
+                        .is_none_or(|agent_id| Some(agent_id) == active_agent_id.as_ref())
+                    && card_id
+                        .as_ref()
+                        .is_none_or(|card_id| Some(card_id) == active_card_id.as_ref())
+                    && planner_chat_id.as_ref().is_none_or(|planner_chat_id| {
+                        Some(planner_chat_id) == active_planner_chat_id.as_ref()
+                    })
+            }
+            (left, right) => left == &right,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExternalReloadPending {
-    Update,
-    Delete,
+    Update { source: TrajectorySourceIdentity },
+    Delete { source: TrajectorySourceIdentity },
+}
+
+impl ExternalReloadPending {
+    pub(crate) fn update(source: TrajectorySourceIdentity) -> Self {
+        Self::Update { source }
+    }
+
+    pub(crate) fn delete(source: TrajectorySourceIdentity) -> Self {
+        Self::Delete { source }
+    }
 }
 
 pub struct ChatSession {
