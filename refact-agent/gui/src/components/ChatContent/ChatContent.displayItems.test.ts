@@ -67,6 +67,26 @@ function cdInstructionMessage(content: string): CDInstructionMessage {
   };
 }
 
+function expectIncrementalAppendMatchesFull(
+  appendedMessage: ChatMessages[number],
+): void {
+  const previousMessages: ChatMessages = [
+    assistantMessage({ message_id: "assistant-before" }),
+  ];
+  const nextMessages: ChatMessages = [...previousMessages, appendedMessage];
+  const previousItems = buildDisplayItems(previousMessages, false);
+
+  const incrementalItems = tryIncrementalDisplayItemsUpdate(
+    previousMessages,
+    nextMessages,
+    previousItems,
+    false,
+  );
+
+  expect(incrementalItems).not.toBeNull();
+  expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+}
+
 describe("ChatContent display items", () => {
   it("rebuilds a same-index assistant update into a summarization item when it becomes compressed", () => {
     const previousMessages: ChatMessages = [assistantMessage()];
@@ -89,6 +109,27 @@ describe("ChatContent display items", () => {
     expect(nextItems).toHaveLength(1);
     expect(nextItems?.[0]?.type).toBe("summarization");
     expect(nextItems?.[0]?.messageIndex).toBe(0);
+  });
+
+  it("matches full rebuild when an assistant message becomes a compressed summary", () => {
+    const previousMessages: ChatMessages = [assistantMessage()];
+    const nextMessages: ChatMessages = [
+      assistantMessage({
+        content: "compressed summary",
+        extra: { compression: { kind: "llm_segment_summary" } },
+      }),
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).not.toBeNull();
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
   });
 
   it("keeps ordinary same-index assistant updates on the incremental assistant path", () => {
@@ -133,6 +174,10 @@ describe("ChatContent display items", () => {
     });
   });
 
+  it("matches full rebuild when appending a compression_report message", () => {
+    expectIncrementalAppendMatchesFull(compressionReportMessage());
+  });
+
   it("renders chat summarizer compression failure events as error display items", () => {
     const failure = eventMessage();
     const messages: ChatMessages = [
@@ -151,6 +196,10 @@ describe("ChatContent display items", () => {
     expect(items[1].messageIndex).toBe(1);
     expect(items[1].errors).toHaveLength(1);
     expect(items[1].errors[0]?.content).toBe(failure.content);
+  });
+
+  it("matches full rebuild when appending a visible compression failure event", () => {
+    expectIncrementalAppendMatchesFull(eventMessage());
   });
 
   it("keeps unrelated events and plan deltas hidden", () => {

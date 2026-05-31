@@ -169,6 +169,44 @@ function syntheticCompressionFailureError(
   };
 }
 
+function buildCompressionDisplayItem(
+  message: ChatMessages[number],
+  index: number,
+): DisplayItemError | DisplayItemSummarization | null {
+  if (isVisibleCompressionFailureEvent(message)) {
+    return {
+      type: "error",
+      key: getMessageKey(message, index),
+      messageIndex: index,
+      errors: [syntheticCompressionFailureError(message)],
+    };
+  }
+
+  if (isCompressedAssistantMessage(message)) {
+    return {
+      type: "summarization",
+      key: getMessageKey(message, index),
+      messageIndex: index,
+      message: syntheticSummarizationMessage(message),
+    };
+  }
+
+  if (isCompressionReportMessage(message)) {
+    return {
+      type: "summarization",
+      key: getMessageKey(message, index),
+      messageIndex: index,
+      message: syntheticCompressionReportMessage(message),
+    };
+  }
+
+  return null;
+}
+
+function isHiddenDisplayMessage(message: ChatMessages[number]): boolean {
+  return isEventMessage(message) || message.role === "plan";
+}
+
 export type DisplayItem =
   | DisplayItemAssistant
   | DisplayItemUser
@@ -306,17 +344,14 @@ function buildDisplayItemsFromIndex(
     const head = messages[i];
 
     if (isToolMessage(head)) continue;
-    if (isVisibleCompressionFailureEvent(head)) {
-      items.push({
-        type: "error",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        errors: [syntheticCompressionFailureError(head)],
-      });
+
+    const compressionItem = buildCompressionDisplayItem(head, i);
+    if (compressionItem) {
+      items.push(compressionItem);
       continue;
     }
-    if (isEventMessage(head)) continue;
-    if (head.role === "plan") continue;
+
+    if (isHiddenDisplayMessage(head)) continue;
 
     if (isErrorMessage(head)) {
       const errors = [head];
@@ -359,29 +394,6 @@ function buildDisplayItemsFromIndex(
         key: getMessageKey(head, i),
         messageIndex: i,
         content: head.content,
-      });
-      continue;
-    }
-
-    const compressedAssistant = isCompressedAssistantMessage(head)
-      ? head
-      : null;
-    if (compressedAssistant) {
-      items.push({
-        type: "summarization",
-        key: getMessageKey(compressedAssistant, i),
-        messageIndex: i,
-        message: syntheticSummarizationMessage(compressedAssistant),
-      });
-      continue;
-    }
-
-    if (isCompressionReportMessage(head)) {
-      items.push({
-        type: "summarization",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        message: syntheticCompressionReportMessage(head),
       });
       continue;
     }
@@ -676,339 +688,13 @@ export function buildDisplayItems(
   messages: ChatMessages,
   isStreaming: boolean,
 ): DisplayItem[] {
-  const items: DisplayItem[] = [];
-  if (messages.length === 0) return items;
-
-  const hiddenQaIndices = computeHiddenQaMessageIndices(messages);
-
-  let lastUserIdx = -1;
-  let lastAssistantIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "user" && !hiddenQaIndices.has(i) && lastUserIdx === -1) {
-      lastUserIdx = i;
-    }
-    if (msg.role === "assistant" && lastAssistantIdx === -1) {
-      lastAssistantIdx = i;
-    }
-    if (lastUserIdx !== -1 && lastAssistantIdx !== -1) break;
-  }
-
-  for (let i = 0; i < messages.length; i++) {
-    const head = messages[i];
-
-    if (isToolMessage(head)) continue;
-    if (isVisibleCompressionFailureEvent(head)) {
-      items.push({
-        type: "error",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        errors: [syntheticCompressionFailureError(head)],
-      });
-      continue;
-    }
-    if (isEventMessage(head)) continue;
-    if (head.role === "plan") continue;
-
-    if (isErrorMessage(head)) {
-      const errors = [head];
-      let j = i + 1;
-      while (j < messages.length) {
-        const candidate = messages[j];
-        if (!isErrorMessage(candidate)) break;
-        errors.push(candidate);
-        j++;
-      }
-      items.push({
-        type: "error",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        errors,
-      });
-      i = j - 1;
-      continue;
-    }
-
-    if (head.role === "plain_text") {
-      if (
-        typeof head.content === "string" &&
-        isSkillReportContent(head.content)
-      ) {
-        const parsed = parseSkillReport(head.content);
-        if (parsed) {
-          items.push({
-            type: "skill_report",
-            key: getMessageKey(head, i),
-            messageIndex: i,
-            skillName: parsed.skillName,
-            report: parsed.report,
-          });
-          continue;
-        }
-      }
-      items.push({
-        type: "plain_text",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        content: head.content,
-      });
-      continue;
-    }
-
-    const compressedAssistant = isCompressedAssistantMessage(head)
-      ? head
-      : null;
-    if (compressedAssistant) {
-      items.push({
-        type: "summarization",
-        key: getMessageKey(compressedAssistant, i),
-        messageIndex: i,
-        message: syntheticSummarizationMessage(compressedAssistant),
-      });
-      continue;
-    }
-
-    if (isCompressionReportMessage(head)) {
-      items.push({
-        type: "summarization",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        message: syntheticCompressionReportMessage(head),
-      });
-      continue;
-    }
-
-    if (head.role === "assistant") {
-      const toolCalls = "tool_calls" in head ? head.tool_calls ?? [] : [];
-      const isOnlyActivateSkill =
-        toolCalls.length > 0 &&
-        toolCalls.every((tc) =>
-          isToolName(tc.function.name, "activate_skill"),
-        ) &&
-        !("content" in head && head.content && String(head.content).trim());
-      if (isOnlyActivateSkill) {
-        continue;
-      }
-
-      const key = getMessageKey(head, i);
-      const contextFilesAfter: DisplayItemContextFiles[] = [];
-      const diffMessagesAfter: DiffMessage[] = [];
-      let diffGroupStartIndex: number | null = null;
-      const contextFilesByToolId: Record<string, ChatContextFile[]> = {};
-      const diffsByToolId: Record<string, DiffChunk[]> = {};
-
-      const eligibleToolCalls = toolCalls.filter(
-        (tc) =>
-          tc.id &&
-          tc.function.name &&
-          READ_TOOLS.has(normalizeToolName(tc.function.name) ?? ""),
-      );
-      const eligibleToolIds = new Set(
-        eligibleToolCalls
-          .map((tc) => tc.id)
-          .filter((id): id is string => Boolean(id)),
-      );
-      const lastEligibleToolId =
-        eligibleToolCalls.length > 0
-          ? eligibleToolCalls[eligibleToolCalls.length - 1].id
-          : null;
-
-      const editToolCalls = toolCalls.filter(
-        (tc) =>
-          tc.id &&
-          tc.function.name &&
-          EDIT_TOOLS.has(normalizeToolName(tc.function.name) ?? ""),
-      );
-      const editToolIds = new Set(
-        editToolCalls
-          .map((tc) => tc.id)
-          .filter((id): id is string => Boolean(id)),
-      );
-
-      let j = i + 1;
-      while (j < messages.length) {
-        const nextMsg = messages[j];
-
-        if (isToolMessage(nextMsg)) {
-          j++;
-          continue;
-        }
-
-        if (isChatContextFileMessage(nextMsg)) {
-          if (
-            nextMsg.tool_call_id === "knowledge_enrichment" ||
-            nextMsg.tool_call_id === "project_context"
-          ) {
-            break;
-          }
-
-          let targetToolId: string | null = null;
-
-          if (
-            nextMsg.tool_call_id &&
-            eligibleToolIds.has(nextMsg.tool_call_id)
-          ) {
-            targetToolId = nextMsg.tool_call_id;
-          } else if (!nextMsg.tool_call_id && lastEligibleToolId) {
-            targetToolId = lastEligibleToolId;
-          }
-
-          if (targetToolId) {
-            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-            const prev = contextFilesByToolId[targetToolId] || [];
-            contextFilesByToolId[targetToolId] = [...prev, ...nextMsg.content];
-          } else {
-            contextFilesAfter.push({
-              type: "context_files",
-              key: getMessageKey(nextMsg, j),
-              messageIndex: j,
-              files: nextMsg.content,
-              toolCallId: nextMsg.tool_call_id,
-              rawExtra: (nextMsg as { extra?: unknown }).extra,
-            });
-          }
-          j++;
-          continue;
-        }
-
-        if (isDiffMessage(nextMsg)) {
-          if (nextMsg.tool_call_id && editToolIds.has(nextMsg.tool_call_id)) {
-            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-            const prevDiffs = diffsByToolId[nextMsg.tool_call_id] || [];
-            diffsByToolId[nextMsg.tool_call_id] = [
-              ...prevDiffs,
-              ...nextMsg.content,
-            ];
-          } else {
-            if (diffGroupStartIndex === null) diffGroupStartIndex = j;
-            diffMessagesAfter.push(nextMsg);
-          }
-          j++;
-          continue;
-        }
-
-        break;
-      }
-
-      items.push({
-        type: "assistant",
-        key,
-        index: i,
-        messageIndex: i,
-        message: head,
-        contextFilesByToolId,
-        diffsByToolId,
-        isStreaming: isStreaming && i === lastAssistantIdx,
-      });
-
-      for (const ctxItem of contextFilesAfter) {
-        items.push(ctxItem);
-      }
-
-      if (diffMessagesAfter.length > 0) {
-        items.push({
-          type: "diff_group",
-          key: `diffs-${key}`,
-          messageIndex: diffGroupStartIndex ?? i,
-          diffs: diffMessagesAfter,
-        });
-      }
-
-      i = j - 1;
-      continue;
-    }
-
-    if (head.role === "user") {
-      if (hiddenQaIndices.has(i)) {
-        continue;
-      }
-
-      items.push({
-        type: "user",
-        key: getMessageKey(head, i),
-        index: i,
-        messageIndex: i,
-        message: head,
-        isLastUser: i === lastUserIdx,
-      });
-      continue;
-    }
-
-    if (head.role === "cd_instruction" && typeof head.content === "string") {
-      const parsed = tryParseSkillActivated(head.content);
-      if (parsed) {
-        items.push({
-          type: "skill_activated",
-          key: getMessageKey(head, i),
-          messageIndex: i,
-          ...parsed,
-        });
-      }
-      continue;
-    }
-
-    if (isSummarizationMessage(head)) {
-      items.push({
-        type: "summarization",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        message: head,
-      });
-      continue;
-    }
-
-    if (isChatContextFileMessage(head)) {
-      items.push({
-        type: "context_files",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        files: head.content,
-        toolCallId: head.tool_call_id,
-        rawExtra: (head as { extra?: unknown }).extra,
-      });
-      continue;
-    }
-
-    if (isSystemMessage(head)) {
-      items.push({
-        type: "system",
-        key: getMessageKey(head, i),
-        messageIndex: i,
-        content: head.content,
-      });
-      continue;
-    }
-
-    if (isDiffMessage(head)) {
-      const key = getMessageKey(head, i);
-      const diffs: DiffMessage[] = [head];
-      let j = i + 1;
-      while (j < messages.length) {
-        const m = messages[j];
-        if (isToolMessage(m)) {
-          j++;
-          continue;
-        }
-        if (isDiffMessage(m)) {
-          diffs.push(m);
-          j++;
-          continue;
-        }
-        break;
-      }
-
-      items.push({
-        type: "diff_group",
-        key: `diffs-${key}`,
-        messageIndex: i,
-        diffs,
-      });
-      i = j - 1;
-      continue;
-    }
-  }
-
-  return items;
+  if (messages.length === 0) return [];
+  return buildDisplayItemsFromIndex(
+    messages,
+    isStreaming,
+    computeHiddenQaMessageIndices(messages),
+    0,
+  );
 }
 
 export function tryIncrementalDisplayItemsUpdate(
