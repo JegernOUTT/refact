@@ -2268,45 +2268,87 @@ async fn apply_loaded_external_update_with_repair(
     true
 }
 
+enum ExternalDeleteRevalidationOutcome {
+    Updated(LoadedTrajectory),
+    Deleted,
+    Noop,
+}
+
 async fn apply_external_delete_with_revalidation(
     gcx: Arc<GlobalContext>,
     session_arc: Arc<AMutex<ChatSession>>,
     chat_id: &str,
     expected_pending: Option<ExternalReloadPending>,
-) -> bool {
-    if let Some(loaded) = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await {
-        return apply_loaded_external_update_with_repair(
-            gcx,
-            session_arc,
-            chat_id,
-            loaded,
-            expected_pending,
-            Some(ExternalReloadPending::Delete),
-            &format!(
-                "Reloading trajectory for {} after delete revalidation",
-                chat_id
-            ),
+) -> ExternalDeleteRevalidationOutcome {
+    if let Some(mut loaded) = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await {
+        let transition_identity_repaired = loaded.transition_identity_repaired;
+        apply_mode_defaults_to_thread(
+            gcx.clone(),
+            &mut loaded.thread,
+            loaded.auto_approve_editing_tools_present,
+            loaded.auto_approve_dangerous_commands_present,
         )
         .await;
+        let repair_patch = loaded.repair_patch();
+        let outcome_loaded = loaded.clone();
+        let repaired_version = {
+            let mut session = session_arc.lock().await;
+            if let Some(expected) = expected_pending {
+                if session.external_reload_pending != Some(expected) {
+                    return ExternalDeleteRevalidationOutcome::Noop;
+                }
+            }
+            if is_active_buddy_session(&session) {
+                session.external_reload_pending = None;
+                return ExternalDeleteRevalidationOutcome::Noop;
+            }
+            if !can_apply_external_reload(&session) {
+                session.external_reload_pending = Some(ExternalReloadPending::Delete);
+                return ExternalDeleteRevalidationOutcome::Updated(outcome_loaded);
+            }
+            info!(
+                "Reloading trajectory for {} after delete revalidation",
+                chat_id
+            );
+            apply_loaded_external_update_to_session(
+                &mut session,
+                loaded,
+                transition_identity_repaired,
+            )
+        };
+        if let Some(repaired_version) = repaired_version {
+            if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
+                warn!(
+                    "Failed to persist repaired trajectory for {}: {}",
+                    chat_id, e
+                );
+            } else {
+                let mut session = session_arc.lock().await;
+                if session.trajectory_version == repaired_version {
+                    session.trajectory_dirty = false;
+                }
+            }
+        }
+        return ExternalDeleteRevalidationOutcome::Updated(outcome_loaded);
     }
 
     let mut session = session_arc.lock().await;
     if let Some(expected) = expected_pending {
         if session.external_reload_pending != Some(expected) {
-            return false;
+            return ExternalDeleteRevalidationOutcome::Noop;
         }
     }
     if is_active_buddy_session(&session) {
         session.external_reload_pending = None;
-        return false;
+        return ExternalDeleteRevalidationOutcome::Noop;
     }
     if !can_apply_external_reload(&session) {
         session.external_reload_pending = Some(ExternalReloadPending::Delete);
-        return false;
+        return ExternalDeleteRevalidationOutcome::Deleted;
     }
     info!("Trajectory file removed externally for {}", chat_id);
     apply_external_delete_to_session(&mut session, chat_id);
-    true
+    ExternalDeleteRevalidationOutcome::Deleted
 }
 
 pub async fn check_external_reload_pending(
@@ -2370,104 +2412,129 @@ pub async fn check_external_reload_pending(
 async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_remove: bool) {
     let app = AppState::from_gcx(gcx.clone()).await;
     let sessions = app.chat.sessions.clone();
-    let mut loaded = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await;
 
-    if is_remove && loaded.is_none() {
-        let tx = &app.chat.trajectory_events_tx;
-        {
-            let _ = tx.send(deleted_trajectory_event(chat_id.to_string()));
-        }
-    } else {
-        let (
-            updated_at,
-            title,
-            is_title_generated,
-            message_count,
-            parent_id,
-            link_type,
-            root_chat_id,
-            model,
-            mode,
-            worktree,
-            total_lines_added,
-            total_lines_removed,
-            tasks_total,
-            tasks_done,
-            tasks_failed,
-            token_totals,
-        ) = if let Some(t) = loaded.as_ref() {
-            let effective_root = t
-                .thread
-                .root_chat_id
-                .clone()
-                .unwrap_or_else(|| t.thread.id.clone());
-            let (lines_added, lines_removed) =
-                calculate_line_changes_from_chat_messages(&t.messages);
-            let (t_total, t_done, t_failed) =
-                calculate_task_progress_from_chat_messages(&t.messages);
-            let tok = calculate_token_totals_from_chat_messages(&t.messages);
-            (
-                Some(t.updated_at.clone()),
-                Some(trajectory_meta_title(&t.thread.title)),
-                Some(t.thread.is_title_generated),
-                Some(t.messages.len()),
-                t.thread.parent_id.clone(),
-                t.thread.link_type.clone(),
-                Some(effective_root),
-                Some(t.thread.model.clone()),
-                Some(t.thread.mode.clone()),
-                t.thread.worktree.clone(),
-                Some(lines_added),
-                Some(lines_removed),
-                Some(t_total),
-                Some(t_done),
-                Some(t_failed),
-                Some(tok),
-            )
-        } else {
-            (
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None,
-            )
+    if is_remove {
+        let session_arc = {
+            let sessions_read = sessions.read().await;
+            sessions_read.get(chat_id).cloned()
         };
-        let (session_state, session_error) = get_session_state_for_chat(&sessions, chat_id).await;
-        let tx = &app.chat.trajectory_events_tx;
-        {
-            let _ = tx.send(TrajectoryEvent {
-                event_type: "updated".to_string(),
-                id: chat_id.to_string(),
-                updated_at,
-                title,
-                is_title_generated,
-                session_state: Some(session_state),
-                error: session_error,
-                message_count,
-                parent_id,
-                link_type,
-                root_chat_id,
-                task_id: None,
-                task_role: None,
-                agent_id: None,
-                card_id: None,
-                model,
-                mode,
-                worktree,
-                total_lines_added,
-                total_lines_removed,
-                tasks_total,
-                tasks_done,
-                tasks_failed,
-                total_prompt_tokens: token_totals.as_ref().map(|t| t.prompt_tokens),
-                total_completion_tokens: token_totals.as_ref().map(|t| t.completion_tokens),
-                total_tokens: token_totals.as_ref().map(|t| t.total_tokens),
-                total_cache_read_tokens: token_totals.as_ref().map(|t| t.cache_read_tokens),
-                total_cache_creation_tokens: token_totals.as_ref().map(|t| t.cache_creation_tokens),
-                total_cost_usd: token_totals.and_then(|t| t.cost_usd),
-            });
-        }
+        let outcome = if let Some(session_arc) = session_arc {
+            apply_external_delete_with_revalidation(gcx.clone(), session_arc, chat_id, None).await
+        } else if let Some(loaded) = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await {
+            if loaded.transition_identity_repaired {
+                persist_loaded_trajectory_repair(gcx.clone(), loaded.clone()).await;
+            }
+            ExternalDeleteRevalidationOutcome::Updated(loaded)
+        } else {
+            ExternalDeleteRevalidationOutcome::Deleted
+        };
+        let event = match outcome {
+            ExternalDeleteRevalidationOutcome::Updated(loaded) => {
+                let task_roots = get_all_task_roots(gcx.clone()).await;
+                let (session_state, session_error) =
+                    get_session_state_for_chat(&sessions, chat_id).await;
+                let is_title_generated = loaded.thread.is_title_generated;
+                updated_trajectory_event_from_meta(
+                    loaded_trajectory_to_meta(&loaded, &task_roots),
+                    Some(is_title_generated),
+                    session_state,
+                    session_error,
+                )
+            }
+            ExternalDeleteRevalidationOutcome::Deleted => {
+                deleted_trajectory_event(chat_id.to_string())
+            }
+            ExternalDeleteRevalidationOutcome::Noop => return,
+        };
+        let _ = app.chat.trajectory_events_tx.send(event);
+        return;
     }
 
-    let sessions = app.chat.sessions.clone();
+    let mut loaded = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await;
+
+    let (
+        updated_at,
+        title,
+        is_title_generated,
+        message_count,
+        parent_id,
+        link_type,
+        root_chat_id,
+        model,
+        mode,
+        worktree,
+        total_lines_added,
+        total_lines_removed,
+        tasks_total,
+        tasks_done,
+        tasks_failed,
+        token_totals,
+    ) = if let Some(t) = loaded.as_ref() {
+        let effective_root = t
+            .thread
+            .root_chat_id
+            .clone()
+            .unwrap_or_else(|| t.thread.id.clone());
+        let (lines_added, lines_removed) = calculate_line_changes_from_chat_messages(&t.messages);
+        let (t_total, t_done, t_failed) = calculate_task_progress_from_chat_messages(&t.messages);
+        let tok = calculate_token_totals_from_chat_messages(&t.messages);
+        (
+            Some(t.updated_at.clone()),
+            Some(trajectory_meta_title(&t.thread.title)),
+            Some(t.thread.is_title_generated),
+            Some(t.messages.len()),
+            t.thread.parent_id.clone(),
+            t.thread.link_type.clone(),
+            Some(effective_root),
+            Some(t.thread.model.clone()),
+            Some(t.thread.mode.clone()),
+            t.thread.worktree.clone(),
+            Some(lines_added),
+            Some(lines_removed),
+            Some(t_total),
+            Some(t_done),
+            Some(t_failed),
+            Some(tok),
+        )
+    } else {
+        (
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None,
+        )
+    };
+    let (session_state, session_error) = get_session_state_for_chat(&sessions, chat_id).await;
+    let _ = app.chat.trajectory_events_tx.send(TrajectoryEvent {
+        event_type: "updated".to_string(),
+        id: chat_id.to_string(),
+        updated_at,
+        title,
+        is_title_generated,
+        session_state: Some(session_state),
+        error: session_error,
+        message_count,
+        parent_id,
+        link_type,
+        root_chat_id,
+        task_id: None,
+        task_role: None,
+        agent_id: None,
+        card_id: None,
+        model,
+        mode,
+        worktree,
+        total_lines_added,
+        total_lines_removed,
+        tasks_total,
+        tasks_done,
+        tasks_failed,
+        total_prompt_tokens: token_totals.as_ref().map(|t| t.prompt_tokens),
+        total_completion_tokens: token_totals.as_ref().map(|t| t.completion_tokens),
+        total_tokens: token_totals.as_ref().map(|t| t.total_tokens),
+        total_cache_read_tokens: token_totals.as_ref().map(|t| t.cache_read_tokens),
+        total_cache_creation_tokens: token_totals.as_ref().map(|t| t.cache_creation_tokens),
+        total_cost_usd: token_totals.and_then(|t| t.cost_usd),
+    });
+
     let session_arc = {
         let sessions_read = sessions.read().await;
         sessions_read.get(chat_id).cloned()
@@ -2488,12 +2555,6 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             session.external_reload_pending = None;
             return;
         }
-    }
-
-    if is_remove && loaded.is_none() {
-        apply_external_delete_with_revalidation(gcx.clone(), session_arc.clone(), chat_id, None)
-            .await;
-        return;
     }
 
     if let Some(loaded) = loaded.take() {
@@ -5092,6 +5153,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_watcher_remove_with_loadable_fallback_emits_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "watcher-remove-generic-fallback-updated";
+        let fallback_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-watch-fallback")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_metadata(
+            &fallback_path,
+            chat_id,
+            "Watcher Fallback",
+            "2024-01-01T00:00:01Z",
+            "fallback after remove",
+        )
+        .await;
+
+        process_trajectory_change(gcx, chat_id, true).await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Watcher Fallback"));
+        assert_eq!(event.task_id.as_deref(), Some("task-watch-fallback"));
+        assert_eq!(event.task_role.as_deref(), Some("planner"));
+        assert!(tokio::fs::try_exists(&fallback_path).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn trajectory_id_mismatch_is_not_loaded() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
@@ -7107,6 +7201,7 @@ mod tests {
     async fn immediate_external_delete_with_loadable_trajectory_reloads_instead_of_clearing() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
         let chat_id = "immediate-delete-loadable-reloads";
         let path = dir
             .path()
@@ -7141,6 +7236,10 @@ mod tests {
 
         process_trajectory_change(gcx, chat_id, true).await;
 
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Reloaded After Stale Delete"));
+
         let session = session_arc.lock().await;
         assert_eq!(session.external_reload_pending, None);
         assert_eq!(session.thread.title, "Reloaded After Stale Delete");
@@ -7168,6 +7267,7 @@ mod tests {
     async fn immediate_external_true_delete_still_clears_reloadable_session() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
         let chat_id = "immediate-true-delete-clears";
         let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
         let mut chat_rx = {
@@ -7188,6 +7288,10 @@ mod tests {
             .insert(chat_id.to_string(), session_arc.clone());
 
         process_trajectory_change(gcx, chat_id, true).await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
+        assert_eq!(event.title, None);
 
         let session = session_arc.lock().await;
         assert_eq!(session.external_reload_pending, None);
@@ -7226,7 +7330,7 @@ mod tests {
             session.trajectory_dirty = false;
         }
 
-        let applied = apply_external_delete_with_revalidation(
+        let outcome = apply_external_delete_with_revalidation(
             gcx,
             session_arc.clone(),
             chat_id,
@@ -7235,7 +7339,10 @@ mod tests {
         .await;
 
         let session = session_arc.lock().await;
-        assert!(!applied);
+        assert!(matches!(
+            outcome,
+            ExternalDeleteRevalidationOutcome::Deleted
+        ));
         assert_eq!(
             session.external_reload_pending,
             Some(ExternalReloadPending::Delete)
@@ -7269,7 +7376,7 @@ mod tests {
             session.trajectory_dirty = false;
         }
 
-        let applied = apply_external_delete_with_revalidation(
+        let outcome = apply_external_delete_with_revalidation(
             gcx,
             session_arc.clone(),
             chat_id,
@@ -7278,7 +7385,7 @@ mod tests {
         .await;
 
         let session = session_arc.lock().await;
-        assert!(!applied);
+        assert!(matches!(outcome, ExternalDeleteRevalidationOutcome::Noop));
         assert_eq!(
             session.external_reload_pending,
             Some(ExternalReloadPending::Update)
@@ -7289,6 +7396,7 @@ mod tests {
     async fn pending_external_delete_applies_when_session_becomes_reloadable() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
         let chat_id = "pending-external-delete";
         let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
         let mut chat_rx = {
@@ -7323,6 +7431,9 @@ mod tests {
             assert_eq!(session.messages.len(), 1);
             assert!(session.active_compression_attempt.is_some());
         }
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
 
         {
             let mut session = session_arc.lock().await;
@@ -7374,6 +7485,7 @@ mod tests {
     async fn pending_external_delete_revalidates_recreated_trajectory_before_clearing() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
         let chat_id = "pending-delete-recreated-reloads";
         let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
         let mut chat_rx = {
@@ -7402,6 +7514,9 @@ mod tests {
             );
             assert_eq!(session.thread.title, "Busy Before Delete");
         }
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
 
         let path = dir
             .path()
