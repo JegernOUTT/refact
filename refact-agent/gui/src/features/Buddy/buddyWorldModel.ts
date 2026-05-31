@@ -349,6 +349,7 @@ function visibleRuntimeEvent(
   nowMs: number,
 ): BuddyRuntimeEvent | null {
   if (event === null || event.dismissed === true) return null;
+  if (isActiveRuntime(event) && event.ttl_ms == null) return event;
   if (isBuddyRuntimeEventVisible(event, nowMs)) return event;
   return hasProviderModelRuntimeTopic(event) ? event : null;
 }
