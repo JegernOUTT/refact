@@ -2370,6 +2370,7 @@ async fn apply_loaded_external_update_with_repair(
     )
     .await;
     let repair_patch = loaded.repair_patch();
+    let mut skipped_active_buddy = false;
     let repaired_version = {
         let mut session = session_arc.lock().await;
         if let Some(expected) = expected_pending {
@@ -2378,17 +2379,33 @@ async fn apply_loaded_external_update_with_repair(
             }
         }
         if is_active_buddy_session(&session) {
-            return false;
-        }
-        if !can_apply_external_reload(&session) {
+            skipped_active_buddy = true;
+            None
+        } else if !can_apply_external_reload(&session) {
             if let Some(pending) = pending_if_not_reloadable {
                 session.external_reload_pending = Some(pending);
             }
             return false;
+        } else {
+            info!("{}", log_message);
+            apply_loaded_external_update_to_session(
+                &mut session,
+                loaded,
+                transition_identity_repaired,
+            )
         }
-        info!("{}", log_message);
-        apply_loaded_external_update_to_session(&mut session, loaded, transition_identity_repaired)
     };
+    if skipped_active_buddy {
+        if transition_identity_repaired {
+            if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
+                warn!(
+                    "Failed to persist repaired trajectory for {}: {}",
+                    chat_id, e
+                );
+            }
+        }
+        return false;
+    }
     if let Some(repaired_version) = repaired_version {
         if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
             warn!(
@@ -2433,6 +2450,7 @@ async fn apply_external_delete_with_revalidation(
         .await;
         let repair_patch = loaded.repair_patch();
         let outcome_loaded = loaded.clone();
+        let mut skipped_active_buddy = false;
         let repaired_version = {
             let mut session = session_arc.lock().await;
             if let Some(expected) = expected_pending {
@@ -2441,28 +2459,42 @@ async fn apply_external_delete_with_revalidation(
                 }
             }
             if is_active_buddy_session(&session) {
-                return ExternalDeleteRevalidationOutcome::Updated {
-                    loaded: outcome_loaded,
-                    applied_to_session: false,
-                };
-            }
-            if !can_apply_external_reload(&session) {
+                skipped_active_buddy = true;
+                None
+            } else if !can_apply_external_reload(&session) {
                 session.external_reload_pending = Some(ExternalReloadPending::Delete);
                 return ExternalDeleteRevalidationOutcome::Updated {
                     loaded: outcome_loaded,
                     applied_to_session: false,
                 };
+            } else {
+                info!(
+                    "Reloading trajectory for {} after delete revalidation",
+                    chat_id
+                );
+                apply_loaded_external_update_to_session(
+                    &mut session,
+                    loaded,
+                    transition_identity_repaired,
+                )
             }
-            info!(
-                "Reloading trajectory for {} after delete revalidation",
-                chat_id
-            );
-            apply_loaded_external_update_to_session(
-                &mut session,
-                loaded,
-                transition_identity_repaired,
-            )
         };
+        if skipped_active_buddy {
+            if transition_identity_repaired {
+                if let Err(e) =
+                    persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await
+                {
+                    warn!(
+                        "Failed to persist repaired trajectory for {}: {}",
+                        chat_id, e
+                    );
+                }
+            }
+            return ExternalDeleteRevalidationOutcome::Updated {
+                loaded: outcome_loaded,
+                applied_to_session: false,
+            };
+        }
         if let Some(repaired_version) = repaired_version {
             if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
                 warn!(
@@ -2642,11 +2674,17 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             let _ = app.chat.trajectory_events_tx.send(event);
         }
 
-        {
+        let active_buddy_collision = {
             let session = session_arc.lock().await;
-            if is_active_buddy_session(&session) {
-                return;
+            is_active_buddy_session(&session)
+        };
+        if active_buddy_collision {
+            if let Some(loaded) = loaded.take() {
+                if loaded.transition_identity_repaired {
+                    persist_loaded_trajectory_repair(gcx.clone(), loaded).await;
+                }
             }
+            return;
         }
 
         if let Some(loaded) = loaded.take() {
@@ -8700,6 +8738,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_watcher_remove_with_active_buddy_persists_repaired_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "active-buddy-remove-repaired-fallback";
+        let fallback_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-active-buddy-repair-fallback")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(fallback_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &fallback_path,
+            serde_json::to_string(&json!({
+                "id": chat_id,
+                "title": "Active Buddy Repaired Fallback",
+                "model": "model",
+                "mode": "task_planner",
+                "tool_use": "agent",
+                "parent_id": "source-chat",
+                "link_type": "mode_transition",
+                "previous_response_id": "resp_source",
+                "messages": [
+                    {"role":"system","content":"target task planner system"},
+                    {"role":"user","content":"fallback survives active buddy repair"}
+                ],
+                "frozen_request_prefix": {
+                    "schema_version": 1,
+                    "created_at": "2026-05-29T00:00:00Z",
+                    "system_prompt": "source system",
+                    "tools_canonical": [{"type":"function","function":{"name":"source_tool"}}]
+                },
+                "claude_code_identity": {
+                    "device_id":"source-device",
+                    "session_id":"source-session"
+                },
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:01Z",
+                "include_project_info": true,
+                "checkpoints_enabled": true,
+                "custom_future_field": {"keep": true}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Buddy Session".to_string();
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.external_reload_pending = Some(ExternalReloadPending::Delete);
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active buddy during repaired fallback".to_string(),
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = false;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx.clone(), chat_id, true).await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(
+            event.title.as_deref(),
+            Some("Active Buddy Repaired Fallback")
+        );
+        assert_eq!(
+            event.task_id.as_deref(),
+            Some("task-active-buddy-repair-fallback")
+        );
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::Delete)
+        );
+        assert_eq!(session.thread.title, "Active Buddy Session");
+        assert_eq!(session.thread.mode, "buddy");
+        assert!(session.thread.buddy_meta.is_some());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active buddy during repaired fallback"
+        );
+        drop(session);
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&fallback_path).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            raw["frozen_request_prefix"]["system_prompt"],
+            "target task planner system"
+        );
+        assert!(raw["frozen_request_prefix"]["tools_canonical"].is_null());
+        assert!(raw.get("claude_code_identity").is_none());
+        assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["custom_future_field"]["keep"], true);
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
     async fn generic_watcher_update_does_not_replace_active_buddy_session() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
@@ -8751,6 +8905,112 @@ mod tests {
         );
         drop(session);
 
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_with_active_buddy_persists_repaired_generic() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "active-buddy-update-repaired-generic";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "id": chat_id,
+                "title": "Repaired Generic Update",
+                "model": "model",
+                "mode": "task_planner",
+                "tool_use": "agent",
+                "parent_id": "source-chat",
+                "link_type": "mode_transition",
+                "previous_response_id": "resp_source",
+                "messages": [
+                    {"role":"system","content":"target task planner system"},
+                    {"role":"user","content":"generic update active buddy repair"}
+                ],
+                "frozen_request_prefix": {
+                    "schema_version": 1,
+                    "created_at": "2026-05-29T00:00:00Z",
+                    "system_prompt": "source system",
+                    "tools_canonical": [{"type":"function","function":{"name":"source_tool"}}]
+                },
+                "claude_code_identity": {
+                    "device_id":"source-device",
+                    "session_id":"source-session"
+                },
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:01Z",
+                "include_project_info": true,
+                "checkpoints_enabled": true,
+                "custom_future_field": {"keep": true}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Buddy Session".to_string();
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.external_reload_pending = Some(ExternalReloadPending::Update);
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active buddy during repaired update".to_string(),
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx.clone(), chat_id, false).await;
+        check_external_reload_pending(gcx.clone(), session_arc.clone()).await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Repaired Generic Update"));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::Update)
+        );
+        assert_eq!(session.thread.title, "Active Buddy Session");
+        assert_eq!(session.thread.mode, "buddy");
+        assert!(session.thread.buddy_meta.is_some());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active buddy during repaired update"
+        );
+        drop(session);
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["frozen_request_prefix"]["system_prompt"],
+            "target task planner system"
+        );
+        assert!(raw["frozen_request_prefix"]["tools_canonical"].is_null());
+        assert!(raw.get("claude_code_identity").is_none());
+        assert!(raw.get("previous_response_id").is_none());
+        assert_eq!(raw["custom_future_field"]["keep"], true);
         assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
     }
 
