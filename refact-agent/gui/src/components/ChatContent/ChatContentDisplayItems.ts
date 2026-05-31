@@ -203,6 +203,37 @@ function buildCompressionDisplayItem(
   return null;
 }
 
+type AssistantDisplayClass =
+  | "compressed"
+  | "hidden_activate_skill_only"
+  | "normal";
+
+function assistantHasVisibleContent(message: AssistantMessage): boolean {
+  return Boolean(message.content && String(message.content).trim());
+}
+
+function isHiddenActivateSkillOnlyAssistant(
+  message: AssistantMessage,
+): boolean {
+  const toolCalls = message.tool_calls ?? [];
+  return (
+    toolCalls.length > 0 &&
+    toolCalls.every((tc) => isToolName(tc.function.name, "activate_skill")) &&
+    !assistantHasVisibleContent(message)
+  );
+}
+
+function assistantDisplayClass(
+  message: ChatMessages[number],
+): AssistantDisplayClass | null {
+  if (!isAssistantMessage(message)) return null;
+  if (isCompressedAssistantMessage(message)) return "compressed";
+  if (isHiddenActivateSkillOnlyAssistant(message)) {
+    return "hidden_activate_skill_only";
+  }
+  return "normal";
+}
+
 function isHiddenDisplayMessage(message: ChatMessages[number]): boolean {
   return isEventMessage(message) || message.role === "plan";
 }
@@ -400,13 +431,7 @@ function buildDisplayItemsFromIndex(
 
     if (head.role === "assistant") {
       const toolCalls = "tool_calls" in head ? head.tool_calls ?? [] : [];
-      const isOnlyActivateSkill =
-        toolCalls.length > 0 &&
-        toolCalls.every((tc) =>
-          isToolName(tc.function.name, "activate_skill"),
-        ) &&
-        !("content" in head && head.content && String(head.content).trim());
-      if (isOnlyActivateSkill) {
+      if (assistantDisplayClass(head) === "hidden_activate_skill_only") {
         continue;
       }
 
@@ -742,10 +767,18 @@ export function tryIncrementalDisplayItemsUpdate(
   if (!isAssistantMessage(changedMessage)) return null;
 
   const previousMessage = previousMessages[changedIndex];
-  if (
-    isCompressedAssistantMessage(previousMessage) ||
-    isCompressedAssistantMessage(changedMessage)
-  ) {
+  const previousDisplayClass = assistantDisplayClass(previousMessage);
+  const changedDisplayClass = assistantDisplayClass(changedMessage);
+  if (previousDisplayClass !== changedDisplayClass) {
+    return rebuildDisplayItemsFromStart(
+      previousItems,
+      nextMessages,
+      isStreaming,
+      changedIndex,
+    );
+  }
+
+  if (changedDisplayClass === "compressed") {
     return rebuildDisplayItemsFromStart(
       previousItems,
       nextMessages,

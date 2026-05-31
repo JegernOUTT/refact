@@ -22,6 +22,43 @@ function assistantMessage(
   };
 }
 
+function activateSkillOnlyAssistantMessage(
+  overrides: Partial<AssistantMessage> = {},
+): AssistantMessage {
+  return assistantMessage({
+    content: "",
+    tool_calls: [
+      {
+        id: "activate-skill-1",
+        index: 0,
+        type: "function",
+        function: {
+          name: "activate_skill",
+          arguments: JSON.stringify({ skill_name: "frog-skill" }),
+        },
+      },
+    ],
+    ...overrides,
+  });
+}
+
+function expectIncrementalSameIndexMatchesFull(
+  previousMessages: ChatMessages,
+  nextMessages: ChatMessages,
+): void {
+  const previousItems = buildDisplayItems(previousMessages, false);
+
+  const incrementalItems = tryIncrementalDisplayItemsUpdate(
+    previousMessages,
+    nextMessages,
+    previousItems,
+    false,
+  );
+
+  expect(incrementalItems).not.toBeNull();
+  expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+}
+
 function compressionReportMessage(
   overrides: Partial<CompressionReportMessage> = {},
 ): CompressionReportMessage {
@@ -130,6 +167,26 @@ describe("ChatContent display items", () => {
 
     expect(incrementalItems).not.toBeNull();
     expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+  });
+
+  it("matches full rebuild when same-index activate_skill-only assistant becomes visible", () => {
+    const previousMessages: ChatMessages = [
+      activateSkillOnlyAssistantMessage(),
+    ];
+    const nextMessages: ChatMessages = [
+      activateSkillOnlyAssistantMessage({ content: "Skill is activated now." }),
+    ];
+
+    expectIncrementalSameIndexMatchesFull(previousMessages, nextMessages);
+  });
+
+  it("matches full rebuild when same-index visible assistant becomes activate_skill-only hidden", () => {
+    const previousMessages: ChatMessages = [
+      activateSkillOnlyAssistantMessage({ content: "Skill is activated now." }),
+    ];
+    const nextMessages: ChatMessages = [activateSkillOnlyAssistantMessage()];
+
+    expectIncrementalSameIndexMatchesFull(previousMessages, nextMessages);
   });
 
   it("keeps ordinary same-index assistant updates on the incremental assistant path", () => {
