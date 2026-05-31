@@ -1399,12 +1399,12 @@ fn trajectory_path_stem_matches_id(path: &Path, id: &str) -> bool {
     false
 }
 
-pub async fn load_trajectory_for_chat(
+async fn load_trajectory_candidate(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
+    candidate: ValidTrajectoryCandidate,
 ) -> Option<LoadedTrajectory> {
     let app = AppState::from_gcx(gcx.clone()).await;
-    let candidate = find_trajectory_or_buddy_file(gcx.clone(), chat_id).await?;
     let traj_path = candidate.path;
     let t = candidate.json;
 
@@ -1653,6 +1653,14 @@ pub async fn load_trajectory_for_chat(
         auto_approve_dangerous_commands_present,
         transition_identity_repaired: transition_prefix_repaired,
     })
+}
+
+pub async fn load_trajectory_for_chat(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Option<LoadedTrajectory> {
+    let candidate = find_trajectory_or_buddy_file(gcx.clone(), chat_id).await?;
+    load_trajectory_candidate(gcx, chat_id, candidate).await
 }
 
 pub async fn save_initial_planner_trajectory(
@@ -2343,37 +2351,7 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
     if is_remove && loaded.is_none() {
         let tx = &app.chat.trajectory_events_tx;
         {
-            let _ = tx.send(TrajectoryEvent {
-                event_type: "deleted".to_string(),
-                id: chat_id.to_string(),
-                updated_at: None,
-                title: None,
-                is_title_generated: None,
-                session_state: None,
-                error: None,
-                message_count: None,
-                parent_id: None,
-                link_type: None,
-                root_chat_id: None,
-                task_id: None,
-                task_role: None,
-                agent_id: None,
-                card_id: None,
-                model: None,
-                mode: None,
-                worktree: None,
-                total_lines_added: None,
-                total_lines_removed: None,
-                tasks_total: None,
-                tasks_done: None,
-                tasks_failed: None,
-                total_prompt_tokens: None,
-                total_completion_tokens: None,
-                total_tokens: None,
-                total_cache_read_tokens: None,
-                total_cache_creation_tokens: None,
-                total_cost_usd: None,
-            });
+            let _ = tx.send(deleted_trajectory_event(chat_id.to_string()));
         }
     } else {
         let (
@@ -3600,6 +3578,126 @@ async fn trajectory_data_to_meta_validated(app: AppState, data: &TrajectoryData)
     meta
 }
 
+fn loaded_trajectory_to_meta(loaded: &LoadedTrajectory, task_roots: &[PathBuf]) -> TrajectoryMeta {
+    let effective_root = loaded
+        .thread
+        .root_chat_id
+        .clone()
+        .unwrap_or_else(|| loaded.thread.id.clone());
+    let (task_id, task_role, agent_id, card_id) =
+        task_context_from_task_meta(loaded.thread.task_meta.as_ref());
+    let (total_lines_added, total_lines_removed) =
+        calculate_line_changes_from_chat_messages(&loaded.messages);
+    let (tasks_total, tasks_done, tasks_failed) =
+        calculate_task_progress_from_chat_messages(&loaded.messages);
+    let token_totals = calculate_token_totals_from_chat_messages(&loaded.messages);
+
+    let mut meta = TrajectoryMeta {
+        id: loaded.thread.id.clone(),
+        title: trajectory_meta_title(&loaded.thread.title),
+        created_at: loaded.created_at.clone(),
+        updated_at: loaded.updated_at.clone(),
+        model: loaded.thread.model.clone(),
+        mode: loaded.thread.mode.clone(),
+        message_count: loaded.messages.len(),
+        parent_id: loaded.thread.parent_id.clone(),
+        link_type: loaded.thread.link_type.clone(),
+        task_id,
+        task_role,
+        agent_id,
+        card_id,
+        session_state: None,
+        root_chat_id: Some(effective_root),
+        worktree: loaded.thread.worktree.clone(),
+        total_lines_added,
+        total_lines_removed,
+        tasks_total,
+        tasks_done,
+        tasks_failed,
+        total_prompt_tokens: token_totals.prompt_tokens,
+        total_completion_tokens: token_totals.completion_tokens,
+        total_tokens: token_totals.total_tokens,
+        total_cache_read_tokens: token_totals.cache_read_tokens,
+        total_cache_creation_tokens: token_totals.cache_creation_tokens,
+        total_cost_usd: token_totals.cost_usd,
+    };
+    apply_task_trajectory_context(&loaded.source_path, task_roots, &mut meta);
+    meta
+}
+
+fn deleted_trajectory_event(id: String) -> TrajectoryEvent {
+    TrajectoryEvent {
+        event_type: "deleted".to_string(),
+        id,
+        updated_at: None,
+        title: None,
+        is_title_generated: None,
+        session_state: None,
+        error: None,
+        message_count: None,
+        parent_id: None,
+        link_type: None,
+        root_chat_id: None,
+        task_id: None,
+        task_role: None,
+        agent_id: None,
+        card_id: None,
+        model: None,
+        mode: None,
+        worktree: None,
+        total_lines_added: None,
+        total_lines_removed: None,
+        tasks_total: None,
+        tasks_done: None,
+        tasks_failed: None,
+        total_prompt_tokens: None,
+        total_completion_tokens: None,
+        total_tokens: None,
+        total_cache_read_tokens: None,
+        total_cache_creation_tokens: None,
+        total_cost_usd: None,
+    }
+}
+
+fn updated_trajectory_event_from_meta(
+    meta: TrajectoryMeta,
+    is_title_generated: Option<bool>,
+    session_state: String,
+    session_error: Option<String>,
+) -> TrajectoryEvent {
+    TrajectoryEvent {
+        event_type: "updated".to_string(),
+        id: meta.id,
+        updated_at: Some(meta.updated_at),
+        title: Some(meta.title),
+        is_title_generated,
+        session_state: Some(session_state),
+        error: session_error,
+        message_count: Some(meta.message_count),
+        parent_id: meta.parent_id,
+        link_type: meta.link_type,
+        root_chat_id: meta.root_chat_id,
+        task_id: meta.task_id,
+        task_role: meta.task_role,
+        agent_id: meta.agent_id,
+        card_id: meta.card_id,
+        model: Some(meta.model),
+        mode: Some(meta.mode),
+        worktree: meta.worktree,
+        total_lines_added: Some(meta.total_lines_added),
+        total_lines_removed: Some(meta.total_lines_removed),
+        tasks_total: Some(meta.tasks_total),
+        tasks_done: Some(meta.tasks_done),
+        tasks_failed: Some(meta.tasks_failed),
+        total_prompt_tokens: Some(meta.total_prompt_tokens),
+        total_completion_tokens: Some(meta.total_completion_tokens),
+        total_tokens: Some(meta.total_tokens),
+        total_cache_read_tokens: Some(meta.total_cache_read_tokens),
+        total_cache_creation_tokens: Some(meta.total_cache_creation_tokens),
+        total_cost_usd: meta.total_cost_usd,
+    }
+}
+
 fn apply_task_trajectory_context(path: &Path, task_roots: &[PathBuf], meta: &mut TrajectoryMeta) {
     if let Some((task_id, role, agent_id)) = task_trajectory_context_from_path(path, task_roots) {
         if meta.task_id.is_none() {
@@ -4215,36 +4313,23 @@ pub async fn handle_v1_trajectories_delete(
     fs::remove_file(&file_path)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let event = TrajectoryEvent {
-        event_type: "deleted".to_string(),
-        id: id.clone(),
-        updated_at: None,
-        title: None,
-        is_title_generated: None,
-        session_state: None,
-        error: None,
-        message_count: None,
-        parent_id: None,
-        link_type: None,
-        root_chat_id: None,
-        task_id: None,
-        task_role: None,
-        agent_id: None,
-        card_id: None,
-        model: None,
-        mode: None,
-        worktree: None,
-        total_lines_added: None,
-        total_lines_removed: None,
-        tasks_total: None,
-        tasks_done: None,
-        tasks_failed: None,
-        total_prompt_tokens: None,
-        total_completion_tokens: None,
-        total_tokens: None,
-        total_cache_read_tokens: None,
-        total_cache_creation_tokens: None,
-        total_cost_usd: None,
+
+    let sessions = app.chat.sessions.clone();
+    let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
+    let fallback = match find_trajectory_file(gcx.clone(), &id).await {
+        Some(candidate) => load_trajectory_candidate(gcx.clone(), &id, candidate).await,
+        None => None,
+    };
+    let event = if let Some(fallback) = fallback {
+        let task_roots = get_all_task_roots(gcx).await;
+        updated_trajectory_event_from_meta(
+            loaded_trajectory_to_meta(&fallback, &task_roots),
+            Some(fallback.thread.is_title_generated),
+            session_state,
+            session_error,
+        )
+    } else {
+        deleted_trajectory_event(id.clone())
     };
     let _ = app.chat.trajectory_events_tx.send(event);
     Ok(Response::builder()
@@ -4368,6 +4453,29 @@ mod tests {
         message: &str,
     ) {
         let mut trajectory = sample_trajectory(id, title, "2024-01-01T00:00:01Z");
+        trajectory["messages"] = json!([{ "role": "user", "content": message }]);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
+    }
+
+    async fn write_trajectory_file_with_metadata(
+        path: &Path,
+        id: &str,
+        title: &str,
+        updated_at: &str,
+        message: &str,
+    ) {
+        let mut trajectory = sample_trajectory(id, title, updated_at);
+        trajectory["model"] = json!("fallback-model");
+        trajectory["mode"] = json!("task_planner");
+        trajectory["isTitleGenerated"] = json!(true);
+        trajectory["parent_id"] = json!("parent-fallback");
+        trajectory["link_type"] = json!("handoff");
+        trajectory["root_chat_id"] = json!("root-fallback");
         trajectory["messages"] = json!([{ "role": "user", "content": message }]);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
@@ -4817,6 +4925,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_trajectory_delete_does_not_emit_buddy_fallback_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "buddy-delete-no-fallback-update";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let buddy_path = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Delete Normal",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        write_buddy_conversation_file(&buddy_path, chat_id, "Keep Buddy").await;
+
+        handle_v1_trajectories_delete(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
+        assert_eq!(event.title, None);
+        assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
+        assert!(tokio::fs::try_exists(&buddy_path).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn explicit_buddy_inclusive_lookup_loads_buddy_conversation_file() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
@@ -5259,6 +5405,107 @@ mod tests {
 
         assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
         assert!(!tokio::fs::try_exists(&task_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn http_delete_higher_priority_trajectory_emits_updated_from_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "http-delete-fallback-updated";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-fallback")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Deleted Higher Priority",
+            "2024-01-01T00:00:02Z",
+        )
+        .await;
+        write_trajectory_file_with_metadata(
+            &task_path,
+            chat_id,
+            "Fallback Lower Priority",
+            "2024-01-01T00:00:01Z",
+            "fallback message",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("busy fallback state".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        handle_v1_trajectories_delete(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.updated_at.as_deref(), Some("2024-01-01T00:00:01Z"));
+        assert_eq!(event.title.as_deref(), Some("Fallback Lower Priority"));
+        assert_eq!(event.is_title_generated, Some(true));
+        assert_eq!(event.message_count, Some(1));
+        assert_eq!(event.parent_id.as_deref(), Some("parent-fallback"));
+        assert_eq!(event.link_type.as_deref(), Some("handoff"));
+        assert_eq!(event.root_chat_id.as_deref(), Some("root-fallback"));
+        assert_eq!(event.task_id.as_deref(), Some("task-fallback"));
+        assert_eq!(event.task_role.as_deref(), Some("planner"));
+        assert_eq!(event.card_id, None);
+        assert_eq!(event.model.as_deref(), Some("fallback-model"));
+        assert_eq!(event.mode.as_deref(), Some("task_planner"));
+        assert_eq!(event.session_state.as_deref(), Some("generating"));
+        assert_eq!(event.error.as_deref(), Some("busy fallback state"));
+        assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
+        assert!(tokio::fs::try_exists(&task_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn http_delete_only_remaining_trajectory_emits_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "http-delete-only-deleted";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Only Remaining",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+
+        handle_v1_trajectories_delete(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
+        assert_eq!(event.updated_at, None);
+        assert_eq!(event.title, None);
+        assert_eq!(event.session_state, None);
+        assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
     }
 
     #[tokio::test]
