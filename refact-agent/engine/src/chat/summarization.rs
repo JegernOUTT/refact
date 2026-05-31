@@ -253,15 +253,45 @@ fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
     )
 }
 
+fn is_read_like_tool_name(tool_name: &str) -> bool {
+    let normalized =
+        crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(tool_name.trim());
+    matches!(
+        normalized.as_str(),
+        "cat"
+            | "tree"
+            | "search_pattern"
+            | "search_semantic"
+            | "search_symbol_definition"
+            | "web"
+            | "web_search"
+            | "knowledge"
+            | "search_trajectories"
+            | "get_trajectory_context"
+    )
+}
+
+fn tool_call_is_completed_by_context_file(
+    tool_call: &crate::call_validation::ChatToolCall,
+    completed_context_file_after_call: &HashSet<&str>,
+) -> bool {
+    completed_context_file_after_call.contains(tool_call.id.as_str())
+        && is_read_like_tool_name(&tool_call.function.name)
+}
+
 fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
     let mut completed_after_call = HashSet::new();
+    let mut completed_context_file_after_call = HashSet::new();
     for message in messages.iter().rev() {
         if is_ui_only_message(message) {
             continue;
         }
         match message.role.as_str() {
-            "tool" | "diff" | "context_file" if !message.tool_call_id.is_empty() => {
+            "tool" | "diff" if !message.tool_call_id.is_empty() => {
                 completed_after_call.insert(message.tool_call_id.as_str());
+            }
+            "context_file" if !message.tool_call_id.is_empty() => {
+                completed_context_file_after_call.insert(message.tool_call_id.as_str());
             }
             "assistant" => {
                 let Some(tool_calls) = message.tool_calls.as_ref() else {
@@ -273,10 +303,13 @@ fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
                 if assistant_finish_reason_requests_tools(message) && tool_calls.is_empty() {
                     return true;
                 }
-                if tool_calls
-                    .iter()
-                    .any(|tool_call| !completed_after_call.contains(tool_call.id.as_str()))
-                {
+                if tool_calls.iter().any(|tool_call| {
+                    !completed_after_call.contains(tool_call.id.as_str())
+                        && !tool_call_is_completed_by_context_file(
+                            tool_call,
+                            &completed_context_file_after_call,
+                        )
+                }) {
                     return true;
                 }
             }
@@ -298,11 +331,38 @@ fn is_trimmable_tail_diagnostic(message: &ChatMessage) -> bool {
     is_excluded_from_segment(message) || matches!(message.role.as_str(), "event" | "error")
 }
 
+fn tail_context_file_matches_read_tool_call(
+    message_idx: usize,
+    messages: &[ChatMessage],
+    tool_call_id: &str,
+) -> bool {
+    if tool_call_id.is_empty() {
+        return false;
+    }
+    messages[..message_idx].iter().rev().any(|message| {
+        if message.role != "assistant" || is_ui_only_message(message) {
+            return false;
+        }
+        message.tool_calls.as_ref().is_some_and(|tool_calls| {
+            tool_calls.iter().any(|tool_call| {
+                tool_call.id == tool_call_id && is_read_like_tool_name(&tool_call.function.name)
+            })
+        })
+    })
+}
+
 fn has_tail_summarizable_output(messages: &[ChatMessage]) -> bool {
-    messages.iter().any(|message| {
-        matches!(message.role.as_str(), "assistant" | "tool" | "diff")
-            && !is_ui_only_message(message)
-            && !message.content.content_text_only().trim().is_empty()
+    messages.iter().enumerate().any(|(idx, message)| {
+        if is_ui_only_message(message) || message.content.content_text_only().trim().is_empty() {
+            return false;
+        }
+        match message.role.as_str() {
+            "assistant" | "tool" | "diff" => true,
+            "context_file" => {
+                tail_context_file_matches_read_tool_call(idx, messages, &message.tool_call_id)
+            }
+            _ => false,
+        }
     })
 }
 
@@ -1402,19 +1462,24 @@ mod tests {
     }
 
     fn assistant_with_tool_call() -> ChatMessage {
+        assistant_with_named_tool_call("call_1", "shell")
+    }
+
+    fn assistant_with_named_tool_call(id: &str, name: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
             content: ChatContent::SimpleText(String::new()),
             tool_calls: Some(vec![ChatToolCall {
-                id: "call_1".to_string(),
+                id: id.to_string(),
                 index: Some(0),
                 function: ChatToolFunction {
-                    name: "shell".to_string(),
+                    name: name.to_string(),
                     arguments: "{}".to_string(),
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
             }]),
+            finish_reason: Some("tool_calls".to_string()),
             ..Default::default()
         }
     }
@@ -1438,22 +1503,7 @@ mod tests {
     }
 
     fn assistant_with_tool_call_id(id: &str) -> ChatMessage {
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText(String::new()),
-            tool_calls: Some(vec![ChatToolCall {
-                id: id.to_string(),
-                index: Some(0),
-                function: ChatToolFunction {
-                    name: "shell".to_string(),
-                    arguments: "{}".to_string(),
-                },
-                tool_type: "function".to_string(),
-                extra_content: None,
-            }]),
-            finish_reason: Some("tool_calls".to_string()),
-            ..Default::default()
-        }
+        assistant_with_named_tool_call(id, "shell")
     }
 
     fn tool_with_id(id: &str, text: &str) -> ChatMessage {
@@ -1702,8 +1752,7 @@ mod tests {
 
     #[test]
     fn tail_segment_pending_assistant_tool_call_is_not_eligible() {
-        let mut pending = assistant_with_tool_call();
-        pending.finish_reason = Some("tool_calls".to_string());
+        let pending = assistant_with_tool_call();
         let mut messages = vec![user("run tool"), pending];
 
         assert_eq!(eligible_tail_non_user_segment(&messages), None);
@@ -1751,8 +1800,7 @@ mod tests {
 
     #[test]
     fn tail_segment_completed_tool_call_is_eligible() {
-        let mut assistant_call = assistant_with_tool_call();
-        assistant_call.finish_reason = Some("tool_calls".to_string());
+        let assistant_call = assistant_with_tool_call();
         let mut messages = vec![user("run tool"), assistant_call, tool("result")];
 
         assert_eq!(
@@ -1766,6 +1814,63 @@ mod tests {
         ));
         assert_eq!(messages.len(), 2);
         assert!(is_segment_summary(&messages[1]));
+    }
+
+    #[test]
+    fn tail_segment_completed_read_tool_context_file_is_eligible() {
+        let assistant_call = assistant_with_named_tool_call("call_read", "cat");
+        let mut messages = vec![
+            user("read file"),
+            assistant_call,
+            context_file_with_tool_call_id("call_read", "file content"),
+        ];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 1, end: 2 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "read result summary",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 2);
+        assert!(is_segment_summary(&messages[1]));
+    }
+
+    #[test]
+    fn tail_segment_context_file_for_non_read_tool_is_not_eligible() {
+        let assistant_call = assistant_with_named_tool_call("call_shell", "shell");
+        let mut messages = vec![
+            user("run shell"),
+            assistant_call,
+            context_file_with_tool_call_id("call_shell", "shell output"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn tail_segment_context_file_without_matching_read_tool_is_not_eligible() {
+        let mut messages = vec![
+            user("look here"),
+            context_file_with_tool_call_id("call_read", "file context"),
+        ];
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
     }
 
     #[test]
@@ -1900,7 +2005,7 @@ mod tests {
             user("first"),
             assistant("closed old"),
             user("second"),
-            assistant_with_tool_call_id("call_done"),
+            assistant_with_named_tool_call("call_done", "cat"),
             context_file_with_tool_call_id("call_done", "read result"),
         ];
 
@@ -1920,12 +2025,55 @@ mod tests {
     }
 
     #[test]
+    fn current_tail_matching_context_file_for_non_read_tool_blocks_closed_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant_with_named_tool_call("call_shell", "shell"),
+            context_file_with_tool_call_id("call_shell", "shell output"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn current_tail_matching_context_file_for_cc_read_alias_allows_closed_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant_with_named_tool_call("call_alias", "t_hist_get"),
+            context_file_with_tool_call_id("call_alias", "history context"),
+        ];
+
+        assert!(!current_tail_has_pending_tool_calls(&messages));
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "closed summary",
+            "test-model",
+        ));
+        assert_eq!(messages[1].content.content_text_only(), "closed summary");
+    }
+
+    #[test]
     fn current_tail_unrelated_context_file_tool_call_id_blocks_closed_segment() {
         let mut messages = vec![
             user("first"),
             assistant("closed old"),
             user("second"),
-            assistant_with_tool_call_id("call_pending"),
+            assistant_with_named_tool_call("call_pending", "cat"),
             context_file_with_tool_call_id("call_other", "read result"),
         ];
         let before = serde_json::to_string(&messages).unwrap();
@@ -1945,7 +2093,7 @@ mod tests {
             user("first"),
             assistant("closed old"),
             user("second"),
-            assistant_with_tool_call_id("call_pending"),
+            assistant_with_named_tool_call("call_pending", "cat"),
             context_file_with_tool_call_id("", "read result"),
         ];
         let before = serde_json::to_string(&messages).unwrap();
