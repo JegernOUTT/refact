@@ -4954,6 +4954,9 @@ pub async fn handle_v1_trajectories_delete(
         None => None,
     };
     let event = if let Some(fallback) = fallback {
+        if fallback.transition_identity_repaired {
+            persist_loaded_trajectory_repair(gcx.clone(), fallback.clone()).await;
+        }
         let task_roots = get_all_task_roots(gcx).await;
         let meta = loaded_trajectory_to_meta(&fallback, &task_roots);
         let (session_state, session_error, session_worktree) =
