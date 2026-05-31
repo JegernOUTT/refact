@@ -3062,7 +3062,7 @@ describe("BuddySettingsPanel_autosave", () => {
       const capturedBodies: unknown[] = [];
       server.use(
         http.post(
-          "http://127.0.0.1:8001/v1/buddy/settings",
+          "*/v1/buddy/settings",
           async ({ request }) => {
             capturedBodies.push(await request.json());
             return HttpResponse.json(makeSnapshot().settings);
