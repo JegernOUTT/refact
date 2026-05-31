@@ -9063,7 +9063,9 @@ async fn maybe_enqueue_chat_reaction_records_not_queued_and_rolls_back_when_runt
     assert!(!first_debug_json.contains(generated));
     {
         let lock = app.buddy.buddy.lock().await;
-        assert!(lock.as_ref().unwrap().runtime_queue.items.is_empty());
+        let runtime_queue = &lock.as_ref().unwrap().runtime_queue;
+        assert!(runtime_queue.items.is_empty());
+        assert!(runtime_queue.now_playing.is_none());
     }
 
     maybe_enqueue_chat_reaction(
