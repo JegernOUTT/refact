@@ -270,6 +270,25 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [value, setValue, isSendImmediately, setIsSendImmediately] =
     useInputValue(() => unCheckAll());
 
+  const displayedInputValue =
+    isVoiceActive && liveTranscript
+      ? value.trim()
+        ? `${value}\n${liveTranscript}`
+        : liveTranscript
+      : value;
+
+  const collapsedPreviewText = useMemo(() => {
+    const trimmed = displayedInputValue.trimEnd();
+    if (!trimmed) return "";
+
+    const lines = trimmed.split(/\r?\n/);
+    if (lines.length <= 2) return trimmed;
+
+    const lastTwoLines = lines.slice(-2);
+    lastTwoLines[0] = `… ${lastTwoLines[0]}`;
+    return lastTwoLines.join("\n");
+  }, [displayedInputValue]);
+
   const valueRef = React.useRef(value);
   valueRef.current = value;
 
@@ -417,27 +436,24 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     });
   }, []);
 
-  const handleCompactPointerDown = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
+  const handleComposerPointerDownCapture = useCallback(
+    (event: React.PointerEvent<HTMLFormElement>) => {
+      if (isComposerExpanded) return;
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (isComposerExpanded && target.closest("button, a, input, textarea")) {
-        return;
+      const actionButton = target.closest("button");
+      if (actionButton && target.closest(`.${styles.bottomActionControls}`)) {
+        if (
+          actionButton.getAttribute("aria-label") !== "Resend last messages"
+        ) {
+          return;
+        }
       }
 
       event.preventDefault();
       focusComposerInput();
     },
     [focusComposerInput, isComposerExpanded],
-  );
-
-  const handleCompactKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      focusComposerInput();
-    },
-    [focusComposerInput],
   );
 
   const handleComposerBlur = useCallback(
@@ -522,6 +538,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               : styles.chatFormCollapsed,
             className,
           )}
+          onClick={() => {
+            if (!isComposerExpanded) {
+              focusComposerInput();
+            }
+          }}
+          onPointerDownCapture={handleComposerPointerDownCapture}
           onSubmit={() => handleSubmit("after_flow")}
         >
           <Box
@@ -582,13 +604,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   onHelpClick={handleHelpCommand}
                   commands={commands}
                   requestCommandsCompletion={requestCompletion}
-                  value={
-                    isVoiceActive && liveTranscript
-                      ? value.trim()
-                        ? `${value}\n${liveTranscript}`
-                        : liveTranscript
-                      : value
-                  }
+                  value={displayedInputValue}
                   onChange={handleChange}
                   onSubmit={(event) => {
                     handleEnter(event);
@@ -617,6 +633,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               </Box>
             </Box>
           </Box>
+          {collapsedPreviewText && (
+            <Box className={styles.collapsedInputPreview} aria-hidden="true">
+              {collapsedPreviewText}
+            </Box>
+          )}
           <Flex
             gap="2"
             wrap="nowrap"
@@ -624,23 +645,19 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             px="3"
             align="center"
             className={styles.bottomControlsRow}
-            onPointerDown={handleCompactPointerDown}
-            onKeyDown={handleCompactKeyDown}
           >
             <span className={styles.bottomModelControl}>
-              <ChatSettingsDropdown
-                disabled={isBuddyChat || !isComposerExpanded}
-              />
+              <ChatSettingsDropdown disabled={isBuddyChat} />
             </span>
             <span className={styles.bottomModeControl}>
               <ModeSelect
                 selectedMode={threadMode ?? DEFAULT_MODE}
                 onModeChange={onSetMode}
-                disabled={isBuddyChat || isModeDisabled || !isComposerExpanded}
+                disabled={isBuddyChat || isModeDisabled}
               />
             </span>
             <span className={styles.bottomWorkspaceControl}>
-              <WorktreeControl disabled={isBuddyChat || !isComposerExpanded} />
+              <WorktreeControl disabled={isBuddyChat} />
             </span>
 
             <Flex
@@ -650,12 +667,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
               align="center"
               className={styles.bottomActionControls}
             >
-              <span className={styles.collapsedStatusControl}>
-                <StreamingTokenCounter />
-              </span>
-              <span className={styles.collapsedStatusControl}>
-                <UsageCounter />
-              </span>
               <span className={styles.hideActionFirst}>
                 <BrowserToggleButton chatId={chatId} />
               </span>

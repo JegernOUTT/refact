@@ -109,15 +109,53 @@
 }
 
 .chatFormCollapsed .expandedComposerContent {
-  grid-template-rows: 0fr;
-  opacity: 0;
+  grid-template-rows: 1fr;
+}
+
+.chatFormCollapsed .expandedComposerContentInner {
+  max-height: calc(var(--line-height-2, 20px) * 2 + var(--space-2));
+}
+
+.chatFormCollapsed .inputHeader {
+  display: none;
+}
+
+.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput) {
+  min-height: 0;
+  max-height: calc(var(--line-height-2, 20px) * 2 + var(--space-2));
+  padding: var(--space-1) var(--chat-input-padding);
+  overflow: hidden !important;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  resize: none;
+}
+
+.chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput::placeholder) {
+  opacity: 0.7;
+}
+
+.collapsedInputPreview {
+  display: none;
+}
+
+.chatFormCollapsed .collapsedInputPreview {
+  display: -webkit-box;
+  padding: 0 var(--chat-input-padding, var(--space-3)) var(--space-1);
+  color: var(--gray-11);
+  font-size: var(--font-size-2);
+  line-height: var(--line-height-2, 20px);
+  white-space: pre-wrap;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
   pointer-events: none;
 }
 
-.chatFormCollapsed .bottomControlsRow {
-  cursor: text;
-  padding-top: 1px;
-  padding-bottom: 1px;
+.chatFormCollapsed .expandedComposerContent:has(+ .collapsedInputPreview) {
+  display: none;
 }
 
 .chatFormCollapsed .bottomModelControl,
@@ -126,27 +164,24 @@
   opacity: 0.45;
 }
 
-.chatFormCollapsed .hideActionFirst,
-.chatFormCollapsed .hideActionSecond,
-.chatFormCollapsed .hideActionThird,
-.chatFormCollapsed .hideActionFourth,
-.chatFormCollapsed .hideActionFifth,
-.chatFormCollapsed .hideActionSixth,
-.chatFormCollapsed .hideActionSeventh {
-  display: none;
+.chatFormCollapsed .bottomModelControl,
+.chatFormCollapsed .bottomModeControl,
+.chatFormCollapsed .bottomWorkspaceControl {
+  pointer-events: none;
+}
+
+.chatFormCollapsed .bottomActionControls > span {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.chatFormCollapsed .bottomActionControls > :last-child {
+  pointer-events: auto;
 }
 
 .collapsedStatusControl {
   display: none;
   flex-shrink: 0;
-}
-
-.chatFormCollapsed .collapsedStatusControl {
-  display: inline-flex;
-}
-
-.chatFormExpanded .collapsedStatusControl {
-  display: none;
 }
 
 .inputHeader {
@@ -164,6 +199,17 @@
 .textareaWrapper :global(.rt-TextAreaInput) {
   min-height: 100px;
   padding: var(--chat-input-padding);
+}
+
+.chatFormExpanded .textareaWrapper :global(.rt-TextAreaInput) {
+  display: block;
+  max-height: none;
+  -webkit-line-clamp: initial;
+  line-clamp: initial;
+}
+
+.chatFormExpanded .collapsedInputPreview {
+  display: none;
 }
 
 .file_name_ellipsis_rtl {
@@ -242,14 +288,6 @@
 
 .bottomControlsRow {
   overflow: hidden;
-}
-
-.chatFormCollapsed .bottomControlsRow {
-  min-height: 28px;
-}
-
-.chatFormCollapsed .bottomControlsRow :global(button:disabled) {
-  cursor: text;
 }
 
 .bottomModelControl,
