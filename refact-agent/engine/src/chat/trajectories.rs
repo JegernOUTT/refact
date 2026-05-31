@@ -2240,7 +2240,6 @@ async fn apply_loaded_external_update_with_repair(
             }
         }
         if is_active_buddy_session(&session) {
-            session.external_reload_pending = None;
             return false;
         }
         if !can_apply_external_reload(&session) {
@@ -2269,9 +2268,14 @@ async fn apply_loaded_external_update_with_repair(
 }
 
 enum ExternalDeleteRevalidationOutcome {
-    Updated(LoadedTrajectory),
-    Deleted,
-    Noop,
+    Updated {
+        loaded: LoadedTrajectory,
+        applied_to_session: bool,
+    },
+    Deleted {
+        applied_to_session: bool,
+    },
+    NoopStalePending,
 }
 
 async fn apply_external_delete_with_revalidation(
@@ -2295,16 +2299,21 @@ async fn apply_external_delete_with_revalidation(
             let mut session = session_arc.lock().await;
             if let Some(expected) = expected_pending {
                 if session.external_reload_pending != Some(expected) {
-                    return ExternalDeleteRevalidationOutcome::Noop;
+                    return ExternalDeleteRevalidationOutcome::NoopStalePending;
                 }
             }
             if is_active_buddy_session(&session) {
-                session.external_reload_pending = None;
-                return ExternalDeleteRevalidationOutcome::Noop;
+                return ExternalDeleteRevalidationOutcome::Updated {
+                    loaded: outcome_loaded,
+                    applied_to_session: false,
+                };
             }
             if !can_apply_external_reload(&session) {
                 session.external_reload_pending = Some(ExternalReloadPending::Delete);
-                return ExternalDeleteRevalidationOutcome::Updated(outcome_loaded);
+                return ExternalDeleteRevalidationOutcome::Updated {
+                    loaded: outcome_loaded,
+                    applied_to_session: false,
+                };
             }
             info!(
                 "Reloading trajectory for {} after delete revalidation",
@@ -2329,26 +2338,34 @@ async fn apply_external_delete_with_revalidation(
                 }
             }
         }
-        return ExternalDeleteRevalidationOutcome::Updated(outcome_loaded);
+        return ExternalDeleteRevalidationOutcome::Updated {
+            loaded: outcome_loaded,
+            applied_to_session: true,
+        };
     }
 
     let mut session = session_arc.lock().await;
     if let Some(expected) = expected_pending {
         if session.external_reload_pending != Some(expected) {
-            return ExternalDeleteRevalidationOutcome::Noop;
+            return ExternalDeleteRevalidationOutcome::NoopStalePending;
         }
     }
     if is_active_buddy_session(&session) {
-        session.external_reload_pending = None;
-        return ExternalDeleteRevalidationOutcome::Noop;
+        return ExternalDeleteRevalidationOutcome::Deleted {
+            applied_to_session: false,
+        };
     }
     if !can_apply_external_reload(&session) {
         session.external_reload_pending = Some(ExternalReloadPending::Delete);
-        return ExternalDeleteRevalidationOutcome::Deleted;
+        return ExternalDeleteRevalidationOutcome::Deleted {
+            applied_to_session: false,
+        };
     }
     info!("Trajectory file removed externally for {}", chat_id);
     apply_external_delete_to_session(&mut session, chat_id);
-    ExternalDeleteRevalidationOutcome::Deleted
+    ExternalDeleteRevalidationOutcome::Deleted {
+        applied_to_session: true,
+    }
 }
 
 pub async fn check_external_reload_pending(
@@ -2356,9 +2373,8 @@ pub async fn check_external_reload_pending(
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
     let (chat_id, pending) = {
-        let mut session = session_arc.lock().await;
+        let session = session_arc.lock().await;
         if is_active_buddy_session(&session) {
-            session.external_reload_pending = None;
             return;
         }
         (
@@ -2424,12 +2440,24 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             if loaded.transition_identity_repaired {
                 persist_loaded_trajectory_repair(gcx.clone(), loaded.clone()).await;
             }
-            ExternalDeleteRevalidationOutcome::Updated(loaded)
+            ExternalDeleteRevalidationOutcome::Updated {
+                loaded,
+                applied_to_session: false,
+            }
         } else {
-            ExternalDeleteRevalidationOutcome::Deleted
+            ExternalDeleteRevalidationOutcome::Deleted {
+                applied_to_session: false,
+            }
         };
         let event = match outcome {
-            ExternalDeleteRevalidationOutcome::Updated(loaded) => {
+            ExternalDeleteRevalidationOutcome::Updated {
+                loaded,
+                applied_to_session,
+            } => {
+                debug!(
+                    "External delete revalidation for {} updated list; applied_to_session={}",
+                    chat_id, applied_to_session
+                );
                 let task_roots = get_all_task_roots(gcx.clone()).await;
                 let (session_state, session_error) =
                     get_session_state_for_chat(&sessions, chat_id).await;
@@ -2441,10 +2469,14 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
                     session_error,
                 )
             }
-            ExternalDeleteRevalidationOutcome::Deleted => {
+            ExternalDeleteRevalidationOutcome::Deleted { applied_to_session } => {
+                debug!(
+                    "External delete revalidation for {} deleted list item; applied_to_session={}",
+                    chat_id, applied_to_session
+                );
                 deleted_trajectory_event(chat_id.to_string())
             }
-            ExternalDeleteRevalidationOutcome::Noop => return,
+            ExternalDeleteRevalidationOutcome::NoopStalePending => return,
         };
         let _ = app.chat.trajectory_events_tx.send(event);
         return;
@@ -2550,9 +2582,8 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
     };
 
     {
-        let mut session = session_arc.lock().await;
+        let session = session_arc.lock().await;
         if is_active_buddy_session(&session) {
-            session.external_reload_pending = None;
             return;
         }
     }
@@ -7341,7 +7372,9 @@ mod tests {
         let session = session_arc.lock().await;
         assert!(matches!(
             outcome,
-            ExternalDeleteRevalidationOutcome::Deleted
+            ExternalDeleteRevalidationOutcome::Deleted {
+                applied_to_session: false
+            }
         ));
         assert_eq!(
             session.external_reload_pending,
@@ -7385,7 +7418,10 @@ mod tests {
         .await;
 
         let session = session_arc.lock().await;
-        assert!(matches!(outcome, ExternalDeleteRevalidationOutcome::Noop));
+        assert!(matches!(
+            outcome,
+            ExternalDeleteRevalidationOutcome::NoopStalePending
+        ));
         assert_eq!(
             session.external_reload_pending,
             Some(ExternalReloadPending::Update)
@@ -7572,13 +7608,28 @@ mod tests {
             .join("chats")
             .join("conversations")
             .join(format!("{chat_id}.json"));
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Removed Normal",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
         write_buddy_conversation_file(&buddy_path, chat_id, "Active Buddy File").await;
+        tokio::fs::remove_file(&normal_path).await.unwrap();
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
         let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
         let mut chat_rx = {
             let mut session = session_arc.lock().await;
             session.thread.title = "Active Buddy Session".to_string();
             session.thread.mode = "buddy".to_string();
             session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.external_reload_pending = Some(ExternalReloadPending::Update);
             session.messages.push(ChatMessage::new(
                 "user".to_string(),
                 "keep buddy message".to_string(),
@@ -7594,16 +7645,93 @@ mod tests {
             .insert(chat_id.to_string(), session_arc.clone());
 
         process_trajectory_change(gcx.clone(), chat_id, true).await;
-        check_external_reload_pending(gcx, session_arc.clone()).await;
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
+        assert_eq!(event.title, None);
+        assert!(tokio::fs::try_exists(&buddy_path).await.unwrap());
+        assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
 
         let session = session_arc.lock().await;
-        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::Update)
+        );
         assert_eq!(session.thread.title, "Active Buddy Session");
         assert!(session.thread.buddy_meta.is_some());
         assert_eq!(session.messages.len(), 1);
         assert_eq!(
             session.messages[0].content.content_text_only(),
             "keep buddy message"
+        );
+        drop(session);
+
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_remove_with_active_buddy_and_generic_fallback_emits_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "active-buddy-remove-generic-fallback";
+        let fallback_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-active-buddy-fallback")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_metadata(
+            &fallback_path,
+            chat_id,
+            "Active Buddy Fallback",
+            "2024-01-01T00:00:01Z",
+            "fallback survives active buddy",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Buddy Session".to_string();
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.external_reload_pending = Some(ExternalReloadPending::Delete);
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active buddy with fallback".to_string(),
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx.clone(), chat_id, true).await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Active Buddy Fallback"));
+        assert_eq!(event.task_id.as_deref(), Some("task-active-buddy-fallback"));
+        assert_eq!(event.task_role.as_deref(), Some("planner"));
+        assert_eq!(event.message_count, Some(1));
+
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.external_reload_pending,
+            Some(ExternalReloadPending::Delete)
+        );
+        assert_eq!(session.thread.title, "Active Buddy Session");
+        assert_eq!(session.thread.mode, "buddy");
+        assert!(session.thread.buddy_meta.is_some());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active buddy with fallback"
         );
         drop(session);
 
