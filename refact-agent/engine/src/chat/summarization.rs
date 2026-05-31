@@ -985,7 +985,10 @@ fn emit_compression_status(
     phase: CompressionPhase,
     reason: Option<CompressionReason>,
 ) {
-    let is_compressing = phase == CompressionPhase::Running;
+    let is_compressing = matches!(
+        phase,
+        CompressionPhase::Checking | CompressionPhase::Running
+    );
     session.is_compressing = is_compressing;
     session.runtime.is_compressing = is_compressing;
     session.compression_phase = Some(phase);
@@ -2129,6 +2132,36 @@ mod tests {
     }
 
     #[test]
+    fn emit_compression_checking_sets_active_session_runtime_and_event() {
+        let mut session = ChatSession::new("compression-checking".to_string());
+        let mut rx = session.subscribe();
+
+        emit_compression_status(&mut session, CompressionPhase::Checking, None);
+
+        assert!(session.is_compressing);
+        assert!(session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Checking));
+        assert_eq!(session.runtime.compression_phase, Some(CompressionPhase::Checking));
+        assert_eq!(session.compression_reason, None);
+        assert_eq!(session.runtime.compression_reason, None);
+        let json = rx.try_recv().unwrap();
+        let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::RuntimeUpdated {
+                is_compressing,
+                compression_phase,
+                compression_reason,
+                ..
+            } => {
+                assert!(is_compressing);
+                assert_eq!(compression_phase, Some(CompressionPhase::Checking));
+                assert_eq!(compression_reason, None);
+            }
+            other => panic!("expected RuntimeUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn emit_compression_runtime_sets_session_and_runtime_flags() {
         let mut session = ChatSession::new("compression-runtime".to_string());
         let mut rx = session.subscribe();
@@ -2156,6 +2189,29 @@ mod tests {
         }
     }
 
+    fn assert_emitted_runtime_status(
+        rx: &mut tokio::sync::broadcast::Receiver<Arc<String>>,
+        expected_is_compressing: bool,
+        expected_phase: CompressionPhase,
+        expected_reason: Option<CompressionReason>,
+    ) {
+        let json = rx.try_recv().unwrap();
+        let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::RuntimeUpdated {
+                is_compressing,
+                compression_phase,
+                compression_reason,
+                ..
+            } => {
+                assert_eq!(is_compressing, expected_is_compressing);
+                assert_eq!(compression_phase, Some(expected_phase));
+                assert_eq!(compression_reason, expected_reason);
+            }
+            other => panic!("expected RuntimeUpdated, got {other:?}"),
+        }
+    }
+
     #[test]
     fn emit_compression_skipped_records_reason() {
         let mut session = ChatSession::new("compression-skipped".to_string());
@@ -2170,20 +2226,43 @@ mod tests {
             session.compression_reason,
             Some(CompressionReason::PressureLow)
         );
-        let json = rx.try_recv().unwrap();
-        let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
-        match envelope.event {
-            ChatEvent::RuntimeUpdated {
-                is_compressing,
-                compression_phase,
-                compression_reason,
-                ..
-            } => {
-                assert!(!is_compressing);
-                assert_eq!(compression_phase, Some(CompressionPhase::Skipped));
-                assert_eq!(compression_reason, Some(CompressionReason::PressureLow));
-            }
-            other => panic!("expected RuntimeUpdated, got {other:?}"),
+        assert_emitted_runtime_status(
+            &mut rx,
+            false,
+            CompressionPhase::Skipped,
+            Some(CompressionReason::PressureLow),
+        );
+    }
+
+    #[test]
+    fn emit_compression_terminal_phases_are_inactive() {
+        let cases = [
+            (CompressionPhase::Applied, None),
+            (
+                CompressionPhase::Skipped,
+                Some(CompressionReason::NoEligibleSegment),
+            ),
+            (
+                CompressionPhase::Failed,
+                Some(CompressionReason::TransientFailure),
+            ),
+        ];
+
+        for (phase, reason) in cases {
+            let mut session = ChatSession::new(format!("compression-terminal-{phase:?}"));
+            session.is_compressing = true;
+            session.runtime.is_compressing = true;
+            let mut rx = session.subscribe();
+
+            emit_compression_status(&mut session, phase, reason);
+
+            assert!(!session.is_compressing);
+            assert!(!session.runtime.is_compressing);
+            assert_eq!(session.compression_phase, Some(phase));
+            assert_eq!(session.runtime.compression_phase, Some(phase));
+            assert_eq!(session.compression_reason, reason);
+            assert_eq!(session.runtime.compression_reason, reason);
+            assert_emitted_runtime_status(&mut rx, false, phase, reason);
         }
     }
 
