@@ -941,18 +941,18 @@ describe("BuddyHome_renders_all_sections", () => {
       } satisfies BuddyRuntimeEvent;
 
       server.use(
-        http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        http.get("*/v1/buddy/opportunities", () =>
           HttpResponse.json({ opportunities: [] }),
         ),
-        http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        http.get("*/v1/buddy/conversations", () =>
           HttpResponse.json([]),
         ),
-        http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+        http.get("*/v1/stats/llm/summary", () =>
           HttpResponse.json({
             totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
           }),
         ),
-        http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        http.get("*/v1/setup/status", () =>
           HttpResponse.json({ configured: true, reasons: [], detail: {} }),
         ),
       );
@@ -995,18 +995,18 @@ describe("BuddyHome_renders_all_sections", () => {
       } satisfies BuddyRuntimeEvent;
 
       server.use(
-        http.get("http://127.0.0.1:8001/v1/buddy/opportunities", () =>
+        http.get("*/v1/buddy/opportunities", () =>
           HttpResponse.json({ opportunities: [] }),
         ),
-        http.get("http://127.0.0.1:8001/v1/buddy/conversations", () =>
+        http.get("*/v1/buddy/conversations", () =>
           HttpResponse.json([]),
         ),
-        http.get("http://127.0.0.1:8001/v1/stats/llm/summary", () =>
+        http.get("*/v1/stats/llm/summary", () =>
           HttpResponse.json({
             totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
           }),
         ),
-        http.get("http://127.0.0.1:8001/v1/setup/status", () =>
+        http.get("*/v1/setup/status", () =>
           HttpResponse.json({ configured: true, reasons: [], detail: {} }),
         ),
       );
