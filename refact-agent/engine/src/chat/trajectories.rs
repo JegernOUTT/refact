@@ -171,6 +171,26 @@ pub async fn get_session_state_for_chat(
     }
 }
 
+async fn get_generic_session_state_for_chat(
+    sessions: &SessionsMap,
+    chat_id: &str,
+) -> (String, Option<String>) {
+    let session_arc = sessions.read().await.get(chat_id).cloned();
+    match session_arc {
+        Some(arc) => {
+            let session = arc.lock().await;
+            if is_active_buddy_session(&session) {
+                return (SessionState::Idle.to_string(), None);
+            }
+            (
+                session.runtime.state.to_string(),
+                session.runtime.error.clone(),
+            )
+        }
+        None => (SessionState::Idle.to_string(), None),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrajectoryMeta {
     pub id: String,
@@ -1975,7 +1995,7 @@ pub async fn save_trajectory_snapshot(
             .unwrap_or_else(|| snapshot.chat_id.clone());
         let sessions = app.chat.sessions.clone();
         let (session_state, session_error) =
-            get_session_state_for_chat(&sessions, &snapshot.chat_id).await;
+            get_generic_session_state_for_chat(&sessions, &snapshot.chat_id).await;
         let (total_lines_added, total_lines_removed) =
             calculate_line_changes_from_chat_messages(&snapshot.messages);
         let (tasks_total, tasks_done, tasks_failed) =
@@ -2460,7 +2480,7 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
                 );
                 let task_roots = get_all_task_roots(gcx.clone()).await;
                 let (session_state, session_error) =
-                    get_session_state_for_chat(&sessions, chat_id).await;
+                    get_generic_session_state_for_chat(&sessions, chat_id).await;
                 let is_title_generated = loaded.thread.is_title_generated;
                 updated_trajectory_event_from_meta(
                     loaded_trajectory_to_meta(&loaded, &task_roots),
@@ -2534,7 +2554,8 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
             None, None,
         )
     };
-    let (session_state, session_error) = get_session_state_for_chat(&sessions, chat_id).await;
+    let (session_state, session_error) =
+        get_generic_session_state_for_chat(&sessions, chat_id).await;
     let _ = app.chat.trajectory_events_tx.send(TrajectoryEvent {
         event_type: "updated".to_string(),
         id: chat_id.to_string(),
@@ -3187,7 +3208,15 @@ fn spawn_title_generation_task(
             return;
         }
         info!("Updated trajectory {} with generated title: {}", id, title);
-        let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
+        if data
+            .extra
+            .get("buddy_meta")
+            .is_some_and(|value| !value.is_null())
+        {
+            return;
+        }
+        let (session_state, session_error) =
+            get_generic_session_state_for_chat(&sessions, &id).await;
         let worktree = if let Some(candidate) = trajectory_worktree_from_extra(&data.extra) {
             validate_loaded_worktree_strict(app.clone(), &id, candidate).await
         } else {
@@ -4255,6 +4284,10 @@ async fn enrich_with_session_state(app: AppState, trajectories: &mut Vec<Traject
 
     for (idx, session_arc) in session_arcs {
         let session = session_arc.lock().await;
+        if is_active_buddy_session(&session) {
+            trajectories[idx].session_state = Some(SessionState::Idle.to_string());
+            continue;
+        }
         trajectories[idx].session_state = Some(session.runtime.state.to_string());
         if trajectories[idx].worktree.is_none() {
             trajectories[idx].worktree = session.thread.worktree.clone();
@@ -4302,6 +4335,10 @@ pub async fn handle_v1_trajectories_save(
             "ID mismatch".to_string(),
         ));
     }
+    let emits_generic_event = data
+        .extra
+        .get("buddy_meta")
+        .map_or(true, |value| value.is_null());
     let file_path = resolve_trajectory_data_save_path(gcx.clone(), &id, &data)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -4353,7 +4390,7 @@ pub async fn handle_v1_trajectories_save(
         .map(|s| s.to_string())
         .unwrap_or_else(|| id.clone());
     let sessions = app.chat.sessions.clone();
-    let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
+    let (session_state, session_error) = get_generic_session_state_for_chat(&sessions, &id).await;
     let (total_lines_added, total_lines_removed) =
         calculate_line_changes_from_messages(&data.messages);
     let (tasks_total, tasks_done, tasks_failed) =
@@ -4365,42 +4402,44 @@ pub async fn handle_v1_trajectories_save(
         .and_then(|value| serde_json::from_value::<super::types::TaskMeta>(value.clone()).ok())
         .map(|meta| task_context_from_task_meta(Some(&meta)))
         .unwrap_or((None, None, None, None));
-    let event = TrajectoryEvent {
-        event_type: if is_new {
-            "created".to_string()
-        } else {
-            "updated".to_string()
-        },
-        id: id.clone(),
-        updated_at: Some(data.updated_at.clone()),
-        title: Some(trajectory_meta_title(&data.title)),
-        is_title_generated: Some(is_title_generated),
-        session_state: Some(session_state),
-        error: session_error,
-        message_count: Some(data.messages.len()),
-        parent_id,
-        link_type,
-        root_chat_id: Some(effective_root),
-        task_id,
-        task_role,
-        agent_id,
-        card_id,
-        model: Some(data.model.clone()),
-        mode: Some(data.mode.clone()),
-        worktree,
-        total_lines_added: Some(total_lines_added),
-        total_lines_removed: Some(total_lines_removed),
-        tasks_total: Some(tasks_total),
-        tasks_done: Some(tasks_done),
-        tasks_failed: Some(tasks_failed),
-        total_prompt_tokens: Some(token_totals.prompt_tokens),
-        total_completion_tokens: Some(token_totals.completion_tokens),
-        total_tokens: Some(token_totals.total_tokens),
-        total_cache_read_tokens: Some(token_totals.cache_read_tokens),
-        total_cache_creation_tokens: Some(token_totals.cache_creation_tokens),
-        total_cost_usd: token_totals.cost_usd,
-    };
-    let _ = app.chat.trajectory_events_tx.send(event);
+    if emits_generic_event {
+        let event = TrajectoryEvent {
+            event_type: if is_new {
+                "created".to_string()
+            } else {
+                "updated".to_string()
+            },
+            id: id.clone(),
+            updated_at: Some(data.updated_at.clone()),
+            title: Some(trajectory_meta_title(&data.title)),
+            is_title_generated: Some(is_title_generated),
+            session_state: Some(session_state),
+            error: session_error,
+            message_count: Some(data.messages.len()),
+            parent_id,
+            link_type,
+            root_chat_id: Some(effective_root),
+            task_id,
+            task_role,
+            agent_id,
+            card_id,
+            model: Some(data.model.clone()),
+            mode: Some(data.mode.clone()),
+            worktree,
+            total_lines_added: Some(total_lines_added),
+            total_lines_removed: Some(total_lines_removed),
+            tasks_total: Some(tasks_total),
+            tasks_done: Some(tasks_done),
+            tasks_failed: Some(tasks_failed),
+            total_prompt_tokens: Some(token_totals.prompt_tokens),
+            total_completion_tokens: Some(token_totals.completion_tokens),
+            total_tokens: Some(token_totals.total_tokens),
+            total_cache_read_tokens: Some(token_totals.cache_read_tokens),
+            total_cache_creation_tokens: Some(token_totals.cache_creation_tokens),
+            total_cost_usd: token_totals.cost_usd,
+        };
+        let _ = app.chat.trajectory_events_tx.send(event);
+    }
     if should_generate_title {
         let trajectories_dir = file_path.parent().map(Path::to_path_buf).ok_or_else(|| {
             ScratchError::new(
@@ -4439,7 +4478,7 @@ pub async fn handle_v1_trajectories_delete(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let sessions = app.chat.sessions.clone();
-    let (session_state, session_error) = get_session_state_for_chat(&sessions, &id).await;
+    let (session_state, session_error) = get_generic_session_state_for_chat(&sessions, &id).await;
     let fallback = match find_trajectory_file(gcx.clone(), &id).await {
         Some(candidate) => load_trajectory_candidate(gcx.clone(), &id, candidate).await,
         None => None,
@@ -4754,8 +4793,12 @@ mod tests {
     }
 
     fn trajectory_worktree_sample() -> WorktreeMeta {
+        trajectory_worktree_sample_with_id("wt-1")
+    }
+
+    fn trajectory_worktree_sample_with_id(id: &str) -> WorktreeMeta {
         WorktreeMeta {
-            id: "wt-1".to_string(),
+            id: id.to_string(),
             kind: "task_agent".to_string(),
             root: std::path::PathBuf::from("/tmp/refact-wt"),
             source_workspace_root: std::path::PathBuf::from("/tmp/refact-src"),
@@ -5633,6 +5676,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_list_does_not_use_active_buddy_state_error_or_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "list-active-buddy-clean";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Generic List Item",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("buddy-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("buddy list error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let item = listed.iter().find(|item| item.id == chat_id).unwrap();
+
+        assert_eq!(item.session_state.as_deref(), Some("idle"));
+        assert!(item.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn generic_list_keeps_normal_active_session_state_and_worktree_enrichment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "list-normal-active-enriched";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Normal List Item",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        let worktree = trajectory_worktree_sample_with_id("normal-wt");
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.worktree = Some(worktree.clone());
+            session.runtime.state = SessionState::Generating;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let item = listed.iter().find(|item| item.id == chat_id).unwrap();
+
+        assert_eq!(item.session_state.as_deref(), Some("generating"));
+        assert_eq!(
+            item.worktree.as_ref().map(|meta| meta.id.as_str()),
+            Some("normal-wt")
+        );
+    }
+
+    #[tokio::test]
     async fn http_delete_higher_priority_trajectory_emits_updated_from_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let (_gcx, app) = make_app_with_workspace(dir.path()).await;
@@ -5698,6 +5820,76 @@ mod tests {
         assert_eq!(event.mode.as_deref(), Some("task_planner"));
         assert_eq!(event.session_state.as_deref(), Some("generating"));
         assert_eq!(event.error.as_deref(), Some("busy fallback state"));
+        assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
+        assert!(tokio::fs::try_exists(&task_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn http_delete_fallback_with_active_buddy_uses_generic_idle_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "http-delete-fallback-active-buddy-clean";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-buddy-delete-fallback")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Deleted Higher Priority",
+            "2024-01-01T00:00:02Z",
+        )
+        .await;
+        write_trajectory_file_with_metadata(
+            &task_path,
+            chat_id,
+            "Fallback With Buddy Collision",
+            "2024-01-01T00:00:01Z",
+            "fallback message",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("buddy-delete-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("buddy delete fallback error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        handle_v1_trajectories_delete(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(
+            event.title.as_deref(),
+            Some("Fallback With Buddy Collision")
+        );
+        assert_eq!(event.task_id.as_deref(), Some("task-buddy-delete-fallback"));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert_eq!(event.error, None);
+        assert_ne!(
+            event.worktree.as_ref().map(|worktree| worktree.id.as_str()),
+            Some("buddy-delete-wt")
+        );
         assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
         assert!(tokio::fs::try_exists(&task_path).await.unwrap());
     }
@@ -6088,6 +6280,71 @@ mod tests {
             .join("trajectories")
             .join(format!("{chat_id}.json"));
         assert!(!tokio::fs::try_exists(project_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn http_generic_save_with_active_buddy_uses_generic_idle_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "http-generic-save-active-buddy-clean";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("buddy-save-wt"));
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("buddy save error".to_string());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+        let mut payload =
+            sample_trajectory(chat_id, "Generic Save Collision", "2024-01-01T00:00:01Z");
+        payload["messages"] = json!([{ "role": "user", "content": "generic save" }]);
+
+        handle_v1_trajectories_save(
+            State(app),
+            AxumPath(chat_id.to_string()),
+            hyper::body::Bytes::from(serde_json::to_vec(&payload).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "created");
+        assert_eq!(event.title.as_deref(), Some("Generic Save Collision"));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert_eq!(event.error, None);
+        assert!(event.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_buddy_save_does_not_emit_generic_trajectory_sse() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "http-buddy-save-no-generic-sse";
+        let mut payload = sample_trajectory(chat_id, "Buddy Saved", "2024-01-01T00:00:01Z");
+        payload["mode"] = json!("buddy");
+        payload["buddy_meta"] = json!({
+            "is_buddy_chat": true,
+            "buddy_chat_kind": "investigation",
+            "workflow_id": null
+        });
+
+        handle_v1_trajectories_save(
+            State(app),
+            AxumPath(chat_id.to_string()),
+            hyper::body::Bytes::from(serde_json::to_vec(&payload).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert_no_trajectory_event_for(&mut rx, std::time::Duration::from_millis(100)).await;
     }
 
     #[tokio::test]
@@ -7696,12 +7953,14 @@ mod tests {
             session.thread.title = "Active Buddy Session".to_string();
             session.thread.mode = "buddy".to_string();
             session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.thread.worktree = Some(trajectory_worktree_sample_with_id("buddy-remove-wt"));
             session.external_reload_pending = Some(ExternalReloadPending::Delete);
+            session.runtime.state = SessionState::Generating;
+            session.runtime.error = Some("buddy remove fallback error".to_string());
             session.messages.push(ChatMessage::new(
                 "user".to_string(),
                 "keep active buddy with fallback".to_string(),
             ));
-            session.runtime.state = SessionState::Idle;
             session.trajectory_dirty = false;
             session.subscribe()
         };
@@ -7719,6 +7978,12 @@ mod tests {
         assert_eq!(event.task_id.as_deref(), Some("task-active-buddy-fallback"));
         assert_eq!(event.task_role.as_deref(), Some("planner"));
         assert_eq!(event.message_count, Some(1));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert_eq!(event.error, None);
+        assert_ne!(
+            event.worktree.as_ref().map(|worktree| worktree.id.as_str()),
+            Some("buddy-remove-wt")
+        );
 
         let session = session_arc.lock().await;
         assert_eq!(
