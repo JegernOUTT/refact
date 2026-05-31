@@ -59,6 +59,23 @@ fn is_background_agent_terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
 }
 
+fn is_terminal_runtime_state(state: SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Idle
+            | SessionState::Completed
+            | SessionState::Error
+            | SessionState::WaitingUserInput
+    )
+}
+
+fn is_active_compression_phase(phase: Option<CompressionPhase>) -> bool {
+    matches!(
+        phase,
+        Some(CompressionPhase::Checking | CompressionPhase::Running)
+    )
+}
+
 fn should_replace_background_agent(
     existing: Option<&BackgroundAgentSummary>,
     incoming: &BackgroundAgentSummary,
@@ -772,7 +789,12 @@ impl ChatSession {
     pub fn set_runtime_state(&mut self, state: SessionState, error: Option<String>) {
         let old_state = self.runtime.state;
         let old_error = self.runtime.error.clone();
-        if old_state == state && old_error == error {
+        let should_clear_terminal_compression = is_terminal_runtime_state(state)
+            && (self.is_compressing
+                || self.runtime.is_compressing
+                || is_active_compression_phase(self.compression_phase)
+                || is_active_compression_phase(self.runtime.compression_phase));
+        if old_state == state && old_error == error && !should_clear_terminal_compression {
             return;
         }
 
@@ -794,17 +816,17 @@ impl ChatSession {
         self.runtime.error = error.clone();
         self.runtime.queue_size = self.command_queue.len();
         self.runtime.queued_items = self.build_queued_items();
-        if matches!(
-            state,
-            SessionState::Idle
-                | SessionState::Completed
-                | SessionState::Error
-                | SessionState::WaitingUserInput
-        ) && self.is_compressing
-        {
+        if should_clear_terminal_compression {
             self.is_compressing = false;
             self.runtime.is_compressing = false;
+            if is_active_compression_phase(self.compression_phase) {
+                self.compression_phase = None;
+                self.compression_reason = None;
+            }
         }
+        self.runtime.is_compressing = self.is_compressing;
+        self.runtime.compression_phase = self.compression_phase;
+        self.runtime.compression_reason = self.compression_reason;
         self.touch();
 
         if state != SessionState::Paused && (was_paused || had_pause_reasons) {
@@ -2636,6 +2658,114 @@ mod tests {
 
         assert_eq!(session.last_activity, before);
         assert_eq!(session.event_seq, 0);
+    }
+
+    #[test]
+    fn set_runtime_state_idle_clears_active_compression_same_state() {
+        let mut session = make_session();
+        session.is_compressing = false;
+        session.runtime.is_compressing = false;
+        session.compression_phase = Some(CompressionPhase::Checking);
+        session.runtime.compression_phase = Some(CompressionPhase::Checking);
+        let mut rx = session.subscribe();
+        let before = session.last_activity;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        session.set_runtime_state(SessionState::Idle, None);
+
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, None);
+        assert_eq!(session.runtime.compression_phase, None);
+        assert!(session.last_activity > before);
+
+        let json = rx.try_recv().unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::RuntimeUpdated {
+                state,
+                is_compressing,
+                compression_phase,
+                ..
+            } => {
+                assert_eq!(state, SessionState::Idle);
+                assert!(!is_compressing);
+                assert_eq!(compression_phase, None);
+            }
+            other => panic!("expected RuntimeUpdated, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn set_runtime_state_terminal_clears_active_running_compression() {
+        let mut session = make_session();
+        session.runtime.state = SessionState::Generating;
+        session.is_compressing = true;
+        session.runtime.is_compressing = true;
+        session.compression_phase = Some(CompressionPhase::Running);
+        session.runtime.compression_phase = Some(CompressionPhase::Running);
+        let mut rx = session.subscribe();
+
+        session.set_runtime_state(SessionState::Completed, None);
+
+        assert_eq!(session.runtime.state, SessionState::Completed);
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, None);
+        assert_eq!(session.runtime.compression_phase, None);
+
+        let json = rx.try_recv().unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::RuntimeUpdated {
+                state,
+                is_compressing,
+                compression_phase,
+                ..
+            } => {
+                assert_eq!(state, SessionState::Completed);
+                assert!(!is_compressing);
+                assert_ne!(compression_phase, Some(CompressionPhase::Running));
+                assert_ne!(compression_phase, Some(CompressionPhase::Checking));
+            }
+            other => panic!("expected RuntimeUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_runtime_state_terminal_preserves_terminal_compression_phase() {
+        let mut session = make_session();
+        session.runtime.state = SessionState::Generating;
+        session.compression_phase = Some(CompressionPhase::Applied);
+        session.compression_reason = None;
+        session.runtime.compression_phase = Some(CompressionPhase::Applied);
+        session.runtime.compression_reason = None;
+        let mut rx = session.subscribe();
+
+        session.set_runtime_state(SessionState::Idle, None);
+
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+        assert_eq!(
+            session.runtime.compression_phase,
+            Some(CompressionPhase::Applied)
+        );
+
+        let json = rx.try_recv().unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::RuntimeUpdated {
+                is_compressing,
+                compression_phase,
+                ..
+            } => {
+                assert!(!is_compressing);
+                assert_eq!(compression_phase, Some(CompressionPhase::Applied));
+            }
+            other => panic!("expected RuntimeUpdated, got {other:?}"),
+        }
     }
 
     #[test]
