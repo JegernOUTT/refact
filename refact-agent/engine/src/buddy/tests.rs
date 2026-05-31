@@ -9449,6 +9449,86 @@ fn chat_reaction_limiter_rolls_back_when_runtime_event_not_queued() {
 }
 
 #[tokio::test]
+async fn maybe_enqueue_chat_activity_reaction_records_not_queued_and_rolls_back_when_runtime_queue_drops_event(
+) {
+    use super::chat_reactions::{ChatActivityCompletion, maybe_enqueue_chat_activity_reaction};
+    use crate::chat::types::ThreadParams;
+
+    let app = make_gcx_with_buddy().await;
+    let chat_id = "not-queued-activity-rollback-chat".to_string();
+    let mut rx = {
+        let mut lock = app.buddy.buddy.lock().await;
+        let svc = lock.as_mut().unwrap();
+        svc.force_next_runtime_enqueue_drop = true;
+        svc.events_tx.subscribe()
+    };
+
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+        },
+    )
+    .await;
+
+    let first_debug = wait_for_chat_reaction_debug_attempt(&app, "not_queued").await;
+    let first_attempt = first_debug
+        .recent_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.result == "not_queued")
+        .expect("not_queued activity attempt must be recorded");
+    assert_eq!(first_attempt.chat_id, chat_id);
+    assert_eq!(first_attempt.signal_type.as_deref(), Some("speech_chat_reaction"));
+    assert_eq!(first_attempt.queued, Some(false));
+    assert!(first_attempt.event_id.is_none());
+    assert_eq!(first_debug.counts_by_result.get("not_queued"), Some(&1));
+    assert!(first_debug.counts_by_result.get("emitted").is_none());
+    assert!(!first_debug
+        .recent_attempts
+        .iter()
+        .any(|attempt| attempt.result == "emitted"));
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, super::events::BuddyEvent::RuntimeEvent { .. }),
+            "dropped activity reaction must not broadcast a runtime event"
+        );
+    }
+    {
+        let lock = app.buddy.buddy.lock().await;
+        let svc = lock.as_ref().unwrap();
+        assert!(svc.runtime_queue.items.is_empty());
+        assert!(svc.runtime_queue.now_playing.is_none());
+    }
+
+    maybe_enqueue_chat_activity_reaction(
+        app.clone(),
+        ChatActivityCompletion {
+            chat_id: chat_id.clone(),
+            thread: ThreadParams::default(),
+        },
+    )
+    .await;
+
+    let ev = wait_for_runtime_event(&app, "speech_chat_reaction").await;
+    assert_eq!(ev.chat_id.as_deref(), Some(chat_id.as_str()));
+    let second_debug = wait_for_chat_reaction_debug_attempt(&app, "emitted").await;
+    assert_eq!(second_debug.counts_by_result.get("not_queued"), Some(&1));
+    assert_eq!(second_debug.counts_by_result.get("emitted"), Some(&1));
+    let emitted = second_debug
+        .recent_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.result == "emitted")
+        .expect("activity retry must emit after rollback");
+    assert_eq!(emitted.chat_id, chat_id);
+    assert_eq!(emitted.signal_type.as_deref(), Some("speech_chat_reaction"));
+    assert_eq!(emitted.event_id.as_deref(), Some(ev.id.as_str()));
+    assert_eq!(emitted.queued, Some(true));
+}
+
+#[tokio::test]
 async fn chat_activity_reaction_emits_after_normal_chat_activity_or_completion() {
     use super::chat_reactions::{
         ChatActivityCompletion, AMBIENT_LINES, maybe_enqueue_chat_activity_reaction,
