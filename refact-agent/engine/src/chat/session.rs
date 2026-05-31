@@ -188,6 +188,8 @@ impl ChatSession {
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
+            compression_attempt_generation: 0,
+            active_compression_attempt: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -254,6 +256,8 @@ impl ChatSession {
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
+            compression_attempt_generation: 0,
+            active_compression_attempt: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -792,6 +796,7 @@ impl ChatSession {
         let should_clear_terminal_compression = is_terminal_runtime_state(state)
             && (self.is_compressing
                 || self.runtime.is_compressing
+                || self.active_compression_attempt.is_some()
                 || is_active_compression_phase(self.compression_phase)
                 || is_active_compression_phase(self.runtime.compression_phase));
         if old_state == state && old_error == error && !should_clear_terminal_compression {
@@ -819,6 +824,7 @@ impl ChatSession {
         if should_clear_terminal_compression {
             self.is_compressing = false;
             self.runtime.is_compressing = false;
+            self.active_compression_attempt = None;
             if is_active_compression_phase(self.compression_phase) {
                 self.compression_phase = None;
                 self.compression_reason = None;
@@ -2667,6 +2673,8 @@ mod tests {
         session.runtime.is_compressing = false;
         session.compression_phase = Some(CompressionPhase::Checking);
         session.runtime.compression_phase = Some(CompressionPhase::Checking);
+        session.compression_attempt_generation = 1;
+        session.active_compression_attempt = Some(1);
         let mut rx = session.subscribe();
         let before = session.last_activity;
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -2677,6 +2685,7 @@ mod tests {
         assert!(!session.runtime.is_compressing);
         assert_eq!(session.compression_phase, None);
         assert_eq!(session.runtime.compression_phase, None);
+        assert_eq!(session.active_compression_attempt, None);
         assert!(session.last_activity > before);
 
         let json = rx.try_recv().unwrap();
@@ -2705,6 +2714,8 @@ mod tests {
         session.runtime.is_compressing = true;
         session.compression_phase = Some(CompressionPhase::Running);
         session.runtime.compression_phase = Some(CompressionPhase::Running);
+        session.compression_attempt_generation = 7;
+        session.active_compression_attempt = Some(7);
         let mut rx = session.subscribe();
 
         session.set_runtime_state(SessionState::Completed, None);
@@ -2714,6 +2725,7 @@ mod tests {
         assert!(!session.runtime.is_compressing);
         assert_eq!(session.compression_phase, None);
         assert_eq!(session.runtime.compression_phase, None);
+        assert_eq!(session.active_compression_attempt, None);
 
         let json = rx.try_recv().unwrap();
         let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
@@ -2763,6 +2775,32 @@ mod tests {
             } => {
                 assert!(!is_compressing);
                 assert_eq!(compression_phase, Some(CompressionPhase::Applied));
+            }
+            other => panic!("expected RuntimeUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_runtime_state_terminal_clears_active_compression_attempt_token() {
+        let mut session = make_session();
+        session.compression_attempt_generation = 3;
+        session.active_compression_attempt = Some(3);
+        let mut rx = session.subscribe();
+
+        session.set_runtime_state(SessionState::Idle, None);
+
+        assert_eq!(session.compression_attempt_generation, 3);
+        assert_eq!(session.active_compression_attempt, None);
+        let json = rx.try_recv().unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::RuntimeUpdated {
+                state,
+                is_compressing,
+                ..
+            } => {
+                assert_eq!(state, SessionState::Idle);
+                assert!(!is_compressing);
             }
             other => panic!("expected RuntimeUpdated, got {other:?}"),
         }

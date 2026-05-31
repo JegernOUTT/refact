@@ -90,6 +90,8 @@ pub struct ChatSession {
     pub is_compressing: bool,
     pub compression_phase: Option<CompressionPhase>,
     pub compression_reason: Option<CompressionReason>,
+    pub(crate) compression_attempt_generation: u64,
+    pub(crate) active_compression_attempt: Option<u64>,
     pub draft_message: Option<ChatMessage>,
     pub draft_usage: Option<ChatUsage>,
     pub command_queue: VecDeque<CommandRequest>,

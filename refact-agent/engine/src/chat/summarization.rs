@@ -995,6 +995,9 @@ fn emit_compression_status(
     session.compression_reason = reason;
     session.runtime.compression_phase = Some(phase);
     session.runtime.compression_reason = reason;
+    if !is_compressing {
+        session.active_compression_attempt = None;
+    }
     let state = session.runtime.state;
     let error = session.runtime.error.clone();
     session.emit(ChatEvent::RuntimeUpdated {
@@ -1004,6 +1007,41 @@ fn emit_compression_status(
         compression_phase: Some(phase),
         compression_reason: reason,
     });
+}
+
+fn reserve_compression_attempt(session: &mut ChatSession) -> u64 {
+    let mut next = session.compression_attempt_generation.wrapping_add(1);
+    if next == 0 {
+        next = 1;
+    }
+    session.compression_attempt_generation = next;
+    session.active_compression_attempt = Some(next);
+    emit_compression_status(session, CompressionPhase::Checking, None);
+    next
+}
+
+fn owns_compression_attempt(session: &ChatSession, attempt: u64) -> bool {
+    session.active_compression_attempt == Some(attempt)
+}
+
+fn emit_compression_running_if_owned(session: &mut ChatSession, attempt: u64) -> bool {
+    if !owns_compression_attempt(session, attempt) {
+        return false;
+    }
+    emit_compression_running(session);
+    true
+}
+
+fn emit_compression_skipped_if_owned(
+    session: &mut ChatSession,
+    attempt: u64,
+    reason: CompressionReason,
+) -> bool {
+    if !owns_compression_attempt(session, attempt) {
+        return false;
+    }
+    emit_compression_skipped(session, reason);
+    true
 }
 
 fn emit_compression_running(session: &mut ChatSession) {
@@ -1025,6 +1063,7 @@ fn emit_compression_failed(session: &mut ChatSession, reason: CompressionReason)
 fn compression_attempt_active(session: &ChatSession) -> bool {
     session.is_compressing
         || session.runtime.is_compressing
+        || session.active_compression_attempt.is_some()
         || matches!(
             session.compression_phase,
             Some(CompressionPhase::Checking | CompressionPhase::Running)
@@ -1081,11 +1120,35 @@ fn append_compression_failure_event(session: &mut ChatSession, failure: &Segment
     session.touch();
 }
 
+fn finish_compression_failure_if_owned(
+    session: &mut ChatSession,
+    attempt: u64,
+    failure: &SegmentSummaryFailure,
+) -> bool {
+    if !owns_compression_attempt(session, attempt) {
+        return false;
+    }
+    if failure.is_structural() {
+        session.tier1_compaction_disabled = true;
+    } else {
+        session.tier1_compact_attempts += 1;
+    }
+    append_compression_failure_event(session, failure);
+    emit_compression_failed(session, compression_failure_reason(failure));
+    true
+}
+
 fn apply_resolved_segment_summary(
     session: &mut ChatSession,
     source_hash: &str,
     summary: ChatMessage,
+    attempt: Option<u64>,
 ) -> bool {
+    if let Some(attempt) = attempt {
+        if !owns_compression_attempt(session, attempt) {
+            return false;
+        }
+    }
     if matches!(
         session.runtime.state,
         SessionState::Generating | SessionState::ExecutingTools
@@ -1127,7 +1190,7 @@ pub async fn apply_segment_summarization(
     thread: &crate::chat::types::ThreadParams,
     force: bool,
 ) -> bool {
-    let raw_messages = {
+    let (attempt, raw_messages) = {
         let mut session = session_arc.lock().await;
         if compression_attempt_active(&session) {
             return false;
@@ -1136,7 +1199,7 @@ pub async fn apply_segment_summarization(
             emit_compression_skipped(&mut session, CompressionReason::AutoCompactDisabled);
             return false;
         }
-        emit_compression_status(&mut session, CompressionPhase::Checking, None);
+        let attempt = reserve_compression_attempt(&mut session);
         if session.tier1_compaction_disabled && !force {
             emit_compression_skipped(&mut session, CompressionReason::SessionCompactionDisabled);
             return false;
@@ -1157,26 +1220,25 @@ pub async fn apply_segment_summarization(
             emit_compression_skipped(&mut session, CompressionReason::PendingToolCalls);
             return false;
         }
-        session.messages.clone()
+        (attempt, session.messages.clone())
     };
 
     let Some(segment) = first_eligible_segment(&raw_messages) else {
         let mut session = session_arc.lock().await;
-        emit_compression_skipped(&mut session, CompressionReason::NoEligibleSegment);
+        emit_compression_skipped_if_owned(
+            &mut session,
+            attempt,
+            CompressionReason::NoEligibleSegment,
+        );
         return false;
     };
     let (model, model_n_ctx) = match resolve_summary_model(gcx.clone(), &thread.model).await {
         Ok(value) => value,
         Err(failure) => {
             let mut session = session_arc.lock().await;
-            if failure.is_structural() {
-                session.tier1_compaction_disabled = true;
-            } else {
-                session.tier1_compact_attempts += 1;
+            if finish_compression_failure_if_owned(&mut session, attempt, &failure) {
+                warn!("Segment summarization failed before subchat: {}", failure);
             }
-            warn!("Segment summarization failed before subchat: {}", failure);
-            append_compression_failure_event(&mut session, &failure);
-            emit_compression_failed(&mut session, compression_failure_reason(&failure));
             return false;
         }
     };
@@ -1184,13 +1246,15 @@ pub async fn apply_segment_summarization(
     let pressure = estimated_context_pressure(&raw_messages, effective_n_ctx);
     if !force && !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
         let mut session = session_arc.lock().await;
-        emit_compression_skipped(&mut session, CompressionReason::PressureLow);
+        emit_compression_skipped_if_owned(&mut session, attempt, CompressionReason::PressureLow);
         return false;
     }
 
     {
         let mut session = session_arc.lock().await;
-        emit_compression_running(&mut session);
+        if !emit_compression_running_if_owned(&mut session, attempt) {
+            return false;
+        }
     }
 
     let source_messages = raw_messages[segment.start..=segment.end].to_vec();
@@ -1211,22 +1275,20 @@ pub async fn apply_segment_summarization(
     match summarize_segment(gcx, &source_messages, model, model_n_ctx, goal_hint).await {
         Ok(summary) => {
             let mut session = session_arc.lock().await;
-            apply_resolved_segment_summary(&mut session, &source_hash, summary)
+            apply_resolved_segment_summary(&mut session, &source_hash, summary, Some(attempt))
         }
         Err(failure) => {
             let mut session = session_arc.lock().await;
-            if failure.is_structural() {
-                session.tier1_compaction_disabled = true;
-                warn!(
-                    "Segment summarization structurally disabled for this session: {}",
-                    failure
-                );
-            } else {
-                session.tier1_compact_attempts += 1;
-                warn!("Segment summarization failed: {}", failure);
+            if finish_compression_failure_if_owned(&mut session, attempt, &failure) {
+                if failure.is_structural() {
+                    warn!(
+                        "Segment summarization structurally disabled for this session: {}",
+                        failure
+                    );
+                } else {
+                    warn!("Segment summarization failed: {}", failure);
+                }
             }
-            append_compression_failure_event(&mut session, &failure);
-            emit_compression_failed(&mut session, compression_failure_reason(&failure));
             false
         }
     }
@@ -2141,7 +2203,10 @@ mod tests {
         assert!(session.is_compressing);
         assert!(session.runtime.is_compressing);
         assert_eq!(session.compression_phase, Some(CompressionPhase::Checking));
-        assert_eq!(session.runtime.compression_phase, Some(CompressionPhase::Checking));
+        assert_eq!(
+            session.runtime.compression_phase,
+            Some(CompressionPhase::Checking)
+        );
         assert_eq!(session.compression_reason, None);
         assert_eq!(session.runtime.compression_reason, None);
         let json = rx.try_recv().unwrap();
@@ -2267,6 +2332,92 @@ mod tests {
     }
 
     #[test]
+    fn reserve_compression_attempt_assigns_nonzero_token_and_terminal_clears_it() {
+        let mut session = ChatSession::new("compression-token".to_string());
+
+        let attempt = reserve_compression_attempt(&mut session);
+
+        assert_ne!(attempt, 0);
+        assert_eq!(session.compression_attempt_generation, attempt);
+        assert_eq!(session.active_compression_attempt, Some(attempt));
+        assert!(session.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Checking));
+
+        emit_compression_applied(&mut session);
+
+        assert_eq!(session.active_compression_attempt, None);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+    }
+
+    #[test]
+    fn stale_attempt_cannot_overwrite_later_applied_status() {
+        let mut session = ChatSession::new("compression-stale-status".to_string());
+        let stale_attempt = reserve_compression_attempt(&mut session);
+        emit_compression_applied(&mut session);
+
+        assert!(!emit_compression_skipped_if_owned(
+            &mut session,
+            stale_attempt,
+            CompressionReason::PressureLow,
+        ));
+
+        assert_eq!(session.active_compression_attempt, None);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+        assert_eq!(session.compression_reason, None);
+    }
+
+    #[test]
+    fn stale_attempt_cannot_apply_summary_after_losing_ownership() {
+        let mut session = ChatSession::new("compression-stale-apply".to_string());
+        session.messages = vec![user("first"), assistant("old answer"), user("second")];
+        let stale_attempt = reserve_compression_attempt(&mut session);
+        let segment = first_eligible_segment(&session.messages).unwrap();
+        let source_messages = session.messages[segment.start..=segment.end].to_vec();
+        let source_hash = source_hash_for_messages(&source_messages);
+        let summary = make_segment_summary_message(
+            "compressed summary".to_string(),
+            &source_messages,
+            "test-model",
+        );
+        emit_compression_applied(&mut session);
+
+        assert!(!apply_resolved_segment_summary(
+            &mut session,
+            &source_hash,
+            summary,
+            Some(stale_attempt),
+        ));
+
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(
+            session.messages[1].content.content_text_only(),
+            "old answer"
+        );
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+    }
+
+    #[test]
+    fn stale_failure_path_does_not_append_summarizer_failure_event() {
+        let mut session = ChatSession::new("compression-stale-failure".to_string());
+        let stale_attempt = reserve_compression_attempt(&mut session);
+        let mut rx = session.subscribe();
+        emit_compression_applied(&mut session);
+        while rx.try_recv().is_ok() {}
+        let failure = SegmentSummaryFailure::Transient("network failed".to_string());
+
+        assert!(!finish_compression_failure_if_owned(
+            &mut session,
+            stale_attempt,
+            &failure,
+        ));
+
+        assert!(session.messages.is_empty());
+        assert_eq!(session.tier1_compact_attempts, 0);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn compression_failure_maps_to_structured_reason() {
         assert_eq!(
             compression_failure_reason(&SegmentSummaryFailure::NoModelAvailable),
@@ -2389,7 +2540,8 @@ mod tests {
         assert!(apply_resolved_segment_summary(
             &mut session,
             &source_hash,
-            summary
+            summary,
+            None
         ));
 
         assert!(!session.is_compressing);
@@ -2451,7 +2603,8 @@ mod tests {
         assert!(!apply_resolved_segment_summary(
             &mut session,
             &source_hash,
-            summary
+            summary,
+            None
         ));
 
         assert_eq!(session.messages.len(), 3);
@@ -2669,7 +2822,8 @@ mod tests {
             assert!(apply_resolved_segment_summary(
                 &mut session,
                 &source_hash,
-                summary
+                summary,
+                None
             ));
             assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
             assert_eq!(session.compression_reason, None);
