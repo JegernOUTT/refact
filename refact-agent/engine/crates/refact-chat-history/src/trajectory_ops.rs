@@ -243,6 +243,18 @@ fn remove_equivalent_compression_reports(
     affected_boundary.saturating_sub(removed_before_boundary)
 }
 
+pub fn insert_compression_report_at_boundary(
+    messages: &mut Vec<ChatMessage>,
+    report: ChatMessage,
+    affected_boundary: usize,
+) -> usize {
+    let adjusted_boundary =
+        remove_equivalent_compression_reports(messages, &report, affected_boundary);
+    let insert_idx = compression_report_insert_index(messages, adjusted_boundary);
+    messages.insert(insert_idx, report);
+    insert_idx
+}
+
 pub fn build_compression_report_message(
     context_files_removed: usize,
     context_messages_dropped: usize,
@@ -670,9 +682,7 @@ pub fn compress_in_place(
             before_tokens,
             after_tokens_pre,
         );
-        let adjusted_boundary = remove_equivalent_compression_reports(messages, &report, boundary);
-        let insert_idx = compression_report_insert_index(messages, adjusted_boundary);
-        messages.insert(insert_idx, report);
+        insert_compression_report_at_boundary(messages, report, boundary);
     }
 
     let after_tokens = approx_token_count(messages);

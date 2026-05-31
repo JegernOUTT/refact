@@ -14,7 +14,8 @@ use crate::tools::tools_description::{
 };
 use refact_chat_history::history_limit::{compress_duplicate_context_files, compute_context_budget};
 use refact_chat_history::trajectory_ops::{
-    build_compression_report_message, is_memory_path, TOOLS_TO_PRESERVE,
+    build_compression_report_message, insert_compression_report_at_boundary, is_memory_path,
+    TOOLS_TO_PRESERVE,
 };
 use refact_core::string_utils::redact_sensitive;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
@@ -112,6 +113,38 @@ struct CompressChatApplyRequest<'a> {
     tool_call_names: &'a HashMap<String, String>,
 }
 
+struct CompressChatApplyOutput {
+    messages: Vec<ChatMessage>,
+    stats: CompressChatApplyStats,
+    before_tokens: usize,
+    report: Option<ChatMessage>,
+    affected_boundary: Option<usize>,
+}
+
+fn first_changed_boundary(before: &[ChatMessage], after: &[ChatMessage]) -> Option<usize> {
+    let common_len = before.len().min(after.len());
+    for idx in 0..common_len {
+        if serde_json::to_value(&before[idx]).ok() != serde_json::to_value(&after[idx]).ok() {
+            return Some(idx);
+        }
+    }
+    (before.len() != after.len()).then_some(common_len)
+}
+
+fn insert_current_compression_report(
+    messages: &mut Vec<ChatMessage>,
+    report: Option<ChatMessage>,
+    affected_boundary: Option<usize>,
+) -> Option<Value> {
+    let report = report?;
+    let boundary = affected_boundary.unwrap_or(messages.len());
+    let report_idx = insert_compression_report_at_boundary(messages, report, boundary);
+    messages[report_idx]
+        .extra
+        .get("compression_report")
+        .cloned()
+}
+
 fn tokens_with_tail(
     modifiable_prefix: &[ChatMessage],
     preserved_tail: &[ChatMessage],
@@ -182,11 +215,12 @@ fn remove_invalid_tool_calls_and_tool_calls_results_before(
     before != serde_json::to_value(&*modifiable_prefix).ok()
 }
 
-fn compress_chat_apply_head_messages(
+fn compress_chat_apply_head_output(
     mut head_messages: Vec<ChatMessage>,
     immutable_tail: &[ChatMessage],
     request: &CompressChatApplyRequest,
-) -> (Vec<ChatMessage>, CompressChatApplyStats, usize) {
+) -> CompressChatApplyOutput {
+    let original_head_messages = head_messages.clone();
     let before_tokens = tokens_with_tail(&head_messages, &[], immutable_tail);
     let preserve_cutoff = preserve_cutoff_for(&head_messages, request.preserve_last_turns);
     let mut preserved_tail = head_messages.split_off(preserve_cutoff.min(head_messages.len()));
@@ -326,19 +360,47 @@ fn compress_chat_apply_head_messages(
         }
     }
 
-    if stats.has_meaningful_mutation() {
+    let report = if stats.has_meaningful_mutation() {
         let after_tokens_pre_report =
             tokens_with_tail(&head_messages, &preserved_tail, immutable_tail);
-        head_messages.push(build_compression_report_message(
+        Some(build_compression_report_message(
             stats.context_files_removed(),
             stats.context_messages_dropped,
             stats.tool_truncated + stats.tool_dropped,
             before_tokens,
             after_tokens_pre_report,
-        ));
-    }
+        ))
+    } else {
+        None
+    };
     head_messages.append(&mut preserved_tail);
-    (head_messages, stats, before_tokens)
+    let affected_boundary = report
+        .as_ref()
+        .and_then(|_| first_changed_boundary(&original_head_messages, &head_messages));
+    CompressChatApplyOutput {
+        messages: head_messages,
+        stats,
+        before_tokens,
+        report,
+        affected_boundary,
+    }
+}
+
+#[cfg(test)]
+fn compress_chat_apply_head_messages(
+    head_messages: Vec<ChatMessage>,
+    immutable_tail: &[ChatMessage],
+    request: &CompressChatApplyRequest,
+) -> (Vec<ChatMessage>, CompressChatApplyStats, usize) {
+    let CompressChatApplyOutput {
+        mut messages,
+        stats,
+        before_tokens,
+        report,
+        affected_boundary,
+    } = compress_chat_apply_head_output(head_messages, immutable_tail, request);
+    insert_current_compression_report(&mut messages, report, affected_boundary);
+    (messages, stats, before_tokens)
 }
 
 #[cfg(test)]
@@ -473,6 +535,47 @@ mod tests {
             .iter()
             .filter(|message| message.role == "compression_report")
             .count()
+    }
+
+    fn compression_report_metadata(message: &ChatMessage) -> Value {
+        message.extra["compression_report"].clone()
+    }
+
+    fn compression_report_metadatas(messages: &[ChatMessage]) -> Vec<Value> {
+        messages
+            .iter()
+            .filter(|message| message.role == "compression_report")
+            .map(compression_report_metadata)
+            .collect()
+    }
+
+    fn stable_existing_report_for_manual_context_drop() -> ChatMessage {
+        let mut report = build_compression_report_message(1, 1, 0, 0, 0);
+        for _ in 0..10 {
+            let before = vec![
+                user_message("old user"),
+                report.clone(),
+                context_file_message("old_context", "old.rs", "old context"),
+                assistant_message("old assistant"),
+            ];
+            let after = vec![
+                user_message("old user"),
+                report.clone(),
+                assistant_message("old assistant"),
+            ];
+            let next = build_compression_report_message(
+                1,
+                1,
+                0,
+                before.iter().map(approx_tokens_for_message).sum(),
+                after.iter().map(approx_tokens_for_message).sum(),
+            );
+            if compression_report_metadata(&next) == compression_report_metadata(&report) {
+                return report;
+            }
+            report = next;
+        }
+        report
     }
 
     #[test]
@@ -1008,6 +1111,205 @@ mod tests {
     }
 
     #[test]
+    fn apply_report_after_first_user_when_leading_systems_and_first_user_preserved() {
+        let messages = vec![
+            system_message("root prompt"),
+            system_message("workspace details"),
+            context_file_message("old_context", "old.rs", "old context"),
+            user_message("tail user"),
+            assistant_message("tail assistant"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.context_messages_dropped, 1);
+        let report_idx = compression_report_index(&after);
+        let first_user_idx = after
+            .iter()
+            .position(|message| message.role == "user")
+            .unwrap();
+        assert!(report_idx > first_user_idx);
+        let roles: Vec<_> = after.iter().map(|message| message.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec![
+                "system",
+                "system",
+                "user",
+                "compression_report",
+                "assistant"
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_noop_with_existing_report_returns_no_current_report_metadata() {
+        let old_report = build_compression_report_message(1, 1, 0, 100, 80);
+        let old_metadata = compression_report_metadata(&old_report);
+        let messages = vec![
+            user_message("old user"),
+            old_report,
+            assistant_message("answer"),
+        ];
+        let drop_context_files = HashSet::new();
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.preserve_last_turns = Some(0);
+
+        let CompressChatApplyOutput {
+            mut messages,
+            stats,
+            report,
+            affected_boundary,
+            ..
+        } = compress_chat_apply_head_output(messages, &[], &request);
+        let current_metadata =
+            insert_current_compression_report(&mut messages, report, affected_boundary);
+
+        assert!(!stats.has_meaningful_mutation());
+        assert_eq!(current_metadata, None);
+        assert_eq!(compression_report_count(&messages), 1);
+        assert_eq!(compression_report_metadatas(&messages), vec![old_metadata]);
+    }
+
+    #[test]
+    fn apply_preserved_tail_old_report_does_not_drive_current_metadata() {
+        let old_report = build_compression_report_message(0, 0, 1, 1000, 900);
+        let old_metadata = compression_report_metadata(&old_report);
+        let messages = vec![
+            user_message("old user"),
+            context_file_message("old_context", "old.rs", "old context"),
+            user_message("tail user"),
+            old_report,
+            assistant_message("tail assistant"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+
+        let CompressChatApplyOutput {
+            mut messages,
+            stats,
+            report,
+            affected_boundary,
+            ..
+        } = compress_chat_apply_head_output(messages, &[], &request);
+        let current_metadata =
+            insert_current_compression_report(&mut messages, report, affected_boundary)
+                .expect("current invocation should create report metadata");
+
+        assert_eq!(stats.context_messages_dropped, 1);
+        assert_ne!(current_metadata, old_metadata);
+        assert_eq!(compression_report_count(&messages), 2);
+        assert!(compression_report_metadatas(&messages).contains(&old_metadata));
+    }
+
+    #[test]
+    fn apply_repeated_equivalent_manual_compression_dedupes() {
+        let existing_report = stable_existing_report_for_manual_context_drop();
+        let existing_metadata = compression_report_metadata(&existing_report);
+        let messages = vec![
+            user_message("old user"),
+            existing_report,
+            context_file_message("old_context", "old.rs", "old context"),
+            assistant_message("old assistant"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.context_messages_dropped, 1);
+        assert_eq!(compression_report_count(&after), 1);
+        assert_eq!(
+            compression_report_metadatas(&after),
+            vec![existing_metadata]
+        );
+    }
+
+    #[test]
+    fn apply_non_equivalent_manual_reports_remain() {
+        let existing_report = build_compression_report_message(0, 0, 1, 1000, 800);
+        let existing_metadata = compression_report_metadata(&existing_report);
+        let messages = vec![
+            user_message("old user"),
+            existing_report,
+            context_file_message("old_context", "old.rs", "old context"),
+            assistant_message("old assistant"),
+        ];
+        let drop_context_files = HashSet::from(["old.rs".to_string()]);
+        let drop_memories = HashSet::new();
+        let truncate_tool_outputs = HashSet::new();
+        let drop_tool_outputs = HashSet::new();
+        let drop_context_messages = HashSet::new();
+        let tool_call_names = HashMap::new();
+        let mut request = apply_request(
+            &drop_context_files,
+            &drop_memories,
+            &truncate_tool_outputs,
+            &drop_tool_outputs,
+            &drop_context_messages,
+            &tool_call_names,
+        );
+        request.preserve_last_turns = Some(0);
+
+        let (after, stats, _) = compress_chat_apply_head_messages(messages, &[], &request);
+
+        assert_eq!(stats.context_messages_dropped, 1);
+        assert_eq!(compression_report_count(&after), 2);
+        assert!(compression_report_metadatas(&after).contains(&existing_metadata));
+    }
+
+    #[test]
     fn apply_drop_project_information_preserves_tail_system_messages() {
         let messages = vec![
             system_message("root prompt"),
@@ -1038,7 +1340,15 @@ mod tests {
             .content
             .content_text_only()
             .contains("old project workspace details")));
-        assert_preserved_tail_unchanged(&messages, &after, 1);
+        let report_idx = compression_report_index(&after);
+        assert_eq!(
+            after[report_idx - 1].content.content_text_only(),
+            "tail user"
+        );
+        assert!(after.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("tail project workspace details")));
     }
 
     #[test]
@@ -1579,23 +1889,28 @@ impl Tool for ToolCompressChatApply {
             target_tokens,
             tool_call_names: &tool_call_names,
         };
-        let (mut head_messages, stats, before_tokens) = compress_chat_apply_head_messages(
+        let CompressChatApplyOutput {
+            messages: mut head_messages,
+            stats,
+            before_tokens,
+            report,
+            affected_boundary,
+        } = compress_chat_apply_head_output(
             session_snapshot.messages[..active_start].to_vec(),
             &tail_messages,
             &request,
         );
         head_messages.extend(tail_messages);
+        let compression_report_metadata =
+            insert_current_compression_report(&mut head_messages, report, affected_boundary);
 
         let after_tokens = head_messages
             .iter()
             .map(approx_tokens_for_message)
             .sum::<usize>();
         let after_count = head_messages.len();
-        let report_after_tokens = head_messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "compression_report")
-            .and_then(|message| message.extra.get("compression_report"))
+        let report_after_tokens = compression_report_metadata
+            .as_ref()
             .and_then(|metadata| metadata.get("tokens_after"))
             .and_then(|value| value.as_u64())
             .map(|value| value as usize)
@@ -1641,14 +1956,14 @@ impl Tool for ToolCompressChatApply {
             "tool_outputs_dropped": stats.tool_dropped,
             "project_info_dropped": stats.project_info_dropped,
             "dedup_context_files": stats.dedup_count,
-            "compression_report": {
+            "compression_report": compression_report_metadata.map(|metadata| json!({
                 "role": "compression_report",
-                "context_files_removed": stats.context_files_removed(),
-                "context_messages_dropped": stats.context_messages_dropped,
-                "tool_results_truncated": stats.tool_truncated + stats.tool_dropped,
-                "tokens_before": before_tokens,
-                "tokens_after": report_after_tokens,
-            },
+                "context_files_removed": metadata.get("context_files_removed").cloned().unwrap_or(Value::Null),
+                "context_messages_dropped": metadata.get("context_messages_dropped").cloned().unwrap_or(Value::Null),
+                "tool_results_truncated": metadata.get("tool_results_truncated").cloned().unwrap_or(Value::Null),
+                "tokens_before": metadata.get("tokens_before").cloned().unwrap_or(Value::Null),
+                "tokens_after": metadata.get("tokens_after").cloned().unwrap_or(Value::Null),
+            })),
             "aggressive_summary_skipped_reason": stats.aggressive_summary_skipped_reason,
             "active_tail_start": active_start,
         });
