@@ -339,6 +339,18 @@ fn first_changed_boundary(before: &[ChatMessage], after: &[ChatMessage]) -> Opti
 }
 
 pub const TOOLS_TO_PRESERVE: &[&str] = &["research", "delegate", "plan", "review"];
+const TOOL_PREVIEW_CHARS: usize = 200;
+const TOOL_PREVIEW_REDACTION_EXTRA_CHARS: usize = 256;
+
+fn compressed_tool_preview(content_text: &str) -> String {
+    let scan_chars = TOOL_PREVIEW_CHARS + TOOL_PREVIEW_REDACTION_EXTRA_CHARS;
+    let scan_window = match content_text.char_indices().nth(scan_chars) {
+        Some((end, _)) => &content_text[..end],
+        None => content_text,
+    };
+    let redacted = redact_sensitive(scan_window);
+    redacted.chars().take(TOOL_PREVIEW_CHARS).collect()
+}
 
 fn should_preserve_tool(name: &str) -> bool {
     TOOLS_TO_PRESERVE.iter().any(|t| *t == name)
@@ -651,8 +663,7 @@ pub fn compress_in_place(
                 }
                 let content_text = msg.content.content_text_only();
                 if content_text.len() > 500 {
-                    let preview: String = content_text.chars().take(200).collect();
-                    let preview = redact_sensitive(&preview);
+                    let preview = compressed_tool_preview(&content_text);
                     msg.content =
                         ChatContent::SimpleText(format!("Tool result compressed: {}...", preview));
                     tool_modified += 1;
@@ -1254,6 +1265,77 @@ mod tests {
         let text = tool_msg.content.content_text_only();
         assert!(text.contains("api_key=[REDACTED]"));
         assert!(!text.contains(secret));
+    }
+
+    #[test]
+    fn test_compress_non_agentic_tool_preview_redacts_boundary_crossing_bearer_token() {
+        let secret = "boundary-bearer-token-that-crosses-the-preview-cutoff";
+        let long_content = format!("{}Bearer {} {}", "x".repeat(170), secret, "y".repeat(1000));
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            make_tool_msg("tc1", &long_content),
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        let text = tool_msg.content.content_text_only();
+        assert!(text.contains("Bearer [REDACTED]"));
+        assert!(!text.contains(secret));
+        assert!(!text.contains("boundary-bearer-token"));
+    }
+
+    #[test]
+    fn test_compress_non_agentic_tool_preview_redacts_boundary_crossing_api_key() {
+        let secret = "sk-boundaryapikeycrossingthepreviewcutoff123456789";
+        let long_content = format!("{}api_key={} {}", "x".repeat(170), secret, "y".repeat(1000));
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            make_tool_msg("tc1", &long_content),
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        let text = tool_msg.content.content_text_only();
+        assert!(text.contains("api_key=[REDACTED"));
+        assert!(!text.contains(secret));
+        assert!(!text.contains("sk-"));
+    }
+
+    #[test]
+    fn test_compress_non_agentic_tool_preview_remains_bounded() {
+        let long_content = "x".repeat(1000);
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("tc1", "cat"),
+            make_tool_msg("tc1", &long_content),
+        ];
+        let opts = CompressOptions {
+            compress_non_agentic_tools: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
+        let text = tool_msg.content.content_text_only();
+        let preview = text
+            .strip_prefix("Tool result compressed: ")
+            .and_then(|text| text.strip_suffix("..."))
+            .unwrap();
+        assert_eq!(preview.chars().count(), TOOL_PREVIEW_CHARS);
+        assert!(preview.chars().all(|c| c == 'x'));
     }
 
     #[test]
