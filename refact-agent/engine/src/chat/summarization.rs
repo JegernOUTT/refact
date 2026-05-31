@@ -260,7 +260,7 @@ fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
             continue;
         }
         match message.role.as_str() {
-            "tool" | "diff" if !message.tool_call_id.is_empty() => {
+            "tool" | "diff" | "context_file" if !message.tool_call_id.is_empty() => {
                 completed_after_call.insert(message.tool_call_id.as_str());
             }
             "assistant" => {
@@ -1462,6 +1462,15 @@ mod tests {
         }
     }
 
+    fn context_file_with_tool_call_id(id: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            tool_call_id: id.to_string(),
+            ..Default::default()
+        }
+    }
+
     fn context_file_named(file_name: &str, content: &str) -> ContextFile {
         ContextFile {
             file_name: file_name.to_string(),
@@ -1880,6 +1889,71 @@ mod tests {
         assert_eq!(messages[1].content.content_text_only(), "closed summary");
         assert_eq!(messages[3].role, "assistant");
         assert_eq!(messages[4].role, "tool");
+    }
+
+    #[test]
+    fn current_tail_matching_context_file_tool_result_allows_closed_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant_with_tool_call_id("call_done"),
+            context_file_with_tool_call_id("call_done", "read result"),
+        ];
+
+        assert!(!current_tail_has_pending_tool_calls(&messages));
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "closed summary",
+            "test-model",
+        ));
+        assert_eq!(messages[1].content.content_text_only(), "closed summary");
+        assert_eq!(messages[3].role, "assistant");
+        assert_eq!(messages[4].role, "context_file");
+    }
+
+    #[test]
+    fn current_tail_unrelated_context_file_tool_call_id_blocks_closed_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant_with_tool_call_id("call_pending"),
+            context_file_with_tool_call_id("call_other", "read result"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn current_tail_empty_context_file_tool_call_id_blocks_closed_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant_with_tool_call_id("call_pending"),
+            context_file_with_tool_call_id("", "read result"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
     }
 
     #[test]
