@@ -1766,19 +1766,76 @@ pub async fn load_generic_trajectory_for_chat(
     load_trajectory_candidate(gcx, chat_id, candidate).await
 }
 
+fn trajectory_source_matches_hint(
+    actual: &TrajectorySourceIdentity,
+    hint: &TrajectorySourceIdentity,
+) -> bool {
+    match (actual, hint) {
+        (
+            TrajectorySourceIdentity::Task {
+                task_id,
+                role,
+                agent_id,
+                card_id,
+                planner_chat_id,
+            },
+            TrajectorySourceIdentity::Task {
+                task_id: hint_task_id,
+                role: hint_role,
+                agent_id: hint_agent_id,
+                card_id: hint_card_id,
+                planner_chat_id: hint_planner_chat_id,
+            },
+        ) => {
+            task_id == hint_task_id
+                && role == hint_role
+                && hint_agent_id
+                    .as_ref()
+                    .is_none_or(|hint_agent_id| Some(hint_agent_id) == agent_id.as_ref())
+                && hint_card_id
+                    .as_ref()
+                    .is_none_or(|hint_card_id| Some(hint_card_id) == card_id.as_ref())
+                && hint_planner_chat_id
+                    .as_ref()
+                    .is_none_or(|hint_planner_chat_id| {
+                        Some(hint_planner_chat_id) == planner_chat_id.as_ref()
+                    })
+        }
+        (left, right) => left == right,
+    }
+}
+
+fn effective_trajectory_source_for_path(
+    source: TrajectorySourceIdentity,
+    path: &Path,
+    task_roots: &[PathBuf],
+) -> TrajectorySourceIdentity {
+    let path_source = trajectory_source_identity_from_path(path, task_roots);
+    if matches!(&source, TrajectorySourceIdentity::Normal)
+        && !matches!(&path_source, TrajectorySourceIdentity::Normal)
+    {
+        path_source
+    } else {
+        source
+    }
+}
+
 async fn load_generic_trajectory_for_chat_matching_source(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
     source: &TrajectorySourceIdentity,
 ) -> Option<LoadedTrajectory> {
     validate_trajectory_id(chat_id).ok()?;
+    let task_roots = get_all_task_roots(gcx.clone()).await;
     let paths = trajectory_candidate_paths(gcx.clone(), chat_id).await;
     for path in paths {
         let Some(candidate) = read_valid_trajectory_candidate(path, chat_id).await else {
             continue;
         };
         let candidate_source = match TrajectorySourceIdentity::from_json(&candidate.json) {
-            Ok(candidate_source) => candidate_source,
+            Ok(candidate_source) => {
+                effective_trajectory_source_for_path(candidate_source, &candidate.path, &task_roots)
+            }
             Err(e) => {
                 warn!(
                     "Skipping trajectory candidate {} for chat {}: invalid source: {}",
@@ -1789,7 +1846,7 @@ async fn load_generic_trajectory_for_chat_matching_source(
                 continue;
             }
         };
-        if candidate_source != *source {
+        if !trajectory_source_matches_hint(&candidate_source, source) {
             continue;
         }
         return load_trajectory_candidate(gcx, chat_id, candidate).await;
@@ -2919,20 +2976,23 @@ fn trajectory_source_identity_from_path(
         .unwrap_or(TrajectorySourceIdentity::Normal)
 }
 
-async fn collect_task_trajectory_chat_ids_under_path(
+async fn collect_task_trajectory_sources_under_path(
     path: &Path,
     task_roots: &[PathBuf],
-) -> Vec<String> {
+) -> Vec<(String, TrajectorySourceIdentity)> {
     if !is_under_task_root(path, task_roots) {
         return Vec::new();
     }
 
-    let mut chat_ids = Vec::new();
+    let mut sources = Vec::new();
     let mut pending = vec![path.to_path_buf()];
     while let Some(path) = pending.pop() {
         if should_dispatch_trajectory_path(&path, task_roots) {
             if let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) {
-                chat_ids.push(chat_id.to_string());
+                sources.push((
+                    chat_id.to_string(),
+                    trajectory_source_identity_from_path(&path, task_roots),
+                ));
             }
             continue;
         }
@@ -2949,7 +3009,20 @@ async fn collect_task_trajectory_chat_ids_under_path(
             pending.push(entry.path());
         }
     }
-    chat_ids
+    sources
+}
+
+type TrajectoryPendingKey = (String, TrajectorySourceIdentity);
+type TrajectoryPendingMap = std::collections::HashMap<TrajectoryPendingKey, (Instant, bool)>;
+
+fn insert_pending_trajectory_change(
+    pending: &mut TrajectoryPendingMap,
+    chat_id: String,
+    is_remove: bool,
+    source: TrajectorySourceIdentity,
+    now: Instant,
+) {
+    pending.insert((chat_id, source), (now, is_remove));
 }
 
 enum TrajectoryWatcherMessage {
@@ -3048,10 +3121,7 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             task_roots.len()
         );
 
-        let mut pending: std::collections::HashMap<
-            String,
-            (Instant, bool, TrajectorySourceIdentity),
-        > = std::collections::HashMap::new();
+        let mut pending = TrajectoryPendingMap::new();
         let mut pending_scans: std::collections::HashMap<PathBuf, Instant> =
             std::collections::HashMap::new();
         let debounce = timeouts().watcher_debounce;
@@ -3071,7 +3141,13 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                             is_remove,
                             source,
                         }) => {
-                            pending.insert(chat_id, (Instant::now(), is_remove, source));
+                            insert_pending_trajectory_change(
+                                &mut pending,
+                                chat_id,
+                                is_remove,
+                                source,
+                                Instant::now(),
+                            );
                         }
                         Some(TrajectoryWatcherMessage::ScanPath(path)) => {
                             pending_scans.insert(path, Instant::now());
@@ -3095,11 +3171,15 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
 
             for path in ready_scans {
                 pending_scans.remove(&path);
-                for chat_id in collect_task_trajectory_chat_ids_under_path(&path, &task_roots).await
+                for (chat_id, source) in
+                    collect_task_trajectory_sources_under_path(&path, &task_roots).await
                 {
-                    pending.insert(
+                    insert_pending_trajectory_change(
+                        &mut pending,
                         chat_id,
-                        (Instant::now(), false, TrajectorySourceIdentity::Normal),
+                        false,
+                        source,
+                        Instant::now(),
                     );
                 }
             }
@@ -3107,12 +3187,12 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             let now = Instant::now();
             let ready: Vec<_> = pending
                 .iter()
-                .filter(|(_, (t, _, _))| now.duration_since(*t) >= debounce)
-                .map(|(k, v)| (k.clone(), v.1, v.2.clone()))
+                .filter(|(_, (t, _))| now.duration_since(*t) >= debounce)
+                .map(|(key, value)| (key.clone(), value.1))
                 .collect();
 
-            for (chat_id, is_remove, source) in ready {
-                pending.remove(&chat_id);
+            for ((chat_id, source), is_remove) in ready {
+                pending.remove(&(chat_id.clone(), source.clone()));
                 if let Some(gcx) = gcx_weak.upgrade() {
                     process_trajectory_change_for_source(gcx, &chat_id, is_remove, Some(source))
                         .await;
@@ -4015,15 +4095,11 @@ fn loaded_trajectory_to_meta(loaded: &LoadedTrajectory, task_roots: &[PathBuf]) 
         .root_chat_id
         .clone()
         .unwrap_or_else(|| loaded.thread.id.clone());
-    let loaded_source = TrajectorySourceIdentity::from_session_parts(&loaded.thread);
-    let path_source = trajectory_source_identity_from_path(&loaded.source_path, task_roots);
-    let source = if matches!(&loaded_source, TrajectorySourceIdentity::Normal)
-        && !matches!(&path_source, TrajectorySourceIdentity::Normal)
-    {
-        path_source
-    } else {
-        loaded_source
-    };
+    let source = effective_trajectory_source_for_path(
+        TrajectorySourceIdentity::from_session_parts(&loaded.thread),
+        &loaded.source_path,
+        task_roots,
+    );
     let (task_id, task_role, agent_id, card_id) =
         task_context_from_task_meta(loaded.thread.task_meta.as_ref());
     let (total_lines_added, total_lines_removed) =
@@ -4157,9 +4233,7 @@ fn updated_trajectory_event_from_meta_with_worktree(
 
 fn apply_task_trajectory_context(path: &Path, task_roots: &[PathBuf], meta: &mut TrajectoryMeta) {
     if let Some((task_id, role, agent_id)) = task_trajectory_context_from_path(path, task_roots) {
-        if matches!(&meta.source, TrajectorySourceIdentity::Normal) {
-            meta.source = trajectory_source_identity_from_path(path, task_roots);
-        }
+        meta.source = effective_trajectory_source_for_path(meta.source.clone(), path, task_roots);
         if meta.task_id.is_none() {
             meta.task_id = Some(task_id);
         }
@@ -10027,6 +10101,255 @@ mod tests {
         );
         drop(session);
         assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn task_path_hint_update_with_normal_same_id_loads_task_without_session_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "task-path-hint-update-normal-collision";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Same Id",
+            "normal must not be loaded",
+        )
+        .await;
+        let task_meta = task_meta(
+            "task-path-hint-update",
+            "agents",
+            Some("agent-path-hint"),
+            Some("card-path-hint"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-path-hint-update")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-path-hint")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Path Hint Updated",
+            "task path hint replacement",
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Normal Path Hint".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active normal path hint".to_string(),
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx.clone(),
+            chat_id,
+            false,
+            Some(trajectory_source_identity_from_path(
+                &task_path,
+                &get_all_task_roots(gcx).await,
+            )),
+        )
+        .await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Task Path Hint Updated"));
+        assert_eq!(event.task_id.as_deref(), Some("task-path-hint-update"));
+        assert_eq!(event.task_role.as_deref(), Some("agents"));
+        assert_eq!(event.agent_id.as_deref(), Some("agent-path-hint"));
+        assert_eq!(event.card_id.as_deref(), Some("card-path-hint"));
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Normal Path Hint");
+        assert!(session.thread.task_meta.is_none());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active normal path hint"
+        );
+        drop(session);
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn normal_path_update_with_task_same_id_loads_normal_without_session_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "normal-path-update-task-collision";
+        let task_meta = task_meta(
+            "task-normal-path-update",
+            "agents",
+            Some("agent-normal-path"),
+            Some("card-normal-path"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-normal-path-update")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-normal-path")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Same Id",
+            "task must not be loaded",
+            &task_meta,
+        )
+        .await;
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Path Updated",
+            "normal path replacement",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Task Path Hint".to_string();
+            session.thread.task_meta = Some(task_meta.clone());
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active task path hint".to_string(),
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change_for_source(
+            gcx,
+            chat_id,
+            false,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.title.as_deref(), Some("Normal Path Updated"));
+        assert_eq!(event.task_id, None);
+        assert_eq!(event.session_state.as_deref(), Some("idle"));
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Task Path Hint");
+        assert_eq!(session.thread.task_meta, Some(task_meta));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active task path hint"
+        );
+        drop(session);
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn task_scan_collects_path_derived_task_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, _) = make_app_with_workspace(dir.path()).await;
+        let task_roots = vec![dir.path().join(".refact").join("tasks")];
+        let chat_id = "scan-task-source";
+        let path = task_roots[0]
+            .join("task-scan-source")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-scan-source")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&path, chat_id, "Scan Task", "2024-01-01T00:00:01Z").await;
+
+        let mut sources =
+            collect_task_trajectory_sources_under_path(&task_roots[0], &task_roots).await;
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].0, chat_id);
+        assert_eq!(
+            sources[0].1,
+            TrajectorySourceIdentity::task(
+                "task-scan-source".to_string(),
+                "agents".to_string(),
+                Some("agent-scan-source".to_string()),
+                None,
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn watcher_pending_debounce_keys_by_chat_and_source() {
+        let chat_id = "debounce-source-collision".to_string();
+        let task_source = TrajectorySourceIdentity::task(
+            "task-debounce".to_string(),
+            "agents".to_string(),
+            Some("agent-debounce".to_string()),
+            None,
+            None,
+        );
+        let mut pending = TrajectoryPendingMap::new();
+        let now = Instant::now();
+
+        insert_pending_trajectory_change(
+            &mut pending,
+            chat_id.clone(),
+            false,
+            TrajectorySourceIdentity::Normal,
+            now,
+        );
+        insert_pending_trajectory_change(
+            &mut pending,
+            chat_id.clone(),
+            true,
+            task_source.clone(),
+            now,
+        );
+
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            pending.get(&(chat_id.clone(), TrajectorySourceIdentity::Normal)),
+            Some(&(now, false))
+        );
+        assert_eq!(pending.get(&(chat_id, task_source)), Some(&(now, true)));
     }
 
     #[tokio::test]
