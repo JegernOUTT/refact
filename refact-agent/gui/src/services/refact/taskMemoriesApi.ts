@@ -233,9 +233,9 @@ export const taskMemoriesApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
-              filename,
-            )}/pin`,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/memories/${encodeURIComponent(filename)}/pin`,
           ),
           method: "POST",
           body: { pinned },
@@ -288,9 +288,9 @@ export const taskMemoriesApi = createApi({
         const result = await baseQuery({
           url: buildApiUrlFromState(
             state,
-            `/v1/task/${encodeURIComponent(taskId)}/memories/${encodeURIComponent(
-              filename,
-            )}/archive`,
+            `/v1/task/${encodeURIComponent(
+              taskId,
+            )}/memories/${encodeURIComponent(filename)}/archive`,
           ),
           method: "POST",
         });

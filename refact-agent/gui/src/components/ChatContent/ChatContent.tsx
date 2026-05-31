@@ -272,9 +272,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   }, [messages, isStreaming]);
 
   const initialScrollIndex = useMemo(() => {
-    return displayItems.length > 0
-      ? displayItems.length - 1
-      : undefined;
+    return displayItems.length > 0 ? displayItems.length - 1 : undefined;
   }, [displayItems]);
 
   const virtuosoFooter = useMemo(

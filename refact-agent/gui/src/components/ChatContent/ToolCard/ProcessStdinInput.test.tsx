@@ -44,10 +44,7 @@ function toolMessage(tty: boolean): ToolMessage {
   };
 }
 
-async function renderExpandedStdinCard(
-  tty: boolean,
-  config?: Partial<Config>,
-) {
+async function renderExpandedStdinCard(tty: boolean, config?: Partial<Config>) {
   const chat = createDefaultChatState();
   const currentThread = chat.threads[chat.current_thread_id];
   currentThread.thread.messages = [toolMessage(tty)];

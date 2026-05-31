@@ -162,12 +162,9 @@ describe("MarketplacePluginCard", () => {
 
   it("shows Installed and Uninstall button when isInstalled", () => {
     server.use(
-      http.delete(
-        "*/v1/plugins/installed/my-plugin",
-        () => {
-          return HttpResponse.json({ deleted: true });
-        },
-      ),
+      http.delete("*/v1/plugins/installed/my-plugin", () => {
+        return HttpResponse.json({ deleted: true });
+      }),
     );
     render(
       <MarketplacePluginCard plugin={ENGINE_PLUGIN} isInstalled={true} />,

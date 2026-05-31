@@ -134,9 +134,7 @@ describe("hasUsableEngineEndpoint", () => {
     expect(hasUsableEngineEndpoint({ host: "vscode", lspPort: 8001 })).toBe(
       true,
     );
-    expect(hasUsableEngineEndpoint({ host: "vscode", lspPort: 0 })).toBe(
-      false,
-    );
+    expect(hasUsableEngineEndpoint({ host: "vscode", lspPort: 0 })).toBe(false);
     expect(hasUsableEngineEndpoint({ host: "jetbrains" })).toBe(false);
     expect(
       hasUsableEngineEndpoint({

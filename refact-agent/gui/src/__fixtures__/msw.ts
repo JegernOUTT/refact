@@ -7,19 +7,13 @@ import { STUB_TOOL_RESPONSE } from "./tools_response";
 import type { LinksForChatResponse } from "../services/refact/links";
 import { ToolConfirmationResponse } from "../services/refact";
 
-export const goodPing: HttpHandler = http.get(
-  "*/v1/ping",
-  () => {
-    return HttpResponse.text("pong");
-  },
-);
+export const goodPing: HttpHandler = http.get("*/v1/ping", () => {
+  return HttpResponse.text("pong");
+});
 
-export const goodCaps: HttpHandler = http.get(
-  "*/v1/caps",
-  () => {
-    return HttpResponse.json(STUB_CAPS_RESPONSE);
-  },
-);
+export const goodCaps: HttpHandler = http.get("*/v1/caps", () => {
+  return HttpResponse.json(STUB_CAPS_RESPONSE);
+});
 
 export const goodCapsWithKnowledgeFeature: HttpHandler = http.get(
   "*/v1/caps",
@@ -31,26 +25,17 @@ export const goodCapsWithKnowledgeFeature: HttpHandler = http.get(
   },
 );
 
-export const emptyCaps: HttpHandler = http.get(
-  `*/v1/caps`,
-  () => {
-    return HttpResponse.json(EMPTY_CAPS_RESPONSE);
-  },
-);
+export const emptyCaps: HttpHandler = http.get(`*/v1/caps`, () => {
+  return HttpResponse.json(EMPTY_CAPS_RESPONSE);
+});
 
-export const noTools: HttpHandler = http.get(
-  "*/v1/tools",
-  () => {
-    return HttpResponse.json([]);
-  },
-);
+export const noTools: HttpHandler = http.get("*/v1/tools", () => {
+  return HttpResponse.json([]);
+});
 
-export const goodPrompts: HttpHandler = http.get(
-  "*/v1/customization",
-  () => {
-    return HttpResponse.json({ system_prompts: SYSTEM_PROMPTS });
-  },
-);
+export const goodPrompts: HttpHandler = http.get("*/v1/customization", () => {
+  return HttpResponse.json({ system_prompts: SYSTEM_PROMPTS });
+});
 
 export const noCompletions: HttpHandler = http.post(
   "*/v1/at-command-completion",
@@ -72,50 +57,39 @@ export const noCommandPreview: HttpHandler = http.post(
   },
 );
 
-export const goodUser: HttpHandler = http.get(
-  "*/v1/providers",
-  () =>
-    HttpResponse.json({
-      providers: [
-        {
-          name: "openai",
-          base_provider: "openai",
-          display_name: "OpenAI",
-          enabled: true,
-          readonly: false,
-          has_credentials: true,
-          status: "active",
-          model_count: 5,
-        },
-      ],
-    }),
+export const goodUser: HttpHandler = http.get("*/v1/providers", () =>
+  HttpResponse.json({
+    providers: [
+      {
+        name: "openai",
+        base_provider: "openai",
+        display_name: "OpenAI",
+        enabled: true,
+        readonly: false,
+        has_credentials: true,
+        status: "active",
+        model_count: 5,
+      },
+    ],
+  }),
 );
 
-export const chatLinks: HttpHandler = http.post(
-  `*${CHAT_LINKS_URL}`,
-  () => {
-    return HttpResponse.json(STUB_LINKS_FOR_CHAT_RESPONSE);
-  },
-);
+export const chatLinks: HttpHandler = http.post(`*${CHAT_LINKS_URL}`, () => {
+  return HttpResponse.json(STUB_LINKS_FOR_CHAT_RESPONSE);
+});
 
-export const noChatLinks: HttpHandler = http.post(
-  `*${CHAT_LINKS_URL}`,
-  () => {
-    const res: LinksForChatResponse = {
-      uncommited_changes_warning: "",
-      new_chat_suggestion: false,
-      links: [],
-    };
-    return HttpResponse.json(res);
-  },
-);
+export const noChatLinks: HttpHandler = http.post(`*${CHAT_LINKS_URL}`, () => {
+  const res: LinksForChatResponse = {
+    uncommited_changes_warning: "",
+    new_chat_suggestion: false,
+    links: [],
+  };
+  return HttpResponse.json(res);
+});
 
-export const goodTools: HttpHandler = http.get(
-  `*${TOOLS}`,
-  () => {
-    return HttpResponse.json(STUB_TOOL_RESPONSE);
-  },
-);
+export const goodTools: HttpHandler = http.get(`*${TOOLS}`, () => {
+  return HttpResponse.json(STUB_TOOL_RESPONSE);
+});
 
 export const ToolConfirmation = http.post(
   "*/v1/tools-check-if-confirmation-needed",
@@ -265,9 +239,6 @@ export const sidebarSubscribe: HttpHandler = http.get(
 );
 
 // Tasks list endpoint
-export const emptyTasks: HttpHandler = http.get(
-  "*/v1/tasks",
-  () => {
-    return HttpResponse.json([]);
-  },
-);
+export const emptyTasks: HttpHandler = http.get("*/v1/tasks", () => {
+  return HttpResponse.json([]);
+});

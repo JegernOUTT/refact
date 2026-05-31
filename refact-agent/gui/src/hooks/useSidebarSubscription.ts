@@ -913,11 +913,15 @@ export function useSidebarSubscription() {
       scheduleReconnect();
     };
 
-    disconnectRef.current = subscribeToSidebarEvents(subscriptionConfig, apiKey, {
-      onEvent,
-      onError,
-      onDisconnected,
-    });
+    disconnectRef.current = subscribeToSidebarEvents(
+      subscriptionConfig,
+      apiKey,
+      {
+        onEvent,
+        onError,
+        onDisconnected,
+      },
+    );
   }, [
     config.apiKey,
     config.lspPort,

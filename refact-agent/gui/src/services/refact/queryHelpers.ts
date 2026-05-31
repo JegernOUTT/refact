@@ -46,7 +46,10 @@ function normalizeRequestUrl(state: QueryState, url: string): string {
   return url;
 }
 
-function normalizeRequest(state: QueryState, request: string | FetchArgs): FetchArgs {
+function normalizeRequest(
+  state: QueryState,
+  request: string | FetchArgs,
+): FetchArgs {
   if (typeof request === "string") {
     return { url: normalizeRequestUrl(state, request) };
   }

@@ -284,14 +284,11 @@ describe("MCPOAuth", () => {
           authorize_url: "https://auth.example.com/authorize",
         });
       }),
-      http.post(
-        "*/v1/mcp/oauth/cancel",
-        async ({ request }) => {
-          const body = (await request.json()) as { session_id: string };
-          cancelledSessionId = body.session_id;
-          return HttpResponse.json({ cancelled: true });
-        },
-      ),
+      http.post("*/v1/mcp/oauth/cancel", async ({ request }) => {
+        const body = (await request.json()) as { session_id: string };
+        cancelledSessionId = body.session_id;
+        return HttpResponse.json({ cancelled: true });
+      }),
     );
 
     const { user } = render(<MCPOAuth configPath={CONFIG_PATH} />, {

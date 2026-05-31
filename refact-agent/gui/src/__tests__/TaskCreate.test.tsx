@@ -15,9 +15,7 @@ const CONFIG_STATE = {
 
 describe("TaskCreate", () => {
   it("task_create_form_accepts_target_files_input", async () => {
-    server.use(
-      http.get("*/v1/tasks", () => HttpResponse.json([])),
-    );
+    server.use(http.get("*/v1/tasks", () => HttpResponse.json([])));
 
     const { user } = render(<TaskList />, { preloadedState: CONFIG_STATE });
 

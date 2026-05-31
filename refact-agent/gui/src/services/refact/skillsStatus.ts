@@ -25,10 +25,7 @@ export const skillsStatusApi = createApi({
       queryFn: async (chatId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
-          url: buildApiUrlFromState(
-            state,
-            `/v1/chats/${chatId}/skills-status`,
-          ),
+          url: buildApiUrlFromState(state, `/v1/chats/${chatId}/skills-status`),
         });
         if (result.error) return { error: result.error };
         return { data: result.data as SkillsStatusResponse };

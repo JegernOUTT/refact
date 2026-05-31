@@ -446,7 +446,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
       window.setTimeout(() => {
         const activeElement = document.activeElement;
-        if (activeElement instanceof Node && root.contains(activeElement)) return;
+        if (activeElement instanceof Node && root.contains(activeElement))
+          return;
         setIsComposerExpanded(false);
       }, 0);
     },
@@ -570,9 +571,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                     onRemoveManualPreviewItem={
                       chatId
                         ? (index) =>
-                            dispatch(
-                              removeManualPreviewItem({ chatId, index }),
-                            )
+                            dispatch(removeManualPreviewItem({ chatId, index }))
                         : undefined
                     }
                     onOpenFile={queryPathThenOpenFile}

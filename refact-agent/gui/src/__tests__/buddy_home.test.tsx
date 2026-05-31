@@ -638,13 +638,10 @@ describe("BuddyOpportunityCard_dismiss_calls_mutation", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.post(
-        "*/v1/buddy/opportunities/:id/dismiss",
-        () => {
-          dismissed = true;
-          return HttpResponse.json({ snapshot: makeSnapshot() });
-        },
-      ),
+      http.post("*/v1/buddy/opportunities/:id/dismiss", () => {
+        dismissed = true;
+        return HttpResponse.json({ snapshot: makeSnapshot() });
+      }),
     );
 
     const opp = makeOpportunity({
@@ -712,9 +709,7 @@ describe("BuddyHome_renders_all_sections", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -793,9 +788,7 @@ describe("BuddyHome_renders_all_sections", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -804,13 +797,10 @@ describe("BuddyHome_renders_all_sections", () => {
       http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
-      http.post(
-        "*/v1/buddy/runtime/:id/dismiss",
-        ({ params }) => {
-          dismissedIds.push(String(params.id));
-          return HttpResponse.json({ detail: "offline" }, { status: 503 });
-        },
-      ),
+      http.post("*/v1/buddy/runtime/:id/dismiss", ({ params }) => {
+        dismissedIds.push(String(params.id));
+        return HttpResponse.json({ detail: "offline" }, { status: 503 });
+      }),
       http.post("*/v1/buddy/conversations", () => {
         conversationStarted = true;
         return HttpResponse.json({
@@ -904,9 +894,7 @@ describe("BuddyHome_renders_all_sections", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -1025,9 +1013,7 @@ describe("BuddyHome_renders_all_sections", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -1050,9 +1036,7 @@ describe("BuddyHome_renders_all_sections", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -2815,16 +2799,13 @@ describe("BuddySettingsPanel_autosave", () => {
   it("toggling a switch immediately sends partial patch to server", async () => {
     let capturedBody: unknown;
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json({
-            ...makeSnapshot().settings,
-            quiet_mode: true,
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          quiet_mode: true,
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -2848,16 +2829,13 @@ describe("BuddySettingsPanel_autosave", () => {
     const responseResolvers: ((settings: BuddySnapshot["settings"]) => void)[] =
       [];
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBodies.push(await request.json());
-          const settings = await new Promise<BuddySnapshot["settings"]>(
-            (resolve) => responseResolvers.push(resolve),
-          );
-          return HttpResponse.json(settings);
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        const settings = await new Promise<BuddySnapshot["settings"]>(
+          (resolve) => responseResolvers.push(resolve),
+        );
+        return HttpResponse.json(settings);
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -2899,16 +2877,13 @@ describe("BuddySettingsPanel_autosave", () => {
   it("clicking a segmented enum button immediately sends partial patch", async () => {
     let capturedBody: unknown;
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json({
-            ...makeSnapshot().settings,
-            humor_level: "normal",
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          humor_level: "normal",
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -2928,22 +2903,19 @@ describe("BuddySettingsPanel_autosave", () => {
   it("daily digest saves valid and empty partial patches", async () => {
     const capturedBodies: unknown[] = [];
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          const body = (await request.json()) as {
-            daily_digest_hour?: number | null;
-          };
-          capturedBodies.push(body);
-          return HttpResponse.json({
-            ...makeSnapshot().settings,
-            daily_digest_hour:
-              "daily_digest_hour" in body
-                ? body.daily_digest_hour
-                : makeSnapshot().settings.daily_digest_hour,
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        const body = (await request.json()) as {
+          daily_digest_hour?: number | null;
+        };
+        capturedBodies.push(body);
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          daily_digest_hour:
+            "daily_digest_hour" in body
+              ? body.daily_digest_hour
+              : makeSnapshot().settings.daily_digest_hour,
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3033,13 +3005,10 @@ describe("BuddySettingsPanel_autosave", () => {
     vi.useFakeTimers();
     let capturedBody: unknown;
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json(makeSnapshot().settings);
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json(makeSnapshot().settings);
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3070,13 +3039,10 @@ describe("BuddySettingsPanel_autosave", () => {
   it("prompt blur saves immediately without waiting for debounce", async () => {
     let capturedBody: unknown;
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json(makeSnapshot().settings);
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json(makeSnapshot().settings);
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3099,16 +3065,13 @@ describe("BuddySettingsPanel_autosave", () => {
     vi.useFakeTimers();
     const capturedBodies: unknown[] = [];
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBodies.push(await request.json());
-          return HttpResponse.json({
-            ...makeSnapshot().settings,
-            personality_prompt: null,
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          personality_prompt: null,
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3146,16 +3109,13 @@ describe("BuddySettingsPanel_autosave", () => {
   it("delete all prompt text and blur sends clear_personality_prompt flag", async () => {
     const capturedBodies: unknown[] = [];
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBodies.push(await request.json());
-          return HttpResponse.json({
-            ...makeSnapshot().settings,
-            personality_prompt: null,
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          personality_prompt: null,
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3187,17 +3147,14 @@ describe("BuddySettingsPanel_autosave", () => {
     vi.useFakeTimers();
     const capturedBodies: unknown[] = [];
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBodies.push(await request.json());
-          return HttpResponse.json({
-            ...makeSnapshot().settings,
-            quiet_mode: true,
-            personality_prompt: "Server prompt",
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          quiet_mode: true,
+          personality_prompt: "Server prompt",
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3250,16 +3207,13 @@ describe("BuddySettingsPanel_autosave", () => {
   it("prompt clear button sends clear_personality_prompt flag", async () => {
     let capturedBody: unknown;
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json({
-            ...makeSnapshot().settings,
-            personality_prompt: null,
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          personality_prompt: null,
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3417,9 +3371,7 @@ describe("BuddySettingsPanel_autosave", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -3501,16 +3453,13 @@ describe("BuddySettingsPanel_autosave", () => {
     const responseResolvers: ((settings: BuddySnapshot["settings"]) => void)[] =
       [];
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBodies.push(await request.json());
-          const settings = await new Promise<BuddySnapshot["settings"]>(
-            (resolve) => responseResolvers.push(resolve),
-          );
-          return HttpResponse.json(settings);
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        const settings = await new Promise<BuddySnapshot["settings"]>(
+          (resolve) => responseResolvers.push(resolve),
+        );
+        return HttpResponse.json(settings);
+      }),
     );
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
@@ -3614,13 +3563,10 @@ describe("BuddySettingsPanel_autosave", () => {
   it("prompt focus and blur without edits does not save", async () => {
     const capturedBodies: unknown[] = [];
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBodies.push(await request.json());
-          return HttpResponse.json(makeSnapshot().settings);
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        return HttpResponse.json(makeSnapshot().settings);
+      }),
     );
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(
@@ -3899,13 +3845,10 @@ describe("BuddyPanel_opportunity_notifications", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json(defaultBuddySettings());
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json(defaultBuddySettings());
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -3971,9 +3914,7 @@ describe("BuddyHome_disabled_state", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -4022,9 +3963,7 @@ describe("BuddyHome_disabled_state", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
@@ -4033,13 +3972,10 @@ describe("BuddyHome_disabled_state", () => {
       http.get("*/v1/setup/status", () =>
         HttpResponse.json({ configured: true, reasons: [], detail: {} }),
       ),
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json(defaultBuddySettings());
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json(defaultBuddySettings());
+      }),
     );
 
     const { user } = render(<BuddyHome />, { store });
@@ -4175,22 +4111,19 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
           }),
         ]),
       ),
-      http.get(
-        "*/v1/trajectories/existing-buddy-chat",
-        () => {
-          trajectoryCalled = true;
-          return HttpResponse.json({
-            id: "existing-buddy-chat",
-            title: "My Buddy Chat",
-            created_at: "2024-01-01T00:00:00Z",
-            updated_at: "2024-01-02T00:00:00Z",
-            model: "",
-            mode: "buddy",
-            tool_use: "agent",
-            messages: [],
-          });
-        },
-      ),
+      http.get("*/v1/trajectories/existing-buddy-chat", () => {
+        trajectoryCalled = true;
+        return HttpResponse.json({
+          id: "existing-buddy-chat",
+          title: "My Buddy Chat",
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-02T00:00:00Z",
+          model: "",
+          mode: "buddy",
+          tool_use: "agent",
+          messages: [],
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -4230,28 +4163,25 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
           }),
         ]),
       ),
-      http.get(
-        "*/v1/trajectories/workflow-buddy-chat",
-        () => {
-          trajectoryCalled = true;
-          return HttpResponse.json({
-            id: "workflow-buddy-chat",
-            title: "Workflow Buddy Chat",
-            created_at: "2024-01-01T00:00:00Z",
-            updated_at: "2024-01-02T00:00:00Z",
-            model: "",
-            mode: "buddy",
-            tool_use: "agent",
-            messages: [
-              {
-                role: "user",
-                content: "Workflow saved message",
-                message_id: "workflow-msg-1",
-              },
-            ],
-          });
-        },
-      ),
+      http.get("*/v1/trajectories/workflow-buddy-chat", () => {
+        trajectoryCalled = true;
+        return HttpResponse.json({
+          id: "workflow-buddy-chat",
+          title: "Workflow Buddy Chat",
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-02T00:00:00Z",
+          model: "",
+          mode: "buddy",
+          tool_use: "agent",
+          messages: [
+            {
+              role: "user",
+              content: "Workflow saved message",
+              message_id: "workflow-msg-1",
+            },
+          ],
+        });
+      }),
     );
 
     const store = setUpStore({ ...CONFIG_STATE });
@@ -4283,9 +4213,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
     let createConversationCalled = false;
     let trajectoryCalled = false;
     server.use(
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.post("*/v1/buddy/conversations", () => {
         createConversationCalled = true;
         return HttpResponse.json({
@@ -4320,9 +4248,7 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     http.get("*/v1/buddy/opportunities", () =>
       HttpResponse.json({ opportunities: [] }),
     ),
-    http.get("*/v1/buddy/conversations", () =>
-      HttpResponse.json([]),
-    ),
+    http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
     http.get("*/v1/stats/llm/summary", () =>
       HttpResponse.json({
         totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },

@@ -316,11 +316,13 @@ function makeDiagnostic(
 function makePostMock() {
   return vi.fn(
     (
-      _connection: number | {
-        host?: "web" | "ide" | "vscode" | "jetbrains";
-        lspPort?: number;
-        lspUrl?: string;
-      },
+      _connection:
+        | number
+        | {
+            host?: "web" | "ide" | "vscode" | "jetbrains";
+            lspPort?: number;
+            lspUrl?: string;
+          },
       _apiKey: string | undefined,
       _body: BuddyErrorReport,
     ) => Promise.resolve(undefined),
@@ -436,9 +438,7 @@ function setupBuddyCompanionHandlers() {
         repo_name: "refact",
       }),
     ),
-    http.post("*/v1/chats/:id/commands", () =>
-      HttpResponse.json({ ok: true }),
-    ),
+    http.post("*/v1/chats/:id/commands", () => HttpResponse.json({ ok: true })),
   );
 }
 

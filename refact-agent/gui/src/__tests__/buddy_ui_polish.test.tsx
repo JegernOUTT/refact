@@ -392,9 +392,7 @@ describe("buddy UI polish", () => {
       http.get("*/v1/buddy/opportunities", () =>
         HttpResponse.json({ opportunities: [] }),
       ),
-      http.get("*/v1/buddy/conversations", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
       http.get("*/v1/stats/llm/summary", () =>
         HttpResponse.json({
           totals: { total_calls: 1, successful_calls: 1, total_tokens: 10 },
@@ -527,18 +525,15 @@ describe("buddy UI polish", () => {
     store.dispatch(setBuddySnapshot(snapshot));
 
     server.use(
-      http.post(
-        "*/v1/buddy/settings",
-        async ({ request }) => {
-          const body = (await request.json()) as Partial<
-            BuddySnapshot["settings"]
-          >;
-          return HttpResponse.json({
-            ...snapshot.settings,
-            ...body,
-          });
-        },
-      ),
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        const body = (await request.json()) as Partial<
+          BuddySnapshot["settings"]
+        >;
+        return HttpResponse.json({
+          ...snapshot.settings,
+          ...body,
+        });
+      }),
     );
 
     const { user } = render(<BuddySettingsPanel />, {

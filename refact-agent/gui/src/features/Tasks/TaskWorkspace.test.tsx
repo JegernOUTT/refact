@@ -291,18 +291,14 @@ function taskWorkspaceHandlers(
     http.get("*/v1/worktrees", () =>
       HttpResponse.json(makeWorktreeList(records)),
     ),
-    http.get("*/v1/ping", () =>
-      HttpResponse.json({ status: "ok" }),
-    ),
+    http.get("*/v1/ping", () => HttpResponse.json({ status: "ok" })),
     http.get("*/v1/chat-modes", () =>
       HttpResponse.json({ modes: [], errors: [] }),
     ),
     http.get("*/v1/caps", () =>
       HttpResponse.json({ chat_models: [], completion_models: [] }),
     ),
-    http.post("*/v1/buddy/diagnostics/collect", () =>
-      HttpResponse.json({}),
-    ),
+    http.post("*/v1/buddy/diagnostics/collect", () => HttpResponse.json({})),
     http.get("*/v1/worktrees/:id/diff", ({ params }) => {
       const id = String(params.id);
       return HttpResponse.json({
@@ -955,13 +951,11 @@ describe("TaskWorkspace planner CRUD", () => {
   it("delete_planner_failure_restores_local_state", async () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
-      http.get(
-        "*/v1/tasks/task-1/trajectories/planner",
-        () => HttpResponse.json([makePlannerTrajectory()]),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([makePlannerTrajectory()]),
       ),
-      http.delete(
-        `*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
-        () => HttpResponse.json({ error: "Internal error" }, { status: 500 }),
+      http.delete(`*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`, () =>
+        HttpResponse.json({ error: "Internal error" }, { status: 500 }),
       ),
     );
 
@@ -986,20 +980,17 @@ describe("TaskWorkspace planner CRUD", () => {
   it("delete_planner_409_shows_agent_refs_in_notification", async () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
-      http.get(
-        "*/v1/tasks/task-1/trajectories/planner",
-        () => HttpResponse.json([makePlannerTrajectory()]),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([makePlannerTrajectory()]),
       ),
-      http.delete(
-        `*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`,
-        () =>
-          HttpResponse.json(
-            {
-              error: "Referenced by agents",
-              agent_refs: [{ chat_id: "agent-ref-1" }],
-            },
-            { status: 409 },
-          ),
+      http.delete(`*/v1/tasks/${TASK_ID}/planner-chats/${PLANNER_ID}`, () =>
+        HttpResponse.json(
+          {
+            error: "Referenced by agents",
+            agent_refs: [{ chat_id: "agent-ref-1" }],
+          },
+          { status: 409 },
+        ),
       ),
     );
 
@@ -1019,9 +1010,8 @@ describe("TaskWorkspace planner CRUD", () => {
   it("cached_savedPlanners_does_not_resurrect_deleted_planner", async () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
-      http.get(
-        "*/v1/tasks/task-1/trajectories/planner",
-        () => HttpResponse.json([]),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([]),
       ),
     );
 
@@ -1045,9 +1035,8 @@ describe("TaskWorkspace planner CRUD", () => {
   it("create_planner_failure_shows_notification", async () => {
     server.use(...taskWorkspaceHandlers(makeCard(), []));
     server.use(
-      http.get(
-        "*/v1/tasks/task-1/trajectories/planner",
-        () => HttpResponse.json([]),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([]),
       ),
       http.post(`*/v1/tasks/${TASK_ID}/planner-chats`, () =>
         HttpResponse.json({ error: "Server error" }, { status: 500 }),

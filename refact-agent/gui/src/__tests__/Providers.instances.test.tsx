@@ -172,13 +172,10 @@ describe("Providers provider instances", () => {
           runtime: null,
         }),
       ),
-      http.post(
-        "*/v1/providers/openai_work",
-        async ({ request }) => {
-          requestBody = await request.json();
-          return HttpResponse.json({ success: true });
-        },
-      ),
+      http.post("*/v1/providers/openai_work", async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.json({ success: true });
+      }),
     );
 
     const store = setUpStore(preloadedState);
@@ -219,16 +216,13 @@ describe("Providers provider instances", () => {
     let availableModelsRequests = 0;
 
     server.use(
-      http.get(
-        "*/v1/providers/openai_work/available-models",
-        () => {
-          availableModelsRequests += 1;
-          return HttpResponse.json({
-            models: [],
-            source: "model_caps",
-          });
-        },
-      ),
+      http.get("*/v1/providers/openai_work/available-models", () => {
+        availableModelsRequests += 1;
+        return HttpResponse.json({
+          models: [],
+          source: "model_caps",
+        });
+      }),
       http.post("*/v1/providers/openai_work", () =>
         HttpResponse.json({ success: true }),
       ),
@@ -269,34 +263,22 @@ describe("Providers provider instances", () => {
     const requests: string[] = [];
 
     server.use(
-      http.get(
-        "*/v1/providers/openrouter_work/account-info",
-        ({ request }) => {
-          requests.push(new URL(request.url).pathname);
-          return HttpResponse.json({ data: {} });
-        },
-      ),
-      http.get(
-        "*/v1/providers/openrouter_work/health",
-        ({ request }) => {
-          requests.push(new URL(request.url).pathname);
-          return HttpResponse.json({ ok: true });
-        },
-      ),
-      http.get(
-        "*/v1/providers/claude_code_work/usage",
-        ({ request }) => {
-          requests.push(new URL(request.url).pathname);
-          return HttpResponse.json({ data: {} });
-        },
-      ),
-      http.get(
-        "*/v1/providers/openai_codex_work/usage",
-        ({ request }) => {
-          requests.push(new URL(request.url).pathname);
-          return HttpResponse.json({ data: {} });
-        },
-      ),
+      http.get("*/v1/providers/openrouter_work/account-info", ({ request }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({ data: {} });
+      }),
+      http.get("*/v1/providers/openrouter_work/health", ({ request }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({ ok: true });
+      }),
+      http.get("*/v1/providers/claude_code_work/usage", ({ request }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({ data: {} });
+      }),
+      http.get("*/v1/providers/openai_codex_work/usage", ({ request }) => {
+        requests.push(new URL(request.url).pathname);
+        return HttpResponse.json({ data: {} });
+      }),
       http.get(
         "*/v1/providers/openrouter_work/models/openai%2Fgpt-4.1/endpoints",
         ({ request }) => {
@@ -370,13 +352,10 @@ describe("Providers provider instances", () => {
     let requestBody: unknown;
 
     server.use(
-      http.post(
-        "*/v1/providers/openai_2",
-        async ({ request }) => {
-          requestBody = await request.json();
-          return HttpResponse.json({ success: true });
-        },
-      ),
+      http.post("*/v1/providers/openai_2", async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.json({ success: true });
+      }),
     );
 
     const onCreated = vi.fn();

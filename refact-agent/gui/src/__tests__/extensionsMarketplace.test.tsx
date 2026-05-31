@@ -50,9 +50,7 @@ const SOURCES = [
 describe("SkillsMarketplace", () => {
   it("renders marketplace items from API", async () => {
     server.use(
-      http.get("*/v1/ext/registry", () =>
-        HttpResponse.json(REGISTRY),
-      ),
+      http.get("*/v1/ext/registry", () => HttpResponse.json(REGISTRY)),
       http.get("*/v1/skills/marketplace", () =>
         HttpResponse.json({
           items: [
@@ -90,9 +88,7 @@ describe("SkillsMarketplace", () => {
 
   it("opens source settings dialog", async () => {
     server.use(
-      http.get("*/v1/ext/registry", () =>
-        HttpResponse.json(REGISTRY),
-      ),
+      http.get("*/v1/ext/registry", () => HttpResponse.json(REGISTRY)),
       http.get("*/v1/skills/marketplace", () =>
         HttpResponse.json({ items: [], sources: SOURCES }),
       ),
@@ -116,9 +112,7 @@ describe("SkillsMarketplace", () => {
 describe("CommandsMarketplace", () => {
   it("renders commands from API", async () => {
     server.use(
-      http.get("*/v1/ext/registry", () =>
-        HttpResponse.json(REGISTRY),
-      ),
+      http.get("*/v1/ext/registry", () => HttpResponse.json(REGISTRY)),
       http.get("*/v1/commands/marketplace", () =>
         HttpResponse.json({
           items: [

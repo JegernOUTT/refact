@@ -66,9 +66,7 @@ describe("useGetCapsQuery", () => {
         return HttpResponse.text("pong");
       }),
       http.get("/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
-      http.get("*/v1/caps", () =>
-        HttpResponse.json(STUB_CAPS_RESPONSE),
-      ),
+      http.get("*/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
     );
 
     const store = setUpStore({
@@ -107,9 +105,7 @@ describe("useGetCapsQuery", () => {
         pingUrl = request.url;
         return HttpResponse.text("pong");
       }),
-      http.get("*/v1/caps", () =>
-        HttpResponse.json(STUB_CAPS_RESPONSE),
-      ),
+      http.get("*/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
     );
 
     const store = setUpStore({

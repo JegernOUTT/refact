@@ -83,41 +83,38 @@ function worktreesList(
 }
 
 function worktreeDiff() {
-  return http.get(
-    "*/v1/worktrees/:id/diff",
-    ({ params }) => {
-      const id = String(params.id);
-      const response: WorktreeDiffResponse = {
-        id,
+  return http.get("*/v1/worktrees/:id/diff", ({ params }) => {
+    const id = String(params.id);
+    const response: WorktreeDiffResponse = {
+      id,
+      branch: null,
+      base_branch: null,
+      base_commit: null,
+      status: {
+        path_exists: true,
+        is_git_worktree: true,
+        dirty: false,
+        staged_count: 0,
+        unstaged_count: 0,
+        untracked_count: 0,
         branch: null,
-        base_branch: null,
-        base_commit: null,
-        status: {
-          path_exists: true,
-          is_git_worktree: true,
-          dirty: false,
-          staged_count: 0,
-          unstaged_count: 0,
-          untracked_count: 0,
-          branch: null,
-          head_commit: null,
-        },
-        files: [],
-        stats: {
-          committed_files: 0,
-          staged_files: 0,
-          unstaged_files: 0,
-          untracked_files: 0,
-          files_changed: 0,
-          additions: 0,
-          deletions: 0,
-        },
-        patch: "",
-        patch_truncated: false,
-      };
-      return HttpResponse.json(response);
-    },
-  );
+        head_commit: null,
+      },
+      files: [],
+      stats: {
+        committed_files: 0,
+        staged_files: 0,
+        unstaged_files: 0,
+        untracked_files: 0,
+        files_changed: 0,
+        additions: 0,
+        deletions: 0,
+      },
+      patch: "",
+      patch_truncated: false,
+    };
+    return HttpResponse.json(response);
+  });
 }
 
 function chatModes() {
@@ -144,31 +141,25 @@ function chatModes() {
 }
 
 function commandCapture(calls: JsonObject[]) {
-  return http.post(
-    "*/v1/chats/:id/commands",
-    async ({ request }) => {
-      calls.push((await request.json()) as JsonObject);
-      return HttpResponse.json({ status: "queued" });
-    },
-  );
+  return http.post("*/v1/chats/:id/commands", async ({ request }) => {
+    calls.push((await request.json()) as JsonObject);
+    return HttpResponse.json({ status: "queued" });
+  });
 }
 
 function createWorktreeHandler(
   record: WorktreeRecordView,
   calls: JsonObject[],
 ) {
-  return http.post(
-    "*/v1/worktrees",
-    async ({ request }) => {
-      calls.push((await request.json()) as JsonObject);
-      return HttpResponse.json({
-        worktree: record,
-        branch_was_created: true,
-        dirty_source_warning: false,
-        warnings: [],
-      });
-    },
-  );
+  return http.post("*/v1/worktrees", async ({ request }) => {
+    calls.push((await request.json()) as JsonObject);
+    return HttpResponse.json({
+      worktree: record,
+      branch_was_created: true,
+      dirty_source_warning: false,
+      warnings: [],
+    });
+  });
 }
 
 function openWorktreeHandler(
@@ -176,18 +167,15 @@ function openWorktreeHandler(
   canOpenFolder: boolean,
   calls?: string[],
 ) {
-  return http.post(
-    `*/v1/worktrees/${record.meta.id}/open`,
-    () => {
-      calls?.push(record.meta.id);
-      return HttpResponse.json({
-        id: record.meta.id,
-        path: record.meta.root,
-        branch: record.meta.branch,
-        can_open_folder: canOpenFolder,
-      });
-    },
-  );
+  return http.post(`*/v1/worktrees/${record.meta.id}/open`, () => {
+    calls?.push(record.meta.id);
+    return HttpResponse.json({
+      id: record.meta.id,
+      path: record.meta.root,
+      branch: record.meta.branch,
+      can_open_folder: canOpenFolder,
+    });
+  });
 }
 
 function deleteWorktreeHandler(calls: string[]) {

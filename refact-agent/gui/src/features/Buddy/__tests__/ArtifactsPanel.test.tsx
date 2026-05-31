@@ -63,13 +63,10 @@ describe("ArtifactsPanel", () => {
           ],
         }),
       ),
-      http.post(
-        "*/v1/buddy/artifact_approve",
-        async ({ request }) => {
-          requestBody = await request.json();
-          return HttpResponse.text("OK");
-        },
-      ),
+      http.post("*/v1/buddy/artifact_approve", async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.text("OK");
+      }),
     );
 
     const { user } = render(<ArtifactsPanel />, {

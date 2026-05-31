@@ -35,13 +35,10 @@ describe("usePostUserAction", () => {
   it("usePostUserAction_called_on_setFileInfo", async () => {
     let requestBody: unknown;
     server.use(
-      http.post(
-        "*/v1/buddy/user_action",
-        async ({ request }) => {
-          requestBody = await request.json();
-          return HttpResponse.text("OK");
-        },
-      ),
+      http.post("*/v1/buddy/user_action", async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.text("OK");
+      }),
     );
 
     render(<EventBusHarness />, { preloadedState: CONFIG_STATE });
@@ -67,13 +64,10 @@ describe("usePostUserAction", () => {
   it("usePostUserAction_called_on_setSelectedSnippet", async () => {
     let requestBody: unknown;
     server.use(
-      http.post(
-        "*/v1/buddy/user_action",
-        async ({ request }) => {
-          requestBody = await request.json();
-          return HttpResponse.text("OK");
-        },
-      ),
+      http.post("*/v1/buddy/user_action", async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.text("OK");
+      }),
     );
 
     render(<EventBusHarness />, { preloadedState: CONFIG_STATE });

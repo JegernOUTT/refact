@@ -67,20 +67,16 @@ function mockMemories(response: TaskMemoriesResponse = memoriesResponse) {
   const kinds = [...new Set(response.memories.map((m) => m.kind))].sort();
   const pinned_count = response.memories.filter((m) => m.pinned).length;
   server.use(
-    http.get("*/v1/task/:taskId/memories", () =>
-      HttpResponse.json(response),
-    ),
-    http.get(
-      "*/v1/task/:taskId/memories/facets",
-      ({ params }) =>
-        HttpResponse.json({
-          task_id: String(params.taskId),
-          namespaces,
-          tags,
-          kinds,
-          total_count: response.memories.length,
-          pinned_count,
-        }),
+    http.get("*/v1/task/:taskId/memories", () => HttpResponse.json(response)),
+    http.get("*/v1/task/:taskId/memories/facets", ({ params }) =>
+      HttpResponse.json({
+        task_id: String(params.taskId),
+        namespaces,
+        tags,
+        kinds,
+        total_count: response.memories.length,
+        pinned_count,
+      }),
     ),
   );
 }
@@ -215,13 +211,10 @@ describe("MemoryInboxPanel", () => {
     const queryStrings: string[] = [];
     mockMemories();
     server.use(
-      http.get(
-        "*/v1/task/:taskId/memories",
-        ({ request }) => {
-          queryStrings.push(new URL(request.url).search);
-          return HttpResponse.json(memoriesResponse);
-        },
-      ),
+      http.get("*/v1/task/:taskId/memories", ({ request }) => {
+        queryStrings.push(new URL(request.url).search);
+        return HttpResponse.json(memoriesResponse);
+      }),
     );
 
     const { user } = render(<MemoryInboxPanel taskId="task-1" />, {
@@ -256,31 +249,26 @@ describe("MemoryInboxPanel", () => {
 
   it("memory_inbox_filter_options_persist_under_active_filters", async () => {
     server.use(
-      http.get(
-        "*/v1/task/:taskId/memories",
-        ({ request }) => {
-          const url = new URL(request.url);
-          const response =
-            url.searchParams.get("kind") === "risk"
-              ? {
-                  ...memoriesResponse,
-                  memories: [memoriesResponse.memories[1]],
-                }
-              : memoriesResponse;
-          return HttpResponse.json(response);
-        },
-      ),
-      http.get(
-        "*/v1/task/:taskId/memories/facets",
-        ({ params }) =>
-          HttpResponse.json({
-            task_id: String(params.taskId),
-            namespaces: ["card:T-2", "task"],
-            tags: ["agent", "cleanup", "handoff", "index", "planner", "search"],
-            kinds: ["decision", "risk"],
-            total_count: 2,
-            pinned_count: 1,
-          }),
+      http.get("*/v1/task/:taskId/memories", ({ request }) => {
+        const url = new URL(request.url);
+        const response =
+          url.searchParams.get("kind") === "risk"
+            ? {
+                ...memoriesResponse,
+                memories: [memoriesResponse.memories[1]],
+              }
+            : memoriesResponse;
+        return HttpResponse.json(response);
+      }),
+      http.get("*/v1/task/:taskId/memories/facets", ({ params }) =>
+        HttpResponse.json({
+          task_id: String(params.taskId),
+          namespaces: ["card:T-2", "task"],
+          tags: ["agent", "cleanup", "handoff", "index", "planner", "search"],
+          kinds: ["decision", "risk"],
+          total_count: 2,
+          pinned_count: 1,
+        }),
       ),
     );
 
@@ -488,16 +476,11 @@ describe("MemoryInboxPanel", () => {
           cards: [],
         }),
       ),
-      http.get("*/v1/worktrees", () =>
-        HttpResponse.json({ worktrees: [] }),
+      http.get("*/v1/worktrees", () => HttpResponse.json({ worktrees: [] })),
+      http.get("*/v1/tasks/:taskId/trajectories/:role", () =>
+        HttpResponse.json([]),
       ),
-      http.get(
-        "*/v1/tasks/:taskId/trajectories/:role",
-        () => HttpResponse.json([]),
-      ),
-      http.get("*/v1/ping", () =>
-        HttpResponse.json({ pong: "pong" }),
-      ),
+      http.get("*/v1/ping", () => HttpResponse.json({ pong: "pong" })),
       http.get("*/v1/chat-modes", () =>
         HttpResponse.json({ chat_modes: [], error: null }),
       ),
@@ -562,27 +545,23 @@ describe("MemoryInboxPanel", () => {
           memories: [{ ...memoriesResponse.memories[0], pinned: false }],
         }),
       ),
-      http.get(
-        "*/v1/task/:taskId/memories/facets",
-        ({ params }) =>
-          HttpResponse.json({
-            task_id: String(params.taskId),
-            namespaces: ["task"],
-            tags: [],
-            kinds: ["decision"],
-            total_count: 1,
-            pinned_count: 0,
-          }),
+      http.get("*/v1/task/:taskId/memories/facets", ({ params }) =>
+        HttpResponse.json({
+          task_id: String(params.taskId),
+          namespaces: ["task"],
+          tags: [],
+          kinds: ["decision"],
+          total_count: 1,
+          pinned_count: 0,
+        }),
       ),
-      http.post(
-        "*/v1/task/:taskId/memories/:filename/pin",
-        () =>
-          HttpResponse.json({
-            ok: true,
-            filename: "decision.md",
-            pinned: true,
-            changed: true,
-          }),
+      http.post("*/v1/task/:taskId/memories/:filename/pin", () =>
+        HttpResponse.json({
+          ok: true,
+          filename: "decision.md",
+          pinned: true,
+          changed: true,
+        }),
       ),
     );
 
@@ -606,21 +585,18 @@ describe("MemoryInboxPanel", () => {
           memories: [{ ...memoriesResponse.memories[1] }],
         }),
       ),
-      http.get(
-        "*/v1/task/:taskId/memories/facets",
-        ({ params }) =>
-          HttpResponse.json({
-            task_id: String(params.taskId),
-            namespaces: ["card:T-2"],
-            tags: ["cleanup"],
-            kinds: ["risk"],
-            total_count: 1,
-            pinned_count: 1,
-          }),
+      http.get("*/v1/task/:taskId/memories/facets", ({ params }) =>
+        HttpResponse.json({
+          task_id: String(params.taskId),
+          namespaces: ["card:T-2"],
+          tags: ["cleanup"],
+          kinds: ["risk"],
+          total_count: 1,
+          pinned_count: 1,
+        }),
       ),
-      http.post(
-        "*/v1/task/:taskId/memories/:filename/pin",
-        () => HttpResponse.json({ error: "server error" }, { status: 500 }),
+      http.post("*/v1/task/:taskId/memories/:filename/pin", () =>
+        HttpResponse.json({ error: "server error" }, { status: 500 }),
       ),
     );
 
@@ -646,26 +622,22 @@ describe("MemoryInboxPanel", () => {
           memories: [{ ...memoriesResponse.memories[0], pinned: false }],
         }),
       ),
-      http.get(
-        "*/v1/task/:taskId/memories/facets",
-        ({ params }) =>
-          HttpResponse.json({
-            task_id: String(params.taskId),
-            namespaces: ["task"],
-            tags: [],
-            kinds: ["decision"],
-            total_count: 1,
-            pinned_count: 0,
-          }),
+      http.get("*/v1/task/:taskId/memories/facets", ({ params }) =>
+        HttpResponse.json({
+          task_id: String(params.taskId),
+          namespaces: ["task"],
+          tags: [],
+          kinds: ["decision"],
+          total_count: 1,
+          pinned_count: 0,
+        }),
       ),
-      http.post(
-        "*/v1/task/:taskId/memories/:filename/archive",
-        () =>
-          HttpResponse.json({
-            ok: true,
-            filename: "decision.md",
-            archived_filename: "archived/decision.md",
-          }),
+      http.post("*/v1/task/:taskId/memories/:filename/archive", () =>
+        HttpResponse.json({
+          ok: true,
+          filename: "decision.md",
+          archived_filename: "archived/decision.md",
+        }),
       ),
     );
 
@@ -693,21 +665,18 @@ describe("MemoryInboxPanel", () => {
           memories: [{ ...memoriesResponse.memories[0], pinned: false }],
         }),
       ),
-      http.get(
-        "*/v1/task/:taskId/memories/facets",
-        ({ params }) =>
-          HttpResponse.json({
-            task_id: String(params.taskId),
-            namespaces: ["task"],
-            tags: [],
-            kinds: ["decision"],
-            total_count: 1,
-            pinned_count: 0,
-          }),
+      http.get("*/v1/task/:taskId/memories/facets", ({ params }) =>
+        HttpResponse.json({
+          task_id: String(params.taskId),
+          namespaces: ["task"],
+          tags: [],
+          kinds: ["decision"],
+          total_count: 1,
+          pinned_count: 0,
+        }),
       ),
-      http.post(
-        "*/v1/task/:taskId/memories/:filename/archive",
-        () => HttpResponse.json({ error: "server error" }, { status: 500 }),
+      http.post("*/v1/task/:taskId/memories/:filename/archive", () =>
+        HttpResponse.json({ error: "server error" }, { status: 500 }),
       ),
     );
 

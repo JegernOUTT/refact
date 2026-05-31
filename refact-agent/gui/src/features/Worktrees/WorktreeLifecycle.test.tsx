@@ -181,19 +181,14 @@ function worktreesList(records: WorktreeRecordView[]) {
 }
 
 function diffHandler(diff = makeDiff()) {
-  return http.get("*/v1/worktrees/:id/diff", () =>
-    HttpResponse.json(diff),
-  );
+  return http.get("*/v1/worktrees/:id/diff", () => HttpResponse.json(diff));
 }
 
 function mergeHandler(response: MergeWorktreeResponse, calls: JsonObject[]) {
-  return http.post(
-    "*/v1/worktrees/:id/merge",
-    async ({ request }) => {
-      calls.push((await request.json()) as JsonObject);
-      return HttpResponse.json(response);
-    },
-  );
+  return http.post("*/v1/worktrees/:id/merge", async ({ request }) => {
+    calls.push((await request.json()) as JsonObject);
+    return HttpResponse.json(response);
+  });
 }
 
 function taskHandlers(record: WorktreeRecordView) {
@@ -241,12 +236,8 @@ function taskHandlers(record: WorktreeRecordView) {
     ],
   };
   return [
-    http.get("*/v1/tasks/task-1", () =>
-      HttpResponse.json({ meta: task }),
-    ),
-    http.get("*/v1/tasks/task-1/board", () =>
-      HttpResponse.json(board),
-    ),
+    http.get("*/v1/tasks/task-1", () => HttpResponse.json({ meta: task })),
+    http.get("*/v1/tasks/task-1/board", () => HttpResponse.json(board)),
     http.get("*/v1/tasks/task-1/trajectories/planner", () =>
       HttpResponse.json([]),
     ),
@@ -259,18 +250,14 @@ function taskHandlers(record: WorktreeRecordView) {
         warnings: [],
       }),
     ),
-    http.get("*/v1/ping", () =>
-      HttpResponse.json({ status: "ok" }),
-    ),
+    http.get("*/v1/ping", () => HttpResponse.json({ status: "ok" })),
     http.get("*/v1/chat-modes", () =>
       HttpResponse.json({ modes: [], errors: [] }),
     ),
     http.get("*/v1/caps", () =>
       HttpResponse.json({ chat_models: [], completion_models: [] }),
     ),
-    http.post("*/v1/buddy/diagnostics/collect", () =>
-      HttpResponse.json({}),
-    ),
+    http.post("*/v1/buddy/diagnostics/collect", () => HttpResponse.json({})),
     worktreesList([record]),
   ];
 }

@@ -70,32 +70,25 @@ const historicalDetailResponse: TaskDocumentDetail = {
 
 function mockDocuments(response: TaskDocumentListResponse = listResponse) {
   server.use(
-    http.get("*/v1/task/:taskId/documents", () =>
-      HttpResponse.json(response),
-    ),
-    http.get(
-      "*/v1/task/:taskId/documents/:slug",
-      ({ request, params }) => {
-        const slug = String(params.slug);
-        const version = new URL(request.url).searchParams.get("version");
-        if (version) {
-          return HttpResponse.json({ error: "not found" }, { status: 404 });
-        }
-        const found = response.documents.find((d) => d.slug === slug);
-        if (found) {
-          return HttpResponse.json({ ...found, content: "" });
-        }
+    http.get("*/v1/task/:taskId/documents", () => HttpResponse.json(response)),
+    http.get("*/v1/task/:taskId/documents/:slug", ({ request, params }) => {
+      const slug = String(params.slug);
+      const version = new URL(request.url).searchParams.get("version");
+      if (version) {
         return HttpResponse.json({ error: "not found" }, { status: 404 });
-      },
-    ),
-    http.get(
-      "*/v1/task/:taskId/documents/:slug/history",
-      ({ params }) =>
-        HttpResponse.json({
-          task_id: String(params.taskId),
-          slug: String(params.slug),
-          history: [],
-        }),
+      }
+      const found = response.documents.find((d) => d.slug === slug);
+      if (found) {
+        return HttpResponse.json({ ...found, content: "" });
+      }
+      return HttpResponse.json({ error: "not found" }, { status: 404 });
+    }),
+    http.get("*/v1/task/:taskId/documents/:slug/history", ({ params }) =>
+      HttpResponse.json({
+        task_id: String(params.taskId),
+        slug: String(params.slug),
+        history: [],
+      }),
     ),
   );
 }
@@ -123,15 +116,12 @@ describe("DocumentsPanel", () => {
   it("clicking a row expands inline content as markdown", async () => {
     mockDocuments();
     server.use(
-      http.get(
-        "*/v1/task/:taskId/documents/:slug",
-        ({ params }) => {
-          if (params.slug === "initial-plan") {
-            return HttpResponse.json(detailResponse);
-          }
-          return HttpResponse.json({ status: 404 }, { status: 404 });
-        },
-      ),
+      http.get("*/v1/task/:taskId/documents/:slug", ({ params }) => {
+        if (params.slug === "initial-plan") {
+          return HttpResponse.json(detailResponse);
+        }
+        return HttpResponse.json({ status: 404 }, { status: 404 });
+      }),
     );
 
     const { user } = render(<DocumentsPanel taskId="task-1" />, {
@@ -196,18 +186,15 @@ describe("DocumentsPanel", () => {
     const createRequests: unknown[] = [];
     mockDocuments();
     server.use(
-      http.post(
-        "*/v1/task/:taskId/documents",
-        async ({ request }) => {
-          const body = await request.json();
-          createRequests.push(body);
-          return HttpResponse.json({
-            ...detailResponse,
-            slug: (body as { slug: string }).slug,
-            name: (body as { name: string }).name,
-          });
-        },
-      ),
+      http.post("*/v1/task/:taskId/documents", async ({ request }) => {
+        const body = await request.json();
+        createRequests.push(body);
+        return HttpResponse.json({
+          ...detailResponse,
+          slug: (body as { slug: string }).slug,
+          name: (body as { name: string }).name,
+        });
+      }),
     );
 
     const { user } = render(<DocumentsPanel taskId="task-1" />, {
@@ -245,15 +232,12 @@ describe("DocumentsPanel", () => {
   it("clicking edit opens editor in edit mode prefilled", async () => {
     mockDocuments();
     server.use(
-      http.get(
-        "*/v1/task/:taskId/documents/:slug",
-        ({ params }) => {
-          if (params.slug === "initial-plan") {
-            return HttpResponse.json(detailResponse);
-          }
-          return HttpResponse.json({ status: 404 }, { status: 404 });
-        },
-      ),
+      http.get("*/v1/task/:taskId/documents/:slug", ({ params }) => {
+        if (params.slug === "initial-plan") {
+          return HttpResponse.json(detailResponse);
+        }
+        return HttpResponse.json({ status: 404 }, { status: 404 });
+      }),
     );
 
     const { user } = render(<DocumentsPanel taskId="task-1" />, {
@@ -277,13 +261,10 @@ describe("DocumentsPanel", () => {
     const deleteRequests: string[] = [];
     mockDocuments();
     server.use(
-      http.delete(
-        "*/v1/task/:taskId/documents/:slug",
-        ({ params }) => {
-          deleteRequests.push(String(params.slug));
-          return new HttpResponse(null, { status: 204 });
-        },
-      ),
+      http.delete("*/v1/task/:taskId/documents/:slug", ({ params }) => {
+        deleteRequests.push(String(params.slug));
+        return new HttpResponse(null, { status: 204 });
+      }),
     );
 
     const { user } = render(<DocumentsPanel taskId="task-1" />, {
@@ -309,36 +290,30 @@ describe("DocumentsPanel", () => {
   it("clicking a history version loads and renders historical content", async () => {
     mockDocuments();
     server.use(
-      http.get(
-        "*/v1/task/:taskId/documents/:slug/history",
-        ({ params }) => {
-          if (params.slug === "initial-plan") {
-            return HttpResponse.json({
-              task_id: "task-1",
-              slug: "initial-plan",
-              history: [
-                {
-                  version: 1,
-                  updated_at: "2026-05-21T10:00:00Z",
-                  author_role: "planner",
-                  size_bytes: 128,
-                },
-              ],
-            });
-          }
-          return HttpResponse.json({ status: 404 }, { status: 404 });
-        },
-      ),
-      http.get(
-        "*/v1/task/:taskId/documents/:slug",
-        ({ request, params }) => {
-          const version = new URL(request.url).searchParams.get("version");
-          if (params.slug === "initial-plan" && version === "1") {
-            return HttpResponse.json(historicalDetailResponse);
-          }
-          return HttpResponse.json({ status: 404 }, { status: 404 });
-        },
-      ),
+      http.get("*/v1/task/:taskId/documents/:slug/history", ({ params }) => {
+        if (params.slug === "initial-plan") {
+          return HttpResponse.json({
+            task_id: "task-1",
+            slug: "initial-plan",
+            history: [
+              {
+                version: 1,
+                updated_at: "2026-05-21T10:00:00Z",
+                author_role: "planner",
+                size_bytes: 128,
+              },
+            ],
+          });
+        }
+        return HttpResponse.json({ status: 404 }, { status: 404 });
+      }),
+      http.get("*/v1/task/:taskId/documents/:slug", ({ request, params }) => {
+        const version = new URL(request.url).searchParams.get("version");
+        if (params.slug === "initial-plan" && version === "1") {
+          return HttpResponse.json(historicalDetailResponse);
+        }
+        return HttpResponse.json({ status: 404 }, { status: 404 });
+      }),
     );
 
     const { user } = render(<DocumentsPanel taskId="task-1" />, {
@@ -363,14 +338,12 @@ describe("DocumentsPanel", () => {
   it("escape key closes the history dialog", async () => {
     mockDocuments();
     server.use(
-      http.get(
-        "*/v1/task/:taskId/documents/:slug/history",
-        () =>
-          HttpResponse.json({
-            task_id: "task-1",
-            slug: "initial-plan",
-            history: [],
-          }),
+      http.get("*/v1/task/:taskId/documents/:slug/history", () =>
+        HttpResponse.json({
+          task_id: "task-1",
+          slug: "initial-plan",
+          history: [],
+        }),
       ),
     );
 
@@ -397,14 +370,12 @@ describe("DocumentsPanel", () => {
   it("tab_cycles_focus_within_history_dialog", async () => {
     mockDocuments();
     server.use(
-      http.get(
-        "*/v1/task/:taskId/documents/:slug/history",
-        () =>
-          HttpResponse.json({
-            task_id: "task-1",
-            slug: "initial-plan",
-            history: [],
-          }),
+      http.get("*/v1/task/:taskId/documents/:slug/history", () =>
+        HttpResponse.json({
+          task_id: "task-1",
+          slug: "initial-plan",
+          history: [],
+        }),
       ),
     );
 
@@ -532,21 +503,19 @@ describe("DocumentsPanel", () => {
       ],
     });
     server.use(
-      http.post(
-        "*/v1/task/:taskId/documents/:slug/pin",
-        () =>
-          HttpResponse.json({
-            slug: "api-design",
-            name: "API Design",
-            kind: "design",
-            pinned: true,
-            version: 1,
-            content: "",
-            created_at: "2026-05-24T10:00:00Z",
-            updated_at: "2026-05-24T10:00:00Z",
-            author_role: "planner",
-            relevant_cards: [],
-          }),
+      http.post("*/v1/task/:taskId/documents/:slug/pin", () =>
+        HttpResponse.json({
+          slug: "api-design",
+          name: "API Design",
+          kind: "design",
+          pinned: true,
+          version: 1,
+          content: "",
+          created_at: "2026-05-24T10:00:00Z",
+          updated_at: "2026-05-24T10:00:00Z",
+          author_role: "planner",
+          relevant_cards: [],
+        }),
       ),
       http.get("*/v1/task/:taskId/documents", () =>
         HttpResponse.json({
@@ -649,9 +618,8 @@ describe("DocumentsPanel", () => {
       ],
     });
     server.use(
-      http.post(
-        "*/v1/task/:taskId/documents/:slug/pin",
-        () => HttpResponse.json({ error: "fail" }, { status: 500 }),
+      http.post("*/v1/task/:taskId/documents/:slug/pin", () =>
+        HttpResponse.json({ error: "fail" }, { status: 500 }),
       ),
     );
 

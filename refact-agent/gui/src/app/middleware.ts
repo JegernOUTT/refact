@@ -243,10 +243,15 @@ startListening({
       }
 
       if (Object.keys(patch).length > 0) {
-        await sendChatCommand(chatId, state.config, state.config.apiKey ?? undefined, {
-          type: "set_params",
-          patch,
-        });
+        await sendChatCommand(
+          chatId,
+          state.config,
+          state.config.apiKey ?? undefined,
+          {
+            type: "set_params",
+            patch,
+          },
+        );
       }
     } catch {
       // Silently ignore - backend may not support this command

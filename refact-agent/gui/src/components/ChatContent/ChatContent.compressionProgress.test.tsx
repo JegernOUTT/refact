@@ -4,9 +4,7 @@ import { ChatContent } from "./ChatContent";
 import { createDefaultChatState, render, screen } from "../../utils/test-utils";
 import type { RootState } from "../../app/store";
 import type { ChatMessages } from "../../services/refact";
-import {
-  switchToThread,
-} from "../../features/Chat/Thread/actions";
+import { switchToThread } from "../../features/Chat/Thread/actions";
 import type { ChatThreadRuntime } from "../../features/Chat/Thread/types";
 
 function userMessage(content: string): ChatMessages[number] {

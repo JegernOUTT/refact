@@ -78,13 +78,10 @@ describe("CardCommentsSection", () => {
   it("submit_calls_add_comment_mutation_and_clears_composer", async () => {
     const requests: unknown[] = [];
     server.use(
-      http.post(
-        `*/v1/tasks/${TASK_ID}/board`,
-        async ({ request }) => {
-          requests.push(await request.json());
-          return HttpResponse.json(emptyBoardResponse);
-        },
-      ),
+      http.post(`*/v1/tasks/${TASK_ID}/board`, async ({ request }) => {
+        requests.push(await request.json());
+        return HttpResponse.json(emptyBoardResponse);
+      }),
     );
 
     const { user } = renderSection([]);

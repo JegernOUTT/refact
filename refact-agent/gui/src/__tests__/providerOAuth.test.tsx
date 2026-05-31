@@ -28,9 +28,8 @@ function renderProviderOAuth(providerName: string) {
 
 function mockProviderOauthStart(providerName: string, body: object) {
   server.use(
-    http.post(
-      `*/v1/providers/${providerName}/oauth/start`,
-      () => HttpResponse.json(body),
+    http.post(`*/v1/providers/${providerName}/oauth/start`, () =>
+      HttpResponse.json(body),
     ),
   );
 }

@@ -318,9 +318,12 @@ export async function cancelQueuedItem(
   if (apiKey) {
     headers.Authorization = `Bearer ${apiKey}`;
   }
-  const response = await fetch(queueItemUrl(connection, chatId, clientRequestId), {
-    method: "DELETE",
-    headers,
-  });
+  const response = await fetch(
+    queueItemUrl(connection, chatId, clientRequestId),
+    {
+      method: "DELETE",
+      headers,
+    },
+  );
   return response.ok;
 }
