@@ -111,6 +111,7 @@ interface BubbleView {
     | "270px"
     | "300px"
     | "330px";
+  maxWidth: "220px" | "300px" | "min(460px, 72vw)";
   whiteSpace: React.CSSProperties["whiteSpace"];
   opacity: number;
   visible: boolean;
@@ -177,6 +178,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   bubblePosition = "top",
   randomizeBubblePosition = false,
   compactBubble: compactBubbleOverride = false,
+  chatCompanionBubble: chatCompanionBubbleOverride = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<BuddyAnimState>(createInitialAnimState());
@@ -187,6 +189,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     text: "",
     position: bubblePosition,
     width: "max-content",
+    maxWidth: "300px",
     whiteSpace: "nowrap",
     opacity: 0,
     visible: false,
@@ -259,33 +262,51 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           (anim.walkOffsetX / CANVAS_SIZE) * displaySize,
         );
         const compactBubble = compactBubbleOverride || displaySize <= 180;
+        const chatCompanionBubble =
+          chatCompanionBubbleOverride && displaySize <= 180;
         const overrideText = speechOverrideRef.current ?? "";
         const rawText = overrideText || anim.statusText || "";
-        const text = ellipsizeMiddle(rawText, compactBubble ? 120 : 170);
+        const text = ellipsizeMiddle(
+          rawText,
+          chatCompanionBubble ? 160 : compactBubble ? 120 : 170,
+        );
         const opacity = overrideText ? 1 : anim.statusOpacity;
         const visible = opacity > 0.02 && text.length > 0;
         const hasControls = speechControlCount > 0;
         const isVeryLongText = text.length > 130;
         const isLongText = text.length > 72;
         const isMediumText = text.length > 34;
-        const fixedWidth = hasControls || isLongText;
-        const width: BubbleView["width"] = compactBubble
-          ? isLongText
-            ? "220px"
-            : hasControls
-              ? "200px"
-              : isMediumText
-                ? "200px"
-                : "max-content"
-          : isVeryLongText
-            ? "300px"
+        const fixedWidth = hasControls || isLongText || chatCompanionBubble;
+        const width: BubbleView["width"] = chatCompanionBubble
+          ? isVeryLongText || hasControls
+            ? "330px"
             : isLongText
-              ? "270px"
+              ? "300px"
+              : isMediumText
+                ? "260px"
+                : "max-content"
+          : compactBubble
+            ? isLongText
+              ? "220px"
               : hasControls
-                ? "230px"
+                ? "200px"
                 : isMediumText
                   ? "200px"
-                  : "max-content";
+                  : "max-content"
+            : isVeryLongText
+              ? "300px"
+              : isLongText
+                ? "270px"
+                : hasControls
+                  ? "230px"
+                  : isMediumText
+                    ? "200px"
+                    : "max-content";
+        const maxWidth: BubbleView["maxWidth"] = chatCompanionBubble
+          ? "min(460px, 72vw)"
+          : compactBubble
+            ? "220px"
+            : "300px";
         const whiteSpace: BubbleView["whiteSpace"] =
           fixedWidth || isMediumText ? "normal" : "nowrap";
         const previousFixedWidth =
@@ -306,6 +327,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           text,
           position,
           width,
+          maxWidth,
           whiteSpace,
           opacity: nextOpacity,
           visible,
@@ -316,6 +338,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           previous.text !== nextView.text ||
           previous.position !== nextView.position ||
           previous.width !== nextView.width ||
+          previous.maxWidth !== nextView.maxWidth ||
           previous.whiteSpace !== nextView.whiteSpace ||
           previous.visible !== nextView.visible ||
           previous.walkOffsetPx !== nextView.walkOffsetPx ||
@@ -330,6 +353,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     frameIdRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(frameIdRef.current);
   }, [
+    chatCompanionBubbleOverride,
     compactBubbleOverride,
     displaySize,
     emit,
@@ -456,6 +480,8 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         (() => {
           const pos = BUBBLE_STYLES[bubbleView.position];
           const compactBubble = compactBubbleOverride || displaySize <= 180;
+          const chatCompanionBubble =
+            chatCompanionBubbleOverride && displaySize <= 180;
           const tailColor: React.CSSProperties =
             bubbleView.position === "left"
               ? {
@@ -476,9 +502,17 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
                   };
           const compactSideContainer: React.CSSProperties = compactBubble
             ? bubbleView.position === "left"
-              ? { right: "calc(86% - var(--buddy-walk-x, 0px))" }
+              ? {
+                  right: chatCompanionBubble
+                    ? "calc(56% - var(--buddy-walk-x, 0px))"
+                    : "calc(86% - var(--buddy-walk-x, 0px))",
+                }
               : bubbleView.position === "right"
-                ? { left: "calc(86% + var(--buddy-walk-x, 0px))" }
+                ? {
+                    left: chatCompanionBubble
+                      ? "calc(56% + var(--buddy-walk-x, 0px))"
+                      : "calc(86% + var(--buddy-walk-x, 0px))",
+                  }
                 : {}
             : {};
           const bubbleStyle: BubbleStyle = {
@@ -498,7 +532,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
             lineHeight: 1.36,
             whiteSpace: bubbleView.whiteSpace,
             width: bubbleView.width,
-            maxWidth: compactBubble ? "220px" : "300px",
+            maxWidth: bubbleView.maxWidth,
             overflowWrap: "break-word",
             overflow: "visible",
             pointerEvents: speechControlCount > 0 ? "auto" : "none",

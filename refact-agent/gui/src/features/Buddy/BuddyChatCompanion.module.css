@@ -3,8 +3,17 @@
   right: 0;
   bottom: 100%;
   z-index: 50;
+  display: flex;
+  justify-content: flex-end;
+  width: min(620px, calc(100vw - var(--space-4)));
+  max-width: calc(100vw - var(--space-4));
   padding-bottom: 4px;
+  pointer-events: none;
   animation: slideUp 0.25s ease-out;
+}
+
+.companion > * {
+  pointer-events: auto;
 }
 
 .disabledCompanion {

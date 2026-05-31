@@ -1243,6 +1243,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         speechIntent={notification.speechIntent}
         onSpeechControlClick={(ctrl) => void handleControl(ctrl)}
         bubblePosition="left"
+        compactBubble
+        chatCompanionBubble
       />
     </div>
   );

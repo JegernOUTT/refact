@@ -121,6 +121,73 @@ describe("BuddyCanvas compact speech layout", () => {
     });
   });
 
+  it("expands compact chat companion side bubbles for long speech", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      noopContext,
+    );
+
+    render(
+      <BuddyCanvas
+        state={makeSemanticState()}
+        displaySize={160}
+        speechOverride="Pixel’s here, poking the shadows—your chats are probably playing hide-and-seek with tiny gremlin socks."
+        bubblePosition="left"
+        compactBubble
+        chatCompanionBubble
+      />,
+    );
+
+    runAnimationFrame();
+
+    const bubble = await screen.findByText(/poking the shadows/u);
+    const bubbleElement = bubble.closest("div[data-bubble-position]");
+
+    expect(bubbleElement).not.toBeNull();
+    await waitFor(() => {
+      expect(bubbleElement).toHaveStyle({
+        width: "300px",
+      });
+      expect(bubbleElement?.getAttribute("style")).toContain(
+        "max-width: min(460px, 72vw)",
+      );
+      expect(bubbleElement?.getAttribute("style")).toContain(
+        "white-space: normal",
+      );
+      expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");
+    });
+  });
+
+  it("keeps explicit compact bubbles narrow unless chat companion layout is requested", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      noopContext,
+    );
+
+    render(
+      <BuddyCanvas
+        state={makeSemanticState()}
+        displaySize={160}
+        speechOverride="The observatory has a very long update that should keep the compact side bubble narrow."
+        bubblePosition="left"
+        compactBubble
+      />,
+    );
+
+    runAnimationFrame();
+
+    const bubble = await screen.findByText(/observatory has a very long/u);
+    const bubbleElement = bubble.closest("div[data-bubble-position]");
+
+    expect(bubbleElement).not.toBeNull();
+    await waitFor(() => {
+      expect(bubbleElement).toHaveStyle({
+        width: "220px",
+        maxWidth: "220px",
+        whiteSpace: "normal",
+      });
+      expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");
+    });
+  });
+
   it("keeps normal world side bubble sizing at the same display size", async () => {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
       noopContext,

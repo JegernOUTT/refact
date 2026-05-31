@@ -27,6 +27,7 @@ const VOICE_TTL: Duration = Duration::from_secs(5 * 60);
 const VOICE_TIMEOUT: Duration = Duration::from_secs(8);
 pub const VOICE_RUNTIME_EVENT_TIMEOUT_MS: u64 = 1500;
 const VOICE_MAX_CHARS: usize = 80;
+const CHAT_REACTION_VOICE_MAX_CHARS: usize = 120;
 const VOICE_CACHE_MAX_ITEMS: usize = 128;
 
 pub use refact_buddy_core::voice_service::SpeechIntent;
@@ -360,12 +361,13 @@ impl VoiceService {
         }
 
         let request = VoiceRenderRequest::from_ctx(intent_kind, &ctx);
+        let normalize_line = request.normalize_line_fn();
         let rendered =
             tokio::time::timeout(VOICE_TIMEOUT, self.renderer.render_voice(gcx, request))
                 .await
                 .ok()
                 .flatten()
-                .map(|text| normalize_voice_line(&text))
+                .map(|text| normalize_line(&text))
                 .filter(|text| !text.is_empty())
                 .unwrap_or_default();
         if !rendered.is_empty() {
@@ -400,11 +402,12 @@ impl VoiceService {
 
         let fallback = self.fallback_for(intent_kind, ctx);
         let request = VoiceRenderRequest::from_ctx(intent_kind, ctx);
+        let normalize_line = request.normalize_line_fn();
         let rendered = tokio::time::timeout(timeout, self.renderer.render_voice(gcx, request))
             .await
             .ok()
             .flatten()
-            .map(|text| normalize_voice_line(&text))
+            .map(|text| normalize_line(&text))
             .filter(|text| !text.is_empty())
             .unwrap_or(fallback);
 
@@ -522,6 +525,22 @@ impl VoiceRenderRequest {
             self.workflow_summary.as_deref().unwrap_or("none"),
         )
     }
+
+    fn max_new_tokens(&self) -> usize {
+        if self.intent_kind.starts_with("speech:chat_reaction_") {
+            CHAT_REACTION_VOICE_MAX_CHARS
+        } else {
+            VOICE_MAX_CHARS
+        }
+    }
+
+    fn normalize_line_fn(&self) -> fn(&str) -> String {
+        if self.intent_kind.starts_with("speech:chat_reaction_") {
+            normalize_chat_reaction_voice_line
+        } else {
+            normalize_voice_line
+        }
+    }
 }
 
 async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Option<String> {
@@ -549,11 +568,12 @@ async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Optio
         }
     };
 
+    let max_new_tokens = request.max_new_tokens();
     let params = SubchatParameters {
         subchat_model_type: ChatModelType::Light,
         subchat_model: String::new(),
         subchat_n_ctx: config.n_ctx,
-        subchat_max_new_tokens: VOICE_MAX_CHARS,
+        subchat_max_new_tokens: max_new_tokens,
         subchat_temperature: Some(0.9),
         subchat_tokens_for_rag: 0,
         subchat_reasoning_effort: None,
@@ -570,7 +590,7 @@ async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Optio
     config.tools = crate::subchat::ToolsPolicy::None;
     config.max_steps = 1;
     config.model = model;
-    config.max_new_tokens = VOICE_MAX_CHARS;
+    config.max_new_tokens = max_new_tokens;
     config.temperature = Some(0.9);
     config.buddy_meta = Some(crate::buddy::types::BuddyThreadMeta {
         is_buddy_chat: true,
@@ -599,6 +619,14 @@ async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Optio
 }
 
 fn normalize_voice_line(raw: &str) -> String {
+    normalize_voice_line_with_limit(raw, VOICE_MAX_CHARS)
+}
+
+fn normalize_chat_reaction_voice_line(raw: &str) -> String {
+    normalize_voice_line_with_limit(raw, CHAT_REACTION_VOICE_MAX_CHARS)
+}
+
+fn normalize_voice_line_with_limit(raw: &str, max_chars: usize) -> String {
     let stripped = raw
         .replace(['\r', '\n'], " ")
         .split_whitespace()
@@ -608,7 +636,26 @@ fn normalize_voice_line(raw: &str) -> String {
         .trim()
         .trim_matches(|c| c == '"' || c == '\'' || c == '`')
         .trim();
-    trimmed.chars().take(VOICE_MAX_CHARS).collect()
+    truncate_voice_line(trimmed, max_chars)
+}
+
+fn truncate_voice_line(trimmed: &str, max_chars: usize) -> String {
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let mut truncated = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    if let Some(idx) = truncated.rfind(char::is_whitespace) {
+        truncated.truncate(idx);
+    }
+    let truncated = truncated.trim_end();
+    if truncated.is_empty() {
+        return "…".to_string();
+    }
+    format!("{}…", truncated)
 }
 
 fn fallback_phrases(intent_kind: &str) -> &'static [&'static str] {
@@ -742,6 +789,18 @@ mod tests {
         let title = service.render_chat_title(gcx, voice_ctx(&persona)).await;
 
         assert_eq!(title.chars().count(), VOICE_MAX_CHARS);
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn voice_truncates_at_word_boundary_with_ellipsis() {
+        let line = normalize_voice_line_with_limit(
+            "sparkly gremlin words should not be sliced through the middle",
+            24,
+        );
+
+        assert_eq!(line, "sparkly gremlin words…");
+        assert!(line.chars().count() <= 24);
     }
 
     #[tokio::test]
@@ -848,5 +907,44 @@ mod tests {
         assert!(user.contains("friendly low-noise Pixel gremlin check-in"));
         assert!(user.contains("being present"));
         assert!(user.contains("do not quote the message"));
+    }
+
+    #[tokio::test]
+    async fn chat_reaction_voice_uses_chat_reaction_limit() {
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let renderer =
+            TestVoiceRenderer::new(vec![Some("x".repeat(CHAT_REACTION_VOICE_MAX_CHARS + 40))]);
+        let service = VoiceService::new_with_renderer(renderer);
+        let persona = persona("helper_sprite");
+        let ctx = VoiceCtx {
+            persona: &persona,
+            identity_name: "Pixel",
+            pulse_one_liner: "Tests are running".to_string(),
+            workflow_id: Some("chat_reaction"),
+            workflow_summary: Some("please write a hello world example for me"),
+        };
+
+        let line = service
+            .render_chat_reaction(gcx, ctx, ChatReactionSpeechIntent::Ambient)
+            .await;
+
+        assert_eq!(line.chars().count(), CHAT_REACTION_VOICE_MAX_CHARS);
+        assert!(line.ends_with('…'));
+    }
+
+    #[test]
+    fn chat_reaction_voice_request_uses_chat_reaction_token_budget() {
+        let persona = persona("helper_sprite");
+        let ctx = VoiceCtx {
+            persona: &persona,
+            identity_name: "Pixel",
+            pulse_one_liner: "Tests are running".to_string(),
+            workflow_id: Some("chat_reaction"),
+            workflow_summary: Some("please write a hello world example for me"),
+        };
+        let request =
+            VoiceRenderRequest::from_ctx(ChatReactionSpeechIntent::Ambient.as_str(), &ctx);
+
+        assert_eq!(request.max_new_tokens(), CHAT_REACTION_VOICE_MAX_CHARS);
     }
 }
