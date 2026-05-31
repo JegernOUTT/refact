@@ -407,28 +407,40 @@ describe("Dashboard progressive sidebar readiness", () => {
       preloadedState: {
         ...CONFIG_STATE,
         history: {
-          chats: {
-            "chat-predefined": {
-              id: "chat-predefined",
-              title: "Predefined workspace chat",
-              updatedAt: "2024-01-01T00:00:00Z",
-              model: "gpt-4",
-              mode: "agent",
-              tool_use: "agent",
-              messages: [],
-              boost_reasoning: false,
-              include_project_info: true,
-              increase_max_tokens: false,
-              createdAt: "2024-01-01T00:00:00Z",
-              last_user_message_id: "",
-              message_count: 1,
-              total_lines_added: 0,
-              total_lines_removed: 0,
-              tasks_total: 0,
-              tasks_done: 0,
-              tasks_failed: 0,
-            },
-          },
+          chats: Object.fromEntries(
+            Array.from({ length: 12 }, (_, i) => [
+              `chat-predefined-${i}`,
+              {
+                id: `chat-predefined-${i}`,
+                title:
+                  i === 0
+                    ? "Predefined workspace chat"
+                    : `Predefined workspace chat ${i}`,
+                updatedAt: `2024-01-${String(i + 1).padStart(
+                  2,
+                  "0",
+                )}T00:00:00Z`,
+                model: "gpt-4",
+                mode: "agent",
+                tool_use: "agent",
+                messages: [],
+                boost_reasoning: false,
+                include_project_info: true,
+                increase_max_tokens: false,
+                createdAt: `2024-01-${String(i + 1).padStart(
+                  2,
+                  "0",
+                )}T00:00:00Z`,
+                last_user_message_id: "",
+                message_count: 1,
+                total_lines_added: 0,
+                total_lines_removed: 0,
+                tasks_total: 0,
+                tasks_done: 0,
+                tasks_failed: 0,
+              },
+            ]),
+          ),
           isLoading: false,
           loadError: null,
           pagination: {

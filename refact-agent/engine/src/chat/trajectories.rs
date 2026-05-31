@@ -260,6 +260,7 @@ pub struct TrajectoryData {
 struct TrajectoryListData {
     id: String,
     updated_at: String,
+    mode: Option<String>,
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -268,6 +269,47 @@ struct TrajectoryListCandidate {
     id: String,
     updated_at: String,
     path: PathBuf,
+}
+
+fn trajectory_list_main_link_type(link_type: Option<&str>) -> bool {
+    matches!(link_type, Some("handoff" | "mode_transition" | "branch"))
+}
+
+pub fn trajectory_event_is_displayable_chat(event: &TrajectoryEvent) -> bool {
+    if event.task_id.is_some() {
+        return false;
+    }
+    if matches!(
+        event.mode.as_deref(),
+        Some("task_agent" | "task_planner" | "buddy")
+    ) {
+        return false;
+    }
+    if event.parent_id.is_some() && !trajectory_list_main_link_type(event.link_type.as_deref()) {
+        return false;
+    }
+
+    true
+}
+
+fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData) -> bool {
+    if data.extra.get("buddy_meta").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if data.extra.get("task_meta").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if matches!(data.mode.as_deref(), Some("task_agent" | "task_planner")) {
+        return false;
+    }
+
+    let parent_id = data.extra.get("parent_id").and_then(|v| v.as_str());
+    let link_type = data.extra.get("link_type").and_then(|v| v.as_str());
+    if parent_id.is_some() && !trajectory_list_main_link_type(link_type) {
+        return false;
+    }
+
+    true
 }
 
 #[derive(Clone)]
@@ -3842,6 +3884,7 @@ fn trajectory_data_to_meta(data: &TrajectoryData) -> TrajectoryMeta {
 pub struct TrajectoriesListQuery {
     pub limit: Option<usize>,
     pub cursor: Option<String>,
+    pub displayable_only: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4071,6 +4114,8 @@ async fn hydrate_trajectory_list_page(
 async fn collect_trajectory_list_candidates(
     gcx: &Arc<GlobalContext>,
     cursor_filter: Option<&(String, String)>,
+    displayable_only: bool,
+    task_roots: &[PathBuf],
 ) -> Vec<TrajectoryListCandidate> {
     let mut candidates = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -4091,6 +4136,9 @@ async fn collect_trajectory_list_candidates(
             if !is_real_file(&path).await {
                 continue;
             }
+            if displayable_only && is_under_task_root(&path, task_roots) {
+                continue;
+            }
             let Ok(content) = fs::read_to_string(&path).await else {
                 continue;
             };
@@ -4098,6 +4146,9 @@ async fn collect_trajectory_list_candidates(
                 continue;
             };
             if data.extra.get("buddy_meta").map_or(false, |v| !v.is_null()) {
+                continue;
+            }
+            if displayable_only && !trajectory_list_data_is_displayable_chat(&data) {
                 continue;
             }
             if !trajectory_path_stem_matches_id(&path, &data.id) {
@@ -4296,6 +4347,7 @@ pub async fn list_trajectories_page(
     app: AppState,
     limit: usize,
     cursor: Option<String>,
+    displayable_only: bool,
 ) -> Result<PaginatedTrajectories, String> {
     let gcx = app.gcx.clone();
     let limit = limit.clamp(1, 200);
@@ -4306,18 +4358,26 @@ pub async fn list_trajectories_page(
         None => None,
     };
 
-    let mut candidates = collect_trajectory_list_candidates(&gcx, cursor_filter.as_ref()).await;
+    let task_roots = get_all_task_roots(gcx.clone()).await;
+    let mut candidates = collect_trajectory_list_candidates(
+        &gcx,
+        cursor_filter.as_ref(),
+        displayable_only,
+        &task_roots,
+    )
+    .await;
     let total_count = if cursor_filter.is_none() {
         candidates.len()
     } else {
-        collect_trajectory_list_candidates(&gcx, None).await.len()
+        collect_trajectory_list_candidates(&gcx, None, displayable_only, &task_roots)
+            .await
+            .len()
     };
     candidates.sort_by(|a, b| match b.updated_at.cmp(&a.updated_at) {
         std::cmp::Ordering::Equal => b.id.cmp(&a.id),
         other => other,
     });
 
-    let task_roots = get_all_task_roots(gcx.clone()).await;
     let (mut items, has_more) =
         hydrate_trajectory_list_page(app.clone(), candidates, limit, &task_roots).await;
     enrich_with_session_state(app, &mut items).await;
@@ -4342,9 +4402,14 @@ pub async fn handle_v1_trajectories_list(
     State(app): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<TrajectoriesListQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let response = list_trajectories_page(app, params.limit.unwrap_or(50), params.cursor)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+    let response = list_trajectories_page(
+        app,
+        params.limit.unwrap_or(50),
+        params.cursor,
+        params.displayable_only.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
 
     let json = serde_json::to_string(&response).map_err(|e| {
         ScratchError::new(
@@ -5169,6 +5234,7 @@ mod tests {
             axum::extract::Query(TrajectoriesListQuery {
                 limit: Some(10),
                 cursor: None,
+                displayable_only: None,
             }),
         )
         .await
@@ -5201,6 +5267,79 @@ mod tests {
         assert_eq!(agent["task_id"].as_str(), Some("task-list"));
         assert_eq!(agent["task_role"].as_str(), Some("agents"));
         assert_eq!(agent["agent_id"].as_str(), Some("agent-1"));
+    }
+
+    #[tokio::test]
+    async fn paginated_list_displayable_only_filters_task_and_subagent_trajectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let root = dir.path().join(".refact");
+
+        write_trajectory_file(
+            &root.join("trajectories").join("project-chat.json"),
+            "project-chat",
+            "Project Chat",
+            "2024-01-01T00:00:05Z",
+        )
+        .await;
+
+        let subagent_path = root.join("trajectories").join("subagent-chat.json");
+        let mut subagent =
+            sample_trajectory("subagent-chat", "Subagent Chat", "2024-01-01T00:00:04Z");
+        subagent["parent_id"] = json!("project-chat");
+        subagent["link_type"] = json!("subagent");
+        tokio::fs::create_dir_all(subagent_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&subagent_path, serde_json::to_string(&subagent).unwrap())
+            .await
+            .unwrap();
+
+        write_trajectory_file(
+            &root
+                .join("tasks")
+                .join("task-list")
+                .join("trajectories")
+                .join("planner")
+                .join("planner-chat.json"),
+            "planner-chat",
+            "Planner Chat",
+            "2024-01-01T00:00:03Z",
+        )
+        .await;
+        let task_path = root
+            .join("trajectories")
+            .join("legacy-task-agent-chat.json");
+        let mut legacy_task = sample_trajectory(
+            "legacy-task-agent-chat",
+            "Legacy Task Agent Chat",
+            "2024-01-01T00:00:02Z",
+        );
+        legacy_task["mode"] = json!("task_agent");
+        tokio::fs::write(&task_path, serde_json::to_string(&legacy_task).unwrap())
+            .await
+            .unwrap();
+
+        let missing_link_path = root.join("trajectories").join("missing-link-child.json");
+        let mut missing_link_child = sample_trajectory(
+            "missing-link-child",
+            "Missing Link Child",
+            "2024-01-01T00:00:01Z",
+        );
+        missing_link_child["parent_id"] = json!("project-chat");
+        tokio::fs::write(
+            &missing_link_path,
+            serde_json::to_string(&missing_link_child).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let page = list_trajectories_page(app, 10, None, true).await.unwrap();
+        let ids: Vec<_> = page.items.iter().map(|item| item.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["project-chat"]);
+        assert_eq!(page.total_count, 1);
+        assert!(!page.has_more);
     }
 
     #[tokio::test]

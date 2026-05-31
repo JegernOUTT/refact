@@ -16,22 +16,27 @@ export function useLoadMoreHistory(options: LoadMoreHistoryOptions = {}) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadingRef = useRef(false);
+  const requestedBoundariesRef = useRef(new Set<string>());
 
   const loadMore = useCallback(async () => {
     if (loadingRef.current || !pagination.hasMore) return;
     if (!pagination.cursor) return;
+    const requestedCursor = pagination.cursor;
+    const requestedGeneration = pagination.generation;
+    const boundaryKey = `${requestedGeneration}:${requestedCursor}`;
+    if (requestedBoundariesRef.current.has(boundaryKey)) return;
+    requestedBoundariesRef.current.add(boundaryKey);
 
     loadingRef.current = true;
     setIsLoading(true);
     setError(null);
 
-    const requestedCursor = pagination.cursor;
-    const requestedGeneration = pagination.generation;
     const request = dispatch(
       trajectoriesApi.endpoints.listTrajectoriesPaginated.initiate(
         {
           limit: 50,
           cursor: requestedCursor,
+          displayableOnly: true,
         },
         { forceRefetch: true, subscribe: false },
       ),
@@ -62,6 +67,7 @@ export function useLoadMoreHistory(options: LoadMoreHistoryOptions = {}) {
         }),
       );
     } catch (err) {
+      requestedBoundariesRef.current.delete(boundaryKey);
       setError(err instanceof Error ? err.message : "Failed to load more");
     } finally {
       request.unsubscribe();

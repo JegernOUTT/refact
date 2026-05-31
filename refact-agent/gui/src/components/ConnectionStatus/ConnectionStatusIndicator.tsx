@@ -36,7 +36,7 @@ export const ConnectionStatusIndicator: React.FC = () => {
     setIsRefreshing(true);
     const trajQuery = dispatch(
       trajectoriesApi.endpoints.listTrajectoriesPaginated.initiate(
-        { limit: 50 },
+        { limit: 50, displayableOnly: true },
         { forceRefetch: true },
       ),
     );

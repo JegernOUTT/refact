@@ -111,6 +111,7 @@ export type PaginatedTrajectories = {
 export type TrajectoriesListParams = {
   limit?: number;
   cursor?: string;
+  displayableOnly?: boolean;
 };
 
 export function chatThreadToTrajectoryData(
@@ -174,7 +175,8 @@ export const trajectoriesApi = createApi({
     listTrajectoriesFirstPage: builder.query<TrajectoryMeta[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(state, "/v1/trajectories");
+        const params = new URLSearchParams({ displayable_only: "true" });
+        const url = buildApiUrlFromState(state, "/v1/trajectories", params);
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         const response = result.data as PaginatedTrajectories;
@@ -191,6 +193,7 @@ export const trajectoriesApi = createApi({
         const params = new URLSearchParams();
         if (args?.limit) params.set("limit", String(args.limit));
         if (args?.cursor) params.set("cursor", args.cursor);
+        if (args?.displayableOnly) params.set("displayable_only", "true");
         const url = buildApiUrlFromState(state, "/v1/trajectories", params);
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
