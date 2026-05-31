@@ -2412,6 +2412,17 @@ fn can_apply_external_reload(session: &ChatSession) -> bool {
     session.runtime.state == SessionState::Idle && !session.trajectory_dirty
 }
 
+fn pending_reload_source_matches_session(
+    pending: &ExternalReloadPending,
+    session: &ChatSession,
+) -> bool {
+    match pending {
+        ExternalReloadPending::Update { source } | ExternalReloadPending::Delete { source } => {
+            source.matches_session_for_delete(session)
+        }
+    }
+}
+
 fn is_active_buddy_session(session: &ChatSession) -> bool {
     session.thread.buddy_meta.is_some()
 }
@@ -2741,18 +2752,26 @@ pub async fn check_external_reload_pending(
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
     let (chat_id, pending) = {
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
         if is_active_buddy_session(&session) {
             return;
         }
-        (
-            session.chat_id.clone(),
-            if can_apply_external_reload(&session) {
-                session.external_reload_pending.clone()
-            } else {
-                None
-            },
-        )
+        let pending = if can_apply_external_reload(&session) {
+            session.external_reload_pending.clone()
+        } else {
+            None
+        };
+        if let Some(pending) = pending.as_ref() {
+            if !pending_reload_source_matches_session(pending, &session) {
+                warn!(
+                    "Clearing pending external reload for {} because pending source no longer matches active session",
+                    session.chat_id
+                );
+                session.external_reload_pending = None;
+                return;
+            }
+        }
+        (session.chat_id.clone(), pending)
     };
     match pending {
         Some(ExternalReloadPending::Delete { source }) => {
@@ -2788,7 +2807,7 @@ pub async fn check_external_reload_pending(
                     && session.external_reload_pending == Some(expected_pending)
                 {
                     warn!(
-                        "Clearing pending external reload for {} because trajectory file is missing",
+                        "Clearing pending external reload for {} because matching trajectory source is missing",
                         chat_id
                     );
                     session.external_reload_pending = None;
@@ -10649,6 +10668,303 @@ mod tests {
             ))
         );
         assert!(session.thread.task_meta.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_task_update_applies_task_despite_normal_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-task-update-normal-priority";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Higher Priority",
+            "normal must not apply",
+        )
+        .await;
+        let task_meta = task_meta(
+            "task-pending-update-apply",
+            "agents",
+            Some("agent-pending-apply"),
+            Some("card-pending-apply"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-pending-update-apply")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-pending-apply")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Pending Applied",
+            "task pending applied",
+            &task_meta,
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta.clone());
+            session.thread.title = "Busy Task Before Pending Apply".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "old busy task".to_string(),
+            ));
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::from_task_meta(&task_meta),
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Task Pending Applied");
+        assert_eq!(session.thread.task_meta, Some(task_meta));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "task pending applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_normal_update_applies_normal_despite_task_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-normal-update-task-collision";
+        let task_meta = task_meta(
+            "task-pending-normal-collision",
+            "agents",
+            Some("agent-pending-normal"),
+            Some("card-pending-normal"),
+            None,
+        );
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-pending-normal-collision")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-pending-normal")
+            .join(format!("{chat_id}.json"));
+        write_task_trajectory_file_with_user_message(
+            &task_path,
+            chat_id,
+            "Task Same Id",
+            "task must not apply",
+            &task_meta,
+        )
+        .await;
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Pending Applied",
+            "normal pending applied",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Busy Normal Before Pending Apply".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "old busy normal".to_string(),
+            ));
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Normal,
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Normal Pending Applied");
+        assert!(session.thread.task_meta.is_none());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "normal pending applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_task_update_missing_source_clears_while_normal_same_id_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-task-update-missing-normal-exists";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Same Id Exists",
+            "normal must not replace missing task",
+        )
+        .await;
+        let task_meta = task_meta(
+            "task-missing-pending-update",
+            "agents",
+            Some("agent-missing-pending"),
+            Some("card-missing-pending"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta.clone());
+            session.thread.title = "Active Task Missing Pending Source".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep active task when matching source missing".to_string(),
+            ));
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::from_task_meta(&task_meta),
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Task Missing Pending Source");
+        assert_eq!(session.thread.task_meta, Some(task_meta));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep active task when matching source missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_update_source_mismatch_clears_without_loading_other_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-update-source-mismatch-clears";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Mismatched Normal Pending",
+            "normal mismatch must not apply",
+        )
+        .await;
+        let task_meta = task_meta(
+            "task-pending-mismatch",
+            "agents",
+            Some("agent-pending-mismatch"),
+            Some("card-pending-mismatch"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.task_meta = Some(task_meta.clone());
+            session.thread.title = "Active Task Mismatched Pending".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep task on mismatched pending".to_string(),
+            ));
+            session.external_reload_pending = Some(ExternalReloadPending::update(
+                TrajectorySourceIdentity::Normal,
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Task Mismatched Pending");
+        assert_eq!(session.thread.task_meta, Some(task_meta));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep task on mismatched pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_delete_source_mismatch_clears_without_loading_other_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-delete-source-mismatch-clears";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Same Id For Delete Mismatch",
+            "normal delete mismatch must not apply",
+        )
+        .await;
+        let task_meta = task_meta(
+            "task-delete-mismatch",
+            "agents",
+            Some("agent-delete-mismatch"),
+            Some("card-delete-mismatch"),
+            None,
+        );
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Normal Delete Mismatch".to_string();
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep normal on mismatched delete".to_string(),
+            ));
+            session.external_reload_pending = Some(ExternalReloadPending::delete(
+                TrajectorySourceIdentity::from_task_meta(&task_meta),
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Normal Delete Mismatch");
+        assert!(session.thread.task_meta.is_none());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep normal on mismatched delete"
+        );
     }
 
     #[tokio::test]
