@@ -421,12 +421,14 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     (event: React.PointerEvent<HTMLDivElement>) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.closest("button, a, input, textarea")) return;
+      if (isComposerExpanded && target.closest("button, a, input, textarea")) {
+        return;
+      }
 
       event.preventDefault();
       focusComposerInput();
     },
-    [focusComposerInput],
+    [focusComposerInput, isComposerExpanded],
   );
 
   const handleCompactKeyDown = useCallback(
@@ -522,41 +524,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           )}
           onSubmit={() => handleSubmit("after_flow")}
         >
-          <div
-            className={styles.compactControlsRow}
-            role="button"
-            tabIndex={0}
-            aria-label="Expand chat input"
-            onPointerDown={handleCompactPointerDown}
-            onKeyDown={handleCompactKeyDown}
-          >
-            <span className={styles.compactModelControl}>
-              <ChatSettingsDropdown disabled={isBuddyChat} compact />
-            </span>
-            <span className={styles.compactStreamingTokens}>
-              <StreamingTokenCounter />
-            </span>
-            <span className={styles.compactUsageCounter}>
-              <UsageCounter />
-            </span>
-            <Flex className={styles.compactActionControls}>
-              <UnifiedSendButton
-                disabled={isVoiceActive || !isOnline || allDisabled}
-                isStreaming={isStreaming || isWaiting}
-                hasText={
-                  value.trim().length > 0 ||
-                  attachedImages.length > 0 ||
-                  textFiles.length > 0
-                }
-                hasMessages={messages.length > 0}
-                queuedCount={queuedItems.length}
-                onSend={() => handleSubmit("after_flow")}
-                onSendImmediately={handleSendImmediately}
-                onStop={() => void abort()}
-                onResend={() => void regenerate()}
-              />
-            </Flex>
-          </div>
           <Box
             className={styles.expandedComposerContent}
             onFocus={() => setIsComposerExpanded(true)}
@@ -648,105 +615,113 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   )}
                 />
               </Box>
-              <Flex
-                gap="2"
-                wrap="nowrap"
-                py="2"
-                px="3"
-                align="center"
-                className={styles.bottomControlsRow}
-              >
-                <span className={styles.bottomModelControl}>
-                  <ChatSettingsDropdown disabled={isBuddyChat} />
-                </span>
-                <span className={styles.bottomModeControl}>
-                  <ModeSelect
-                    selectedMode={threadMode ?? DEFAULT_MODE}
-                    onModeChange={onSetMode}
-                    disabled={isBuddyChat || isModeDisabled}
-                  />
-                </span>
-                <span className={styles.bottomWorkspaceControl}>
-                  <WorktreeControl disabled={isBuddyChat} />
-                </span>
-
-                <Flex
-                  justify="end"
-                  wrap="nowrap"
-                  gap="2"
-                  align="center"
-                  className={styles.bottomActionControls}
-                >
-                  <span className={styles.hideActionFirst}>
-                    <BrowserToggleButton chatId={chatId} />
-                  </span>
-                  <span className={styles.hideActionSecond}>
-                    <AutoEnrichmentToggleButton
-                      disabled={isStreaming || isWaiting}
-                    />
-                  </span>
-                  <span className={styles.hideActionThird}>
-                    <AutoCompactToggleButton
-                      disabled={isStreaming || isWaiting}
-                    />
-                  </span>
-                  <span className={styles.hideActionFourth}>
-                    <WandButton
-                      currentText={value}
-                      disabled={isStreaming || isWaiting}
-                      onUpdateText={handleChange}
-                    />
-                  </span>
-                  {onClose && (
-                    <span className={styles.hideActionFifth}>
-                      <BackToSideBarButton
-                        disabled={isStreaming}
-                        title="Return to sidebar"
-                        onClick={onClose}
-                      />
-                    </span>
-                  )}
-                  {config.features?.images !== false &&
-                    isMultimodalitySupportedForCurrentModel && (
-                      <span className={styles.hideActionSixth}>
-                        <AttachImagesButton />
-                      </span>
-                    )}
-                  <span className={styles.hideActionSeventh}>
-                    <MicrophoneButton
-                      ref={microphoneRef}
-                      onTranscript={(text) => {
-                        setValue((prev) => {
-                          if (prev.trim()) {
-                            return `${prev}\n${text}`;
-                          }
-                          return text;
-                        });
-                      }}
-                      onLiveTranscript={handleLiveTranscript}
-                      onRecordingChange={handleRecordingChange}
-                      disabled={disableMicrophone}
-                    />
-                  </span>
-                  <UnifiedSendButton
-                    disabled={isVoiceActive || !isOnline || allDisabled}
-                    isStreaming={isStreaming || isWaiting}
-                    hasText={
-                      value.trim().length > 0 ||
-                      attachedImages.length > 0 ||
-                      textFiles.length > 0
-                    }
-                    hasMessages={messages.length > 0}
-                    queuedCount={queuedItems.length}
-                    onSend={() => handleSubmit("after_flow")}
-                    onSendImmediately={handleSendImmediately}
-                    onStop={() => void abort()}
-                    onResend={() => void regenerate()}
-                  />
-                </Flex>
-              </Flex>
             </Box>
           </Box>
+          <Flex
+            gap="2"
+            wrap="nowrap"
+            py="2"
+            px="3"
+            align="center"
+            className={styles.bottomControlsRow}
+            onPointerDown={handleCompactPointerDown}
+            onKeyDown={handleCompactKeyDown}
+          >
+            <span className={styles.bottomModelControl}>
+              <ChatSettingsDropdown
+                disabled={isBuddyChat || !isComposerExpanded}
+              />
+            </span>
+            <span className={styles.bottomModeControl}>
+              <ModeSelect
+                selectedMode={threadMode ?? DEFAULT_MODE}
+                onModeChange={onSetMode}
+                disabled={isBuddyChat || isModeDisabled || !isComposerExpanded}
+              />
+            </span>
+            <span className={styles.bottomWorkspaceControl}>
+              <WorktreeControl disabled={isBuddyChat || !isComposerExpanded} />
+            </span>
+
+            <Flex
+              justify="end"
+              wrap="nowrap"
+              gap="2"
+              align="center"
+              className={styles.bottomActionControls}
+            >
+              <span className={styles.collapsedStatusControl}>
+                <StreamingTokenCounter />
+              </span>
+              <span className={styles.collapsedStatusControl}>
+                <UsageCounter />
+              </span>
+              <span className={styles.hideActionFirst}>
+                <BrowserToggleButton chatId={chatId} />
+              </span>
+              <span className={styles.hideActionSecond}>
+                <AutoEnrichmentToggleButton
+                  disabled={isStreaming || isWaiting}
+                />
+              </span>
+              <span className={styles.hideActionThird}>
+                <AutoCompactToggleButton disabled={isStreaming || isWaiting} />
+              </span>
+              <span className={styles.hideActionFourth}>
+                <WandButton
+                  currentText={value}
+                  disabled={isStreaming || isWaiting}
+                  onUpdateText={handleChange}
+                />
+              </span>
+              {onClose && (
+                <span className={styles.hideActionFifth}>
+                  <BackToSideBarButton
+                    disabled={isStreaming}
+                    title="Return to sidebar"
+                    onClick={onClose}
+                  />
+                </span>
+              )}
+              {config.features?.images !== false &&
+                isMultimodalitySupportedForCurrentModel && (
+                  <span className={styles.hideActionSixth}>
+                    <AttachImagesButton />
+                  </span>
+                )}
+              <span className={styles.hideActionSeventh}>
+                <MicrophoneButton
+                  ref={microphoneRef}
+                  onTranscript={(text) => {
+                    setValue((prev) => {
+                      if (prev.trim()) {
+                        return `${prev}\n${text}`;
+                      }
+                      return text;
+                    });
+                  }}
+                  onLiveTranscript={handleLiveTranscript}
+                  onRecordingChange={handleRecordingChange}
+                  disabled={disableMicrophone}
+                />
+              </span>
+              <UnifiedSendButton
+                disabled={isVoiceActive || !isOnline || allDisabled}
+                isStreaming={isStreaming || isWaiting}
+                hasText={
+                  value.trim().length > 0 ||
+                  attachedImages.length > 0 ||
+                  textFiles.length > 0
+                }
+                hasMessages={messages.length > 0}
+                queuedCount={queuedItems.length}
+                onSend={() => handleSubmit("after_flow")}
+                onSendImmediately={handleSendImmediately}
+                onStop={() => void abort()}
+                onResend={() => void regenerate()}
+              />
+            </Flex>
+          </Flex>
         </Form>
       </Flex>
     </Box>

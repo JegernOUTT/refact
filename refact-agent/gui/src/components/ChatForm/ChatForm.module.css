@@ -43,6 +43,10 @@
   box-shadow: none;
 }
 
+.chatFormExpanded.chatFormMain:focus-within {
+  border-color: var(--accent-a7);
+}
+
 /* Remove Radix's internal focus ring/chrome that creates thick border effect */
 .chatFormMain :global(.rt-TextAreaRoot),
 .chatFormMain :global(.rt-TextAreaRoot:focus),
@@ -90,47 +94,6 @@
   --chat-input-padding: var(--space-3);
 }
 
-.compactControlsRow {
-  container-type: inline-size;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 32px;
-  padding: var(--space-1) var(--space-2);
-  overflow: hidden;
-  cursor: text;
-  transition:
-    min-height 0.18s ease,
-    padding 0.18s ease,
-    opacity 0.18s ease;
-}
-
-.compactControlsRow:focus-visible {
-  outline: 1px solid var(--accent-a8);
-  outline-offset: -2px;
-}
-
-.compactModelControl,
-.compactStreamingTokens,
-.compactUsageCounter {
-  display: inline-flex;
-  min-width: 0;
-}
-
-.compactModelControl {
-  flex: 1 1 auto;
-}
-
-.compactStreamingTokens,
-.compactUsageCounter {
-  flex: 0 0 auto;
-}
-
-.compactActionControls {
-  flex: 0 0 auto;
-  margin-left: auto;
-}
-
 .expandedComposerContent {
   display: grid;
   grid-template-rows: 1fr;
@@ -151,16 +114,39 @@
   pointer-events: none;
 }
 
-.chatFormExpanded .compactControlsRow {
-  min-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  opacity: 0;
-  pointer-events: none;
+.chatFormCollapsed .bottomControlsRow {
+  cursor: text;
+  padding-top: 1px;
+  padding-bottom: 1px;
 }
 
-.chatFormExpanded .compactControlsRow :global(*) {
-  pointer-events: none;
+.chatFormCollapsed .bottomModelControl,
+.chatFormCollapsed .bottomModeControl,
+.chatFormCollapsed .bottomWorkspaceControl {
+  opacity: 0.45;
+}
+
+.chatFormCollapsed .hideActionFirst,
+.chatFormCollapsed .hideActionSecond,
+.chatFormCollapsed .hideActionThird,
+.chatFormCollapsed .hideActionFourth,
+.chatFormCollapsed .hideActionFifth,
+.chatFormCollapsed .hideActionSixth,
+.chatFormCollapsed .hideActionSeventh {
+  display: none;
+}
+
+.collapsedStatusControl {
+  display: none;
+  flex-shrink: 0;
+}
+
+.chatFormCollapsed .collapsedStatusControl {
+  display: inline-flex;
+}
+
+.chatFormExpanded .collapsedStatusControl {
+  display: none;
 }
 
 .inputHeader {
@@ -258,6 +244,14 @@
   overflow: hidden;
 }
 
+.chatFormCollapsed .bottomControlsRow {
+  min-height: 28px;
+}
+
+.chatFormCollapsed .bottomControlsRow :global(button:disabled) {
+  cursor: text;
+}
+
 .bottomModelControl,
 .bottomModeControl,
 .bottomWorkspaceControl {
@@ -267,18 +261,6 @@
 @container (max-width: 520px) {
   .hideTopTokensFirst,
   .hideActionFirst {
-    display: none;
-  }
-}
-
-@container (max-width: 420px) {
-  .compactStreamingTokens {
-    display: none;
-  }
-}
-
-@container (max-width: 320px) {
-  .compactUsageCounter {
     display: none;
   }
 }
