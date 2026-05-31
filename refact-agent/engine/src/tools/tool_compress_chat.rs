@@ -163,54 +163,89 @@ fn remove_invalid_tool_calls_and_tool_calls_results_before(
     immutable_tail: &[ChatMessage],
 ) -> bool {
     let before = serde_json::to_value(&*modifiable_prefix).ok();
-    let tool_call_ids: HashSet<String> = modifiable_prefix
-        .iter()
-        .chain(immutable_tail.iter())
-        .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
-        .map(|m| m.tool_call_id.clone())
-        .collect();
 
-    modifiable_prefix.retain(|m| {
-        if let Some(tool_calls) = &m.tool_calls {
-            tool_calls.iter().all(|tc| tool_call_ids.contains(&tc.id))
-        } else {
-            true
-        }
-    });
+    struct PendingToolCall {
+        assistant_idx: usize,
+        result_idx: Option<usize>,
+    }
 
-    let assistant_tool_call_ids: HashSet<String> = modifiable_prefix
-        .iter()
-        .chain(immutable_tail.iter())
-        .filter_map(|x| x.tool_calls.clone())
-        .flatten()
-        .map(|x| x.id)
-        .collect();
+    let prefix_len = modifiable_prefix.len();
+    let mut keep_prefix = vec![true; prefix_len];
+    let mut open_by_id: HashMap<String, usize> = HashMap::new();
+    let mut tool_calls: Vec<PendingToolCall> = Vec::new();
+    let mut assistant_tool_calls: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut result_to_tool_call: HashMap<usize, usize> = HashMap::new();
 
-    modifiable_prefix.retain(|m| {
-        let is_tool_result = m.role == "tool" || m.role == "diff";
-        !(is_tool_result
-            && !m.tool_call_id.is_empty()
-            && !assistant_tool_call_ids.contains(&m.tool_call_id))
-    });
-
-    let mut last_occurrence: HashMap<String, usize> = HashMap::new();
-    for (i, m) in modifiable_prefix
+    for (idx, message) in modifiable_prefix
         .iter()
         .chain(immutable_tail.iter())
         .enumerate()
     {
-        let is_tool_result = m.role == "tool" || m.role == "diff";
-        if is_tool_result && !m.tool_call_id.is_empty() {
-            last_occurrence.insert(m.tool_call_id.clone(), i);
+        if let Some(calls) = &message.tool_calls {
+            for call in calls {
+                let tool_call_idx = tool_calls.len();
+                tool_calls.push(PendingToolCall {
+                    assistant_idx: idx,
+                    result_idx: None,
+                });
+                assistant_tool_calls
+                    .entry(idx)
+                    .or_default()
+                    .push(tool_call_idx);
+                open_by_id.insert(call.id.clone(), tool_call_idx);
+            }
+        }
+
+        let is_tool_result = message.role == "tool" || message.role == "diff";
+        if !is_tool_result || message.tool_call_id.is_empty() {
+            continue;
+        }
+
+        if let Some(tool_call_idx) = open_by_id.get(&message.tool_call_id).copied() {
+            if let Some(previous_result_idx) = tool_calls[tool_call_idx].result_idx.replace(idx) {
+                result_to_tool_call.remove(&previous_result_idx);
+                if previous_result_idx < prefix_len {
+                    keep_prefix[previous_result_idx] = false;
+                }
+            }
+            result_to_tool_call.insert(idx, tool_call_idx);
+        } else if idx < prefix_len {
+            keep_prefix[idx] = false;
         }
     }
-    let indices_to_keep: HashSet<usize> = last_occurrence.values().cloned().collect();
+
+    let invalid_assistants: HashSet<usize> = assistant_tool_calls
+        .iter()
+        .filter_map(|(assistant_idx, call_indices)| {
+            call_indices
+                .iter()
+                .any(|idx| tool_calls[*idx].result_idx.is_none())
+                .then_some(*assistant_idx)
+        })
+        .collect();
+
+    for (idx, message) in modifiable_prefix.iter().enumerate() {
+        if invalid_assistants.contains(&idx) {
+            keep_prefix[idx] = false;
+        }
+
+        let is_tool_result = message.role == "tool" || message.role == "diff";
+        if !is_tool_result || message.tool_call_id.is_empty() {
+            continue;
+        }
+
+        match result_to_tool_call.get(&idx) {
+            Some(tool_call_idx)
+                if !invalid_assistants.contains(&tool_calls[*tool_call_idx].assistant_idx) => {}
+            _ => keep_prefix[idx] = false,
+        }
+    }
+
     let mut current_idx = 0usize;
-    modifiable_prefix.retain(|m| {
+    modifiable_prefix.retain(|_| {
         let idx = current_idx;
         current_idx += 1;
-        let is_tool_result = m.role == "tool" || m.role == "diff";
-        m.tool_call_id.is_empty() || !is_tool_result || indices_to_keep.contains(&idx)
+        keep_prefix[idx]
     });
     before != serde_json::to_value(&*modifiable_prefix).ok()
 }
@@ -487,6 +522,22 @@ mod tests {
         }
     }
 
+    fn diff_message(tool_call_id: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "diff".to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn message_texts(messages: &[ChatMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect()
+    }
+
     fn apply_request<'a>(
         drop_context_files: &'a HashSet<String>,
         drop_memories: &'a HashSet<String>,
@@ -547,6 +598,87 @@ mod tests {
             .filter(|message| message.role == "compression_report")
             .map(compression_report_metadata)
             .collect()
+    }
+
+    #[test]
+    fn cleanup_does_not_count_stale_prior_result_for_later_same_id_call() {
+        let mut modifiable_prefix = vec![
+            assistant_tool_call_message("call_reused", "shell"),
+            tool_message("call_reused", "first result"),
+            assistant_tool_call_message("call_reused", "shell"),
+        ];
+
+        let changed =
+            remove_invalid_tool_calls_and_tool_calls_results_before(&mut modifiable_prefix, &[]);
+
+        assert!(changed);
+        assert_eq!(message_texts(&modifiable_prefix), vec!["", "first result"]);
+        assert_eq!(modifiable_prefix[0].role, "assistant");
+        assert_eq!(modifiable_prefix[1].role, "tool");
+    }
+
+    #[test]
+    fn cleanup_removes_orphan_result_before_any_assistant_call_from_prefix() {
+        let mut modifiable_prefix = vec![
+            tool_message("call_orphan", "orphan result"),
+            assistant_tool_call_message("call_orphan", "shell"),
+            tool_message("call_orphan", "real result"),
+        ];
+
+        let changed =
+            remove_invalid_tool_calls_and_tool_calls_results_before(&mut modifiable_prefix, &[]);
+
+        assert!(changed);
+        assert_eq!(message_texts(&modifiable_prefix), vec!["", "real result"]);
+    }
+
+    #[test]
+    fn cleanup_preserves_assistant_followed_by_matching_result() {
+        let mut modifiable_prefix = vec![
+            assistant_tool_call_message("call_valid", "shell"),
+            tool_message("call_valid", "valid result"),
+        ];
+        let before = serde_json::to_string(&modifiable_prefix).unwrap();
+
+        let changed =
+            remove_invalid_tool_calls_and_tool_calls_results_before(&mut modifiable_prefix, &[]);
+
+        assert!(!changed);
+        assert_eq!(serde_json::to_string(&modifiable_prefix).unwrap(), before);
+    }
+
+    #[test]
+    fn cleanup_reused_ids_match_only_later_results_provider_order_safely() {
+        let mut modifiable_prefix = vec![
+            assistant_tool_call_message("call_reused", "shell"),
+            tool_message("call_reused", "first result"),
+            assistant_tool_call_message("call_reused", "shell"),
+            diff_message("call_reused", "second result"),
+        ];
+
+        let changed =
+            remove_invalid_tool_calls_and_tool_calls_results_before(&mut modifiable_prefix, &[]);
+
+        assert!(!changed);
+        assert_eq!(
+            message_texts(&modifiable_prefix),
+            vec!["", "first result", "", "second result"]
+        );
+    }
+
+    #[test]
+    fn cleanup_uses_immutable_tail_results_without_dropping_tail_messages() {
+        let mut modifiable_prefix = vec![assistant_tool_call_message("tail_call", "shell")];
+        let immutable_tail = vec![tool_message("tail_call", "tail result")];
+
+        let changed = remove_invalid_tool_calls_and_tool_calls_results_before(
+            &mut modifiable_prefix,
+            &immutable_tail,
+        );
+
+        assert!(!changed);
+        assert_eq!(modifiable_prefix.len(), 1);
+        assert_eq!(message_texts(&immutable_tail), vec!["tail result"]);
     }
 
     fn stable_existing_report_for_manual_context_drop() -> ChatMessage {
