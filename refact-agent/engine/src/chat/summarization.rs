@@ -1066,7 +1066,6 @@ fn emit_compression_failed(session: &mut ChatSession, reason: CompressionReason)
 fn compression_attempt_active(session: &ChatSession) -> bool {
     session.is_compressing
         || session.runtime.is_compressing
-        || session.active_compression_attempt.is_some()
         || matches!(
             session.compression_phase,
             Some(CompressionPhase::Checking | CompressionPhase::Running)
@@ -2568,7 +2567,10 @@ mod tests {
             42,
             &failure,
         ));
-        assert!(fail_session.messages.iter().all(|message| message.role != "event"));
+        assert!(fail_session
+            .messages
+            .iter()
+            .all(|message| message.role != "event"));
         assert_eq!(fail_session.tier1_compact_attempts, 0);
         assert_eq!(fail_session.compression_phase, phase);
         assert_eq!(fail_session.compression_reason, None);
@@ -2607,6 +2609,83 @@ mod tests {
     }
 
     #[test]
+    fn stale_token_without_active_phase_or_flags_does_not_block_reservation() {
+        let mut session = ChatSession::new("compression-stale-token-no-phase".to_string());
+        set_stale_matching_attempt(&mut session, None);
+
+        assert!(!compression_attempt_active(&session));
+        let attempt = reserve_compression_attempt(&mut session);
+
+        assert_eq!(attempt, 43);
+        assert_eq!(session.active_compression_attempt, Some(43));
+        assert!(session.is_compressing);
+        assert!(session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Checking));
+        assert_eq!(
+            session.runtime.compression_phase,
+            Some(CompressionPhase::Checking)
+        );
+    }
+
+    #[test]
+    fn stale_token_with_terminal_phase_does_not_block_reservation() {
+        for phase in [
+            CompressionPhase::Applied,
+            CompressionPhase::Skipped,
+            CompressionPhase::Failed,
+        ] {
+            let mut session = ChatSession::new(format!("compression-stale-token-{phase:?}"));
+            set_stale_matching_attempt(&mut session, Some(phase));
+
+            assert!(!compression_attempt_active(&session));
+            let attempt = reserve_compression_attempt(&mut session);
+
+            assert_eq!(attempt, 43);
+            assert_eq!(session.active_compression_attempt, Some(43));
+            assert!(session.is_compressing);
+            assert!(session.runtime.is_compressing);
+            assert_eq!(session.compression_phase, Some(CompressionPhase::Checking));
+            assert_eq!(
+                session.runtime.compression_phase,
+                Some(CompressionPhase::Checking)
+            );
+        }
+    }
+
+    #[test]
+    fn active_flags_and_phases_block_concurrent_compression_attempts() {
+        let cases = [
+            (
+                "session phase checking",
+                false,
+                false,
+                Some(CompressionPhase::Checking),
+                None,
+            ),
+            (
+                "runtime phase running",
+                false,
+                false,
+                None,
+                Some(CompressionPhase::Running),
+            ),
+            ("session flag", true, false, None, None),
+            ("runtime flag", false, true, None, None),
+        ];
+
+        for (name, session_flag, runtime_flag, session_phase, runtime_phase) in cases {
+            let mut session = ChatSession::new(format!("compression-active-{name}"));
+            session.active_compression_attempt = Some(42);
+            session.is_compressing = session_flag;
+            session.runtime.is_compressing = runtime_flag;
+            session.compression_phase = session_phase;
+            session.runtime.compression_phase = runtime_phase;
+
+            assert!(compression_attempt_active(&session), "case {name}");
+        }
+    }
+
+    #[test]
     fn active_checking_token_can_skip() {
         let mut session = ChatSession::new("compression-checking-owned".to_string());
         let attempt = reserve_compression_attempt(&mut session);
@@ -2629,7 +2708,10 @@ mod tests {
     fn active_running_token_can_fail_and_apply() {
         let mut fail_session = ChatSession::new("compression-running-owned-fail".to_string());
         let fail_attempt = reserve_compression_attempt(&mut fail_session);
-        assert!(emit_compression_running_if_owned(&mut fail_session, fail_attempt));
+        assert!(emit_compression_running_if_owned(
+            &mut fail_session,
+            fail_attempt
+        ));
         let failure = SegmentSummaryFailure::Transient("network failed".to_string());
 
         assert!(finish_compression_failure_if_owned(
@@ -2638,7 +2720,10 @@ mod tests {
             &failure,
         ));
         assert_eq!(fail_session.active_compression_attempt, None);
-        assert_eq!(fail_session.compression_phase, Some(CompressionPhase::Failed));
+        assert_eq!(
+            fail_session.compression_phase,
+            Some(CompressionPhase::Failed)
+        );
         assert_eq!(
             fail_session.compression_reason,
             Some(CompressionReason::TransientFailure)
@@ -2647,7 +2732,10 @@ mod tests {
 
         let (mut apply_session, source_hash, summary) = summary_apply_fixture();
         let apply_attempt = reserve_compression_attempt(&mut apply_session);
-        assert!(emit_compression_running_if_owned(&mut apply_session, apply_attempt));
+        assert!(emit_compression_running_if_owned(
+            &mut apply_session,
+            apply_attempt
+        ));
 
         assert!(apply_resolved_segment_summary(
             &mut apply_session,
@@ -2656,7 +2744,10 @@ mod tests {
             Some(apply_attempt),
         ));
         assert_eq!(apply_session.active_compression_attempt, None);
-        assert_eq!(apply_session.compression_phase, Some(CompressionPhase::Applied));
+        assert_eq!(
+            apply_session.compression_phase,
+            Some(CompressionPhase::Applied)
+        );
         assert!(is_segment_summary(&apply_session.messages[1]));
     }
 
