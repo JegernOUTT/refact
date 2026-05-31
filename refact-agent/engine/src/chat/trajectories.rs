@@ -1663,6 +1663,14 @@ pub async fn load_trajectory_for_chat(
     load_trajectory_candidate(gcx, chat_id, candidate).await
 }
 
+pub async fn load_generic_trajectory_for_chat(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Option<LoadedTrajectory> {
+    let candidate = find_trajectory_file(gcx.clone(), chat_id).await?;
+    load_trajectory_candidate(gcx, chat_id, candidate).await
+}
+
 pub async fn save_initial_planner_trajectory(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -2167,6 +2175,10 @@ fn can_apply_external_reload(session: &ChatSession) -> bool {
     session.runtime.state == SessionState::Idle && !session.trajectory_dirty
 }
 
+fn is_active_buddy_session(session: &ChatSession) -> bool {
+    session.thread.buddy_meta.is_some()
+}
+
 fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
     session.messages.clear();
     session.thread = ThreadParams {
@@ -2227,6 +2239,10 @@ async fn apply_loaded_external_update_with_repair(
                 return false;
             }
         }
+        if is_active_buddy_session(&session) {
+            session.external_reload_pending = None;
+            return false;
+        }
         if !can_apply_external_reload(&session) {
             if let Some(pending) = pending_if_not_reloadable {
                 session.external_reload_pending = Some(pending);
@@ -2258,7 +2274,7 @@ async fn apply_external_delete_with_revalidation(
     chat_id: &str,
     expected_pending: Option<ExternalReloadPending>,
 ) -> bool {
-    if let Some(loaded) = load_trajectory_for_chat(gcx.clone(), chat_id).await {
+    if let Some(loaded) = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await {
         return apply_loaded_external_update_with_repair(
             gcx,
             session_arc,
@@ -2280,6 +2296,10 @@ async fn apply_external_delete_with_revalidation(
             return false;
         }
     }
+    if is_active_buddy_session(&session) {
+        session.external_reload_pending = None;
+        return false;
+    }
     if !can_apply_external_reload(&session) {
         session.external_reload_pending = Some(ExternalReloadPending::Delete);
         return false;
@@ -2294,7 +2314,11 @@ pub async fn check_external_reload_pending(
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
     let (chat_id, pending) = {
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
+        if is_active_buddy_session(&session) {
+            session.external_reload_pending = None;
+            return;
+        }
         (
             session.chat_id.clone(),
             if can_apply_external_reload(&session) {
@@ -2315,7 +2339,7 @@ pub async fn check_external_reload_pending(
             .await;
         }
         Some(ExternalReloadPending::Update) => {
-            if let Some(loaded) = load_trajectory_for_chat(gcx.clone(), &chat_id).await {
+            if let Some(loaded) = load_generic_trajectory_for_chat(gcx.clone(), &chat_id).await {
                 apply_loaded_external_update_with_repair(
                     gcx.clone(),
                     session_arc.clone(),
@@ -2346,7 +2370,7 @@ pub async fn check_external_reload_pending(
 async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_remove: bool) {
     let app = AppState::from_gcx(gcx.clone()).await;
     let sessions = app.chat.sessions.clone();
-    let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id).await;
+    let mut loaded = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await;
 
     if is_remove && loaded.is_none() {
         let tx = &app.chat.trajectory_events_tx;
@@ -2457,6 +2481,14 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
         }
         return;
     };
+
+    {
+        let mut session = session_arc.lock().await;
+        if is_active_buddy_session(&session) {
+            session.external_reload_pending = None;
+            return;
+        }
+    }
 
     if is_remove && loaded.is_none() {
         apply_external_delete_with_revalidation(gcx.clone(), session_arc.clone(), chat_id, None)
@@ -4378,7 +4410,7 @@ mod tests {
         ActiveCommandContext, BurstGuard, ChatEvent, CompressionPhase, CompressionReason,
         EventEnvelope,
     };
-    use refact_chat_api::{ClaudeCodeIdentity, FrozenRequestPrefix};
+    use refact_chat_api::{BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix};
     use serial_test::serial;
     use std::path::Path;
     use std::process::Command;
@@ -4520,6 +4552,14 @@ mod tests {
         .unwrap();
     }
 
+    fn buddy_thread_meta() -> BuddyThreadMeta {
+        BuddyThreadMeta {
+            is_buddy_chat: true,
+            buddy_chat_kind: "investigation".to_string(),
+            workflow_id: None,
+        }
+    }
+
     async fn wait_for_watcher_start() {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
@@ -4604,6 +4644,19 @@ mod tests {
             Ok(Ok(event)) => panic!("unexpected trajectory event: {:?}", event),
             Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
                 panic!("unexpected trajectory event lag, skipped {skipped}")
+            }
+        }
+    }
+
+    async fn assert_no_chat_event_for(
+        rx: &mut broadcast::Receiver<Arc<String>>,
+        duration: std::time::Duration,
+    ) {
+        match tokio::time::timeout(duration, rx.recv()).await {
+            Err(_) | Ok(Err(broadcast::error::RecvError::Closed)) => {}
+            Ok(Ok(event)) => panic!("unexpected chat event: {event}"),
+            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                panic!("unexpected chat event lag, skipped {skipped}")
             }
         }
     }
@@ -4989,6 +5042,53 @@ mod tests {
             "investigation"
         );
         assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn generic_loader_ignores_buddy_only_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "buddy-generic-loader-isolated";
+        let buddy_path = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        write_buddy_conversation_file(&buddy_path, chat_id, "Only Buddy").await;
+
+        assert!(load_generic_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .is_none());
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+
+        assert_eq!(loaded.thread.title, "Only Buddy");
+        assert!(loaded.thread.buddy_meta.is_some());
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_remove_with_buddy_fallback_emits_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "buddy-watcher-remove-fallback";
+        let buddy_path = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        write_buddy_conversation_file(&buddy_path, chat_id, "Fallback Buddy").await;
+
+        process_trajectory_change(gcx, chat_id, true).await;
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "deleted");
+        assert_eq!(event.title, None);
+        assert_eq!(event.mode, None);
+        assert!(tokio::fs::try_exists(&buddy_path).await.unwrap());
     }
 
     #[tokio::test]
@@ -7343,6 +7443,111 @@ mod tests {
             }
             other => panic!("expected Snapshot, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_remove_does_not_clear_active_buddy_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "active-buddy-remove-guard";
+        let buddy_path = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        write_buddy_conversation_file(&buddy_path, chat_id, "Active Buddy File").await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Buddy Session".to_string();
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep buddy message".to_string(),
+            ));
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx.clone(), chat_id, true).await;
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Buddy Session");
+        assert!(session.thread.buddy_meta.is_some());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep buddy message"
+        );
+        drop(session);
+
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn generic_watcher_update_does_not_replace_active_buddy_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "active-buddy-update-guard";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(
+            &normal_path,
+            chat_id,
+            "Normal Replacement",
+            "normal replacement message",
+        )
+        .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Active Buddy Session".to_string();
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(buddy_thread_meta());
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep buddy message".to_string(),
+            ));
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx.clone(), chat_id, false).await;
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.thread.title, "Active Buddy Session");
+        assert_eq!(session.thread.mode, "buddy");
+        assert!(session.thread.buddy_meta.is_some());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep buddy message"
+        );
+        drop(session);
+
+        assert_no_chat_event_for(&mut chat_rx, std::time::Duration::from_millis(100)).await;
     }
 
     #[tokio::test]
