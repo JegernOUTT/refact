@@ -1,4 +1,5 @@
 import { store } from "../../app/store";
+import { hasUsableEngineEndpoint } from "../../services/refact/apiUrl";
 import { postBuddyErrorRequest } from "../../services/refact/buddy";
 import type { EngineApiConnection } from "../../services/refact/chatCommands";
 
@@ -606,8 +607,7 @@ export async function reportBuddyFrontendError(
   deps: BuddyFrontendErrorDeps = defaultDeps,
 ): Promise<void> {
   const state = deps.getState();
-  const port = state.config.lspPort;
-  if (!port) return;
+  if (!hasUsableEngineEndpoint(state.config)) return;
 
   const apiKey = state.config.apiKey ?? undefined;
   const rawText = errorToText(args.error).trim();

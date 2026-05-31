@@ -6,6 +6,7 @@ import {
   selectApiKey,
   selectConfig,
 } from "../../../features/Config/configSlice";
+import { hasUsableEngineEndpoint } from "../../../services/refact/apiUrl";
 import { writeProcessStdin } from "../../../services/refact/exec";
 import styles from "./ExecToolCard.module.css";
 
@@ -21,10 +22,11 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
   const [chars, setChars] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hasEngineEndpoint = hasUsableEngineEndpoint(config);
 
   const sendChars = useCallback(
     async (value: string) => {
-      if (!config.lspPort || isSending || value.length === 0) return;
+      if (!hasEngineEndpoint || isSending || value.length === 0) return;
       setIsSending(true);
       setError(null);
       try {
@@ -36,10 +38,10 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
         setIsSending(false);
       }
     },
-    [apiKey, config, isSending, processId],
+    [apiKey, config, hasEngineEndpoint, isSending, processId],
   );
 
-  const canSend = chars.length > 0 && !isSending && Boolean(config.lspPort);
+  const canSend = chars.length > 0 && !isSending && hasEngineEndpoint;
 
   return (
     <Flex direction="column" gap="2" className={styles.stdinInputRow}>
@@ -60,7 +62,7 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
               size="1"
               value={chars}
               placeholder="Type stdin..."
-              disabled={isSending || !config.lspPort}
+              disabled={isSending || !hasEngineEndpoint}
               onChange={(event) => setChars(event.target.value)}
               onClick={(event) => event.stopPropagation()}
             />
@@ -78,7 +80,7 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
             size="1"
             variant="soft"
             color="gray"
-            disabled={isSending || !config.lspPort}
+            disabled={isSending || !hasEngineEndpoint}
             onClick={(event) => {
               event.stopPropagation();
               void sendChars("\u0003");

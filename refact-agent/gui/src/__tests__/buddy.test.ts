@@ -316,7 +316,11 @@ function makeDiagnostic(
 function makePostMock() {
   return vi.fn(
     (
-      _connection: number | { lspPort?: number },
+      _connection: number | {
+        host?: "web" | "ide" | "vscode" | "jetbrains";
+        lspPort?: number;
+        lspUrl?: string;
+      },
       _apiKey: string | undefined,
       _body: BuddyErrorReport,
     ) => Promise.resolve(undefined),
@@ -3219,6 +3223,43 @@ describe("Buddy frontend error reporting helpers", () => {
     ).resolves.toBeUndefined();
 
     expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  test("reportBuddyFrontendError reports with remote lspUrl when lspPort is zero", async () => {
+    const post = makePostMock().mockResolvedValue(undefined);
+
+    await reportBuddyFrontendError(
+      {
+        source: "window_error",
+        error: "remote-only endpoint failure",
+        chatId: "chat-a",
+      },
+      {
+        getState: () => ({
+          config: {
+            apiKey: "key",
+            host: "vscode",
+            lspPort: 0,
+            lspUrl: "https://engine.example.test",
+          },
+        }),
+        post,
+        now: () => 100,
+      },
+    );
+
+    expect(post).toHaveBeenCalledTimes(1);
+    const call = post.mock.calls[0];
+    expect(call[0]).toMatchObject({
+      host: "vscode",
+      lspPort: 0,
+      lspUrl: "https://engine.example.test",
+    });
+    expect(call[1]).toBe("key");
+    expect(call[2]).toMatchObject({
+      error: "[frontend:window_error] remote-only endpoint failure",
+      chat_id: "chat-a",
+    });
   });
 
   test("reportBuddyFrontendError dedupes only matching chat scope", async () => {

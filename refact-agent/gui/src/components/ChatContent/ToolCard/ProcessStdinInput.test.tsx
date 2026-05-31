@@ -11,6 +11,7 @@ import {
 import { server } from "../../../utils/mockServer";
 import type { ToolCall, ToolMessage } from "../../../services/refact/types";
 import { ExecToolCard } from "./ExecToolCard";
+import type { Config } from "../../../features/Config/configSlice";
 
 const receivedChars: string[] = [];
 
@@ -43,14 +44,17 @@ function toolMessage(tty: boolean): ToolMessage {
   };
 }
 
-async function renderExpandedStdinCard(tty: boolean) {
+async function renderExpandedStdinCard(
+  tty: boolean,
+  config?: Partial<Config>,
+) {
   const chat = createDefaultChatState();
   const currentThread = chat.threads[chat.current_thread_id];
   currentThread.thread.messages = [toolMessage(tty)];
   const result = render(
     <ExecToolCard toolCall={toolCall()} toolName="shell" />,
     {
-      preloadedState: { chat },
+      preloadedState: config ? { chat, config: config as Config } : { chat },
     },
   );
   await result.user.click(screen.getByText("python"));
@@ -101,5 +105,48 @@ describe("ProcessStdinInput", () => {
 
     await waitFor(() => expect(receivedChars).toEqual(["hello"]));
     await waitFor(() => expect(input.value).toBe(""));
+  });
+
+  test("submits with remote lspUrl when lspPort is zero", async () => {
+    receivedChars.length = 0;
+    let receivedUrl = "";
+    server.use(
+      http.post(
+        "https://engine.example.test/v1/exec/:processId/stdin",
+        async ({ request }) => {
+          receivedUrl = request.url;
+          const body = (await request.json()) as { chars: string };
+          receivedChars.push(body.chars);
+          return HttpResponse.json({
+            process_id: "exec_test",
+            status: "running",
+            bytes_written: body.chars.length,
+            since_seq: 0,
+            next_seq: 0,
+            latest_seq: 0,
+          });
+        },
+      ),
+    );
+
+    await renderExpandedStdinCard(true, {
+      host: "vscode",
+      lspPort: 0,
+      lspUrl: "https://engine.example.test",
+    });
+
+    const input = screen.getByLabelText<HTMLInputElement>("Process stdin");
+    expect(input).toBeEnabled();
+    const sendCtrlC = screen.getByRole("button", { name: "Send Ctrl+C" });
+    expect(sendCtrlC).toBeEnabled();
+    fireEvent.change(input, { target: { value: "remote" } });
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeEnabled();
+    fireEvent.click(send);
+
+    await waitFor(() => expect(receivedChars).toEqual(["remote"]));
+    expect(receivedUrl).toBe(
+      "https://engine.example.test/v1/exec/exec_test/stdin",
+    );
   });
 });
