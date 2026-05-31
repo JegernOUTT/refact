@@ -2293,7 +2293,7 @@ pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSe
 pub(crate) async fn persist_loaded_trajectory_repair_raw(
     gcx: Arc<GlobalContext>,
     repair: &TrajectoryRepairPatch,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let chat_id = &repair.chat_id;
     validate_trajectory_id(chat_id).map_err(|e| e.message)?;
     let file_path = &repair.source_path;
@@ -2345,9 +2345,10 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
         "auto_approve_dangerous_commands".to_string(),
         json!(repair.auto_approve_dangerous_commands),
     );
+    let updated_at = chrono::Utc::now().to_rfc3339();
     trajectory_object.insert(
         "updated_at".to_string(),
-        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+        serde_json::Value::String(updated_at.clone()),
     );
 
     let tmp_path = unique_trajectory_tmp_path(file_path);
@@ -2359,7 +2360,8 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
         json_result,
         Some("Failed to write trajectory"),
     )
-    .await
+    .await?;
+    Ok(updated_at)
 }
 
 async fn persist_loaded_trajectory_repair(gcx: Arc<GlobalContext>, mut loaded: LoadedTrajectory) {
@@ -4971,9 +4973,23 @@ pub async fn handle_v1_trajectories_delete(
         Some(candidate) => load_trajectory_candidate(gcx.clone(), &id, candidate).await,
         None => None,
     };
-    let event = if let Some(fallback) = fallback {
+    let event = if let Some(mut fallback) = fallback {
         if fallback.transition_identity_repaired {
-            persist_loaded_trajectory_repair(gcx.clone(), fallback.clone()).await;
+            apply_mode_defaults_to_thread(
+                gcx.clone(),
+                &mut fallback.thread,
+                fallback.auto_approve_editing_tools_present,
+                fallback.auto_approve_dangerous_commands_present,
+            )
+            .await;
+            match persist_loaded_trajectory_repair_raw(gcx.clone(), &fallback.repair_patch()).await
+            {
+                Ok(updated_at) => fallback.updated_at = updated_at,
+                Err(e) => warn!(
+                    "Failed to persist repaired trajectory for {}: {}",
+                    fallback.thread.id, e
+                ),
+            }
         }
         let task_roots = get_all_task_roots(gcx).await;
         let meta = loaded_trajectory_to_meta(&fallback, &task_roots);
@@ -6647,6 +6663,101 @@ mod tests {
         assert_ne!(event.title.as_deref(), Some("Active Normal Collision"));
         assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
         assert!(tokio::fs::try_exists(&task_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn http_delete_higher_priority_trajectory_repairs_fallback_before_updated_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "http-delete-repaired-fallback-updated-at";
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        let task_path = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-repaired-fallback")
+            .join("trajectories")
+            .join("planner")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &normal_path,
+            chat_id,
+            "Deleted Higher Priority Repair",
+            "2024-01-01T00:00:02Z",
+        )
+        .await;
+        tokio::fs::create_dir_all(task_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &task_path,
+            serde_json::to_string(&json!({
+                "id": chat_id,
+                "title": "Repaired Lower Priority Fallback",
+                "model": "fallback-model",
+                "mode": "task_planner",
+                "tool_use": "agent",
+                "parent_id": "source-chat",
+                "link_type": "mode_transition",
+                "previous_response_id": "resp_stale",
+                "messages": [
+                    {"role":"system","content":"target fallback system"},
+                    {"role":"user","content":"fallback message"}
+                ],
+                "frozen_request_prefix": {
+                    "schema_version": 1,
+                    "created_at": "2026-05-29T00:00:00Z",
+                    "system_prompt": "stale source system",
+                    "tools_canonical": [{"type":"function","function":{"name":"source_tool"}}]
+                },
+                "claude_code_identity": {
+                    "device_id":"source-device",
+                    "session_id":"source-session"
+                },
+                "created_at": "not-a-date",
+                "updated_at": "2024-01-01T00:00:01Z",
+                "include_project_info": true,
+                "checkpoints_enabled": true,
+                "custom_future_field": {"keep": true, "nested": {"value": 73}}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        handle_v1_trajectories_delete(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(
+            event.title.as_deref(),
+            Some("Repaired Lower Priority Fallback")
+        );
+        assert_eq!(event.task_id.as_deref(), Some("task-repaired-fallback"));
+        assert_eq!(event.task_role.as_deref(), Some("planner"));
+        assert_ne!(event.updated_at.as_deref(), Some("2024-01-01T00:00:01Z"));
+        assert!(!tokio::fs::try_exists(&normal_path).await.unwrap());
+        assert!(tokio::fs::try_exists(&task_path).await.unwrap());
+
+        let repaired: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&task_path).await.unwrap()).unwrap();
+        assert_eq!(event.updated_at.as_deref(), repaired["updated_at"].as_str());
+        assert!(parsed_rfc3339_utc(repaired["created_at"].as_str().unwrap()).is_some());
+        assert_eq!(
+            repaired["frozen_request_prefix"]["system_prompt"],
+            "target fallback system"
+        );
+        assert!(repaired["frozen_request_prefix"]["tools_canonical"].is_null());
+        assert!(repaired.get("previous_response_id").is_none());
+        assert!(repaired.get("claude_code_identity").is_none());
+        assert_eq!(repaired["custom_future_field"]["nested"]["value"], 73);
     }
 
     #[tokio::test]
