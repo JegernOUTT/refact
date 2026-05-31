@@ -186,6 +186,14 @@ Chat uses **Commands API** + **SSE subscription**, not RTK Query.
 
 Dispatches messages to specialized renderers. Iterative processing (not recursive). Groups assistant messages with related diffs + tools.
 
+Compression visibility rules:
+
+- `compression_report` messages render visibly as `SummarizationMessage` cards via `syntheticCompressionReportMessage()` and should not be hidden as internal roles.
+- Assistant messages with `extra.compression.kind === "llm_segment_summary"` render visibly as compression/summarization cards via `syntheticSummarizationMessage()` instead of ordinary assistant transcript text.
+- Visible compression failure events are narrowly defined as `event` messages whose metadata is `subkind: "system_notice"`, `source: "chat.summarizer"`, and whose content starts with `Context compression failed:`; these render as visible error display items. Other hidden events, including `plan_delta`, stay out of normal transcript display.
+- The footer compression indicator is driven only by the thread runtime `is_compressing` selector. It appears while the backend reports an active compression attempt and disappears on terminal `RuntimeUpdated`/snapshot state when `is_compressing` becomes false or is cleared.
+- Restore paths and SSE-error/reconnect cleanup must clear `is_compressing`, `compression_phase`, and `compression_reason` so stale compression progress does not survive thread restoration or subscription failures.
+
 | Role           | Component                  | Notes                                                                |
 | -------------- | -------------------------- | -------------------------------------------------------------------- |
 | `user`         | UserInput                  | Editable, checkpoints badge, images, compression hint 🗜️             |

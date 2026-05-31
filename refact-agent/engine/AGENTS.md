@@ -91,6 +91,18 @@ UserMessage → queue → prepare (system prompt, knowledge RAG, history limit) 
 - **`stream_core.rs`**: `merge_thinking_blocks()` — deduplicates by (type,index) → (type,id) → (type,signature); signatures are opaque, latest-wins replacement.
 - **`history_limit.rs`**: 4-stage compression (dedup context files → compress tool results → fix tool calls → limit history). `CompressionStrength`: Absent/Low/Medium/High.
 
+### Compression contract
+
+Chat compression produces first-class chat messages and runtime status, not trailing instructions.
+
+- `compression_report` is a visible message role for deterministic/reactive compression reports. It stores Markdown content plus `extra.compression_report = { kind: "chat_compression_report", context_files_removed, context_messages_dropped, tool_results_truncated, tokens_before, tokens_after, estimated_tokens_saved, reduction_percent }`, uses `summarization_tier: "tier2_reactive"`, and is preserved by model-switch/new-thread sanitization.
+- Trajectory compression and manual `compress_chat_apply` must share `build_compression_report_message()` and `insert_compression_report_at_boundary()`. The helper inserts the report at the earliest affected boundary while staying after leading system messages and after the first user when present, removes equivalent existing reports for idempotency, and leaves non-equivalent reports intact.
+- Runtime compression status is carried on both `ChatSession` and `RuntimeState` as `is_compressing`, `compression_phase`, and `compression_reason`, and is emitted through `RuntimeUpdated` and snapshots.
+- Active compression phases are `checking` and `running`; terminal phases are `applied`, `skipped`, and `failed`. Active phases must set/keep `is_compressing` consistently, while terminal runtime transitions clear stale active phases and preserve already-terminal phase/reason metadata.
+- Segment summarization writes compressed assistant messages with `extra.compression.kind === "llm_segment_summary"`; these summaries remain visible UI artifacts and are excluded from repeated summarization by source metadata.
+- Compressed/truncated tool previews and public summarization failure text must redact sensitive values before truncating or persisting preview text, so split secrets cannot leak through length caps.
+- Manual `compress_chat_apply` must follow trajectory compression placement, report-deduplication, memory-path detection, redaction, path-preservation, and provider-order tool-call cleanup rules. It only mutates the selected modifiable prefix; preserved and active tails remain byte-identical except for insertion of the current compression report at the boundary.
+
 ### Hidden message roles
 
 The chat thread can contain hidden internal roles that are stored in trajectories and SSE snapshots but are not rendered as normal chat turns:
