@@ -82,6 +82,12 @@ impl Default for BurstGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalReloadPending {
+    Update,
+    Delete,
+}
+
 pub struct ChatSession {
     pub chat_id: String,
     pub thread: ThreadParams,
@@ -114,7 +120,7 @@ pub struct ChatSession {
     pub created_at: String,
     pub closed: bool,
     pub closed_flag: Arc<AtomicBool>,
-    pub external_reload_pending: bool,
+    pub external_reload_pending: Option<ExternalReloadPending>,
     pub last_prompt_messages: Vec<ChatMessage>,
     pub tier1_compact_attempts: usize,
     pub tier1_compaction_disabled: bool,

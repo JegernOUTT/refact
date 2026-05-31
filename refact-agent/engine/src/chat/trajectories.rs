@@ -85,7 +85,7 @@ async fn atomic_write_json_with_tmp_path(
     result
 }
 
-use super::types::{ThreadParams, SessionState, ChatSession};
+use super::types::{ChatSession, ExternalReloadPending, SessionState, ThreadParams};
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
 use super::SessionsMap;
@@ -2155,66 +2155,125 @@ async fn persist_loaded_trajectory_repair(gcx: Arc<GlobalContext>, mut loaded: L
     }
 }
 
+fn can_apply_external_reload(session: &ChatSession) -> bool {
+    session.runtime.state == SessionState::Idle && !session.trajectory_dirty
+}
+
+fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
+    session.messages.clear();
+    session.thread = ThreadParams {
+        id: chat_id.to_string(),
+        ..Default::default()
+    };
+    session.reset_compaction_runtime_state();
+    session.external_reload_pending = None;
+    let snapshot = session.snapshot();
+    session.emit(snapshot);
+}
+
+fn apply_loaded_external_update_to_session(
+    session: &mut ChatSession,
+    loaded: LoadedTrajectory,
+    transition_identity_repaired: bool,
+) -> Option<u64> {
+    session.messages = loaded.messages;
+    session.thread = loaded.thread;
+    session.reset_compaction_runtime_state();
+    session.created_at = loaded.created_at;
+    session.wake_up_at = loaded.wake_up_at;
+    session.waiting_for_card_ids = loaded.waiting_for_card_ids;
+    session.external_reload_pending = None;
+    if transition_identity_repaired {
+        session.increment_version();
+    }
+    let snapshot = session.snapshot();
+    session.emit(snapshot);
+    transition_identity_repaired.then_some(session.trajectory_version)
+}
+
 pub async fn check_external_reload_pending(
     gcx: Arc<GlobalContext>,
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
-    let (chat_id, should_reload) = {
+    let (chat_id, pending) = {
         let session = session_arc.lock().await;
         (
             session.chat_id.clone(),
-            session.external_reload_pending
-                && session.runtime.state == SessionState::Idle
-                && !session.trajectory_dirty,
-        )
-    };
-    if !should_reload {
-        return;
-    }
-    if let Some(mut loaded) = load_trajectory_for_chat(gcx.clone(), &chat_id).await {
-        let transition_identity_repaired = loaded.transition_identity_repaired;
-        apply_mode_defaults_to_thread(
-            gcx.clone(),
-            &mut loaded.thread,
-            loaded.auto_approve_editing_tools_present,
-            loaded.auto_approve_dangerous_commands_present,
-        )
-        .await;
-        let repair_patch = loaded.repair_patch();
-        let repaired_version = {
-            let mut session = session_arc.lock().await;
-            if session.runtime.state == SessionState::Idle && !session.trajectory_dirty {
-                info!("Applying pending external reload for {}", chat_id);
-                session.messages = loaded.messages;
-                session.thread = loaded.thread;
-                session.reset_compaction_runtime_state();
-                session.created_at = loaded.created_at;
-                session.wake_up_at = loaded.wake_up_at;
-                session.waiting_for_card_ids = loaded.waiting_for_card_ids;
-                session.external_reload_pending = false;
-                if transition_identity_repaired {
-                    session.increment_version();
-                }
-                let snapshot = session.snapshot();
-                session.emit(snapshot);
-                transition_identity_repaired.then_some(session.trajectory_version)
+            if can_apply_external_reload(&session) {
+                session.external_reload_pending
             } else {
                 None
-            }
-        };
-        if let Some(repaired_version) = repaired_version {
-            if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
-                warn!(
-                    "Failed to persist repaired trajectory for {}: {}",
-                    chat_id, e
+            },
+        )
+    };
+    match pending {
+        Some(ExternalReloadPending::Delete) => {
+            let mut session = session_arc.lock().await;
+            if can_apply_external_reload(&session)
+                && session.external_reload_pending == Some(ExternalReloadPending::Delete)
+            {
+                info!(
+                    "Applying pending external trajectory delete for {}",
+                    chat_id
                 );
+                apply_external_delete_to_session(&mut session, &chat_id);
+            }
+        }
+        Some(ExternalReloadPending::Update) => {
+            if let Some(mut loaded) = load_trajectory_for_chat(gcx.clone(), &chat_id).await {
+                let transition_identity_repaired = loaded.transition_identity_repaired;
+                apply_mode_defaults_to_thread(
+                    gcx.clone(),
+                    &mut loaded.thread,
+                    loaded.auto_approve_editing_tools_present,
+                    loaded.auto_approve_dangerous_commands_present,
+                )
+                .await;
+                let repair_patch = loaded.repair_patch();
+                let repaired_version = {
+                    let mut session = session_arc.lock().await;
+                    if can_apply_external_reload(&session)
+                        && session.external_reload_pending == Some(ExternalReloadPending::Update)
+                    {
+                        info!("Applying pending external reload for {}", chat_id);
+                        apply_loaded_external_update_to_session(
+                            &mut session,
+                            loaded,
+                            transition_identity_repaired,
+                        )
+                    } else {
+                        None
+                    }
+                };
+                if let Some(repaired_version) = repaired_version {
+                    if let Err(e) =
+                        persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await
+                    {
+                        warn!(
+                            "Failed to persist repaired trajectory for {}: {}",
+                            chat_id, e
+                        );
+                    } else {
+                        let mut session = session_arc.lock().await;
+                        if session.trajectory_version == repaired_version {
+                            session.trajectory_dirty = false;
+                        }
+                    }
+                }
             } else {
                 let mut session = session_arc.lock().await;
-                if session.trajectory_version == repaired_version {
-                    session.trajectory_dirty = false;
+                if can_apply_external_reload(&session)
+                    && session.external_reload_pending == Some(ExternalReloadPending::Update)
+                {
+                    warn!(
+                        "Clearing pending external reload for {} because trajectory file is missing",
+                        chat_id
+                    );
+                    session.external_reload_pending = None;
                 }
             }
         }
+        None => {}
     }
 }
 
@@ -2369,26 +2428,23 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
 
     let can_reload = {
         let session = session_arc.lock().await;
-        session.runtime.state == SessionState::Idle && !session.trajectory_dirty
+        can_apply_external_reload(&session)
     };
 
     if !can_reload {
         let mut session = session_arc.lock().await;
-        session.external_reload_pending = true;
+        session.external_reload_pending = Some(if is_remove {
+            ExternalReloadPending::Delete
+        } else {
+            ExternalReloadPending::Update
+        });
         return;
     }
 
     if is_remove {
         let mut session = session_arc.lock().await;
         info!("Trajectory file removed externally for {}", chat_id);
-        session.messages.clear();
-        session.thread = ThreadParams {
-            id: chat_id.to_string(),
-            ..Default::default()
-        };
-        session.reset_compaction_runtime_state();
-        let snapshot = session.snapshot();
-        session.emit(snapshot);
+        apply_external_delete_to_session(&mut session, chat_id);
         return;
     }
 
@@ -2404,24 +2460,16 @@ async fn process_trajectory_change(gcx: Arc<GlobalContext>, chat_id: &str, is_re
         let repair_patch = loaded.repair_patch();
         let repaired_version = {
             let mut session = session_arc.lock().await;
-            if session.runtime.state != SessionState::Idle || session.trajectory_dirty {
-                session.external_reload_pending = true;
+            if !can_apply_external_reload(&session) {
+                session.external_reload_pending = Some(ExternalReloadPending::Update);
                 return;
             }
             info!("Reloading trajectory for {} from external change", chat_id);
-            session.messages = loaded.messages;
-            session.thread = loaded.thread;
-            session.reset_compaction_runtime_state();
-            session.created_at = loaded.created_at;
-            session.wake_up_at = loaded.wake_up_at;
-            session.waiting_for_card_ids = loaded.waiting_for_card_ids;
-            session.external_reload_pending = false;
-            if transition_identity_repaired {
-                session.increment_version();
-            }
-            let snapshot = session.snapshot();
-            session.emit(snapshot);
-            transition_identity_repaired.then_some(session.trajectory_version)
+            apply_loaded_external_update_to_session(
+                &mut session,
+                loaded,
+                transition_identity_repaired,
+            )
         };
         if let Some(repaired_version) = repaired_version {
             if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
@@ -6674,6 +6722,149 @@ mod tests {
         assert_external_remove_clears_active_compression(CompressionPhase::Running).await;
     }
 
+    #[tokio::test]
+    async fn pending_external_delete_applies_when_session_becomes_reloadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-external-delete";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let mut chat_rx = {
+            let mut session = session_arc.lock().await;
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "before deferred delete".to_string(),
+            ));
+            session.thread.title = "Delete Pending".to_string();
+            session.runtime.state = SessionState::Generating;
+            session.trajectory_dirty = true;
+            mark_active_compression(&mut session, CompressionPhase::Running);
+            session.subscribe()
+        };
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        process_trajectory_change(gcx.clone(), chat_id, true).await;
+        {
+            let session = session_arc.lock().await;
+            assert_eq!(
+                session.external_reload_pending,
+                Some(ExternalReloadPending::Delete)
+            );
+            assert_eq!(session.messages.len(), 1);
+            assert!(session.active_compression_attempt.is_some());
+        }
+
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert!(session.messages.is_empty());
+        assert_eq!(session.thread.id, chat_id);
+        assert_eq!(session.thread.title, ThreadParams::default().title);
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, None);
+        assert_eq!(session.runtime.compression_phase, None);
+        assert_eq!(session.compression_reason, None);
+        assert_eq!(session.runtime.compression_reason, None);
+        assert_eq!(session.active_compression_attempt, None);
+        drop(session);
+
+        let json = chat_rx.recv().await.unwrap();
+        let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+        match envelope.event {
+            ChatEvent::Snapshot {
+                thread,
+                runtime,
+                messages,
+                ..
+            } => {
+                assert_eq!(thread.id, chat_id);
+                assert!(messages.is_empty());
+                assert!(!runtime.is_compressing);
+                assert_eq!(runtime.compression_phase, None);
+            }
+            other => panic!("expected Snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_external_delete_clears_existing_pending_reload_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+
+        for (chat_id, pending) in [
+            (
+                "immediate-delete-clears-pending-update",
+                ExternalReloadPending::Update,
+            ),
+            (
+                "immediate-delete-clears-pending-delete",
+                ExternalReloadPending::Delete,
+            ),
+        ] {
+            let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+            {
+                let mut session = session_arc.lock().await;
+                session.messages.push(ChatMessage::new(
+                    "user".to_string(),
+                    "before immediate delete".to_string(),
+                ));
+                session.external_reload_pending = Some(pending);
+                session.runtime.state = SessionState::Idle;
+                session.trajectory_dirty = false;
+            }
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert(chat_id.to_string(), session_arc.clone());
+
+            process_trajectory_change(gcx.clone(), chat_id, true).await;
+
+            let session = session_arc.lock().await;
+            assert_eq!(session.external_reload_pending, None);
+            assert!(session.messages.is_empty());
+            assert_eq!(session.thread.id, chat_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_external_update_missing_file_clears_pending_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-update-missing-file";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "keep after missing update".to_string(),
+            ));
+            session.external_reload_pending = Some(ExternalReloadPending::Update);
+            session.runtime.state = SessionState::Idle;
+            session.trajectory_dirty = false;
+        }
+
+        check_external_reload_pending(gcx, session_arc.clone()).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.external_reload_pending, None);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "keep after missing update"
+        );
+    }
+
     #[test]
     fn trajectory_snapshot_from_session_preserves_ui_only_diagnostics() {
         let mut session = ChatSession::new("ui-only-snapshot".to_string());
@@ -6766,7 +6957,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
-            external_reload_pending: false,
+            external_reload_pending: None,
             last_prompt_messages: Vec::new(),
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
@@ -6848,7 +7039,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
-            external_reload_pending: false,
+            external_reload_pending: None,
             last_prompt_messages: Vec::new(),
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
@@ -8745,7 +8936,10 @@ mod tests {
         process_trajectory_change(gcx.clone(), chat_id, false).await;
         {
             let session = session_arc.lock().await;
-            assert!(session.external_reload_pending);
+            assert_eq!(
+                session.external_reload_pending,
+                Some(ExternalReloadPending::Update)
+            );
             assert!(session.thread.claude_code_identity.is_none());
             assert!(session.thread.frozen_request_prefix.is_none());
         }
@@ -8759,7 +8953,7 @@ mod tests {
 
         {
             let session = session_arc.lock().await;
-            assert!(!session.external_reload_pending);
+            assert_eq!(session.external_reload_pending, None);
             let prefix = session.thread.frozen_request_prefix.as_ref().unwrap();
             assert_eq!(
                 prefix.system_prompt.as_deref(),
