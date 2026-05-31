@@ -915,26 +915,14 @@ async fn resolve_summary_model(
     Err(SegmentSummaryFailure::NoModelAvailable)
 }
 
-async fn effective_n_ctx_for_thread(
-    gcx: Arc<GlobalContext>,
+fn effective_n_ctx_for_resolved_summary_model(
+    model_n_ctx: usize,
     thread: &crate::chat::types::ThreadParams,
-) -> Option<usize> {
-    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0)
-        .await
-        .ok()?;
-    crate::caps::resolve_chat_model(caps, &thread.model)
-        .ok()
-        .map(|record| {
-            let model_n_ctx = if record.base.n_ctx > 0 {
-                record.base.n_ctx
-            } else {
-                crate::chat::config::tokens().default_n_ctx
-            };
-            match thread.context_tokens_cap {
-                Some(cap) if cap > 0 => cap.min(model_n_ctx),
-                _ => model_n_ctx,
-            }
-        })
+) -> usize {
+    match thread.context_tokens_cap {
+        Some(cap) if cap > 0 => cap.min(model_n_ctx),
+        _ => model_n_ctx,
+    }
 }
 
 fn last_visible_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
@@ -1031,6 +1019,19 @@ fn emit_compression_failed(session: &mut ChatSession, reason: CompressionReason)
     emit_compression_status(session, CompressionPhase::Failed, Some(reason));
 }
 
+fn compression_attempt_active(session: &ChatSession) -> bool {
+    session.is_compressing
+        || session.runtime.is_compressing
+        || matches!(
+            session.compression_phase,
+            Some(CompressionPhase::Checking | CompressionPhase::Running)
+        )
+        || matches!(
+            session.runtime.compression_phase,
+            Some(CompressionPhase::Checking | CompressionPhase::Running)
+        )
+}
+
 fn compression_failure_reason(failure: &SegmentSummaryFailure) -> CompressionReason {
     match failure {
         SegmentSummaryFailure::NoModelAvailable => CompressionReason::NoSummaryModel,
@@ -1123,14 +1124,15 @@ pub async fn apply_segment_summarization(
     thread: &crate::chat::types::ThreadParams,
     force: bool,
 ) -> bool {
-    if !should_attempt_segment_summarization(thread, force) {
-        let mut session = session_arc.lock().await;
-        emit_compression_skipped(&mut session, CompressionReason::AutoCompactDisabled);
-        return false;
-    }
-
     let raw_messages = {
         let mut session = session_arc.lock().await;
+        if compression_attempt_active(&session) {
+            return false;
+        }
+        if !should_attempt_segment_summarization(thread, force) {
+            emit_compression_skipped(&mut session, CompressionReason::AutoCompactDisabled);
+            return false;
+        }
         emit_compression_status(&mut session, CompressionPhase::Checking, None);
         if session.tier1_compaction_disabled && !force {
             emit_compression_skipped(&mut session, CompressionReason::SessionCompactionDisabled);
@@ -1160,21 +1162,6 @@ pub async fn apply_segment_summarization(
         emit_compression_skipped(&mut session, CompressionReason::NoEligibleSegment);
         return false;
     };
-    let effective_n_ctx = match effective_n_ctx_for_thread(gcx.clone(), thread).await {
-        Some(value) => value,
-        None => {
-            let mut session = session_arc.lock().await;
-            emit_compression_skipped(&mut session, CompressionReason::EffectiveContextUnknown);
-            return false;
-        }
-    };
-    let pressure = estimated_context_pressure(&raw_messages, effective_n_ctx);
-    if !force && !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
-        let mut session = session_arc.lock().await;
-        emit_compression_skipped(&mut session, CompressionReason::PressureLow);
-        return false;
-    }
-
     let (model, model_n_ctx) = match resolve_summary_model(gcx.clone(), &thread.model).await {
         Ok(value) => value,
         Err(failure) => {
@@ -1190,6 +1177,13 @@ pub async fn apply_segment_summarization(
             return false;
         }
     };
+    let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, thread);
+    let pressure = estimated_context_pressure(&raw_messages, effective_n_ctx);
+    if !force && !matches!(pressure, ContextPressure::High | ContextPressure::Critical) {
+        let mut session = session_arc.lock().await;
+        emit_compression_skipped(&mut session, CompressionReason::PressureLow);
+        return false;
+    }
 
     {
         let mut session = session_arc.lock().await;
@@ -2484,6 +2478,171 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(failure, SegmentSummaryFailure::NoModelAvailable));
+    }
+
+    #[tokio::test]
+    async fn stale_thread_model_with_valid_fallback_computes_attempt_budget() {
+        let gcx = make_test_gcx().await;
+        let light_model = "global-light-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            light_model.to_string(),
+            chat_model_record(light_model, 4_096),
+        );
+        caps.defaults.chat_light_model = light_model.to_string();
+        caps.defaults.chat_default_model = "stale-default-model".to_string();
+        install_caps(gcx.clone(), caps).await;
+        let thread = crate::chat::types::ThreadParams {
+            model: "removed-thread-model".to_string(),
+            ..Default::default()
+        };
+        let messages = vec![
+            user("first"),
+            assistant(&"old assistant output ".repeat(20_000)),
+            user("second"),
+        ];
+
+        let (model, model_n_ctx) = resolve_summary_model(gcx, &thread.model).await.unwrap();
+        let effective_n_ctx = effective_n_ctx_for_resolved_summary_model(model_n_ctx, &thread);
+        let pressure = estimated_context_pressure(&messages, effective_n_ctx);
+
+        assert_eq!(model, light_model);
+        assert_eq!(effective_n_ctx, 4_096);
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(matches!(
+            pressure,
+            ContextPressure::High | ContextPressure::Critical
+        ));
+    }
+
+    #[tokio::test]
+    async fn context_cap_bounds_resolved_fallback_model_context() {
+        let gcx = make_test_gcx().await;
+        let light_model = "global-light-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            light_model.to_string(),
+            chat_model_record(light_model, 65_536),
+        );
+        caps.defaults.chat_light_model = light_model.to_string();
+        install_caps(gcx.clone(), caps).await;
+        let mut thread = crate::chat::types::ThreadParams {
+            model: "removed-thread-model".to_string(),
+            context_tokens_cap: Some(8_192),
+            ..Default::default()
+        };
+
+        let (_, model_n_ctx) = resolve_summary_model(gcx, &thread.model).await.unwrap();
+
+        assert_eq!(
+            effective_n_ctx_for_resolved_summary_model(model_n_ctx, &thread),
+            8_192
+        );
+        thread.context_tokens_cap = Some(0);
+        assert_eq!(
+            effective_n_ctx_for_resolved_summary_model(model_n_ctx, &thread),
+            65_536
+        );
+        thread.context_tokens_cap = Some(131_072);
+        assert_eq!(
+            effective_n_ctx_for_resolved_summary_model(model_n_ctx, &thread),
+            65_536
+        );
+    }
+
+    #[tokio::test]
+    async fn active_compression_guard_exits_without_overwriting_running_attempt() {
+        let gcx = make_test_gcx().await;
+        let mut session = ChatSession::new("compression-active-guard".to_string());
+        session.messages = vec![user("first"), assistant("old answer"), user("second")];
+        session.is_compressing = true;
+        session.runtime.is_compressing = true;
+        session.compression_phase = Some(CompressionPhase::Running);
+        session.runtime.compression_phase = Some(CompressionPhase::Running);
+        let segment = first_eligible_segment(&session.messages).unwrap();
+        let source_messages = session.messages[segment.start..=segment.end].to_vec();
+        let source_hash = source_hash_for_messages(&source_messages);
+        let summary = make_segment_summary_message(
+            "compressed summary".to_string(),
+            &source_messages,
+            "test-model",
+        );
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        let thread = crate::chat::types::ThreadParams {
+            auto_compact_enabled: Some(false),
+            ..Default::default()
+        };
+
+        assert!(!apply_segment_summarization(gcx, &session_arc, &thread, false).await);
+        {
+            let session = session_arc.lock().await;
+            assert!(session.is_compressing);
+            assert!(session.runtime.is_compressing);
+            assert_eq!(session.compression_phase, Some(CompressionPhase::Running));
+            assert_eq!(session.compression_reason, None);
+            assert_eq!(session.event_seq, 0);
+        }
+        {
+            let mut session = session_arc.lock().await;
+            assert!(apply_resolved_segment_summary(
+                &mut session,
+                &source_hash,
+                summary
+            ));
+            assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+            assert_eq!(session.compression_reason, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_skipped_early_return_clears_active_compression_status() {
+        let gcx = make_test_gcx().await;
+        let session_arc = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            "compression-reserved-skip".to_string(),
+        )));
+        let thread = crate::chat::types::ThreadParams::default();
+
+        assert!(!apply_segment_summarization(gcx, &session_arc, &thread, false).await);
+
+        let session = session_arc.lock().await;
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::NoEligibleSegment)
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_failed_early_return_clears_active_compression_status() {
+        let gcx = make_test_gcx().await;
+        let mut caps = CodeAssistantCaps::default();
+        caps.defaults.chat_light_model = "stale-light-model".to_string();
+        caps.defaults.chat_default_model = "stale-default-model".to_string();
+        install_caps(gcx.clone(), caps).await;
+        let mut session = ChatSession::new("compression-reserved-fail".to_string());
+        session.messages = vec![user("first"), assistant("old answer"), user("second")];
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        let thread = crate::chat::types::ThreadParams {
+            model: "removed-thread-model".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!apply_segment_summarization(gcx, &session_arc, &thread, false).await);
+
+        let session = session_arc.lock().await;
+        assert!(!session.is_compressing);
+        assert!(!session.runtime.is_compressing);
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Failed));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::NoSummaryModel)
+        );
+        assert!(session.tier1_compaction_disabled);
     }
 
     #[test]

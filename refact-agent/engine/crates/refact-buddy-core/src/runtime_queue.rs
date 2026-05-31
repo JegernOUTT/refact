@@ -87,7 +87,9 @@ fn runtime_event_stale_without_ttl_at(
 ) -> bool {
     if event.dismissed {
         return created_at
-            .checked_add_signed(chrono::Duration::minutes(DISMISSED_NO_TTL_RETENTION_MINUTES))
+            .checked_add_signed(chrono::Duration::minutes(
+                DISMISSED_NO_TTL_RETENTION_MINUTES,
+            ))
             .is_some_and(|expires_at| expires_at <= now);
     }
     if event.persistent {

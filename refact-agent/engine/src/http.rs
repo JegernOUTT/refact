@@ -33,7 +33,11 @@ pub(crate) fn resolve_http_bind_addr(
     let host = http_host
         .map(str::trim)
         .filter(|host| !host.is_empty())
-        .unwrap_or(if inside_container { "0.0.0.0" } else { "127.0.0.1" });
+        .unwrap_or(if inside_container {
+            "0.0.0.0"
+        } else {
+            "127.0.0.1"
+        });
     let ip = host
         .parse::<IpAddr>()
         .map_err(|error| format!("invalid --http-host '{host}': {error}"))?;
@@ -78,10 +82,7 @@ pub(crate) fn local_lan_ipv4_hosts() -> Vec<Ipv4Addr> {
         let virtual_iface = is_likely_virtual_interface_name(&iface.name);
         for network in iface.ips {
             if let IpAddr::V4(ip) = network.ip() {
-                if !is_candidate_lan_ipv4(ip)
-                    || preferred.contains(&ip)
-                    || fallback.contains(&ip)
-                {
+                if !is_candidate_lan_ipv4(ip) || preferred.contains(&ip) || fallback.contains(&ip) {
                     continue;
                 }
                 if virtual_iface {
@@ -145,7 +146,11 @@ struct MdnsRegistration {
 impl MdnsRegistration {
     fn shutdown(self) {
         if let Err(error) = self.daemon.unregister(&self.fullname) {
-            tracing::warn!("failed to unregister mDNS service {}: {}", self.fullname, error);
+            tracing::warn!(
+                "failed to unregister mDNS service {}: {}",
+                self.fullname,
+                error
+            );
         }
         if let Err(error) = self.daemon.shutdown() {
             tracing::warn!("failed to shutdown mDNS daemon: {}", error);

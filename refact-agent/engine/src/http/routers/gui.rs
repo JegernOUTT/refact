@@ -53,7 +53,10 @@ fn inject_gui_origin_candidates(
 
 pub async fn handle_gui_asset(Path(path): Path<String>) -> impl IntoResponse {
     if path.is_empty() || path.split('/').any(|part| part == ".." || part.is_empty()) {
-        return text_response(StatusCode::BAD_REQUEST, "invalid GUI asset path".to_string());
+        return text_response(
+            StatusCode::BAD_REQUEST,
+            "invalid GUI asset path".to_string(),
+        );
     }
 
     let embedded_path = format!("{ASSET_PREFIX}{path}");
@@ -94,7 +97,11 @@ fn html_response(status: StatusCode, body: Cow<'static, [u8]>) -> Response<BoxBo
 }
 
 fn text_response(status: StatusCode, body: String) -> Response<BoxBody> {
-    response_with_body(status, "text/plain; charset=utf-8", body.into_bytes().into())
+    response_with_body(
+        status,
+        "text/plain; charset=utf-8",
+        body.into_bytes().into(),
+    )
 }
 
 type BoxBody = axum::body::BoxBody;
@@ -106,10 +113,9 @@ fn response_with_body(
 ) -> Response<BoxBody> {
     let mut response = Response::new(boxed(Full::from(body.into_owned())));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(CACHE_CONTROL),
@@ -139,10 +145,22 @@ mod tests {
 
     #[test]
     fn content_type_maps_common_gui_assets() {
-        assert_eq!(content_type_for_path("index.html"), "text/html; charset=utf-8");
-        assert_eq!(content_type_for_path("index.umd.cjs"), "text/javascript; charset=utf-8");
-        assert_eq!(content_type_for_path("style.css"), "text/css; charset=utf-8");
-        assert_eq!(content_type_for_path("manifest.json"), "application/json; charset=utf-8");
+        assert_eq!(
+            content_type_for_path("index.html"),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for_path("index.umd.cjs"),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for_path("style.css"),
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for_path("manifest.json"),
+            "application/json; charset=utf-8"
+        );
         assert_eq!(content_type_for_path("font.woff2"), "font/woff2");
     }
 }
