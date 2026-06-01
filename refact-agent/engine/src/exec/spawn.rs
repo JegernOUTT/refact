@@ -995,7 +995,7 @@ mod tests {
     async fn timeout_kills_and_keeps_partial_output() {
         let registry = ExecRegistry::new();
         let command = if cfg!(windows) {
-            "[Console]::Out.Write('start'); Start-Sleep -Seconds 5"
+            "[Console]::Out.WriteLine('start'); Start-Sleep -Seconds 5"
         } else {
             "printf start; sleep 5"
         };

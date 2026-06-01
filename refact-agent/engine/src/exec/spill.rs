@@ -198,7 +198,7 @@ fn spill_root_from_parts(
 ) -> PathBuf {
     if let Some(cache_home) = cache_home.filter(|value| !value.is_empty()) {
         let path = PathBuf::from(cache_home);
-        if path.is_absolute() {
+        if is_absolute_for_current_or_unix_style(&path) {
             return path.join("refact").join("exec");
         }
     }
@@ -206,6 +206,10 @@ fn spill_root_from_parts(
         return home.join(".cache").join("refact").join("exec");
     }
     fallback_temp_spill_root(temp_dir)
+}
+
+fn is_absolute_for_current_or_unix_style(path: &Path) -> bool {
+    path.is_absolute() || path.to_string_lossy().starts_with('/')
 }
 
 #[cfg(unix)]

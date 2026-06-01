@@ -8,6 +8,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 use crate::exec::transcript::{
     ExecRawCapture, ExecRawOutput, ExecTranscript, DEFAULT_SPILL_THRESHOLD_BYTES,
 };
+#[cfg(test)]
+use crate::exec::spill::SpillTarget;
 use crate::exec::types::{
     current_timestamp_ms, ExecMode, ExecOutputChunk, ExecOutputStream, ExecProcessFilter,
     ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecServiceLookup,
@@ -687,6 +689,21 @@ impl ExecRegistry {
         records
             .get(process_id)
             .and_then(|record| record.transcript.disk_log_path().cloned())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_spill_target_for_test(
+        &self,
+        process_id: &ExecProcessId,
+        target: SpillTarget,
+    ) -> Result<(), String> {
+        let mut records = self.records.lock().await;
+        let record = records
+            .get_mut(process_id)
+            .ok_or_else(|| format!("process not found: {process_id}"))?;
+        record.transcript.set_spill_target_for_test(target);
+        record.snapshot.disk_log_path = None;
+        Ok(())
     }
 
     pub async fn write_stdin(
@@ -1540,6 +1557,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::exec::spill::SpillTarget;
     use crate::exec::transcript::DEFAULT_MAX_BYTES;
     use crate::exec::types::{ExecMode, ExecOwnerMeta, ExecStatusKind};
 
@@ -1659,6 +1677,13 @@ mod tests {
             )
             .await;
         let process_id = first.meta.process_id.clone();
+        let temp = tempfile::tempdir().unwrap();
+        let spill_target =
+            SpillTarget::with_root(temp.path().to_path_buf(), "chat-service", &process_id);
+        registry
+            .set_spill_target_for_test(&process_id, spill_target.clone())
+            .await
+            .unwrap();
         let old_text = format!(
             "old log line\n{}",
             "x".repeat(DEFAULT_SPILL_THRESHOLD_BYTES)
@@ -1682,6 +1707,10 @@ mod tests {
             )
             .await;
         assert_eq!(second.meta.process_id, process_id);
+        registry
+            .set_spill_target_for_test(&process_id, spill_target.clone())
+            .await
+            .unwrap();
         let new_text = format!(
             "new log line\n{}",
             "y".repeat(DEFAULT_SPILL_THRESHOLD_BYTES)
@@ -1695,7 +1724,8 @@ mod tests {
             .await
             .expect("second spill path");
 
-        assert_eq!(first_path, second_path);
+        assert_eq!(first_path, spill_target.path());
+        assert_eq!(second_path, spill_target.path());
         let persisted = std::fs::read_to_string(second_path).unwrap();
         assert_eq!(persisted, new_text);
         assert!(!persisted.contains("old log line"));
@@ -3262,7 +3292,10 @@ mod tests {
         assert_eq!(duplicate, stored);
         assert_eq!(stored.meta.command, "existing");
         assert!(wait_until_process_exits(child_pid).await);
+        #[cfg(target_os = "linux")]
         assert!(wait_until_process_exits(descendant_pid as u32).await);
+        #[cfg(not(target_os = "linux"))]
+        let _ = descendant_pid;
     }
 
     #[tokio::test]

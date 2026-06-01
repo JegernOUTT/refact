@@ -7,7 +7,7 @@ pub use refact_buddy_core::settings::*;
 pub use refact_buddy_core::snapshot::BuddyStorageMetadata;
 
 pub fn storage_metadata(project_root: &Path) -> BuddyStorageMetadata {
-    let buddy_dir = project_root.join(".refact/buddy");
+    let buddy_dir = project_root.join(".refact").join("buddy");
     let settings_path = buddy_dir.join("settings.json");
     BuddyStorageMetadata {
         project_root: project_root.to_string_lossy().to_string(),
@@ -17,7 +17,10 @@ pub fn storage_metadata(project_root: &Path) -> BuddyStorageMetadata {
 }
 
 pub async fn load_settings(project_root: &Path) -> BuddySettings {
-    let path = project_root.join(".refact/buddy/settings.json");
+    let path = project_root
+        .join(".refact")
+        .join("buddy")
+        .join("settings.json");
     match fs::read_to_string(&path).await {
         Ok(content) => match serde_json::from_str::<BuddySettings>(&content) {
             Ok(mut settings) => {
@@ -37,7 +40,10 @@ pub async fn load_settings(project_root: &Path) -> BuddySettings {
 }
 
 pub async fn save_settings(project_root: &Path, settings: &BuddySettings) -> Result<(), String> {
-    let path = project_root.join(".refact/buddy/settings.json");
+    let path = project_root
+        .join(".refact")
+        .join("buddy")
+        .join("settings.json");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .await

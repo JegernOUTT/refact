@@ -5420,7 +5420,7 @@ mod tests {
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let mut rx = app.chat.trajectory_events_tx.subscribe();
 
-        start_trajectory_watcher(gcx);
+        start_trajectory_watcher(gcx.clone());
         wait_for_watcher_start().await;
         drain_trajectory_events(&mut rx).await;
 
@@ -5447,7 +5447,7 @@ mod tests {
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let mut rx = app.chat.trajectory_events_tx.subscribe();
 
-        start_trajectory_watcher(gcx);
+        start_trajectory_watcher(gcx.clone());
         wait_for_watcher_start().await;
         drain_trajectory_events(&mut rx).await;
 
@@ -5467,7 +5467,7 @@ mod tests {
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let mut rx = app.chat.trajectory_events_tx.subscribe();
 
-        start_trajectory_watcher(gcx);
+        start_trajectory_watcher(gcx.clone());
         wait_for_watcher_start().await;
         drain_trajectory_events(&mut rx).await;
 

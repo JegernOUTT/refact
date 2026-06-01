@@ -19,11 +19,13 @@ mod tests {
         )
         .await;
 
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| proj_folder.clone());
         workspace_files
             .iter()
             .filter_map(|path| {
                 let relative_path = path
                     .strip_prefix(proj_folder)
+                    .or_else(|_| path.strip_prefix(&current_dir))
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();

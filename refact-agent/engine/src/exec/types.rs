@@ -73,6 +73,10 @@ fn normalize_windows_drive(path: PathBuf) -> PathBuf {
     };
     if let Some(index) = drive_index {
         let drive = value.as_bytes()[index];
+        if value.starts_with(r"\\?\") {
+            value.replace_range(0..4, "");
+        }
+        let index = if index == 4 { 0 } else { index };
         if drive.is_ascii_uppercase() {
             value.replace_range(
                 index..index + 1,

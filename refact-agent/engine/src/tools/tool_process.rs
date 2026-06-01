@@ -1579,6 +1579,7 @@ fn collect_combined(chunks: &[ExecOutputChunk]) -> String {
 mod tests {
     use super::*;
     use crate::app_state::AppState;
+    use crate::exec::spill::SpillTarget;
     use crate::exec::{ExecProcessMeta, ExecStatusKind};
 
     async fn test_ccx() -> (Arc<GlobalContext>, Arc<AMutex<AtCommandsContext>>) {
@@ -2499,6 +2500,14 @@ mod tests {
             )
             .await;
         let process_id = snapshot.meta.process_id;
+        let temp = tempfile::tempdir().unwrap();
+        gcx.exec_registry
+            .set_spill_target_for_test(
+                &process_id,
+                SpillTarget::with_root(temp.path().to_path_buf(), "chat", &process_id),
+            )
+            .await
+            .unwrap();
         gcx.exec_registry.mark_started(&process_id).await.unwrap();
         gcx.exec_registry
             .append_output(
@@ -3073,6 +3082,14 @@ mod tests {
             )
             .await;
         let process_id = snapshot.meta.process_id;
+        let temp = tempfile::tempdir().unwrap();
+        gcx.exec_registry
+            .set_spill_target_for_test(
+                &process_id,
+                SpillTarget::with_root(temp.path().to_path_buf(), "chat", &process_id),
+            )
+            .await
+            .unwrap();
         gcx.exec_registry.mark_started(&process_id).await.unwrap();
 
         let marker = "DISK_TAIL_MARKER";

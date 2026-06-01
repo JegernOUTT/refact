@@ -958,7 +958,7 @@ mod tests {
 
     fn slow_command() -> String {
         if cfg!(target_os = "windows") {
-            "[Console]::Out.Write('start'); Start-Sleep -Seconds 5".to_string()
+            "[Console]::Out.WriteLine('start'); Start-Sleep -Seconds 5".to_string()
         } else {
             "printf start; sleep 5".to_string()
         }
@@ -1153,10 +1153,7 @@ mod tests {
         );
         assert_eq!(
             exec(&message)["workspace"],
-            workspace
-                .path()
-                .canonicalize()
-                .unwrap()
+            normalize_workspace_path(workspace.path())
                 .to_string_lossy()
                 .as_ref()
         );
