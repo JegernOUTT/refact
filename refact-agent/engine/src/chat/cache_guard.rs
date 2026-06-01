@@ -10,6 +10,7 @@ use similar::{Algorithm, TextDiff};
 use tokio::sync::{Mutex as AMutex};
 
 use crate::app_state::AppState;
+use crate::caps::ChatModelRecord;
 use crate::chat::types::{ChatSession, TaskMeta};
 use crate::tokens::{cached_tokenizer, count_text_tokens_with_fallback};
 
@@ -92,20 +93,15 @@ fn is_task_management_role(role: &str) -> bool {
 }
 
 async fn model_supports_cache_guard(app: AppState, model_id: &str) -> bool {
-    let supports_cache_control =
-        crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
-            .await
-            .ok()
-            .and_then(|caps| crate::caps::resolve_chat_model(caps, model_id).ok())
-            .map(|record| record.base.supports_cache_control)
-            .unwrap_or(false);
-    if supports_cache_control {
-        return true;
-    }
-
-    crate::providers::pricing::lookup_model_pricing(&app.gcx, model_id)
+    crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
         .await
-        .is_some_and(|pricing| pricing.cache_read.is_some() || pricing.cache_creation.is_some())
+        .ok()
+        .and_then(|caps| crate::caps::resolve_chat_model(caps, model_id).ok())
+        .is_some_and(|record| chat_model_supports_cache_guard(&record))
+}
+
+fn chat_model_supports_cache_guard(record: &ChatModelRecord) -> bool {
+    record.base.supports_cache_control
 }
 
 pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
@@ -917,30 +913,57 @@ mod tests {
     }
 
     async fn app_with_cache_priced_model(model_id: &str) -> AppState {
+        app_with_cache_priced_model_support(model_id, true).await
+    }
+
+    async fn app_with_cache_priced_model_without_cache_support(model_id: &str) -> AppState {
+        app_with_cache_priced_model_support(model_id, false).await
+    }
+
+    async fn app_with_cache_priced_model_support(
+        model_id: &str,
+        supports_cache_control: bool,
+    ) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
+        let pricing = crate::providers::traits::ModelPricing {
+            prompt: 2.5,
+            generated: 10.0,
+            cache_read: Some(1.25),
+            cache_creation: None,
+            context_over_200k: None,
+        };
         let mut model_caps = std::collections::HashMap::new();
         model_caps.insert(
             model_id.to_string(),
             crate::caps::model_caps::ModelCapabilities {
                 n_ctx: 128_000,
                 max_output_tokens: 16_384,
-                pricing: Some(crate::providers::traits::ModelPricing {
-                    prompt: 2.5,
-                    generated: 10.0,
-                    cache_read: Some(1.25),
-                    cache_creation: None,
-                    context_over_200k: None,
-                }),
+                supports_cache_control: true,
+                pricing: Some(pricing),
                 ..Default::default()
             },
         );
+        let mut code_caps = crate::caps::CodeAssistantCaps {
+            model_caps: std::sync::Arc::new(model_caps),
+            ..Default::default()
+        };
+        code_caps.chat_models.insert(
+            model_id.to_string(),
+            std::sync::Arc::new(ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: model_id.to_string(),
+                    name: model_id.to_string(),
+                    n_ctx: 128_000,
+                    supports_cache_control,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
         {
             let mut caps = app.model.caps.write().await;
-            caps.caps = Some(std::sync::Arc::new(crate::caps::CodeAssistantCaps {
-                model_caps: std::sync::Arc::new(model_caps),
-                ..Default::default()
-            }));
+            caps.caps = Some(std::sync::Arc::new(code_caps));
             caps.last_attempted_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -1031,11 +1054,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_guard_enabled_for_normal_cache_priced_chat() {
+    async fn cache_guard_enabled_for_normal_cache_supported_chat() {
         let app = app_with_cache_priced_model("test/model-with-cache").await;
         let session = session_with_task_role(None);
 
         assert!(is_guard_enabled(app, "test/model-with-cache", &session).await);
+    }
+
+    #[test]
+    fn cache_guard_disabled_for_cache_priced_model_without_cache_support() {
+        let record = ChatModelRecord {
+            base: crate::caps::BaseModelRecord {
+                supports_cache_control: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(
+            !chat_model_supports_cache_guard(&record),
+            "cache pricing metadata must not enable cache guard without model cache support"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_guard_enablement_ignores_cache_pricing_without_model_cache_support() {
+        let app =
+            app_with_cache_priced_model_without_cache_support("test/model-with-cache-price").await;
+        let session = session_with_task_role(None);
+
+        assert!(
+            !is_guard_enabled(app, "test/model-with-cache-price", &session).await,
+            "cache pricing metadata must not enable cache guard without model cache support"
+        );
     }
 
     #[tokio::test]

@@ -9482,7 +9482,10 @@ async fn maybe_enqueue_chat_activity_reaction_records_not_queued_and_rolls_back_
         .find(|attempt| attempt.result == "not_queued")
         .expect("not_queued activity attempt must be recorded");
     assert_eq!(first_attempt.chat_id, chat_id);
-    assert_eq!(first_attempt.signal_type.as_deref(), Some("speech_chat_reaction"));
+    assert_eq!(
+        first_attempt.signal_type.as_deref(),
+        Some("speech_chat_reaction")
+    );
     assert_eq!(first_attempt.queued, Some(false));
     assert!(first_attempt.event_id.is_none());
     assert_eq!(first_debug.counts_by_result.get("not_queued"), Some(&1));
