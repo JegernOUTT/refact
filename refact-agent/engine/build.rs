@@ -4,6 +4,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=REFACT_SKIP_GUI_BUILD");
+    println!("cargo:rerun-if-env-changed=REFACT_USE_PREBUILT_GUI");
     println!("cargo:rerun-if-changed=../gui/package.json");
     println!("cargo:rerun-if-changed=../gui/package-lock.json");
     println!("cargo:rerun-if-changed=../gui/src");
@@ -27,11 +28,13 @@ fn build_gui_assets() {
         panic!("GUI package.json not found at {}", gui_dir.display());
     }
 
-    if !gui_dir.join("node_modules").exists() {
-        run_command(&gui_dir, npm_program(), &["ci"]);
-    }
+    if env::var("REFACT_USE_PREBUILT_GUI").ok().as_deref() != Some("1") {
+        if !gui_dir.join("node_modules").exists() {
+            run_command(&gui_dir, npm_program(), &["ci"]);
+        }
 
-    run_command(&gui_dir, npm_program(), &["run", "build"]);
+        run_command(&gui_dir, npm_program(), &["run", "build"]);
+    }
 
     if target_chat_dir.exists() {
         std::fs::remove_dir_all(&target_chat_dir).unwrap_or_else(|error| {
