@@ -1963,24 +1963,26 @@ async fn subchat_single_internal(
         cgcx.global_context.clone()
     };
 
-    let tools_desclist: Vec<ToolDesc> = {
+    let tools: Vec<ToolDesc> = if tools_subset
+        .as_ref()
+        .is_some_and(|subset| subset.is_empty())
+    {
+        vec![]
+    } else {
         let tools_turned_on_by_cmdline = get_available_tools(gcx.clone())
             .await
-            .iter()
+            .into_iter()
             .map(|tool| tool.tool_description())
             .collect::<Vec<_>>();
 
-        match tools_subset {
-            Some(ref subset) if subset.is_empty() => vec![],
-            Some(ref subset) => tools_turned_on_by_cmdline
+        match tools_subset.as_ref() {
+            Some(subset) => tools_turned_on_by_cmdline
                 .into_iter()
                 .filter(|tool| subset.contains(&tool.name))
                 .collect(),
             None => tools_turned_on_by_cmdline,
         }
     };
-
-    let tools = tools_desclist;
 
     subchat_stream(
         ccx.clone(),
