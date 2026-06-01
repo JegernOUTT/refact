@@ -111,7 +111,7 @@ pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
 fn body_for_cache_guard(value: &Value) -> Value {
     let sanitized = sanitize_body_for_cache_guard(value);
     if has_anthropic_explicit_cache_markers(value) {
-        body_with_cache_guard_metadata(truncate_body_to_anthropic_cache_prefix(value, sanitized))
+        truncate_body_to_anthropic_cache_prefix(value, sanitized)
     } else {
         sanitized
     }
