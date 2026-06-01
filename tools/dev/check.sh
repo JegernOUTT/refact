@@ -45,42 +45,43 @@ echo
 results=""
 overall=0
 
-# record <component> <name> <exit-code>
-record() {
-  local status="✅ PASS"
-  [ "$3" -ne 0 ] && { status="❌ FAIL"; overall=1; }
-  results="${results}\n  ${status}  $1: $2"
-}
-
-# run <component> <name> <command...>
+# run <component> <name> <dir> <command...>
+# The subshell wraps ONLY `cd && command`; the `if` reads its exit code in the
+# PARENT shell, so results/overall persist (a subshell around the whole record
+# would lose them and silently swallow failures).
 run() {
-  local comp="$1" name="$2"; shift 2
+  local comp="$1" name="$2" dir="$3"; shift 3
   echo "── [$comp] $name ──"
-  if "$@"; then record "$comp" "$name" 0; else record "$comp" "$name" $?; fi
+  if ( cd "$dir" && "$@" ); then
+    results="${results}\n  ✅ PASS  $comp: $name"
+  else
+    results="${results}\n  ❌ FAIL  $comp: $name"
+    overall=1
+  fi
   echo
 }
 
 for comp in $components; do
   case "$comp" in
     engine)
-      ( cd refact-agent/engine && run engine "cargo fmt --check" cargo fmt --check )
-      ( cd refact-agent/engine && run engine "cargo check"       cargo check )
-      ( cd refact-agent/engine && run engine "cargo test --lib"  cargo test --lib )
-      ( cd refact-agent/engine && run engine "cargo test --doc"  cargo test --doc )
+      run engine "cargo fmt --check" refact-agent/engine cargo fmt --check
+      run engine "cargo check"       refact-agent/engine cargo check
+      run engine "cargo test --lib"  refact-agent/engine cargo test --lib
+      run engine "cargo test --doc"  refact-agent/engine cargo test --doc
       ;;
     gui)
-      ( cd refact-agent/gui && run gui "format:check" npm run format:check )
-      ( cd refact-agent/gui && run gui "types"        npm run types )
-      ( cd refact-agent/gui && run gui "lint"         npm run lint )
-      ( cd refact-agent/gui && run gui "test"         npm run test )
+      run gui "format:check" refact-agent/gui npm run format:check
+      run gui "types"        refact-agent/gui npm run types
+      run gui "lint"         refact-agent/gui npm run lint
+      run gui "test"         refact-agent/gui npm run test
       ;;
     vscode)
-      ( cd plugins/vscode && run vscode "compile" npm run compile )
-      ( cd plugins/vscode && run vscode "lint"    npm run lint )
+      run vscode "compile" plugins/vscode npm run compile
+      run vscode "lint"    plugins/vscode npm run lint
       ;;
     intellij)
       # Lightweight Kotlin compile check (full packaging = build-jb-plugin-local.sh)
-      ( cd plugins/intellij && run intellij "compileKotlin" ./gradlew --offline compileKotlin )
+      run intellij "compileKotlin" plugins/intellij ./gradlew --offline compileKotlin
       ;;
     docs|infra)
       echo "── [$comp] no automated checks (skipped) ──"; echo
