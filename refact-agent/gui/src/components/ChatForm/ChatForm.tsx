@@ -50,13 +50,32 @@ function isTextFile(filename: string): boolean {
 }
 
 function isEditableElement(element: Element | null): boolean {
-  if (!(element instanceof HTMLElement)) return false;
-  if (element.isContentEditable) return true;
+  if (!element) return false;
+  if (element instanceof HTMLElement && element.isContentEditable) return true;
   return Boolean(
     element.closest(
       'input, textarea, select, button, a, [role="button"], [role="menuitem"], [data-radix-popper-content-wrapper]',
     ),
   );
+}
+
+function isInsideRadixPortal(element: Element | null): boolean {
+  if (!element) return false;
+  return Boolean(
+    element.closest(
+      '[data-radix-popper-content-wrapper], [data-radix-portal], [role="dialog"], [role="menu"], [role="listbox"]',
+    ),
+  );
+}
+
+function isInsideComposerSurface(
+  target: EventTarget | null,
+  composerRoot: HTMLElement | null,
+): boolean {
+  if (!(target instanceof Node)) return false;
+  if (composerRoot?.contains(target)) return true;
+  if (target instanceof Element && isInsideRadixPortal(target)) return true;
+  return false;
 }
 
 import {
@@ -445,38 +464,76 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   const handleComposerPointerDownCapture = useCallback(
     (event: React.PointerEvent<HTMLFormElement>) => {
-      if (isComposerExpanded) return;
       const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
+      if (!(target instanceof Element)) return;
       if (isEditableElement(target)) return;
 
       event.preventDefault();
       focusComposerInput();
     },
-    [focusComposerInput, isComposerExpanded],
+    [focusComposerInput],
   );
 
   const handleComposerBlur = useCallback(
     (event: React.FocusEvent<HTMLDivElement>) => {
       const root = event.currentTarget;
       const nextTarget = event.relatedTarget;
-      if (nextTarget instanceof Node && root.contains(nextTarget)) return;
+      if (isInsideComposerSurface(nextTarget, root)) return;
 
       window.setTimeout(() => {
         const activeElement = document.activeElement;
-        if (activeElement instanceof Node && root.contains(activeElement))
-          return;
+        if (isInsideComposerSurface(activeElement, root)) return;
         setIsComposerExpanded(openComposerMenus > 0);
       }, 0);
     },
     [openComposerMenus],
   );
 
+  const handleComposerFocusCapture = useCallback(() => {
+    setIsComposerExpanded(true);
+  }, []);
+
   useEffect(() => {
     if (openComposerMenus > 0) {
       setIsComposerExpanded(true);
     }
   }, [openComposerMenus]);
+
+  useEffect(() => {
+    if (openComposerMenus <= 0) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (isInsideRadixPortal(target)) {
+        setIsComposerExpanded(true);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () =>
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [openComposerMenus]);
+
+  useEffect(() => {
+    if (!isComposerExpanded) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const root = composerRef.current;
+      if (isInsideComposerSurface(event.target, root)) {
+        setIsComposerExpanded(true);
+        return;
+      }
+
+      if (openComposerMenus <= 0) {
+        setIsComposerExpanded(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () =>
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [isComposerExpanded, openComposerMenus]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -514,6 +571,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     <Box
       ref={composerRef}
       onBlur={handleComposerBlur}
+      onFocusCapture={handleComposerFocusCapture}
       style={{ flexShrink: 0, position: "relative" }}
     >
       {!globalError && !chatError && information && (
