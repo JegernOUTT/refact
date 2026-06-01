@@ -106,6 +106,9 @@ shadow-rs = "1.1.0"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55.0"
 
+[target.'cfg(not(windows))'.dependencies]
+pnet_datalink = "0.35.0"
+
 [dependencies]
 
 refact-core = { path = "crates/refact-core" }
@@ -174,7 +177,6 @@ md5 = "0.7"
 mdns-sd = "0.20.0"
 notify = { version = "8.0.0", features = ["serde"] }
 parking_lot = { version = "0.12.1", features = ["serde"] }
-pnet_datalink = "0.35.0"
 portable-pty = "0.9"
 process-wrap = { version = "8.0.2", features = ["tokio1"] }
 rand = "0.8.5"

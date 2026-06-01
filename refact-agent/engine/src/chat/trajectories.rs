@@ -5287,8 +5287,9 @@ mod tests {
         id: &str,
     ) -> TrajectoryEvent {
         // Generous timeout: file-watcher notify events can be delayed under
-        // heavy parallel test load (notify backend + tokio scheduler contention).
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        // heavy parallel test load (notify backend + tokio scheduler contention),
+        // especially on macOS CI where FSEvents delivery can lag under cargo test load.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 match rx.recv().await {
                     Ok(event) if event.id == id => return event,

@@ -49,6 +49,16 @@ function isTextFile(filename: string): boolean {
   return TEXT_FILE_EXTENSIONS.has(ext);
 }
 
+function isEditableElement(element: Element | null): boolean {
+  if (!(element instanceof HTMLElement)) return false;
+  if (element.isContentEditable) return true;
+  return Boolean(
+    element.closest(
+      'input, textarea, select, button, a, [role="button"], [role="menuitem"], [data-radix-popper-content-wrapper]',
+    ),
+  );
+}
+
 import {
   BackToSideBarButton,
   UnifiedSendButton,
@@ -319,6 +329,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         unCheckAll();
         attachedFiles.removeAll();
         resetAllTextFiles();
+        setIsComposerExpanded(false);
       }
     },
     [
@@ -437,7 +448,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       if (isComposerExpanded) return;
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.closest("button, a, input")) return;
+      if (isEditableElement(target)) return;
 
       event.preventDefault();
       focusComposerInput();
@@ -475,11 +486,23 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           void microphoneRef.current.toggleRecording();
         }
       }
+
+      if (
+        event.key === "Enter" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        const target = event.target;
+        if (target instanceof Element && isEditableElement(target)) return;
+        event.preventDefault();
+        focusComposerInput();
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [disableMicrophone]);
+  }, [disableMicrophone, focusComposerInput]);
 
   if (pauseReasonsWithPause.pause) {
     return (

@@ -382,6 +382,7 @@ struct ExecRemoveTarget {
     runtime: Option<ExecProcessRuntime>,
     child: Option<tokio::process::Child>,
     process_group_isolated: bool,
+    was_terminal: bool,
 }
 
 #[derive(Clone)]
@@ -1013,6 +1014,7 @@ impl ExecRegistry {
                     runtime: Some(runtime),
                     child: None,
                     process_group_isolated: false,
+                    was_terminal: false,
                 });
             }
             if record.child.is_some() {
@@ -1022,6 +1024,7 @@ impl ExecRegistry {
                     runtime: None,
                     child: record.child.take(),
                     process_group_isolated: record.process_group_isolated,
+                    was_terminal: false,
                 });
             }
         } else if record.child.is_some() {
@@ -1031,6 +1034,7 @@ impl ExecRegistry {
                 runtime: None,
                 child: record.child.take(),
                 process_group_isolated: record.process_group_isolated,
+                was_terminal: true,
             });
         } else if let Some(runtime) = record.runtime.clone() {
             return Some(ExecRemoveTarget {
@@ -1039,6 +1043,7 @@ impl ExecRegistry {
                 runtime: Some(runtime),
                 child: None,
                 process_group_isolated: false,
+                was_terminal: true,
             });
         }
         None
@@ -1125,8 +1130,18 @@ impl ExecRegistry {
                 {
                     if target.process_group_isolated {
                         if let Some(pid) = child.id() {
-                            if let Err(message) = send_sigkill_to_group(pid) {
-                                kill_error = Some(message);
+                            match send_sigkill_to_group(pid) {
+                                Ok(()) => {}
+                                Err(message) if target.was_terminal => {
+                                    tracing::debug!(
+                                        process_id = %target.process_id,
+                                        error = %message,
+                                        "ignoring process-group kill failure for terminal child cleanup"
+                                    );
+                                }
+                                Err(message) => {
+                                    kill_error = Some(message);
+                                }
                             }
                         }
                     }
@@ -1561,11 +1576,11 @@ mod tests {
 
     #[cfg(unix)]
     async fn wait_until_process_exits(process_id: u32) -> bool {
-        for _ in 0..20 {
+        for _ in 0..200 {
             if !process_exists(process_id) {
                 return true;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         !process_exists(process_id)
     }

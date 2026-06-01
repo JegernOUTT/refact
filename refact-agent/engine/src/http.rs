@@ -72,6 +72,12 @@ fn is_likely_virtual_interface_name(name: &str) -> bool {
         || name.starts_with("zt")
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn local_lan_ipv4_hosts() -> Vec<Ipv4Addr> {
+    Vec::new()
+}
+
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn local_lan_ipv4_hosts() -> Vec<Ipv4Addr> {
     let mut preferred = Vec::new();
     let mut fallback = Vec::new();

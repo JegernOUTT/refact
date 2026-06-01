@@ -96,24 +96,22 @@
 
 .chatForm__form {
   transition:
-    min-height 0.24s ease,
-    border-color 0.18s ease;
+    min-height 220ms cubic-bezier(0.2, 0, 0, 1),
+    border-color 180ms ease;
 }
 
 .expandedComposerContent {
   display: grid;
   grid-template-rows: 1fr;
   opacity: 1;
-  transition:
-    grid-template-rows 0.24s ease,
-    max-height 0.24s ease,
-    opacity 0.18s ease;
+  contain: layout paint;
 }
 
 .expandedComposerContentInner {
   min-height: 0;
   overflow: hidden;
-  transition: max-height 0.24s ease;
+  transition: max-height 220ms cubic-bezier(0.2, 0, 0, 1);
+  will-change: max-height;
 }
 
 .chatFormCollapsed .expandedComposerContent {
@@ -133,7 +131,7 @@
 }
 
 .chatFormExpanded .inputHeader {
-  animation: composerHeaderFadeIn 0.16s ease both;
+  animation: composerHeaderFadeIn 160ms ease both;
 }
 
 .chatFormCollapsed .textareaWrapper :global(.rt-TextAreaInput) {
@@ -287,8 +285,8 @@
   padding-top: var(--space-1);
 }
 
-.chatFormExpanded .bottomControlsRow {
-  transition: padding 0.18s ease;
+.bottomControlsRow {
+  transition: padding 180ms ease;
 }
 
 .bottomModelControl,
