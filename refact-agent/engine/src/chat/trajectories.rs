@@ -537,7 +537,11 @@ async fn get_all_trajectories_dirs_from_weak(gcx_weak: &Weak<GlobalContext>) -> 
 pub async fn get_buddy_conversations_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
     let project_dirs = get_project_dirs(gcx).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
-    Ok(workspace_root.join(".refact/buddy/chats/conversations"))
+    Ok(workspace_root
+        .join(".refact")
+        .join("buddy")
+        .join("chats")
+        .join("conversations"))
 }
 
 async fn get_or_create_buddy_conversations_dir(gcx: Arc<GlobalContext>) -> Result<PathBuf, String> {
@@ -15479,12 +15483,10 @@ mod tests {
     async fn trajectory_path_handler_returns_404_for_missing_chat() {
         let dir = tempfile::tempdir().unwrap();
         let (_gcx, app) = make_app_with_workspace(dir.path()).await;
-        let err = handle_v1_trajectory_path(
-            State(app),
-            AxumPath("nonexistent-chat-id".to_string()),
-        )
-        .await
-        .unwrap_err();
+        let err =
+            handle_v1_trajectory_path(State(app), AxumPath("nonexistent-chat-id".to_string()))
+                .await
+                .unwrap_err();
         assert_eq!(err.status_code, StatusCode::NOT_FOUND);
     }
 
@@ -15543,7 +15545,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["path"].as_str().unwrap(), buddy_path.to_string_lossy());
+        assert_eq!(
+            payload["path"].as_str().unwrap(),
+            buddy_path.to_string_lossy()
+        );
     }
 
     #[serial]
@@ -15584,8 +15589,7 @@ mod tests {
 
     #[serial]
     #[tokio::test]
-    async fn trajectory_path_handler_returns_buddy_path_when_active_buddy_session_has_buddy_file()
-    {
+    async fn trajectory_path_handler_returns_buddy_path_when_active_buddy_session_has_buddy_file() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
         let chat_id = "path-buddy-resolved";
@@ -15643,10 +15647,10 @@ mod tests {
             .join(".refact")
             .join("trajectories")
             .join(format!("{chat_id}.json"));
-        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
-        tokio::fs::write(&path, b"this is not json")
+        tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
+        tokio::fs::write(&path, b"this is not json").await.unwrap();
 
         let err = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
             .await
@@ -15665,7 +15669,9 @@ mod tests {
             .join(".refact")
             .join("trajectories")
             .join(format!("{chat_id}.json"));
-        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
         let content = json!({
             "id": "different-id",
             "title": "Wrong id",
