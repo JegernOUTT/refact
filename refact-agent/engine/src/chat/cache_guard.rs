@@ -108,8 +108,121 @@ pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
     sanitize_value(value, true)
 }
 
+fn body_for_cache_guard(value: &Value) -> Value {
+    let sanitized = sanitize_body_for_cache_guard(value);
+    if has_anthropic_explicit_cache_markers(value) {
+        truncate_body_to_anthropic_cache_prefix(value, sanitized)
+    } else {
+        sanitized
+    }
+}
+
 pub fn is_append_only_prefix(prev: &Value, next: &Value) -> bool {
-    is_append_only_prefix_inner(prev, next, None, true, false)
+    is_append_only_prefix_inner(prev, next, None, true)
+}
+
+fn has_anthropic_explicit_cache_markers(value: &Value) -> bool {
+    count_anthropic_cache_control_markers(value) > 0
+}
+
+fn count_anthropic_cache_control_markers(value: &Value) -> usize {
+    count_cache_control_markers(value.get("system"))
+        + count_cache_control_markers(value.get("messages"))
+        + count_cache_control_markers(value.get("tools"))
+}
+
+fn count_cache_control_markers(value: Option<&Value>) -> usize {
+    let Some(value) = value else {
+        return 0;
+    };
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .map(|item| {
+                item.get("cache_control").map_or(0, |_| 1)
+                    + count_cache_control_markers(item.get("content"))
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn truncate_body_to_anthropic_cache_prefix(raw: &Value, mut sanitized: Value) -> Value {
+    if let Some((message_index, content_index)) = raw
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| last_message_cache_marker_index(messages))
+    {
+        truncate_messages_at(&mut sanitized, message_index, content_index);
+        return sanitized;
+    }
+
+    if let Some(index) = raw
+        .get("system")
+        .and_then(Value::as_array)
+        .and_then(|values| last_direct_cache_marker_index(values))
+    {
+        truncate_top_level_array_at(&mut sanitized, "system", index);
+        remove_top_level_key(&mut sanitized, "messages");
+        return sanitized;
+    }
+
+    if let Some(index) = raw
+        .get("tools")
+        .and_then(Value::as_array)
+        .and_then(|values| last_direct_cache_marker_index(values))
+    {
+        truncate_top_level_array_at(&mut sanitized, "tools", index);
+        remove_top_level_key(&mut sanitized, "system");
+        remove_top_level_key(&mut sanitized, "messages");
+    }
+
+    sanitized
+}
+
+fn truncate_top_level_array_at(sanitized: &mut Value, key: &str, index: usize) {
+    if let Some(values) = sanitized.get_mut(key).and_then(Value::as_array_mut) {
+        values.truncate(index + 1);
+    }
+}
+
+fn truncate_messages_at(sanitized: &mut Value, message_index: usize, content_index: usize) {
+    if let Some(messages) = sanitized.get_mut("messages").and_then(Value::as_array_mut) {
+        messages.truncate(message_index + 1);
+        if let Some(content) = messages
+            .get_mut(message_index)
+            .and_then(|message| message.get_mut("content"))
+            .and_then(Value::as_array_mut)
+        {
+            content.truncate(content_index + 1);
+        }
+    }
+}
+
+fn remove_top_level_key(sanitized: &mut Value, key: &str) {
+    if let Some(object) = sanitized.as_object_mut() {
+        object.remove(key);
+    }
+}
+
+fn last_direct_cache_marker_index(values: &[Value]) -> Option<usize> {
+    values
+        .iter()
+        .rposition(|value| value.get("cache_control").is_some())
+}
+
+fn last_message_cache_marker_index(messages: &[Value]) -> Option<(usize, usize)> {
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            let content_index = message
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|content| last_direct_cache_marker_index(content))?;
+            Some((index, content_index))
+        })
 }
 
 fn is_append_only_prefix_inner(
@@ -117,7 +230,6 @@ fn is_append_only_prefix_inner(
     next: &Value,
     parent_key: Option<&str>,
     top_level: bool,
-    parent_is_root: bool,
 ) -> bool {
     match (prev, next) {
         (Value::Null, Value::Null)
@@ -125,7 +237,7 @@ fn is_append_only_prefix_inner(
         | (Value::Number(_), Value::Number(_))
         | (Value::String(_), Value::String(_)) => prev == next,
         (Value::Array(a), Value::Array(b)) => {
-            if is_append_only_array(parent_key, parent_is_root) {
+            if matches!(parent_key, Some("messages" | "input")) {
                 return a.len() <= b.len()
                     && a.iter()
                         .zip(b.iter())
@@ -149,9 +261,7 @@ fn is_append_only_prefix_inner(
                 .filter(|(key, _)| !is_ignored_key(key, top_level))
                 .all(|(key, old_v)| {
                     b.get(key)
-                        .map(|new_v| {
-                            is_append_only_prefix_inner(old_v, new_v, Some(key), false, top_level)
-                        })
+                        .map(|new_v| is_append_only_prefix_inner(old_v, new_v, Some(key), false))
                         .unwrap_or(false)
                 })
         }
@@ -159,9 +269,62 @@ fn is_append_only_prefix_inner(
     }
 }
 
-fn is_append_only_array(parent_key: Option<&str>, parent_is_root: bool) -> bool {
-    matches!(parent_key, Some("messages" | "input"))
-        || parent_is_root && matches!(parent_key, Some("tools" | "system"))
+fn is_anthropic_cache_prefix_compatible(prev: &Value, next: &Value) -> bool {
+    is_anthropic_cache_prefix_inner(prev, next, None, true, false)
+}
+
+fn is_anthropic_cache_prefix_inner(
+    prev: &Value,
+    next: &Value,
+    parent_key: Option<&str>,
+    top_level: bool,
+    content_append_ok: bool,
+) -> bool {
+    match (prev, next) {
+        (Value::Null, Value::Null)
+        | (Value::Bool(_), Value::Bool(_))
+        | (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_)) => prev == next,
+        (Value::Array(a), Value::Array(b)) => {
+            if matches!(parent_key, Some("messages")) || content_append_ok {
+                return a.len() <= b.len()
+                    && a.iter().zip(b.iter()).all(|(old_item, new_item)| {
+                        is_anthropic_cache_prefix_inner(old_item, new_item, None, false, false)
+                    });
+            }
+            a == b
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            let a_keys = a
+                .keys()
+                .filter(|key| !is_ignored_key(key, top_level))
+                .count();
+            let b_keys = b
+                .keys()
+                .filter(|key| !is_ignored_key(key, top_level))
+                .count();
+            if a_keys != b_keys {
+                return false;
+            }
+            a.iter()
+                .filter(|(key, _)| !is_ignored_key(key, top_level))
+                .all(|(key, old_v)| {
+                    let allow_content_append = key == "content" && a.get("role") == b.get("role");
+                    b.get(key)
+                        .map(|new_v| {
+                            is_anthropic_cache_prefix_inner(
+                                old_v,
+                                new_v,
+                                Some(key),
+                                false,
+                                allow_content_append,
+                            )
+                        })
+                        .unwrap_or(false)
+                })
+        }
+        _ => false,
+    }
 }
 
 pub fn unified_json_diff(prev: &Value, next: &Value) -> String {
@@ -376,7 +539,7 @@ pub async fn check_or_pause_cache_guard(
         return Ok(CacheGuardOutcome::Pass(None));
     }
 
-    let sanitized = sanitize_body_for_cache_guard(request_body);
+    let sanitized = body_for_cache_guard(request_body);
 
     let maybe_violation_prev = {
         let mut session = session_arc.lock().await;
@@ -397,6 +560,12 @@ pub async fn check_or_pause_cache_guard(
     let Some(previous) = maybe_violation_prev else {
         return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
     };
+
+    if has_anthropic_explicit_cache_markers(request_body)
+        && is_anthropic_cache_prefix_compatible(&previous, &sanitized)
+    {
+        return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
+    }
 
     let mut diff = unified_json_diff(
         &preview_body_for_cache_guard_diff(&previous),
@@ -668,31 +837,25 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_array_allows_append_only_top_level_additions() {
+    fn test_tools_array_strict_equality() {
         let tool_a =
             json!({"type": "function", "function": {"name": "tool_a", "description": "A"}});
         let tool_b =
             json!({"type": "function", "function": {"name": "tool_b", "description": "B"}});
-        let tool_c =
-            json!({"type": "function", "function": {"name": "tool_c", "description": "C"}});
 
         // Identical tools → OK
         let prev = json!({"messages": [1], "tools": [tool_a.clone()]});
         let next = json!({"messages": [1, 2], "tools": [tool_a.clone()]});
         assert!(is_append_only_prefix(&prev, &next));
 
-        // New tools appended after the already cached tool schemas keep the old prefix stable.
+        // New tool appended mid-session → violation (breaks LLM cache prefix)
         let next_extra = json!({"messages": [1, 2], "tools": [tool_a.clone(), tool_b.clone()]});
-        assert!(is_append_only_prefix(&prev, &next_extra));
-
-        let prev_with_two = json!({"messages": [1], "tools": [tool_a.clone(), tool_b.clone()]});
-        let next_with_three =
-            json!({"messages": [1, 2], "tools": [tool_a.clone(), tool_b.clone(), tool_c]});
-        assert!(is_append_only_prefix(&prev_with_two, &next_with_three));
+        assert!(!is_append_only_prefix(&prev, &next_extra));
 
         // Tool removed mid-session → violation
+        let prev2 = json!({"messages": [1], "tools": [tool_a.clone(), tool_b.clone()]});
         let next_removed = json!({"messages": [1, 2], "tools": [tool_a.clone()]});
-        assert!(!is_append_only_prefix(&prev_with_two, &next_removed));
+        assert!(!is_append_only_prefix(&prev2, &next_removed));
 
         // Tool description changed mid-session → violation
         let tool_a_changed =
@@ -705,31 +868,6 @@ mod tests {
     fn test_non_conversation_arrays_are_strict() {
         let prev = json!({
             "messages": [{"role": "user", "content": "hi"}],
-            "metadata": [{"type": "stable"}]
-        });
-        let appended = json!({
-            "messages": [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello"}
-            ],
-            "metadata": [
-                {"type": "stable"},
-                {"type": "new prefix"}
-            ]
-        });
-        let nested_key = json!({
-            "messages": [{"role": "user", "content": "hi"}],
-            "metadata": [{"type": "stable", "name": "new"}]
-        });
-
-        assert!(!is_append_only_prefix(&prev, &appended));
-        assert!(!is_append_only_prefix(&prev, &nested_key));
-    }
-
-    #[test]
-    fn test_top_level_system_array_allows_append_only_additions() {
-        let prev = json!({
-            "messages": [{"role": "user", "content": "hi"}],
             "system": [{"type": "text", "text": "stable"}]
         });
         let appended = json!({
@@ -739,16 +877,16 @@ mod tests {
             ],
             "system": [
                 {"type": "text", "text": "stable"},
-                {"type": "text", "text": "new suffix"}
+                {"type": "text", "text": "new prefix"}
             ]
         });
-        let changed = json!({
+        let nested_key = json!({
             "messages": [{"role": "user", "content": "hi"}],
-            "system": [{"type": "text", "text": "changed"}]
+            "system": [{"type": "text", "text": "stable", "name": "new"}]
         });
 
-        assert!(is_append_only_prefix(&prev, &appended));
-        assert!(!is_append_only_prefix(&prev, &changed));
+        assert!(!is_append_only_prefix(&prev, &appended));
+        assert!(!is_append_only_prefix(&prev, &nested_key));
     }
 
     #[test]
@@ -781,6 +919,150 @@ mod tests {
             ]
         });
         assert!(!is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn detects_anthropic_explicit_cache_markers() {
+        let body = json!({
+            "system": [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}],
+            "tools": [{"name": "search", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+
+        assert!(has_anthropic_explicit_cache_markers(&body));
+        assert_eq!(count_anthropic_cache_control_markers(&body), 1);
+    }
+
+    #[test]
+    fn anthropic_cache_guard_body_keeps_only_explicit_cache_prefix() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "cached", "cache_control": {"type": "ephemeral"}}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "uncached suffix"}]}
+            ]
+        });
+
+        let sanitized = body_for_cache_guard(&body);
+
+        assert_eq!(sanitized["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(sanitized["messages"][0]["role"], "user");
+        assert!(sanitized.to_string().contains("cached"));
+        assert!(!sanitized.to_string().contains("uncached suffix"));
+        assert!(!sanitized.to_string().contains("cache_control"));
+    }
+
+    #[test]
+    fn comparable_anthropic_prefix_allows_marker_moving_forward() {
+        let prev = sanitize_body_for_cache_guard(&json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
+            }]
+        }));
+        let next = sanitize_body_for_cache_guard(&json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "changed suffix"}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "continue", "cache_control": {"type": "ephemeral"}}]
+                }
+            ]
+        }));
+
+        assert!(is_anthropic_cache_prefix_compatible(&prev, &next));
+    }
+
+    #[tokio::test]
+    async fn cache_guard_allows_anthropic_suffix_changes_after_explicit_cache_marker() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        let prev_body = json!({
+            "model": "test",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
+            }]
+        });
+        {
+            let mut session = session_arc.lock().await;
+            session.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
+        }
+
+        let next_body = json!({
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "changed suffix"}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "continue", "cache_control": {"type": "ephemeral"}}]
+                }
+            ]
+        });
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, CacheGuardOutcome::Pass(Some(_))));
+        let session = session_arc.lock().await;
+        assert!(session.runtime.pause_reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_guard_pauses_when_anthropic_explicit_cache_prefix_changes() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        let prev_body = json!({
+            "model": "test",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
+            }]
+        });
+        {
+            let mut session = session_arc.lock().await;
+            session.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
+        }
+
+        let next_body = json!({
+            "model": "test",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "changed", "cache_control": {"type": "ephemeral"}}]
+            }]
+        });
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, CacheGuardOutcome::Paused { .. }));
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.pause_reasons.len(), 1);
     }
 
     #[test]
