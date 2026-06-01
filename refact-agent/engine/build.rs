@@ -28,10 +28,10 @@ fn build_gui_assets() {
     }
 
     if !gui_dir.join("node_modules").exists() {
-        run_command(&gui_dir, "npm", &["ci"]);
+        run_command(&gui_dir, npm_program(), &["ci"]);
     }
 
-    run_command(&gui_dir, "npm", &["run", "build"]);
+    run_command(&gui_dir, npm_program(), &["run", "build"]);
 
     if target_chat_dir.exists() {
         std::fs::remove_dir_all(&target_chat_dir).unwrap_or_else(|error| {
@@ -69,6 +69,14 @@ fn run_command(cwd: &Path, program: &str, args: &[&str]) {
             program,
             args.join(" ")
         );
+    }
+}
+
+fn npm_program() -> &'static str {
+    if cfg!(windows) {
+        "npm.cmd"
+    } else {
+        "npm"
     }
 }
 

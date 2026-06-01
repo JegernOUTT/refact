@@ -137,40 +137,44 @@ jobs:
 
       - name: Test artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
-        run: cargo test --workspace --profile ci-release --lib --tests || exit 1
+        shell: bash
+        run: cargo test --workspace --profile ci-release --lib --tests
 
       - name: Build artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
+        shell: bash
         run: |
-          cargo build --workspace --profile ci-release || exit 1
+          cargo build --workspace --profile ci-release
           cp ./target/ci-release/refact-lsp${{ matrix.ext }} ../..
 
       - name: Test artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
         env:
           CARGO_PROFILE_CI_RELEASE_LTO: ${{ endsWith(matrix.target, 'apple-darwin') && 'thin' || 'true' }}
-        run: OPENSSL_STATIC=1 cargo test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }} || exit 1
+        run: OPENSSL_STATIC=1 cargo test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
 
       - name: Build artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
         env:
           CARGO_PROFILE_CI_RELEASE_LTO: ${{ endsWith(matrix.target, 'apple-darwin') && 'thin' || 'true' }}
         run: |
-          OPENSSL_STATIC=1 cargo build --workspace --profile ci-release --target ${{ matrix.target }} || exit 1
+          OPENSSL_STATIC=1 cargo build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
 
       - name: Test linux-like artifact
         if: matrix.cross
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
-        run: CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }} || exit 1
+          REFACT_SKIP_GUI_BUILD: "1"
+        run: CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
 
       - name: Build linux-like artifact
         if: matrix.cross
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
+          REFACT_SKIP_GUI_BUILD: "1"
         run: |
-          CROSS_NO_WARNINGS=0 cross build --workspace --profile ci-release --target ${{ matrix.target }} || exit 1
+          CROSS_NO_WARNINGS=0 cross build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
       
       - name: Upload artifacts
