@@ -5,6 +5,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=REFACT_SKIP_GUI_BUILD");
     println!("cargo:rerun-if-env-changed=REFACT_USE_PREBUILT_GUI");
+    println!("cargo:rerun-if-env-changed=REFACT_GUI_DIR");
     println!("cargo:rerun-if-changed=../gui/package.json");
     println!("cargo:rerun-if-changed=../gui/package-lock.json");
     println!("cargo:rerun-if-changed=../gui/src");
@@ -19,7 +20,9 @@ fn main() {
 
 fn build_gui_assets() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let gui_dir = manifest_dir.parent().unwrap().join("gui");
+    let gui_dir = env::var_os("REFACT_GUI_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.parent().unwrap().join("gui"));
     let dist_dir = gui_dir.join("dist").join("chat");
     let asset_dist_dir = manifest_dir.join("assets").join("chat").join("dist");
     let target_chat_dir = asset_dist_dir.join("chat");
@@ -33,7 +36,24 @@ fn build_gui_assets() {
             run_command(&gui_dir, npm_program(), &["ci"]);
         }
 
-        run_command(&gui_dir, npm_program(), &["run", "build"]);
+        run_command_with_env(
+            &gui_dir,
+            npx_program(),
+            &["tsc"],
+            &[("NODE_OPTIONS", "--max-old-space-size=8192")],
+        );
+        run_command_with_env(
+            &gui_dir,
+            npx_program(),
+            &["vite", "build"],
+            &[("NODE_OPTIONS", "--max-old-space-size=8192")],
+        );
+        run_command_with_env(
+            &gui_dir,
+            npx_program(),
+            &["vite", "build", "-c", "vite.node.config.ts"],
+            &[("NODE_OPTIONS", "--max-old-space-size=8192")],
+        );
     }
 
     if target_chat_dir.exists() {
@@ -60,8 +80,13 @@ fn build_gui_assets() {
 }
 
 fn run_command(cwd: &Path, program: &str, args: &[&str]) {
+    run_command_with_env(cwd, program, args, &[]);
+}
+
+fn run_command_with_env(cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) {
     let status = Command::new(program)
         .args(args)
+        .envs(envs.iter().copied())
         .current_dir(cwd)
         .status()
         .unwrap_or_else(|error| panic!("failed to run {program} in {}: {error}", cwd.display()));
@@ -80,6 +105,14 @@ fn npm_program() -> &'static str {
         "npm.cmd"
     } else {
         "npm"
+    }
+}
+
+fn npx_program() -> &'static str {
+    if cfg!(windows) {
+        "npx.cmd"
+    } else {
+        "npx"
     }
 }
 

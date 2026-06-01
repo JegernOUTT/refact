@@ -342,7 +342,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             shiftEnterToSubmit: submitChatWithShiftEnter,
             features: {vecdb, ast},
             currentWorkspaceName: currentActiveWorkspaceName,
-            lspUrl: global.rust_binary_blob?.browser_url?.() || undefined,
+            browserUrl: global.rust_binary_blob?.browser_url?.() || undefined,
         });
 
         this._view?.webview.postMessage(message);
@@ -1014,7 +1014,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 completeManual,
             },
             lspPort: port,
-            lspUrl: global.rust_binary_blob?.browser_url?.() || undefined,
+            browserUrl: global.rust_binary_blob?.browser_url?.() || undefined,
             currentWorkspaceName: currentActiveWorkspaceName,
         };
 

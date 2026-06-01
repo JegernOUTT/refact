@@ -13,4 +13,5 @@ declare const __REFACT_LSP_PORT__: number | undefined;
 interface Window {
   __REFACT_CHAT_VERSION__: VersionInfo;
   __REFACT_LSP_PORT__?: number;
+  __REFACT_ENGINE_ORIGIN_CANDIDATES__?: string[];
 }

@@ -2,6 +2,7 @@ export type EngineApiConfig = {
   host?: "web" | "ide" | "vscode" | "jetbrains";
   lspPort?: number;
   lspUrl?: string;
+  browserUrl?: string;
   dev?: boolean;
   engineServed?: boolean;
 };

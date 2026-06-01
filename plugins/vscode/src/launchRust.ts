@@ -72,10 +72,6 @@ export class RustBinaryBlob {
     }
 
     private default_browser_host(): string {
-        const lanAddress = this.default_lan_ipv4_host();
-        if (lanAddress) {
-            return lanAddress;
-        }
         return this.default_mdns_host();
     }
 

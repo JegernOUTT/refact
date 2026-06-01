@@ -7,6 +7,7 @@ export type Config = {
   lspPort: number;
   tabbed?: boolean;
   lspUrl?: string;
+  browserUrl?: string;
   dev?: boolean;
   engineServed?: boolean;
   // todo: handle light / darkmode
@@ -65,6 +66,7 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
 
     state.host = action.payload.host ?? state.host;
     state.lspUrl = action.payload.lspUrl ?? state.lspUrl;
+    state.browserUrl = action.payload.browserUrl ?? state.browserUrl;
     state.tabbed = action.payload.tabbed ?? state.tabbed;
     state.themeProps = action.payload.themeProps
       ? { ...state.themeProps, ...action.payload.themeProps }

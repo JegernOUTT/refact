@@ -131,7 +131,7 @@ open class LSPProcessHolder(val project: Project) : Disposable {
     }
 
     private fun defaultBrowserHost(): String {
-        return defaultLanIpv4Host() ?: defaultMdnsHost()
+        return defaultMdnsHost()
     }
 
     open fun browserUrlOrNull(): URI? {
