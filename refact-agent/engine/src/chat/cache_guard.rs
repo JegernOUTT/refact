@@ -111,7 +111,7 @@ pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
 fn body_for_cache_guard(value: &Value) -> Value {
     let sanitized = sanitize_body_for_cache_guard(value);
     if has_anthropic_explicit_cache_markers(value) {
-        truncate_body_to_anthropic_cache_prefix(value, sanitized)
+        body_with_cache_guard_metadata(truncate_body_to_anthropic_cache_prefix(value, sanitized))
     } else {
         sanitized
     }
@@ -262,64 +262,6 @@ fn is_append_only_prefix_inner(
                 .all(|(key, old_v)| {
                     b.get(key)
                         .map(|new_v| is_append_only_prefix_inner(old_v, new_v, Some(key), false))
-                        .unwrap_or(false)
-                })
-        }
-        _ => false,
-    }
-}
-
-fn is_anthropic_cache_prefix_compatible(prev: &Value, next: &Value) -> bool {
-    is_anthropic_cache_prefix_inner(prev, next, None, true, false)
-}
-
-fn is_anthropic_cache_prefix_inner(
-    prev: &Value,
-    next: &Value,
-    parent_key: Option<&str>,
-    top_level: bool,
-    content_append_ok: bool,
-) -> bool {
-    match (prev, next) {
-        (Value::Null, Value::Null)
-        | (Value::Bool(_), Value::Bool(_))
-        | (Value::Number(_), Value::Number(_))
-        | (Value::String(_), Value::String(_)) => prev == next,
-        (Value::Array(a), Value::Array(b)) => {
-            if matches!(parent_key, Some("messages")) || content_append_ok {
-                return a.len() <= b.len()
-                    && a.iter().zip(b.iter()).all(|(old_item, new_item)| {
-                        is_anthropic_cache_prefix_inner(old_item, new_item, None, false, false)
-                    });
-            }
-            a == b
-        }
-        (Value::Object(a), Value::Object(b)) => {
-            let a_keys = a
-                .keys()
-                .filter(|key| !is_ignored_key(key, top_level))
-                .count();
-            let b_keys = b
-                .keys()
-                .filter(|key| !is_ignored_key(key, top_level))
-                .count();
-            if a_keys != b_keys {
-                return false;
-            }
-            a.iter()
-                .filter(|(key, _)| !is_ignored_key(key, top_level))
-                .all(|(key, old_v)| {
-                    let allow_content_append = key == "content" && a.get("role") == b.get("role");
-                    b.get(key)
-                        .map(|new_v| {
-                            is_anthropic_cache_prefix_inner(
-                                old_v,
-                                new_v,
-                                Some(key),
-                                false,
-                                allow_content_append,
-                            )
-                        })
                         .unwrap_or(false)
                 })
         }
@@ -560,12 +502,6 @@ pub async fn check_or_pause_cache_guard(
     let Some(previous) = maybe_violation_prev else {
         return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
     };
-
-    if has_anthropic_explicit_cache_markers(request_body)
-        && is_anthropic_cache_prefix_compatible(&previous, &sanitized)
-    {
-        return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
-    }
 
     let mut diff = unified_json_diff(
         &preview_body_for_cache_guard_diff(&previous),
@@ -949,82 +885,6 @@ mod tests {
         assert!(sanitized.to_string().contains("cached"));
         assert!(!sanitized.to_string().contains("uncached suffix"));
         assert!(!sanitized.to_string().contains("cache_control"));
-    }
-
-    #[test]
-    fn comparable_anthropic_prefix_allows_marker_moving_forward() {
-        let prev = sanitize_body_for_cache_guard(&json!({
-            "messages": [{
-                "role": "user",
-                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
-            }]
-        }));
-        let next = sanitize_body_for_cache_guard(&json!({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hello"}]
-                },
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "changed suffix"}]
-                },
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "continue", "cache_control": {"type": "ephemeral"}}]
-                }
-            ]
-        }));
-
-        assert!(is_anthropic_cache_prefix_compatible(&prev, &next));
-    }
-
-    #[tokio::test]
-    async fn cache_guard_allows_anthropic_suffix_changes_after_explicit_cache_marker() {
-        let app = app_with_cache_priced_model("test/model-with-cache").await;
-        let session = session_with_task_role(None);
-        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
-        let prev_body = json!({
-            "model": "test",
-            "messages": [{
-                "role": "user",
-                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
-            }]
-        });
-        {
-            let mut session = session_arc.lock().await;
-            session.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
-        }
-
-        let next_body = json!({
-            "model": "test",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hello"}]
-                },
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "changed suffix"}]
-                },
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "continue", "cache_control": {"type": "ephemeral"}}]
-                }
-            ]
-        });
-        let outcome = check_or_pause_cache_guard(
-            app,
-            session_arc.clone(),
-            "test/model-with-cache",
-            &next_body,
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(outcome, CacheGuardOutcome::Pass(Some(_))));
-        let session = session_arc.lock().await;
-        assert!(session.runtime.pause_reasons.is_empty());
     }
 
     #[tokio::test]
