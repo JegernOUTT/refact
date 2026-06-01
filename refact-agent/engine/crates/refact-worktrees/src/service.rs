@@ -84,8 +84,21 @@ impl WorktreeService {
         self.save_registry_unlocked(registry).await
     }
 
+    async fn load_registry_pruning_missing_records(&self) -> Result<WorktreeRegistry, String> {
+        let _guard = registry_write_lock().lock().await;
+        let mut registry = self.load_registry_unlocked().await?;
+        let before = registry.records.len();
+        registry.records.retain(|record| {
+            !record.references.is_empty() || record.meta.root.try_exists().unwrap_or(true)
+        });
+        if registry.records.len() != before {
+            let _ = self.save_registry_unlocked(&registry).await;
+        }
+        Ok(registry)
+    }
+
     pub async fn list_worktrees(&self) -> Result<WorktreeListResponse, String> {
-        let registry = self.load_registry_unlocked().await?;
+        let registry = self.load_registry_pruning_missing_records().await?;
         let mut worktrees = registry
             .records
             .iter()
@@ -1947,6 +1960,62 @@ mod worktree_registry_tests {
 
         assert_eq!(view.reference_count, 0);
         assert!(view.references.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_registry_list_prunes_missing_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/list-prune-existing".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut registry = service.load_registry().await.unwrap();
+        registry.records.push(sample_record(&service, "missing_1"));
+        service.save_registry(&registry).await.unwrap();
+
+        let list = service.list_worktrees().await.unwrap();
+
+        assert_eq!(list.worktrees.len(), 1);
+        assert_eq!(list.worktrees[0].meta.id, created.worktree.meta.id);
+        let registry = service.load_registry().await.unwrap();
+        assert_eq!(registry.records.len(), 1);
+        assert_eq!(registry.records[0].meta.id, created.worktree.meta.id);
+    }
+
+    #[tokio::test]
+    async fn worktree_registry_list_keeps_referenced_missing_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let mut registry = service.load_registry().await.unwrap();
+        let mut record = sample_record(&service, "missing_referenced");
+        record.references.push(WorktreeReference {
+            kind: "chat".to_string(),
+            chat_id: Some("chat-1".to_string()),
+            ..Default::default()
+        });
+        registry.records.push(record);
+        service.save_registry(&registry).await.unwrap();
+
+        let list = service.list_worktrees().await.unwrap();
+
+        assert_eq!(list.worktrees.len(), 1);
+        assert_eq!(list.worktrees[0].meta.id, "missing_referenced");
+        assert!(!list.worktrees[0].status.path_exists);
+        let registry = service.load_registry().await.unwrap();
+        assert_eq!(registry.records.len(), 1);
     }
 
     #[tokio::test]
