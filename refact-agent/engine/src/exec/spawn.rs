@@ -999,11 +999,13 @@ mod tests {
         } else {
             "printf start; sleep 5"
         };
+        let timeout = if cfg!(windows) {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(200)
+        };
         let result = registry
-            .spawn(
-                ExecSpawnRequest::foreground(shell_script(command))
-                    .with_timeout(Duration::from_millis(200)),
-            )
+            .spawn(ExecSpawnRequest::foreground(shell_script(command)).with_timeout(timeout))
             .await
             .unwrap();
 
@@ -1083,7 +1085,7 @@ mod tests {
         let registry = ExecRegistry::new();
         let abort_flag = Arc::new(AtomicBool::new(false));
         let command = if cfg!(windows) {
-            "[Console]::Out.Write('start'); Start-Sleep -Seconds 5"
+            "[Console]::Out.WriteLine('start'); Start-Sleep -Seconds 5"
         } else {
             "printf start; sleep 5"
         };

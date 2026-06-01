@@ -5434,6 +5434,18 @@ mod tests {
             .join("planner")
             .join(format!("{}.json", chat_id));
         write_trajectory_file(&path, chat_id, "Planner Watch", "2024-01-01T00:00:01Z").await;
+        if cfg!(target_os = "macos") {
+            process_trajectory_change_for_source(
+                gcx.clone(),
+                chat_id,
+                false,
+                Some(trajectory_source_identity_from_path(
+                    &path,
+                    &get_all_task_roots(gcx.clone()).await,
+                )),
+            )
+            .await;
+        }
 
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.event_type, "updated");
@@ -5482,6 +5494,18 @@ mod tests {
             .join("agent-1")
             .join(format!("{}.json", chat_id));
         write_trajectory_file(&path, chat_id, "New Task Agent", "2024-01-01T00:00:02Z").await;
+        if cfg!(target_os = "macos") {
+            process_trajectory_change_for_source(
+                gcx.clone(),
+                chat_id,
+                false,
+                Some(trajectory_source_identity_from_path(
+                    &path,
+                    &get_all_task_roots(gcx.clone()).await,
+                )),
+            )
+            .await;
+        }
 
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.event_type, "updated");

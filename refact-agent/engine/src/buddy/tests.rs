@@ -723,12 +723,14 @@ fn test_settings_request_tone_fields_mark_persona_dirty() {
 fn test_settings_storage_metadata_paths() {
     let root = std::path::PathBuf::from("/tmp/active-buddy-root");
     let storage = super::settings::storage_metadata(&root);
+    let expected_buddy_dir = root.join(".refact").join("buddy");
+    let expected_settings_path = expected_buddy_dir.join("settings.json");
 
     assert_eq!(storage.project_root, "/tmp/active-buddy-root");
-    assert_eq!(storage.buddy_dir, "/tmp/active-buddy-root/.refact/buddy");
+    assert_eq!(storage.buddy_dir, expected_buddy_dir.to_string_lossy());
     assert_eq!(
         storage.settings_path,
-        "/tmp/active-buddy-root/.refact/buddy/settings.json"
+        expected_settings_path.to_string_lossy()
     );
 }
 
@@ -739,12 +741,14 @@ fn test_snapshot_includes_storage_metadata_for_service_path() {
 
     let snapshot = svc.snapshot();
     let storage = snapshot.storage.expect("storage metadata must be present");
+    let expected_buddy_dir = svc.project_root.join(".refact").join("buddy");
+    let expected_settings_path = expected_buddy_dir.join("settings.json");
 
     assert_eq!(storage.project_root, "/tmp/service-buddy-root");
-    assert_eq!(storage.buddy_dir, "/tmp/service-buddy-root/.refact/buddy");
+    assert_eq!(storage.buddy_dir, expected_buddy_dir.to_string_lossy());
     assert_eq!(
         storage.settings_path,
-        "/tmp/service-buddy-root/.refact/buddy/settings.json"
+        expected_settings_path.to_string_lossy()
     );
 }
 
@@ -858,7 +862,9 @@ async fn test_settings_update_service_response_includes_storage_metadata() {
     };
     let expected_project_root = project_root.to_string_lossy().to_string();
     let expected_settings_path = project_root
-        .join(".refact/buddy/settings.json")
+        .join(".refact")
+        .join("buddy")
+        .join("settings.json")
         .to_string_lossy()
         .to_string();
 
@@ -898,7 +904,9 @@ async fn test_settings_update_fallback_response_includes_storage_metadata() {
     let expected_project_root = dir.path().to_string_lossy().to_string();
     let expected_settings_path = dir
         .path()
-        .join(".refact/buddy/settings.json")
+        .join(".refact")
+        .join("buddy")
+        .join("settings.json")
         .to_string_lossy()
         .to_string();
 

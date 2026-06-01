@@ -962,7 +962,12 @@ mod tests {
                     .unwrap()
             }
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(if cfg!(windows) {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(200)
+        })
+        .await;
         abort_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let (_, messages) = run.await.unwrap();
         let message = only_message(messages);
