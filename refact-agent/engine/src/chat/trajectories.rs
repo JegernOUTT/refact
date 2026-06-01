@@ -902,6 +902,61 @@ pub async fn find_trajectory_or_buddy_path(
         .await
         .map(|candidate| candidate.path)
 }
+async fn find_validated_trajectory_path_in_dirs(
+    chat_id: &str,
+    dirs: Vec<PathBuf>,
+) -> Option<PathBuf> {
+    for dir in dirs {
+        let Some(path) = safe_trajectory_file_in_dir(&dir, chat_id).await else {
+            continue;
+        };
+        if read_valid_trajectory_candidate(path.clone(), chat_id)
+            .await
+            .is_some()
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+async fn find_validated_trajectory_path_for_source(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    source: &TrajectorySourceIdentity,
+) -> Option<PathBuf> {
+    let dirs: Vec<PathBuf> = match source {
+        TrajectorySourceIdentity::Buddy => get_buddy_conversations_dir(gcx.clone())
+            .await
+            .ok()
+            .into_iter()
+            .collect(),
+        TrajectorySourceIdentity::Task { .. } => list_task_trajectory_dirs(&gcx).await,
+        TrajectorySourceIdentity::Normal => get_all_trajectories_dirs(gcx.clone()).await,
+    };
+    find_validated_trajectory_path_in_dirs(chat_id, dirs).await
+}
+
+pub async fn find_trajectory_path_for_active_chat(
+    gcx: Arc<GlobalContext>,
+    sessions: &super::SessionsMap,
+    chat_id: &str,
+) -> Option<PathBuf> {
+    validate_trajectory_id(chat_id).ok()?;
+    let source = {
+        let session_arc = sessions.read().await.get(chat_id).cloned();
+        match session_arc {
+            Some(arc) => {
+                let session = arc.lock().await;
+                TrajectorySourceIdentity::from_session(&session)
+            }
+            None => {
+                return find_trajectory_or_buddy_path(gcx, chat_id).await;
+            }
+        }
+    };
+    find_validated_trajectory_path_for_source(gcx, chat_id, &source).await
+}
 
 async fn find_trajectory_or_buddy_file(
     gcx: Arc<GlobalContext>,
@@ -4794,6 +4849,25 @@ pub async fn handle_v1_trajectories_get(
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .body(Body::from(content))
+        .unwrap())
+}
+pub async fn handle_v1_trajectory_path(
+    State(app): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let sessions = app.chat.sessions.clone();
+    validate_trajectory_id(&id)?;
+    let path = find_trajectory_path_for_active_chat(gcx, &sessions, &id)
+        .await
+        .ok_or_else(|| {
+            ScratchError::new(StatusCode::NOT_FOUND, "Trajectory not found".to_string())
+        })?;
+    let body = serde_json::json!({ "path": path.to_string_lossy() });
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
         .unwrap())
 }
 
@@ -15398,5 +15472,217 @@ mod tests {
             MESSAGE_SIZE,
             elapsed.as_millis(),
         );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_returns_404_for_missing_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let err = handle_v1_trajectory_path(
+            State(app),
+            AxumPath("nonexistent-chat-id".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code, StatusCode::NOT_FOUND);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_returns_400_for_invalid_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let err = handle_v1_trajectory_path(State(app), AxumPath("../bad".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_returns_normal_trajectory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "path-normal";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&path, chat_id, "Normal", "2024-01-01T00:00:00Z").await;
+
+        let response = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let returned = payload["path"].as_str().unwrap();
+        assert_eq!(returned, path.to_string_lossy());
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_returns_buddy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "path-buddy";
+        let buddy_path = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        write_buddy_conversation_file(&buddy_path, chat_id, "Buddy").await;
+
+        let response = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["path"].as_str().unwrap(), buddy_path.to_string_lossy());
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_does_not_leak_other_source_for_active_buddy_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "path-collision-buddy";
+
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&normal_path, chat_id, "Normal", "2024-01-01T00:00:00Z").await;
+
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(BuddyThreadMeta {
+                is_buddy_chat: true,
+                buddy_chat_kind: "investigation".to_string(),
+                workflow_id: None,
+            });
+        }
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let err = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code, StatusCode::NOT_FOUND);
+        assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_returns_buddy_path_when_active_buddy_session_has_buddy_file()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "path-buddy-resolved";
+
+        let normal_path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&normal_path, chat_id, "Normal", "2024-01-01T00:00:00Z").await;
+
+        let buddy_path = dir
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        write_buddy_conversation_file(&buddy_path, chat_id, "Buddy").await;
+
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.mode = "buddy".to_string();
+            session.thread.buddy_meta = Some(BuddyThreadMeta {
+                is_buddy_chat: true,
+                buddy_chat_kind: "investigation".to_string(),
+                workflow_id: None,
+            });
+        }
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let response = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let returned = payload["path"].as_str().unwrap();
+        assert_eq!(returned, buddy_path.to_string_lossy());
+        assert_ne!(returned, normal_path.to_string_lossy());
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_rejects_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "path-malformed";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::write(&path, b"this is not json")
+            .await
+            .unwrap();
+
+        let err = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code, StatusCode::NOT_FOUND);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_rejects_id_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "path-id-mismatch";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        let content = json!({
+            "id": "different-id",
+            "title": "Wrong id",
+            "model": "m",
+            "mode": "agent",
+            "tool_use": "agent",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        tokio::fs::write(&path, serde_json::to_string(&content).unwrap())
+            .await
+            .unwrap();
+
+        let err = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code, StatusCode::NOT_FOUND);
     }
 }

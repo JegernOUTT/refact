@@ -221,6 +221,16 @@ export const trajectoriesApi = createApi({
       },
       providesTags: (_result, _error, id) => [{ type: "Trajectory", id }],
     }),
+    getTrajectoryPath: builder.query<{ path: string }, string>({
+      queryFn: async (id, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(state, `/v1/trajectories/${id}/path`);
+        const result = await baseQuery({ url });
+        if (result.error) return { error: result.error };
+        return { data: result.data as { path: string } };
+      },
+      providesTags: (_result, _error, id) => [{ type: "Trajectory", id }],
+    }),
     saveTrajectory: builder.mutation<undefined, TrajectoryData>({
       queryFn: async (data, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
@@ -259,6 +269,8 @@ export const {
   useListTrajectoriesPaginatedQuery,
   useListAllTrajectoriesQuery,
   useGetTrajectoryQuery,
+  useGetTrajectoryPathQuery,
+  useLazyGetTrajectoryQuery,
   useSaveTrajectoryMutation,
   useDeleteTrajectoryMutation,
 } = trajectoriesApi;

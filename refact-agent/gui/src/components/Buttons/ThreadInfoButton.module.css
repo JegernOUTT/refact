@@ -1,0 +1,55 @@
+.popoverContent {
+  /* Keep the panel readable on narrow viewports without overflowing the composer. */
+  max-width: min(420px, 90vw);
+}
+
+.valueText {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-2);
+  background-color: var(--color-surface);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.monoText {
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--font-size-1, 12px);
+  user-select: all;
+}
+
+.copyAllButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-2);
+  background-color: var(--color-surface);
+  color: var(--gray-12);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    filter 0.15s ease;
+}
+
+.copyAllButton:hover:not(:disabled) {
+  background-color: var(--gray-a3);
+  border-color: var(--gray-a6);
+  filter: brightness(1.05);
+}
+
+.copyAllButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

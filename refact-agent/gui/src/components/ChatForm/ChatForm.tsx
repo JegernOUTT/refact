@@ -85,6 +85,7 @@ import {
   WandButton,
   AutoEnrichmentToggleButton,
   AutoCompactToggleButton,
+  ThreadInfoButton,
 } from "../Buttons";
 import {
   StreamingTokenCounter,
@@ -797,6 +798,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   disabled={disableMicrophone}
                 />
               </span>
+              <ThreadInfoButton
+                chatId={chatId}
+                onOpenChange={handleComposerMenuOpenChange}
+              />
               <UnifiedSendButton
                 disabled={isVoiceActive || !isOnline || allDisabled}
                 isStreaming={isStreaming || isWaiting}

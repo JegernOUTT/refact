@@ -15,3 +15,4 @@ export { BrowserToggleButton } from "./BrowserToggleButton";
 export { WandButton } from "./WandButton";
 export { AutoEnrichmentToggleButton } from "./AutoEnrichmentToggleButton";
 export { AutoCompactToggleButton } from "./AutoCompactToggleButton";
+export { ThreadInfoButton } from "./ThreadInfoButton";
