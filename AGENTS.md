@@ -76,6 +76,85 @@ If you changed **both**: run both sets.
 | `plugin_vscode_build` | `plugins/vscode/**`, engine, GUI | VS Code extension packaging against same-commit engine/GUI artifacts |
 | `plugin_intellij_build` | `plugins/intellij/**`, engine, GUI | JetBrains plugin build against same-commit engine/GUI artifacts |
 
+## Dev Workflow & Tooling
+
+The development loop is **error-driven and worktree-based**: work happens in an
+isolated worktree, then squash-merges to `main` as a single commit. Composable
+slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
+(tracked, in `tools/dev/`). Use what you need; skip what you don't.
+
+### Reusable scripts (`tools/dev/`, tracked)
+
+| Script | Purpose |
+|---|---|
+| `changed.sh [base]` | Print changed components (engine/gui/vscode/intellij/docs/infra) vs base (default `origin/main`) |
+| `check.sh [components...]` | Run pre-push checks only for changed components. Auto-detects; runs in the current worktree |
+| `ci-status.sh <run-url\|id>` | GitHub Actions run status: per-job pass/fail + pinpointed failed steps |
+| `ci-logs.sh <run-url\|id> [N]` | Tail (default 300) of each **failed** job's log. Use this, not `gh run view --log-failed` (unreliable for reusable-workflow jobs) |
+| `release.sh <ver> <build\|plugins\|engine> [--push]` | Bump all manifests, commit, tag, optionally push |
+| `setup-cache.sh [--status]` | Enable/inspect the shared sccache build cache |
+
+### Slash commands (`.refact/commands/`, local/personal)
+
+- **`/ship`** — review ×2 → `check.sh` → land. In a worktree: `merge_worktree`
+  (squash, single commit) then **`git push` separately** (merge is local-only).
+  On main: commit + push. Creates a PR only via `/pr`, not by default.
+- **`/fix-ci`** — paste a run URL → `ci-status.sh` + `ci-logs.sh` → fix iteratively
+  → re-check (schedule via `cron`, don't busy-wait). Caps at 3 rounds.
+- **`/issue`** — file a **high-level** labeled issue (feature/bug/initiative).
+- **`/pr`** — push the worktree branch + open a PR; **keep the worktree alive**
+  until the PR merges (for review changes), then clean up.
+- **`/release`** — bump + tag + push from `main`. Tag taxonomy below.
+
+### Worktree → main (the normal land flow)
+
+1. Work in the worktree (branch `refact/chat/...` or `refact/task/...`).
+2. `merge_worktree` squashes it into `main` as one commit and deletes the worktree.
+3. **Merge ≠ push.** `git push origin main` from the main checkout is a separate step.
+4. Run review and `check.sh` **in the worktree** before merging — not against the
+   main checkout (a stale main checkout yields false review findings).
+
+### Release tags (what triggers what)
+
+| Tag | Triggers |
+|---|---|
+| `v<ver>` (any tag matches `*`) | All CI builds (engine, gui, vscode, intellij) — no publish |
+| `release/v<ver>` | VS Code + JetBrains **publish** |
+| `engine/v<ver>` | Engine release |
+
+`tools/bump_release_version.py <ver>` bumps all 6 manifests (intellij, vscode×2,
+gui×2, engine) in one shot; `release.sh` wraps it with tagging.
+
+### GitHub CLI & CI logs
+
+- `gh` is authenticated (`repo` + `workflow` scope) — covers issues, PRs, runs,
+  job logs, releases. Projects v2 board would need `gh auth refresh -s read:project,project`.
+- For failed CI: use `tools/dev/ci-logs.sh` (walks the jobs API + tails each failed
+  job). `gh run view --log-failed` returns nothing for the reusable-workflow matrix.
+- Parse run/job ids straight from pasted URLs
+  (`.../actions/runs/<id>[/job/<jid>]`).
+
+### Build cache across worktrees (sccache)
+
+Each worktree has its own `target/` (cold build = 10-20 min). **sccache** caches
+compiled crates globally so fresh worktree builds become cache hits, and it's
+parallel-safe (unlike a shared `CARGO_TARGET_DIR`, which locks).
+
+- Enable/check: `tools/dev/setup-cache.sh` (writes `~/.cargo/config.toml`
+  `rustc-wrapper = "sccache"` + `CARGO_INCREMENTAL=0` + `SCCACHE_CACHE_SIZE`).
+- `CARGO_INCREMENTAL=0` is **required** for sccache to cache. Trade-off: slightly
+  slower single-worktree incremental rebuilds, much faster cold cross-worktree builds.
+- npm cache (`~/.npm`) is already shared; use `npm ci --prefer-offline` in worktrees.
+- Optional: `mold` linker (uncomment in `refact-agent/engine/.cargo/config.toml`).
+
+### Issues = WHAT, task planner = HOW
+
+GitHub issues are **high-level** (a feature, bug, or initiative — roughly one
+task-planner's *name*). The technical breakdown (T-1, T-2, … cards) stays in the
+**internal task planner**: isolated, disposable, never synced to GitHub. Label
+taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
+`needs-triage`, `blocked`.
+
 ## Architecture Overview
 
 ```

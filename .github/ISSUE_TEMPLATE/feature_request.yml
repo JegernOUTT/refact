@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an improvement or new capability for Refact
+title: "[Feature]: "
+labels: ["type/feature", "needs-triage"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the project does this request relate to?
+      options:
+        - Engine (refact-lsp)
+        - Chat GUI
+        - VS Code extension
+        - JetBrains plugin
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem-motivation
+    attributes:
+      label: Problem / motivation
+      description: What problem would this solve, or what motivates the request?
+      placeholder: Describe the user need or pain point.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen?
+      placeholder: Describe the desired behavior or capability.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives-considered
+    attributes:
+      label: Alternatives considered
+      description: What alternatives or workarounds have you considered?
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add links, screenshots, examples, or other context here.

@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible problem with the engine, GUI, or a plugin
+title: "[Bug]: "
+labels: ["type/bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please provide enough detail for us to reproduce and triage the issue.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the project is affected?
+      options:
+        - Engine (refact-lsp)
+        - Chat GUI
+        - VS Code extension
+        - JetBrains plugin
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and its impact.
+      placeholder: Tell us what you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps needed to reproduce the issue.
+      placeholder: |
+        1. Go to ...
+        2. Run ...
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+  - type: input
+    id: version-commit
+    attributes:
+      label: Version / commit
+      description: Which Refact version, release, or commit SHA are you using?
+      placeholder: vX.Y.Z or commit SHA
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      description: Which operating system are you using?
+      options:
+        - Linux
+        - macOS
+        - Windows
+  - type: textarea
+    id: logs-screenshots
+    attributes:
+      label: Logs / screenshots
+      description: Paste logs, stack traces, or attach screenshots that help explain the issue.
+      render: shell

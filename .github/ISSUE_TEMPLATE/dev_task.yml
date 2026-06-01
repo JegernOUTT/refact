@@ -1,0 +1,44 @@
+name: Dev task
+description: Track a high-level internal development task
+title: "[Task]: "
+labels: ["type/task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for high-level internal development tasks. Technical breakdown lives in the internal task planner, not here.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the project does this task relate to?
+      options:
+        - Engine (refact-lsp)
+        - Chat GUI
+        - VS Code extension
+        - JetBrains plugin
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: goal-outcome
+    attributes:
+      label: Goal / outcome
+      description: Describe what success looks like at a high level.
+      placeholder: State the intended outcome, not the implementation breakdown.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: What conditions should be true when this task is complete?
+      placeholder: |
+        - ...
+        - ...
+  - type: textarea
+    id: notes-links
+    attributes:
+      label: Notes / links
+      description: Add relevant links, context, or constraints.
