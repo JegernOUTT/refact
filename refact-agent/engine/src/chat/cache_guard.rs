@@ -109,7 +109,7 @@ pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
 }
 
 pub fn is_append_only_prefix(prev: &Value, next: &Value) -> bool {
-    is_append_only_prefix_inner(prev, next, None, true)
+    is_append_only_prefix_inner(prev, next, None, true, false)
 }
 
 fn is_append_only_prefix_inner(
@@ -117,6 +117,7 @@ fn is_append_only_prefix_inner(
     next: &Value,
     parent_key: Option<&str>,
     top_level: bool,
+    parent_is_root: bool,
 ) -> bool {
     match (prev, next) {
         (Value::Null, Value::Null)
@@ -124,7 +125,7 @@ fn is_append_only_prefix_inner(
         | (Value::Number(_), Value::Number(_))
         | (Value::String(_), Value::String(_)) => prev == next,
         (Value::Array(a), Value::Array(b)) => {
-            if matches!(parent_key, Some("messages" | "input")) {
+            if is_append_only_array(parent_key, parent_is_root) {
                 return a.len() <= b.len()
                     && a.iter()
                         .zip(b.iter())
@@ -148,12 +149,19 @@ fn is_append_only_prefix_inner(
                 .filter(|(key, _)| !is_ignored_key(key, top_level))
                 .all(|(key, old_v)| {
                     b.get(key)
-                        .map(|new_v| is_append_only_prefix_inner(old_v, new_v, Some(key), false))
+                        .map(|new_v| {
+                            is_append_only_prefix_inner(old_v, new_v, Some(key), false, top_level)
+                        })
                         .unwrap_or(false)
                 })
         }
         _ => false,
     }
+}
+
+fn is_append_only_array(parent_key: Option<&str>, parent_is_root: bool) -> bool {
+    matches!(parent_key, Some("messages" | "input"))
+        || parent_is_root && matches!(parent_key, Some("tools" | "system"))
 }
 
 pub fn unified_json_diff(prev: &Value, next: &Value) -> String {
@@ -660,25 +668,31 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_array_strict_equality() {
+    fn test_tools_array_allows_append_only_top_level_additions() {
         let tool_a =
             json!({"type": "function", "function": {"name": "tool_a", "description": "A"}});
         let tool_b =
             json!({"type": "function", "function": {"name": "tool_b", "description": "B"}});
+        let tool_c =
+            json!({"type": "function", "function": {"name": "tool_c", "description": "C"}});
 
         // Identical tools → OK
         let prev = json!({"messages": [1], "tools": [tool_a.clone()]});
         let next = json!({"messages": [1, 2], "tools": [tool_a.clone()]});
         assert!(is_append_only_prefix(&prev, &next));
 
-        // New tool appended mid-session → violation (breaks LLM cache prefix)
+        // New tools appended after the already cached tool schemas keep the old prefix stable.
         let next_extra = json!({"messages": [1, 2], "tools": [tool_a.clone(), tool_b.clone()]});
-        assert!(!is_append_only_prefix(&prev, &next_extra));
+        assert!(is_append_only_prefix(&prev, &next_extra));
+
+        let prev_with_two = json!({"messages": [1], "tools": [tool_a.clone(), tool_b.clone()]});
+        let next_with_three =
+            json!({"messages": [1, 2], "tools": [tool_a.clone(), tool_b.clone(), tool_c]});
+        assert!(is_append_only_prefix(&prev_with_two, &next_with_three));
 
         // Tool removed mid-session → violation
-        let prev2 = json!({"messages": [1], "tools": [tool_a.clone(), tool_b.clone()]});
         let next_removed = json!({"messages": [1, 2], "tools": [tool_a.clone()]});
-        assert!(!is_append_only_prefix(&prev2, &next_removed));
+        assert!(!is_append_only_prefix(&prev_with_two, &next_removed));
 
         // Tool description changed mid-session → violation
         let tool_a_changed =
@@ -691,6 +705,31 @@ mod tests {
     fn test_non_conversation_arrays_are_strict() {
         let prev = json!({
             "messages": [{"role": "user", "content": "hi"}],
+            "metadata": [{"type": "stable"}]
+        });
+        let appended = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"}
+            ],
+            "metadata": [
+                {"type": "stable"},
+                {"type": "new prefix"}
+            ]
+        });
+        let nested_key = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "metadata": [{"type": "stable", "name": "new"}]
+        });
+
+        assert!(!is_append_only_prefix(&prev, &appended));
+        assert!(!is_append_only_prefix(&prev, &nested_key));
+    }
+
+    #[test]
+    fn test_top_level_system_array_allows_append_only_additions() {
+        let prev = json!({
+            "messages": [{"role": "user", "content": "hi"}],
             "system": [{"type": "text", "text": "stable"}]
         });
         let appended = json!({
@@ -700,16 +739,16 @@ mod tests {
             ],
             "system": [
                 {"type": "text", "text": "stable"},
-                {"type": "text", "text": "new prefix"}
+                {"type": "text", "text": "new suffix"}
             ]
         });
-        let nested_key = json!({
+        let changed = json!({
             "messages": [{"role": "user", "content": "hi"}],
-            "system": [{"type": "text", "text": "stable", "name": "new"}]
+            "system": [{"type": "text", "text": "changed"}]
         });
 
-        assert!(!is_append_only_prefix(&prev, &appended));
-        assert!(!is_append_only_prefix(&prev, &nested_key));
+        assert!(is_append_only_prefix(&prev, &appended));
+        assert!(!is_append_only_prefix(&prev, &changed));
     }
 
     #[test]

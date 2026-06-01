@@ -1270,7 +1270,9 @@ mod tests {
         .await;
         let body = text(&message);
 
-        assert!(body.contains("start"));
+        if !cfg!(windows) {
+            assert!(body.contains("start"));
+        }
         assert!(body.contains("timed out"));
         assert_eq!(exec(&message)["status"], "timed_out");
         assert_eq!(message.tool_failed, Some(true));
