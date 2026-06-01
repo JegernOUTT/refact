@@ -162,6 +162,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [liveTranscript, setLiveTranscript] = React.useState("");
   const [inputResetKey, setInputResetKey] = React.useState(0);
   const [isComposerExpanded, setIsComposerExpanded] = React.useState(false);
+  const [openComposerMenus, setOpenComposerMenus] = React.useState(0);
   const composerRef = React.useRef<HTMLDivElement>(null);
   const isOnline = useIsOnline();
   const { isContextFull } = useUsageCounter();
@@ -424,6 +425,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     });
   }, []);
 
+  const handleComposerMenuOpenChange = useCallback((open: boolean) => {
+    setOpenComposerMenus((count) => Math.max(0, count + (open ? 1 : -1)));
+    if (open) {
+      setIsComposerExpanded(true);
+    }
+  }, []);
+
   const handleComposerPointerDownCapture = useCallback(
     (event: React.PointerEvent<HTMLFormElement>) => {
       if (isComposerExpanded) return;
@@ -447,11 +455,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         const activeElement = document.activeElement;
         if (activeElement instanceof Node && root.contains(activeElement))
           return;
-        setIsComposerExpanded(false);
+        setIsComposerExpanded(openComposerMenus > 0);
       }, 0);
     },
-    [],
+    [openComposerMenus],
   );
+
+  useEffect(() => {
+    if (openComposerMenus > 0) {
+      setIsComposerExpanded(true);
+    }
+  }, [openComposerMenus]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -574,7 +588,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                         <UsageCounter />
                       </span>
                       <span className={styles.hideTopCompressLast}>
-                        <TrajectoryButton disabled={isBuddyChat} />
+                        <TrajectoryButton
+                          disabled={isBuddyChat}
+                          onOpenChange={handleComposerMenuOpenChange}
+                        />
                       </span>
                     </Flex>
                   </Flex>
@@ -623,17 +640,24 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             className={styles.bottomControlsRow}
           >
             <span className={styles.bottomModelControl}>
-              <ChatSettingsDropdown disabled={isBuddyChat} />
+              <ChatSettingsDropdown
+                disabled={isBuddyChat}
+                onOpenChange={handleComposerMenuOpenChange}
+              />
             </span>
             <span className={styles.bottomModeControl}>
               <ModeSelect
                 selectedMode={threadMode ?? DEFAULT_MODE}
                 onModeChange={onSetMode}
                 disabled={isBuddyChat || isModeDisabled}
+                onOpenChange={handleComposerMenuOpenChange}
               />
             </span>
             <span className={styles.bottomWorkspaceControl}>
-              <WorktreeControl disabled={isBuddyChat} />
+              <WorktreeControl
+                disabled={isBuddyChat}
+                onOpenChange={handleComposerMenuOpenChange}
+              />
             </span>
 
             <Flex

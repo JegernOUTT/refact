@@ -176,18 +176,12 @@ jobs:
         if: matrix.cross
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
-          REFACT_USE_PREBUILT_GUI: "1"
-          REFACT_GUI_DIR: /project/refact-agent/gui
-          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
         run: CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
 
       - name: Build linux-like artifact
         if: matrix.cross
         env:
           CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
-          REFACT_USE_PREBUILT_GUI: "1"
-          REFACT_GUI_DIR: /project/refact-agent/gui
-          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
         run: |
           CROSS_NO_WARNINGS=0 cross build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..

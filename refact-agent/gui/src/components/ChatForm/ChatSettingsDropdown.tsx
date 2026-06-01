@@ -81,11 +81,13 @@ function formatPricingDetailed(cost: CapCost): {
 type ChatSettingsDropdownProps = {
   disabled?: boolean;
   compact?: boolean;
+  onOpenChange?: (open: boolean) => void;
 };
 
 export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   disabled,
   compact = false,
+  onOpenChange,
 }) => {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
@@ -113,6 +115,13 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   // Model data
   const currentModelName = caps.currentModel || "Select model";
   const [isOpen, setIsOpen] = useState(false);
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      setIsOpen(open);
+      onOpenChange?.(open);
+    },
+    [onOpenChange],
+  );
   const selectedModelRef = useRef<HTMLButtonElement>(null);
   const modelListRef = useRef<HTMLDivElement>(null);
 
@@ -305,7 +314,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   );
 
   return (
-    <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
+    <Popover.Root open={isOpen} onOpenChange={handleOpenChange}>
       <Popover.Trigger>
         <button
           className={classNames(

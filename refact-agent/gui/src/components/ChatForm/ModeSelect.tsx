@@ -50,12 +50,14 @@ type ModeSelectProps = {
     threadDefaults?: ChatModeThreadDefaults,
   ) => void;
   disabled?: boolean;
+  onOpenChange?: (open: boolean) => void;
 };
 
 export const ModeSelect: React.FC<ModeSelectProps> = ({
   selectedMode,
   onModeChange,
   disabled,
+  onOpenChange,
 }) => {
   const dispatch = useAppDispatch();
   const { data, isLoading } = useGetChatModesQuery(undefined);
@@ -92,6 +94,13 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
   const isModeDisabled = disabled ?? false;
 
   const [isOpen, setIsOpen] = useState(false);
+  const handlePopoverOpenChange = useCallback(
+    (open: boolean) => {
+      setIsOpen(open);
+      onOpenChange?.(open);
+    },
+    [onOpenChange],
+  );
   const [transitionDialogOpen, setTransitionDialogOpen] = useState(false);
   const [targetModeForTransition, setTargetModeForTransition] =
     useState<ChatModeInfo | null>(null);
@@ -200,7 +209,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
 
   return (
     <>
-      <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
+      <Popover.Root open={isOpen} onOpenChange={handlePopoverOpenChange}>
         <Popover.Trigger>
           <button
             className={`${styles.trigger} ${

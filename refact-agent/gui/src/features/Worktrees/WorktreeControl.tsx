@@ -85,10 +85,12 @@ function defaultBranchName(chatId: string): string {
 
 type WorktreeControlProps = {
   disabled?: boolean;
+  onOpenChange?: (open: boolean) => void;
 };
 
 export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   disabled,
+  onOpenChange,
 }) => {
   const dispatch = useAppDispatch();
   const chatId = useAppSelector(selectChatId);
@@ -97,6 +99,13 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
   const [menuOpen, setMenuOpen] = useState(false);
+  const handleMenuOpenChange = useCallback(
+    (open: boolean) => {
+      setMenuOpen(open);
+      onOpenChange?.(open);
+    },
+    [onOpenChange],
+  );
   const [createOpen, setCreateOpen] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -333,7 +342,7 @@ export const WorktreeControl: React.FC<WorktreeControlProps> = ({
 
   return (
     <>
-      <Popover.Root open={menuOpen} onOpenChange={setMenuOpen}>
+      <Popover.Root open={menuOpen} onOpenChange={handleMenuOpenChange}>
         <Popover.Trigger>
           <button
             type="button"
