@@ -403,6 +403,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_bootstrap_upgrades_stale_buddy_mode_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path();
+        global_configs_try_create_all(config_dir).await.unwrap();
+
+        let stale_buddy_mode = r#"schema_version: 15
+id: buddy
+tools:
+  - buddy_say
+  - buddy_render_controls
+"#;
+        let buddy_path = config_dir.join("modes").join("buddy.yaml");
+        fs::write(&buddy_path, stale_buddy_mode).await.unwrap();
+        let checksums_path = config_dir.join(CHECKSUM_FILE);
+        let checksums = HashMap::from([(
+            "modes/buddy.yaml".to_string(),
+            compute_checksum(stale_buddy_mode),
+        )]);
+        save_checksums(&checksums_path, &checksums).await;
+
+        global_configs_try_create_all(config_dir).await.unwrap();
+
+        let upgraded = fs::read_to_string(&buddy_path).await.unwrap();
+        assert!(upgraded.contains("schema_version: 16"));
+        assert!(upgraded.contains("  - buddy_speak"));
+        assert!(upgraded.contains("  - buddy_runtime_event"));
+        assert!(upgraded.contains("  - buddy_log_activity"));
+    }
+
     #[test]
     fn default_modes_with_update_plan_guidance_require_schema_19() {
         for (filename, content) in get_defaults_for_kind("modes") {

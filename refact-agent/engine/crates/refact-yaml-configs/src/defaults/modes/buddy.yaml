@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 16
 id: buddy
 title: Buddy
 description: Persistent project companion for setup, diagnostics, and knowledge management
