@@ -1639,6 +1639,14 @@ mod tests {
         }
     }
 
+    fn diff_message(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "diff".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
     fn context_file_named(file_name: &str, content: &str) -> ContextFile {
         ContextFile {
             file_name: file_name.to_string(),
@@ -2013,6 +2021,59 @@ mod tests {
     }
 
     #[test]
+    fn reported_prior_summary_tail_shape_selects_body_before_trailing_errors() {
+        let prior_source = vec![assistant("prior assistant output before compression")];
+        let prior_summary = make_segment_summary_message(
+            "prior compressed summary".to_string(),
+            &prior_source,
+            "test-model",
+        );
+        let huge = "large completed output ".repeat(1_000);
+        let mut messages = vec![
+            user("earlier user turn"),
+            prior_summary,
+            user("last user asks for long agentic work"),
+            cd_instruction("internal excluded diagnostic"),
+            assistant(&huge),
+            tool_with_id("call_tail", &huge),
+            context_file("large context payload"),
+            error_message("context_length_exceeded"),
+            error_message("context_length_exceeded retry"),
+        ];
+
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 1, end: 1 }]
+        );
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 4, end: 6 })
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 4, end: 6 })
+        );
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed selected tail body",
+            "test-model",
+        ));
+
+        assert_eq!(messages.len(), 7);
+        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[3].role, "cd_instruction");
+        assert!(is_segment_summary(&messages[4]));
+        assert_eq!(
+            messages[4].content.content_text_only(),
+            "compressed selected tail body"
+        );
+        assert_eq!(messages[5].role, "error");
+        assert_eq!(messages[6].role, "error");
+    }
+
+    #[test]
     fn tail_segment_pending_assistant_tool_call_is_not_eligible() {
         let pending = assistant_with_tool_call();
         let mut messages = vec![user("run tool"), pending];
@@ -2118,6 +2179,48 @@ mod tests {
         assert_eq!(messages[1].tool_calls.as_ref().unwrap().len(), 2);
         assert_eq!(messages[2].role, "event");
         assert!(is_segment_summary(&messages[3]));
+    }
+
+    #[test]
+    fn reported_single_user_stale_pending_shape_selects_later_completed_output() {
+        let mut messages = vec![
+            user("single user asks for a long fix"),
+            assistant_with_tool_call_id("call_stale"),
+            assistant_with_tool_call_id("call_shell_done"),
+            tool_with_id("call_shell_done", "completed shell output"),
+            assistant_with_named_tool_call("call_read_done", "cat"),
+            context_file_with_tool_call_id("call_read_done", "completed read output"),
+            diff_message("edited src/lib.rs"),
+            error_message("context_length_exceeded"),
+            error_message("context_length_exceeded retry"),
+        ];
+
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 2, end: 6 })
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 2, end: 6 })
+        );
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed completed output after stale call",
+            "test-model",
+        ));
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call_stale");
+        assert!(is_segment_summary(&messages[2]));
+        assert_eq!(
+            messages[2].content.content_text_only(),
+            "compressed completed output after stale call"
+        );
+        assert_eq!(messages[3].role, "error");
+        assert_eq!(messages[4].role, "error");
     }
 
     #[test]
@@ -2611,11 +2714,7 @@ mod tests {
 
     #[test]
     fn segment_text_labels_diff_as_file_edit() {
-        let diff_msg = ChatMessage {
-            role: "diff".to_string(),
-            content: ChatContent::SimpleText("diff content".to_string()),
-            ..Default::default()
-        };
+        let diff_msg = diff_message("diff content");
         let text = segment_text(&[diff_msg]);
         assert!(text.contains("[FILE_EDIT]"), "got: {text}");
         assert!(
