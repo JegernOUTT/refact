@@ -409,6 +409,110 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       expect(selectCompressionPhase(state)).toBeUndefined();
     });
 
+    test("applied snapshot after active compression creates pulse", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "generating",
+          is_compressing: true,
+          compression_phase: "running",
+        }),
+      );
+
+      const snapshot = createSnapshot([]);
+      snapshot.seq = "3";
+      snapshot.runtime.is_compressing = false;
+      snapshot.runtime.compression_phase = "applied";
+      state = chatReducer(state, applyChatEvent(snapshot));
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBe("applied");
+      expect(selectCompressionPulseSeq(state)).toBe("3");
+    });
+
+    test("applied snapshot preserves existing compression pulse", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "generating",
+          is_compressing: true,
+          compression_phase: "checking",
+        }),
+      );
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "3",
+          type: "runtime_updated",
+          state: "idle",
+          is_compressing: false,
+          compression_phase: "applied",
+        }),
+      );
+      expect(selectCompressionPulseSeq(state)).toBe("3");
+
+      const snapshot = createSnapshot([]);
+      snapshot.seq = "4";
+      snapshot.runtime.compression_phase = "applied";
+      state = chatReducer(state, applyChatEvent(snapshot));
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBe("applied");
+      expect(selectCompressionPulseSeq(state)).toBe("3");
+    });
+
+    test("standalone applied snapshot does not create pulse", () => {
+      const snapshot = createSnapshot([]);
+      snapshot.runtime.is_compressing = false;
+      snapshot.runtime.compression_phase = "applied";
+
+      const state = chatReducer(initialState, applyChatEvent(snapshot));
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBe("applied");
+      expect(selectCompressionPulseSeq(state)).toBeUndefined();
+    });
+
+    test.each(["skipped", "failed"] as const)(
+      "%s snapshot does not create pulse after active compression",
+      (compressionPhase) => {
+        let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+        state = chatReducer(
+          state,
+          applyChatEvent({
+            chat_id: chatId,
+            seq: "2",
+            type: "runtime_updated",
+            state: "generating",
+            is_compressing: true,
+            compression_phase: "running",
+          }),
+        );
+
+        const snapshot = createSnapshot([]);
+        snapshot.seq = "3";
+        snapshot.runtime.is_compressing = false;
+        snapshot.runtime.compression_phase = compressionPhase;
+        state = chatReducer(state, applyChatEvent(snapshot));
+
+        expect(selectCompression(state)).toBe(false);
+        expect(selectCompressionPhase(state)).toBe(compressionPhase);
+        expect(selectCompressionPulseSeq(state)).toBeUndefined();
+      },
+    );
+
     test("runtime_updated generating with is_compressing true sets true", () => {
       let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
 

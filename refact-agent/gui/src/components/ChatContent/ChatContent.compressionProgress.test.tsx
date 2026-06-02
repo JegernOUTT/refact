@@ -280,6 +280,87 @@ describe("ChatContent compression progress", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows progress when a fast applied snapshot follows batched compression events", () => {
+    vi.useFakeTimers({ now: 0 });
+    const { store } = renderChatContent(
+      makeChatState({ messages: [userMessage("hello")] }),
+    );
+    const chatId = store.getState().chat.current_thread_id;
+
+    act(() => {
+      store.dispatch({
+        type: "chatThread/applyChatEvent",
+        payload: {
+          chat_id: chatId,
+          type: "runtime_updated",
+          seq: "1",
+          state: "generating",
+          is_compressing: true,
+          compression_phase: "checking",
+        },
+      });
+      store.dispatch({
+        type: "chatThread/applyChatEvent",
+        payload: {
+          chat_id: chatId,
+          type: "runtime_updated",
+          seq: "2",
+          state: "idle",
+          is_compressing: false,
+          compression_phase: "applied",
+        },
+      });
+      store.dispatch({
+        type: "chatThread/applyChatEvent",
+        payload: {
+          chat_id: chatId,
+          type: "snapshot",
+          seq: "3",
+          thread: {
+            id: chatId,
+            title: "Test",
+            model: "gpt-4",
+            mode: "AGENT",
+            tool_use: "agent",
+            boost_reasoning: false,
+            context_tokens_cap: null,
+            include_project_info: true,
+            checkpoints_enabled: true,
+            is_title_generated: false,
+          },
+          runtime: {
+            state: "idle",
+            paused: false,
+            error: null,
+            queue_size: 0,
+            pause_reasons: [],
+            queued_items: [],
+            is_compressing: false,
+            compression_phase: "applied",
+          },
+          background_agents: [],
+          messages: [userMessage("hello")],
+        },
+      });
+    });
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(499);
+    });
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(
+      screen.queryByTestId("compression-progress"),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps fast compression visible for the minimum duration", () => {
     vi.useFakeTimers({ now: 0 });
     const { store } = renderChatContent(makeChatState({ isCompressing: true }));

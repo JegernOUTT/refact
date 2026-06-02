@@ -1393,6 +1393,22 @@ export const chatReducer = createReducer(initialState, (builder) => {
           snapshotState === "generating" ||
           snapshotState === "executing_tools" ||
           snapshotState === "waiting_ide";
+        const snapshotCompressionPhase = normalizeCompressionPhase(
+          event.runtime.compression_phase,
+        );
+        const snapshotCompressionReason = normalizeCompressionReason(
+          event.runtime.compression_reason,
+        );
+        const wasCompressionActive =
+          existingRuntime?.is_compressing === true ||
+          compressionPhaseIsActive(existingRuntime?.compression_phase);
+        const existingCompressionPulseSeq =
+          existingRuntime?.compression_pulse_seq;
+        const snapshotCompressionPulseSeq =
+          snapshotCompressionPhase === "applied" &&
+          (wasCompressionActive || existingCompressionPulseSeq !== undefined)
+            ? (existingCompressionPulseSeq ?? event.seq)
+            : undefined;
 
         const newRt: ChatThreadRuntime = {
           thread,
@@ -1421,13 +1437,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
             typeof event.runtime.is_compressing === "boolean"
               ? event.runtime.is_compressing
               : false,
-          compression_phase: normalizeCompressionPhase(
-            event.runtime.compression_phase,
-          ),
-          compression_reason: normalizeCompressionReason(
-            event.runtime.compression_reason,
-          ),
-          compression_pulse_seq: undefined,
+          compression_phase: snapshotCompressionPhase,
+          compression_reason: snapshotCompressionReason,
+          compression_pulse_seq: snapshotCompressionPulseSeq,
           task_widget_expanded: existingRuntime?.task_widget_expanded ?? false,
           last_applied_seq: event.seq,
           message_index_by_id: rebuildMessageIndexById(snapshotMessages),
