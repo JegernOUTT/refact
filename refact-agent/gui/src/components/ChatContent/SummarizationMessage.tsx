@@ -22,7 +22,21 @@ type TierMeta = {
   badgeClass: string;
 };
 
-function metaForTier(tier?: SummarizationTier): TierMeta {
+const LLM_SEGMENT_SUMMARY_DESCRIPTION =
+  "Older context was summarized so this chat can continue within the model limit.";
+
+function metaForTier(
+  tier: SummarizationTier | undefined,
+  isSegmentCompressionReport: boolean,
+): TierMeta {
+  if (isSegmentCompressionReport) {
+    return {
+      label: "Context compressed",
+      icon: "🗜️",
+      badgeClass: styles.tierBadgeTier1,
+    };
+  }
+
   switch (tier) {
     case "tier0_deterministic":
       return {
@@ -60,8 +74,10 @@ function metaForTier(tier?: SummarizationTier): TierMeta {
 function tokenLabelFor(
   tier: SummarizationTier | undefined,
   estimate: number,
+  isSegmentCompressionReport: boolean,
 ): string {
   const formatted = `~${estimate.toLocaleString()} tokens`;
+  if (isSegmentCompressionReport) return `${formatted} saved`;
   switch (tier) {
     case "tier1_llm":
     case "tier1_merged":
@@ -81,6 +97,11 @@ type MetadataStat = {
   suffix?: string;
 };
 
+function parseStringStat(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  return value;
+}
+
 function parseNumberStat(value: unknown, suffix = ""): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return `${value.toLocaleString()}${suffix}`;
@@ -93,9 +114,11 @@ function statsFromCompressionReportMetadata(
   if (!report) return null;
 
   const STAT_FIELDS: MetadataStat[] = [
+    { key: "source_message_count", label: "Messages compressed" },
     { key: "context_files_removed", label: "Context files removed" },
     { key: "context_messages_dropped", label: "Context messages dropped" },
     { key: "tool_results_truncated", label: "Tool outputs truncated" },
+    { key: "summary_model", label: "Summary model" },
     { key: "tokens_before", label: "Tokens before" },
     { key: "tokens_after", label: "Tokens after" },
     { key: "estimated_tokens_saved", label: "Tokens saved" },
@@ -103,7 +126,10 @@ function statsFromCompressionReportMetadata(
   ];
 
   const stats = STAT_FIELDS.flatMap(({ key, label, suffix }) => {
-    const value = parseNumberStat(report[key], suffix);
+    const value =
+      key === "summary_model"
+        ? parseStringStat(report[key])
+        : parseNumberStat(report[key], suffix);
     return value ? [{ label, value }] : [];
   });
   return stats.length > 0 ? stats : null;
@@ -146,16 +172,19 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const tier = message.summarization_tier;
   const contentText =
     typeof message.content === "string" ? message.content : "";
+  const compressionReport = getCompressionReportMetadata(message);
+  const isSegmentCompressionReport =
+    compressionReport?.compression_kind === "llm_segment_summary";
 
   const reactiveStats = useMemo(() => {
-    if (tier !== "tier2_reactive") return null;
+    if (tier !== "tier2_reactive" && !compressionReport) return null;
     return (
       statsFromCompressionReportMetadata(message) ??
       parseReactiveStats(contentText)
     );
-  }, [tier, contentText, message]);
+  }, [tier, compressionReport, contentText, message]);
 
-  const meta = metaForTier(tier);
+  const meta = metaForTier(tier, isSegmentCompressionReport);
 
   const rangeLabel = message.summarized_range
     ? `messages ${message.summarized_range[0] + 1}–${
@@ -164,17 +193,26 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
     : null;
 
   const compressionMeta = getAssistantCompressionMetadata(message);
-  const sourceCount = Array.isArray(compressionMeta?.source_message_ids)
-    ? compressionMeta.source_message_ids.length
-    : null;
+  const sourceCount =
+    typeof compressionReport?.source_message_count === "number"
+      ? compressionReport.source_message_count
+      : Array.isArray(compressionMeta?.source_message_ids)
+        ? compressionMeta.source_message_ids.length
+        : null;
   const summaryModel =
-    typeof compressionMeta?.summary_model === "string"
-      ? compressionMeta.summary_model
-      : null;
+    typeof compressionReport?.summary_model === "string"
+      ? compressionReport.summary_model
+      : typeof compressionMeta?.summary_model === "string"
+        ? compressionMeta.summary_model
+        : null;
 
   const tokenLabel =
     typeof message.summarized_token_estimate === "number"
-      ? tokenLabelFor(tier, message.summarized_token_estimate)
+      ? tokenLabelFor(
+          tier,
+          message.summarized_token_estimate,
+          isSegmentCompressionReport,
+        )
       : null;
 
   return (
@@ -220,6 +258,9 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
       </Flex>
       {open && (
         <Box className={styles.body} data-testid="summarization-card-body">
+          {isSegmentCompressionReport && (
+            <p>{LLM_SEGMENT_SUMMARY_DESCRIPTION}</p>
+          )}
           {contentText.length > 0 ? (
             <ToolMarkdown>{contentText}</ToolMarkdown>
           ) : (

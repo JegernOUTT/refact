@@ -5,6 +5,7 @@ import type {
   ChatMessages,
   CompressionReportMessage,
   EventMessage,
+  UserMessage,
 } from "../../services/refact";
 import {
   buildDisplayItems,
@@ -20,6 +21,32 @@ function assistantMessage(
     message_id: "assistant-1",
     ...overrides,
   };
+}
+
+function userMessage(overrides: Partial<UserMessage> = {}): UserMessage {
+  return {
+    role: "user",
+    content: "user content",
+    message_id: "user-1",
+    ...overrides,
+  };
+}
+
+function compressedAssistantMessage(
+  overrides: Partial<AssistantMessage> = {},
+): AssistantMessage {
+  return assistantMessage({
+    content: "internal compressed summary",
+    message_id: "compressed-assistant-1",
+    extra: {
+      compression: {
+        kind: "llm_segment_summary",
+        source_message_ids: ["assistant-old-1"],
+        summary_model: "summary-model",
+      },
+    },
+    ...overrides,
+  });
 }
 
 function activateSkillOnlyAssistantMessage(
@@ -285,6 +312,85 @@ describe("ChatContent display items", () => {
         estimated_tokens_saved: 3000,
       },
     });
+  });
+
+  it("renders_compression_report_without_adjacent_compressed_assistant", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      compressionReportMessage({ message_id: "compression-report" }),
+      compressedAssistantMessage({ message_id: "internal-summary" }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+    const reportItem = items.find((item) => item.type === "summarization");
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "summarization",
+      "user",
+    ]);
+    expect(items.filter((item) => item.type === "summarization")).toHaveLength(
+      1,
+    );
+    expect(reportItem?.type).toBe("summarization");
+    if (reportItem?.type !== "summarization") {
+      throw new Error("Expected report summarization item");
+    }
+    expect(reportItem.messageIndex).toBe(1);
+    expect(reportItem.message.content).toContain("Chat compression report");
+  });
+
+  it("legacy_compressed_assistant_without_report_still_renders_summary_card", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      compressedAssistantMessage({ message_id: "legacy-internal-summary" }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "summarization",
+      "user",
+    ]);
+    expect(items[1]?.type).toBe("summarization");
+    if (items[1]?.type !== "summarization") {
+      throw new Error("Expected legacy summarization item");
+    }
+    expect(items[1].messageIndex).toBe(1);
+    expect(items[1].message.content).toBe("internal compressed summary");
+  });
+
+  it("incremental_report_and_summary_replacement_does_not_render_duplicate_cards", () => {
+    const userBefore = userMessage({ message_id: "user-before" });
+    const userAfter = userMessage({ message_id: "user-after" });
+    const previousMessages: ChatMessages = [
+      userBefore,
+      assistantMessage({ message_id: "assistant-old" }),
+      userAfter,
+    ];
+    const nextMessages: ChatMessages = [
+      userBefore,
+      compressionReportMessage({ message_id: "compression-report" }),
+      compressedAssistantMessage({ message_id: "internal-summary" }),
+      userAfter,
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).not.toBeNull();
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    expect(
+      (incrementalItems ?? []).filter((item) => item.type === "summarization"),
+    ).toHaveLength(1);
   });
 
   it("matches full rebuild when appending a compression_report message", () => {

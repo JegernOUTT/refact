@@ -205,6 +205,20 @@ function buildCompressionDisplayItem(
   return null;
 }
 
+function isCompressedAssistantPairedWithReport(
+  messages: ChatMessages,
+  index: number,
+): boolean {
+  const message = messages[index];
+  if (!message || !isCompressedAssistantMessage(message)) return false;
+  const previous = messages[index - 1];
+  const next = messages[index + 1];
+  return Boolean(
+    (previous && isCompressionReportMessage(previous)) ||
+      (next && isCompressionReportMessage(next)),
+  );
+}
+
 type AssistantDisplayClass =
   | "compressed"
   | "hidden_activate_skill_only"
@@ -377,6 +391,8 @@ function buildDisplayItemsFromIndex(
     const head = messages[i];
 
     if (isToolMessage(head)) continue;
+
+    if (isCompressedAssistantPairedWithReport(messages, i)) continue;
 
     const compressionItem = buildCompressionDisplayItem(head, i);
     if (compressionItem) {
@@ -684,6 +700,30 @@ function patchTailDisplayItems(
   return nextItems;
 }
 
+function findReportAndSummaryReplacementIndex(
+  previousMessages: ChatMessages,
+  nextMessages: ChatMessages,
+): number | null {
+  if (nextMessages.length !== previousMessages.length + 1) return null;
+
+  const changedIndex = previousMessages.findIndex(
+    (message, index) => message !== nextMessages[index],
+  );
+  if (changedIndex === -1) return null;
+
+  if (!isAssistantMessage(previousMessages[changedIndex])) return null;
+  if (!isCompressionReportMessage(nextMessages[changedIndex])) return null;
+  if (!isCompressedAssistantMessage(nextMessages[changedIndex + 1])) {
+    return null;
+  }
+
+  for (let i = changedIndex + 1; i < previousMessages.length; i++) {
+    if (previousMessages[i] !== nextMessages[i + 1]) return null;
+  }
+
+  return changedIndex;
+}
+
 function tryParseSkillActivated(
   content: string,
 ): Omit<DisplayItemSkillActivated, "type" | "key" | "messageIndex"> | null {
@@ -732,6 +772,19 @@ export function tryIncrementalDisplayItemsUpdate(
 ): DisplayItem[] | null {
   if (!previousMessages || !previousItems) return null;
   if (previousMessages.length !== nextMessages.length) {
+    const replacementIndex = findReportAndSummaryReplacementIndex(
+      previousMessages,
+      nextMessages,
+    );
+    if (replacementIndex !== null) {
+      return rebuildDisplayItemsFromStart(
+        previousItems,
+        nextMessages,
+        isStreaming,
+        replacementIndex,
+      );
+    }
+
     return patchTailDisplayItems(
       previousMessages,
       nextMessages,

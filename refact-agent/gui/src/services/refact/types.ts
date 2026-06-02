@@ -481,6 +481,11 @@ export type SummarizationTier =
 
 export type LlmSegmentSummaryCompressionMetadata = Record<string, unknown> & {
   kind: "llm_segment_summary";
+  schema_version?: number;
+  source_hash?: string;
+  source_message_ids?: string[];
+  created_at?: string;
+  summary_model?: string;
 };
 
 function isLlmSegmentSummaryCompressionMetadata(
@@ -513,6 +518,11 @@ export interface SummarizationMessage extends BaseMessage {
 
 export type ChatCompressionReportMetadata = {
   kind: "chat_compression_report";
+  compression_kind?: string;
+  source_message_count?: number;
+  source_message_ids?: string[];
+  source_hash?: string;
+  summary_model?: string;
   context_files_removed?: number;
   context_messages_dropped?: number;
   tool_results_truncated?: number;
@@ -522,10 +532,66 @@ export type ChatCompressionReportMetadata = {
   reduction_percent?: number;
 };
 
+const CHAT_COMPRESSION_REPORT_NUMBER_FIELDS = [
+  "source_message_count",
+  "context_files_removed",
+  "context_messages_dropped",
+  "tool_results_truncated",
+  "tokens_before",
+  "tokens_after",
+  "estimated_tokens_saved",
+  "reduction_percent",
+] as const satisfies readonly (keyof ChatCompressionReportMetadata)[];
+
+const CHAT_COMPRESSION_REPORT_STRING_FIELDS = [
+  "compression_kind",
+  "source_hash",
+  "summary_model",
+] as const satisfies readonly (keyof ChatCompressionReportMetadata)[];
+
+function hasOptionalNumberField(
+  record: Record<string, unknown>,
+  key: (typeof CHAT_COMPRESSION_REPORT_NUMBER_FIELDS)[number],
+): boolean {
+  const value = record[key];
+  return (
+    value === undefined || (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+function hasOptionalStringField(
+  record: Record<string, unknown>,
+  key: (typeof CHAT_COMPRESSION_REPORT_STRING_FIELDS)[number],
+): boolean {
+  const value = record[key];
+  return value === undefined || typeof value === "string";
+}
+
+function hasOptionalStringArrayField(
+  record: Record<string, unknown>,
+  key: "source_message_ids",
+): boolean {
+  const value = record[key];
+  return (
+    value === undefined ||
+    (Array.isArray(value) && value.every((item) => typeof item === "string"))
+  );
+}
+
 function isChatCompressionReportMetadata(
   value: unknown,
 ): value is ChatCompressionReportMetadata {
-  return isRecord(value) && value.kind === "chat_compression_report";
+  return (
+    isRecord(value) &&
+    value.kind === "chat_compression_report" &&
+    CHAT_COMPRESSION_REPORT_NUMBER_FIELDS.every((key) =>
+      hasOptionalNumberField(value, key),
+    ) &&
+    CHAT_COMPRESSION_REPORT_STRING_FIELDS.every((key) =>
+      hasOptionalStringField(value, key),
+    ) &&
+    hasOptionalStringArrayField(value, "source_message_ids")
+  );
 }
 
 export function getCompressionReportMetadata(message: {

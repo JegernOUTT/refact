@@ -272,6 +272,47 @@ describe("SummarizationMessage", () => {
     expect(stats).toHaveTextContent("3,000");
   });
 
+  it("compression_report_stats_include_llm_segment_summary_fields", async () => {
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier1_llm",
+          content: "## Chat context compressed\n\nSummary kept for the model.",
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            source_message_count: 4,
+            summary_model: "summary-model",
+            tokens_before: 12000,
+            tokens_after: 3000,
+            estimated_tokens_saved: 9000,
+            reduction_percent: 75,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("summarization-card-tier")).toHaveTextContent(
+      "Context compressed",
+    );
+    await user.click(screen.getByTestId("summarization-card-header"));
+    expect(
+      screen.getByText(
+        "Older context was summarized so this chat can continue within the model limit.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Summary kept for the model/u)).toBeInTheDocument();
+    const stats = screen.getByTestId("summarization-card-stats");
+    expect(stats).toHaveTextContent("Messages compressed");
+    expect(stats).toHaveTextContent("4");
+    expect(stats).toHaveTextContent("Summary model");
+    expect(stats).toHaveTextContent("summary-model");
+    expect(stats).toHaveTextContent("Tokens saved");
+    expect(stats).toHaveTextContent("9,000");
+    expect(stats).toHaveTextContent("Reduction");
+    expect(stats).toHaveTextContent("75%");
+  });
+
   it("renders context messages dropped from compression report metadata", async () => {
     const { user } = render(
       <SummarizationMessage
