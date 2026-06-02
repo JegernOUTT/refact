@@ -15,6 +15,7 @@ use crate::llm::params::CacheControl;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use refact_chat_api::FrozenRequestPrefix;
+use refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE;
 use refact_tool_api::{build_registry_from_names, ToolAliasRegistry, ToolDesc};
 use super::tools::execute_tools;
 use super::types::ThreadParams;
@@ -152,7 +153,7 @@ fn last_system_message(messages: &[ChatMessage]) -> Option<ChatMessage> {
 fn remove_visualization_only_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     messages
         .into_iter()
-        .filter(|message| message.role != "error")
+        .filter(|message| !matches!(message.role.as_str(), "error" | COMPRESSION_REPORT_ROLE))
         .collect()
 }
 
@@ -650,6 +651,7 @@ mod tests {
     use crate::llm::adapters::openai_chat::OpenAiChatAdapter;
     use crate::yaml_configs::customization_types::{ModeConfig, ProjectRegistry};
     use indexmap::IndexMap;
+    use refact_chat_history::trajectory_ops::COMPRESSION_REPORT_KIND;
     use refact_tool_api::{ToolSource, ToolSourceType};
     use serde_json::json;
     use std::collections::HashMap;
@@ -781,6 +783,61 @@ mod tests {
 
     fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         crate::chat::internal_roles::plan(mode, version, content, None)
+    }
+
+    fn user_message(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn segment_summary_message(content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compression".to_string(),
+            json!({
+                "schema_version": 2,
+                "kind": "llm_segment_summary",
+                "source_hash": "hash",
+                "source_message_ids": ["source-id"],
+                "created_at": "now",
+                "summary_model": "test/frozen-model",
+            }),
+        );
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            summarization_tier: Some("llm_segment_summary".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn compression_report_message(content: &str) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compression_report".to_string(),
+            json!({
+                "kind": COMPRESSION_REPORT_KIND,
+                "compression_kind": "llm_segment_summary",
+                "source_message_count": 1,
+                "summary_model": "test/frozen-model",
+                "tokens_before": 100,
+                "tokens_after": 20,
+                "estimated_tokens_saved": 80,
+                "reduction_percent": 80,
+            }),
+        );
+        ChatMessage {
+            role: COMPRESSION_REPORT_ROLE.to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            summarization_tier: Some("tier1_llm".to_string()),
+            summarized_token_estimate: Some(80),
+            extra,
+            ..Default::default()
+        }
     }
 
     fn frozen_prefix(
@@ -1042,6 +1099,44 @@ mod tests {
             first.llm_request.messages[0].content.content_text_only(),
             second.llm_request.messages[0].content.content_text_only()
         );
+    }
+
+    #[tokio::test]
+    async fn prepare_filters_compression_reports_from_model_context() {
+        let gcx = gcx_with_model_and_modes(
+            "test/frozen-model",
+            vec![mode_config("agent", "Agent", "Do agent work")],
+        )
+        .await;
+        let messages = vec![
+            user_message("before compression"),
+            compression_report_message("visible report should stay out of model context"),
+            segment_summary_message("internal summary kept for the model"),
+            user_message("after compression"),
+        ];
+
+        let prepared = prepare_with_prefix(gcx, messages, Vec::new(), None).await;
+        let roles: Vec<&str> = prepared
+            .llm_request
+            .messages
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        let text = prepared
+            .llm_request
+            .messages
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert!(text.contains("internal summary kept for the model"));
+        assert!(!text.contains("visible report should stay out of model context"));
+        assert!(prepared
+            .limited_messages
+            .iter()
+            .all(|message| message.role != COMPRESSION_REPORT_ROLE));
     }
 
     fn default_settings() -> AdapterSettings {
