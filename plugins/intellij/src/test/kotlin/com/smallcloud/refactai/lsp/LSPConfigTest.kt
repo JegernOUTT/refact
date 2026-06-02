@@ -9,7 +9,7 @@ class LSPConfigTest {
     fun toArgsDoesNotIncludeUnsupportedClientVersionFlag() {
         val args = LSPConfig(port = 12345, ast = false, vecdb = false).toArgs()
 
-        assertEquals(listOf("--http-port", "12345"), args)
+        assertEquals(listOf("--http-port", "12345", "--http-host", "0.0.0.0"), args)
         assertFalse(args.contains("--enduser-client-version"))
     }
 }
