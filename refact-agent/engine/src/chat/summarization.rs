@@ -502,7 +502,66 @@ fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment)
     !tail.iter().any(is_excluded_from_segment)
         && has_tail_summarizable_output(tail)
         && !tail_has_pending_tool_calls(tail)
+        && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_matching_summary(messages, segment)
+}
+
+fn segment_contains_external_tool_completion(
+    messages: &[ChatMessage],
+    segment: SummarySegment,
+) -> bool {
+    let mut prior_inside_tool_call_ids = HashSet::new();
+    let mut prior_outside_tool_call_ids = HashSet::new();
+    let mut prior_inside_read_tool_call_ids = HashSet::new();
+    let mut prior_outside_read_tool_call_ids = HashSet::new();
+
+    for (idx, message) in messages.iter().enumerate() {
+        let is_inside = idx >= segment.start && idx <= segment.end;
+        if is_inside {
+            match message.role.as_str() {
+                "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                    let id = message.tool_call_id.as_str();
+                    if prior_outside_tool_call_ids.contains(id)
+                        && !prior_inside_tool_call_ids.contains(id)
+                    {
+                        return true;
+                    }
+                }
+                "context_file" if !message.tool_call_id.is_empty() => {
+                    let id = message.tool_call_id.as_str();
+                    if prior_outside_read_tool_call_ids.contains(id)
+                        && !prior_inside_read_tool_call_ids.contains(id)
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if message.role != "assistant" || is_ui_only_message(message) {
+            continue;
+        }
+        let Some(tool_calls) = message.tool_calls.as_ref() else {
+            continue;
+        };
+        for tool_call in tool_calls {
+            let id = tool_call.id.as_str();
+            if is_inside {
+                prior_inside_tool_call_ids.insert(id);
+                if is_read_like_tool_name(&tool_call.function.name) {
+                    prior_inside_read_tool_call_ids.insert(id);
+                }
+            } else {
+                prior_outside_tool_call_ids.insert(id);
+                if is_read_like_tool_name(&tool_call.function.name) {
+                    prior_outside_read_tool_call_ids.insert(id);
+                }
+            }
+        }
+    }
+
+    false
 }
 
 pub fn eligible_tail_non_user_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
@@ -520,7 +579,10 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
     }
     closed_non_user_segments(messages)
         .into_iter()
-        .find(|segment| !segment_is_matching_summary(messages, *segment))
+        .find(|segment| {
+            !segment_is_matching_summary(messages, *segment)
+                && !segment_contains_external_tool_completion(messages, *segment)
+        })
         .or_else(|| eligible_tail_non_user_segment(messages))
 }
 
@@ -2289,6 +2351,48 @@ mod tests {
     }
 
     #[test]
+    fn tail_segment_does_not_orphan_tool_result_across_excluded_separator() {
+        let mut messages = vec![
+            user("run tool then continue"),
+            assistant_with_tool_call_id("call_x"),
+            cd_instruction("internal separator"),
+            tool_with_id("call_x", "tool result that must stay paired"),
+            assistant("later output after tool result"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn tail_segment_with_tool_request_and_result_inside_candidate_is_eligible() {
+        let mut messages = vec![
+            user("run tool"),
+            assistant_with_tool_call_id("call_x"),
+            tool_with_id("call_x", "tool result"),
+            assistant("later explanation"),
+        ];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 1, end: 3 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "tool turn summary",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 2);
+        assert!(is_segment_summary(&messages[1]));
+    }
+
+    #[test]
     fn tail_segment_completed_read_tool_context_file_is_eligible() {
         let assistant_call = assistant_with_named_tool_call("call_read", "cat");
         let mut messages = vec![
@@ -2308,6 +2412,26 @@ mod tests {
         ));
         assert_eq!(messages.len(), 2);
         assert!(is_segment_summary(&messages[1]));
+    }
+
+    #[test]
+    fn tail_segment_does_not_orphan_read_context_file_across_excluded_separator() {
+        let mut messages = vec![
+            user("read file then continue"),
+            assistant_with_named_tool_call("call_read", "cat"),
+            cd_instruction("internal separator"),
+            context_file_with_tool_call_id("call_read", "file content"),
+            assistant("later output after read"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
     }
 
     #[test]
