@@ -1974,7 +1974,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
           rt.error = null;
         }
         const wasCompressionActive =
-          rt.is_compressing || compressionPhaseIsActive(rt.compression_phase);
+          rt.is_compressing === true ||
+          compressionPhaseIsActive(rt.compression_phase);
         if (typeof event.is_compressing === "boolean") {
           rt.is_compressing = event.is_compressing;
         } else if (
