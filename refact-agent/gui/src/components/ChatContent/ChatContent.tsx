@@ -136,7 +136,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const compressionVisibleSinceRef = useRef<number | null>(
     compressionActive ? Date.now() : null,
   );
-  const handledCompressionPulseSeqRef = useRef(compressionPulseSeq);
+  const handledCompressionPulseSeqRef = useRef<string | undefined>(undefined);
   const compressionPulseActive =
     compressionPulseSeq !== undefined &&
     compressionPulseSeq !== handledCompressionPulseSeqRef.current;

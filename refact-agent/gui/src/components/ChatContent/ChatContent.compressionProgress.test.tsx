@@ -24,12 +24,16 @@ function makeRuntime({
   snapshotReceived = true,
   isStreaming = false,
   queuedItems = [],
+  compressionPhase,
+  compressionPulseSeq,
 }: {
   messages?: ChatMessages;
   isCompressing?: boolean;
   snapshotReceived?: boolean;
   isStreaming?: boolean;
   queuedItems?: QueuedItem[];
+  compressionPhase?: ChatThreadRuntime["compression_phase"];
+  compressionPulseSeq?: string;
 } = {}): ChatThreadRuntime {
   const chat = createDefaultChatState();
   const chatId = chat.current_thread_id;
@@ -39,6 +43,8 @@ function makeRuntime({
   runtime.snapshot_received = snapshotReceived;
   runtime.streaming = isStreaming;
   runtime.queued_items = queuedItems;
+  runtime.compression_phase = compressionPhase;
+  runtime.compression_pulse_seq = compressionPulseSeq;
   return runtime;
 }
 
@@ -48,6 +54,8 @@ function makeChatState({
   snapshotReceived = true,
   isStreaming = false,
   queuedItems = [],
+  compressionPhase,
+  compressionPulseSeq,
   sseStatus,
 }: {
   messages?: ChatMessages;
@@ -55,6 +63,8 @@ function makeChatState({
   snapshotReceived?: boolean;
   isStreaming?: boolean;
   queuedItems?: QueuedItem[];
+  compressionPhase?: ChatThreadRuntime["compression_phase"];
+  compressionPulseSeq?: string;
   sseStatus?: "disconnected" | "connecting" | "connected";
 } = {}): Partial<RootState> {
   const chat = createDefaultChatState();
@@ -65,6 +75,8 @@ function makeChatState({
   runtime.snapshot_received = snapshotReceived;
   runtime.streaming = isStreaming;
   runtime.queued_items = queuedItems;
+  runtime.compression_phase = compressionPhase;
+  runtime.compression_pulse_seq = compressionPulseSeq;
   return {
     chat,
     ...(sseStatus
@@ -229,6 +241,32 @@ describe("ChatContent compression progress", () => {
     expect(queuedCard?.className).toContain("queuedMessage");
     expect(queuedContent?.className).toContain("queuedMessagesContent");
     expect(queuedContainer?.className).toContain("queuedMessagesContainer");
+  });
+
+  it("shows preloaded compression pulse on first mount", () => {
+    vi.useFakeTimers({ now: 0 });
+    renderChatContent(
+      makeChatState({
+        compressionPhase: "applied",
+        compressionPulseSeq: "preloaded-pulse",
+      }),
+    );
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(499);
+    });
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(
+      screen.queryByTestId("compression-progress"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows progress when fast compression start and applied events are batched", () => {
@@ -398,6 +436,74 @@ describe("ChatContent compression progress", () => {
     expect(
       screen.queryByTestId("chat-virtualized-list-wrapper"),
     ).not.toBeInTheDocument();
+  });
+
+  it("does not replay an old chat compression pulse when switching back", () => {
+    const oldRuntime = makeRuntime({
+      compressionPhase: "applied",
+      compressionPulseSeq: "old-pulse",
+    });
+    oldRuntime.thread.id = "old-chat";
+    const targetRuntime = makeRuntime({
+      messages: [userMessage("target chat content")],
+    });
+    targetRuntime.thread.id = "target-chat";
+    const preloadedState: Partial<RootState> = {
+      chat: {
+        current_thread_id: "target-chat",
+        open_thread_ids: ["old-chat", "target-chat"],
+        threads: {
+          "old-chat": oldRuntime,
+          "target-chat": targetRuntime,
+        },
+        system_prompt: {},
+        tool_use: "explore",
+        sse_refresh_requested: null,
+        stream_version: 0,
+      },
+    };
+    let finishSwitch: FrameRequestCallback | undefined;
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        finishSwitch = callback;
+        return 1;
+      });
+    const cancelAnimationFrameSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation(() => undefined);
+
+    try {
+      const { store } = render(
+        <ChatContent
+          onRetry={() => undefined}
+          onStopStreaming={() => undefined}
+        />,
+        { preloadedState },
+      );
+
+      expect(screen.getByText("target chat content")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("compression-progress"),
+      ).not.toBeInTheDocument();
+
+      act(() => {
+        store.dispatch(switchToThread({ id: "old-chat" }));
+      });
+
+      expect(finishSwitch).toBeDefined();
+
+      act(() => {
+        finishSwitch?.(0);
+      });
+
+      expect(
+        screen.queryByTestId("compression-progress"),
+      ).not.toBeInTheDocument();
+    } finally {
+      requestAnimationFrameSpy.mockRestore();
+      cancelAnimationFrameSpy.mockRestore();
+    }
   });
 
   it("shows switching loading instead of old compressing chat progress", () => {
