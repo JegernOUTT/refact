@@ -487,7 +487,10 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     test.each(["skipped", "failed"] as const)(
       "%s snapshot does not create pulse after active compression",
       (compressionPhase) => {
-        let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+        let state = chatReducer(
+          initialState,
+          applyChatEvent(createSnapshot([])),
+        );
 
         state = chatReducer(
           state,

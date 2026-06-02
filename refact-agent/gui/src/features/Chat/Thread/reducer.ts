@@ -1433,7 +1433,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const snapshotCompressionPulseSeq =
           snapshotCompressionPhase === "applied" &&
           (wasCompressionActive || existingCompressionPulseSeq !== undefined)
-            ? (existingCompressionPulseSeq ?? event.seq)
+            ? existingCompressionPulseSeq ?? event.seq
             : undefined;
 
         const newRt: ChatThreadRuntime = {

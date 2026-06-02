@@ -16,6 +16,13 @@ import {
 } from "../features/Chat/Thread/actions";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 
+function requireThread(state: Chat, threadId: string) {
+  const runtime = state.threads[threadId];
+  expect(runtime).toBeDefined();
+  if (!runtime) throw new Error(`Expected thread ${threadId} to exist`);
+  return runtime;
+}
+
 describe("Chat Thread Reducer - Core Functionality", () => {
   let initialState: Chat;
   let chatId: string;
@@ -537,16 +544,15 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       };
 
       const initialized = chatReducer(initialState, capsAction);
-      const existingRuntime = initialized.threads[chatId];
-      expect(existingRuntime).toBeDefined();
+      const existingRuntime = requireThread(initialized, chatId);
       const withExplicitCap: Chat = {
         ...initialized,
         threads: {
           ...initialized.threads,
           [chatId]: {
-            ...existingRuntime!,
+            ...existingRuntime,
             thread: {
-              ...existingRuntime!.thread,
+              ...existingRuntime.thread,
               context_tokens_cap: 4096,
             },
           },
@@ -599,16 +605,15 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       };
 
       const initialized = chatReducer(initialState, capsAction);
-      const existingRuntime = initialized.threads[chatId];
-      expect(existingRuntime).toBeDefined();
+      const existingRuntime = requireThread(initialized, chatId);
       const withExplicitCap: Chat = {
         ...initialized,
         threads: {
           ...initialized.threads,
           [chatId]: {
-            ...existingRuntime!,
+            ...existingRuntime,
             thread: {
-              ...existingRuntime!.thread,
+              ...existingRuntime.thread,
               context_tokens_cap: 4096,
             },
           },
@@ -723,16 +728,15 @@ describe("Chat Thread Reducer - Core Functionality", () => {
     });
 
     test("model_switch_updates_auto_context_cap_without_existing_model_limit", () => {
-      const existingRuntime = initialState.threads[chatId];
-      expect(existingRuntime).toBeDefined();
+      const existingRuntime = requireThread(initialState, chatId);
       const restoredState: Chat = {
         ...initialState,
         threads: {
           ...initialState.threads,
           [chatId]: {
-            ...existingRuntime!,
+            ...existingRuntime,
             thread: {
-              ...existingRuntime!.thread,
+              ...existingRuntime.thread,
               model: "old-model",
               context_tokens_cap: 8192,
               currentMaximumContextTokens: undefined,
