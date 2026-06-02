@@ -313,6 +313,70 @@ describe("SummarizationMessage", () => {
     expect(stats).toHaveTextContent("75%");
   });
 
+  it("renders llm segment reports as compact compression events", async () => {
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier1_llm",
+          content: "## Full report\n\nMarkdown details stay expandable.",
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            source_message_count: 6,
+            summary_model: "summary-model",
+            tokens_before: 12000,
+            tokens_after: 3000,
+            estimated_tokens_saved: 9000,
+            reduction_percent: 75,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("summarization-card-tier")).toHaveTextContent(
+      "Context compressed",
+    );
+    expect(
+      screen.getByText(
+        "Older context was summarized so this chat can continue within the model limit.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Markdown details stay expandable/u)).toBeNull();
+
+    const stats = screen.getByTestId("summarization-card-stats");
+    expect(stats).toHaveTextContent("Messages compressed");
+    expect(stats).toHaveTextContent("6");
+    expect(stats).toHaveTextContent("Tokens saved");
+    expect(stats).toHaveTextContent("9,000");
+    expect(stats).toHaveTextContent("Reduction");
+    expect(stats).toHaveTextContent("75%");
+    expect(stats).toHaveTextContent("Summary model");
+    expect(stats).toHaveTextContent("summary-model");
+    expect(stats).not.toHaveTextContent("Tokens before");
+
+    await user.click(screen.getByTestId("summarization-card-header"));
+    expect(
+      screen.getByText(/Markdown details stay expandable/u),
+    ).toBeInTheDocument();
+  });
+
+  it("toggles expansion from the keyboard", async () => {
+    const { user } = render(
+      <SummarizationMessage message={makeMessage({ content: "details" })} />,
+    );
+    const header = screen.getByTestId("summarization-card-header");
+
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    header.focus();
+    await user.keyboard("{Enter}");
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("summarization-card-body")).toBeInTheDocument();
+
+    await user.keyboard(" ");
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("summarization-card-body")).toBeNull();
+  });
+
   it("renders context messages dropped from compression report metadata", async () => {
     const { user } = render(
       <SummarizationMessage

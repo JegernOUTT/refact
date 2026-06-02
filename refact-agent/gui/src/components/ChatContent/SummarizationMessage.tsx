@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import { Box, Flex } from "@radix-ui/themes";
 import {
   getAssistantCompressionMetadata,
@@ -59,7 +59,7 @@ function metaForTier(
     case "tier2_reactive":
       return {
         label: "Reactive compaction",
-        icon: "🛟",
+        icon: "🗜️",
         badgeClass: styles.tierBadgeTier2,
       };
     default:
@@ -91,20 +91,34 @@ function tokenLabelFor(
 
 type StatCell = { label: string; value: string };
 
-type MetadataStat = {
-  key: keyof Omit<ChatCompressionReportMetadata, "kind">;
-  label: string;
-  suffix?: string;
-};
-
 function parseStringStat(value: unknown): string | null {
-  if (typeof value !== "string" || value.trim().length === 0) return null;
-  return value;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function parseNumberStat(value: unknown, suffix = ""): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return `${value.toLocaleString()}${suffix}`;
+}
+
+function sourceMessageCountFromReport(
+  report: ChatCompressionReportMetadata,
+): number | null {
+  if (
+    typeof report.source_message_count === "number" &&
+    Number.isFinite(report.source_message_count)
+  ) {
+    return report.source_message_count;
+  }
+  if (Array.isArray(report.source_message_ids)) {
+    return report.source_message_ids.length;
+  }
+  return null;
+}
+
+function statCell(label: string, value: string | null): StatCell[] {
+  return value ? [{ label, value }] : [];
 }
 
 function statsFromCompressionReportMetadata(
@@ -113,26 +127,49 @@ function statsFromCompressionReportMetadata(
   const report = getCompressionReportMetadata(message);
   if (!report) return null;
 
-  const STAT_FIELDS: MetadataStat[] = [
-    { key: "source_message_count", label: "Messages compressed" },
-    { key: "context_files_removed", label: "Context files removed" },
-    { key: "context_messages_dropped", label: "Context messages dropped" },
-    { key: "tool_results_truncated", label: "Tool outputs truncated" },
-    { key: "summary_model", label: "Summary model" },
-    { key: "tokens_before", label: "Tokens before" },
-    { key: "tokens_after", label: "Tokens after" },
-    { key: "estimated_tokens_saved", label: "Tokens saved" },
-    { key: "reduction_percent", label: "Reduction", suffix: "%" },
+  const sourceMessageCount = sourceMessageCountFromReport(report);
+  const stats: StatCell[] = [
+    ...statCell(
+      "Messages compressed",
+      sourceMessageCount !== null ? sourceMessageCount.toLocaleString() : null,
+    ),
+    ...statCell(
+      "Tokens saved",
+      parseNumberStat(report.estimated_tokens_saved),
+    ),
+    ...statCell("Reduction", parseNumberStat(report.reduction_percent, "%")),
+    ...statCell("Summary model", parseStringStat(report.summary_model)),
+    ...statCell("Tokens before", parseNumberStat(report.tokens_before)),
+    ...statCell("Tokens after", parseNumberStat(report.tokens_after)),
+    ...statCell(
+      "Context messages dropped",
+      parseNumberStat(report.context_messages_dropped),
+    ),
+    ...statCell(
+      "Context files removed",
+      parseNumberStat(report.context_files_removed),
+    ),
+    ...statCell(
+      "Tool outputs truncated",
+      parseNumberStat(report.tool_results_truncated),
+    ),
   ];
-
-  const stats = STAT_FIELDS.flatMap(({ key, label, suffix }) => {
-    const value =
-      key === "summary_model"
-        ? parseStringStat(report[key])
-        : parseNumberStat(report[key], suffix);
-    return value ? [{ label, value }] : [];
-  });
   return stats.length > 0 ? stats : null;
+}
+
+function isPrimaryReportStat(stat: StatCell): boolean {
+  return (
+    stat.label === "Messages compressed" ||
+    stat.label === "Tokens saved" ||
+    stat.label === "Reduction" ||
+    stat.label === "Summary model"
+  );
+}
+
+function primaryReportStats(stats: StatCell[] | null): StatCell[] | null {
+  if (!stats) return null;
+  const primary = stats.filter(isPrimaryReportStat);
+  return primary.length > 0 ? primary : null;
 }
 
 function parseReactiveStats(content: string): StatCell[] | null {
@@ -164,10 +201,24 @@ function parseReactiveStats(content: string): StatCell[] | null {
   return stats.length > 0 ? stats : null;
 }
 
+function StatsGrid({ stats }: { stats: StatCell[] }) {
+  return (
+    <Box className={styles.statsGrid} data-testid="summarization-card-stats">
+      {stats.map((s) => (
+        <Box key={s.label} className={styles.statCell}>
+          <span className={styles.statLabel}>{s.label}</span>
+          <span className={styles.statValue}>{s.value}</span>
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
 export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   message,
 }) => {
   const [open, setOpen] = useState(false);
+  const bodyId = useId();
 
   const tier = message.summarization_tier;
   const contentText =
@@ -176,13 +227,14 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const isSegmentCompressionReport =
     compressionReport?.compression_kind === "llm_segment_summary";
 
-  const reactiveStats = useMemo(() => {
-    if (tier !== "tier2_reactive" && !compressionReport) return null;
-    return (
-      statsFromCompressionReportMetadata(message) ??
-      parseReactiveStats(contentText)
-    );
-  }, [tier, compressionReport, contentText, message]);
+  const reportStats = useMemo(
+    () => statsFromCompressionReportMetadata(message),
+    [message],
+  );
+  const bodyStats = useMemo(() => {
+    if (reportStats || tier !== "tier2_reactive") return null;
+    return parseReactiveStats(contentText);
+  }, [tier, reportStats, contentText]);
 
   const meta = metaForTier(tier, isSegmentCompressionReport);
 
@@ -193,9 +245,12 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
     : null;
 
   const compressionMeta = getAssistantCompressionMetadata(message);
+  const reportSourceCount = compressionReport
+    ? sourceMessageCountFromReport(compressionReport)
+    : null;
   const sourceCount =
-    typeof compressionReport?.source_message_count === "number"
-      ? compressionReport.source_message_count
+    reportSourceCount !== null
+      ? reportSourceCount
       : Array.isArray(compressionMeta?.source_message_ids)
         ? compressionMeta.source_message_ids.length
         : null;
@@ -215,18 +270,30 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
         )
       : null;
 
+  const showHeaderMetrics = reportStats === null;
+  const reportSummaryStats = isSegmentCompressionReport
+    ? primaryReportStats(reportStats)
+    : reportStats;
+  const hasReportSummary =
+    isSegmentCompressionReport || reportSummaryStats !== null;
+  const cardClassName = compressionReport
+    ? `${styles.card} ${styles.reportCard}`
+    : styles.card;
+  const toggleOpen = () => setOpen((v) => !v);
+
   return (
-    <Box className={styles.card} data-testid="summarization-card">
+    <Box className={cardClassName} data-testid="summarization-card">
       <Flex
         className={styles.header}
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggleOpen}
         role="button"
         tabIndex={0}
         aria-expanded={open}
+        aria-controls={bodyId}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            setOpen((v) => !v);
+            toggleOpen();
           }
         }}
         data-testid="summarization-card-header"
@@ -244,41 +311,43 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
           {rangeLabel && (
             <span className={styles.rangeLabel}>{rangeLabel}</span>
           )}
-          {sourceCount !== null && (
+          {showHeaderMetrics && sourceCount !== null && (
             <span className={styles.rangeLabel}>{sourceCount} messages</span>
           )}
-          {summaryModel && (
+          {showHeaderMetrics && summaryModel && (
             <span className={styles.tokenLabel}>· {summaryModel}</span>
           )}
-          {tokenLabel && (
+          {showHeaderMetrics && tokenLabel && (
             <span className={styles.tokenLabel}>· {tokenLabel}</span>
           )}
         </Flex>
         <span className={styles.toggle}>{open ? "▲" : "▼"}</span>
       </Flex>
-      {open && (
-        <Box className={styles.body} data-testid="summarization-card-body">
+      {hasReportSummary && (
+        <Box
+          className={styles.eventSummary}
+          data-testid="summarization-card-summary"
+        >
           {isSegmentCompressionReport && (
-            <p>{LLM_SEGMENT_SUMMARY_DESCRIPTION}</p>
+            <p className={styles.description}>
+              {LLM_SEGMENT_SUMMARY_DESCRIPTION}
+            </p>
           )}
+          {reportSummaryStats && <StatsGrid stats={reportSummaryStats} />}
+        </Box>
+      )}
+      {open && (
+        <Box
+          id={bodyId}
+          className={styles.body}
+          data-testid="summarization-card-body"
+        >
           {contentText.length > 0 ? (
             <ToolMarkdown>{contentText}</ToolMarkdown>
           ) : (
             <span>No details available.</span>
           )}
-          {reactiveStats && reactiveStats.length > 0 && (
-            <Box
-              className={styles.statsGrid}
-              data-testid="summarization-card-stats"
-            >
-              {reactiveStats.map((s) => (
-                <Box key={s.label} className={styles.statCell}>
-                  <span className={styles.statLabel}>{s.label}</span>
-                  <span className={styles.statValue}>{s.value}</span>
-                </Box>
-              ))}
-            </Box>
-          )}
+          {bodyStats && bodyStats.length > 0 && <StatsGrid stats={bodyStats} />}
         </Box>
       )}
     </Box>
