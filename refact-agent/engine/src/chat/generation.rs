@@ -91,6 +91,14 @@ fn context_limit_final_error_message(error: &str) -> String {
     )
 }
 
+fn partial_output_stream_error_message(original: &str) -> String {
+    format!(
+        "{} Original error: {}",
+        PARTIAL_OUTPUT_STREAM_ERROR,
+        safe_provider_error_diagnostic(original),
+    )
+}
+
 async fn user_stop_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
     let session = session_arc.lock().await;
     session.user_interrupt_flag.load(Ordering::SeqCst)
@@ -1144,14 +1152,9 @@ pub fn start_generation(
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
                     let original = error.message.clone();
-                    warn!(
-                        "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, original
-                    );
-                    error.message = format!(
-                        "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, original
-                    );
+                    let safe_error = partial_output_stream_error_message(&original);
+                    warn!("{}", safe_error);
+                    error.message = safe_error;
                 }
 
                 let error_message = error.message;
@@ -2437,6 +2440,12 @@ mod tests {
             + crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
     }
 
+    fn partial_output_error_bound() -> usize {
+        PARTIAL_OUTPUT_STREAM_ERROR.len()
+            + " Original error: ".len()
+            + crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
+    }
+
     fn assert_context_limit_secret_redacted(text: &str) {
         assert!(!text.contains("sk-test-secret"), "secret leaked: {text}");
         assert!(
@@ -2500,6 +2509,42 @@ mod tests {
         assert!(!text.contains(far_tail), "far-tail marker leaked: {text}");
         assert!(
             text.len() <= final_context_limit_error_bound(),
+            "len={}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn partial_output_stream_error_redacts_provider_secret() {
+        let text = partial_output_stream_error_message(
+            "provider failed: Authorization: Bearer sk-test-secret",
+        );
+
+        assert!(text.starts_with(PARTIAL_OUTPUT_STREAM_ERROR));
+        assert_context_limit_secret_redacted(&text);
+        assert!(
+            text.len() <= partial_output_error_bound(),
+            "len={}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn partial_output_stream_error_windows_huge_provider_error() {
+        let far_tail = "FAR_TAIL_MARKER";
+        let error = format!(
+            "provider failed: Authorization: Bearer sk-test-secret {} {}",
+            "tail ".repeat(100_000),
+            far_tail,
+        );
+
+        let text = partial_output_stream_error_message(&error);
+
+        assert_context_limit_secret_redacted(&text);
+        assert!(text.contains(crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED));
+        assert!(!text.contains(far_tail), "far-tail marker leaked: {text}");
+        assert!(
+            text.len() <= partial_output_error_bound(),
             "len={}",
             text.len()
         );
