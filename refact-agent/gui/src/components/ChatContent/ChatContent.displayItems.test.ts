@@ -49,6 +49,22 @@ function compressedAssistantMessage(
   });
 }
 
+function matchingCompressedAssistantMessage(
+  overrides: Partial<AssistantMessage> = {},
+): AssistantMessage {
+  return compressedAssistantMessage({
+    extra: {
+      compression: {
+        kind: "llm_segment_summary",
+        source_hash: "source-hash-1",
+        source_message_ids: ["user-before", "assistant-old-1"],
+        summary_model: "summary-model",
+      },
+    },
+    ...overrides,
+  });
+}
+
 function activateSkillOnlyAssistantMessage(
   overrides: Partial<AssistantMessage> = {},
 ): AssistantMessage {
@@ -102,6 +118,24 @@ function compressionReportMessage(
     },
     ...overrides,
   };
+}
+
+function matchingLlmCompressionReportMessage(
+  overrides: Partial<CompressionReportMessage> = {},
+): CompressionReportMessage {
+  return compressionReportMessage({
+    extra: {
+      compression_report: {
+        kind: "chat_compression_report",
+        compression_kind: "llm_segment_summary",
+        source_hash: "source-hash-1",
+        source_message_ids: ["user-before", "assistant-old-1"],
+        source_message_count: 2,
+        summary_model: "summary-model",
+      },
+    },
+    ...overrides,
+  });
 }
 
 function eventMessage(overrides: Partial<EventMessage> = {}): EventMessage {
@@ -314,11 +348,13 @@ describe("ChatContent display items", () => {
     });
   });
 
-  it("renders_compression_report_without_adjacent_compressed_assistant", () => {
+  it("matching_llm_report_and_summary_render_single_report_card", () => {
     const messages: ChatMessages = [
       userMessage({ message_id: "user-before" }),
-      compressionReportMessage({ message_id: "compression-report" }),
-      compressedAssistantMessage({ message_id: "internal-summary" }),
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+      matchingCompressedAssistantMessage({ message_id: "internal-summary" }),
       userMessage({ message_id: "user-after" }),
     ];
 
@@ -339,6 +375,110 @@ describe("ChatContent display items", () => {
     }
     expect(reportItem.messageIndex).toBe(1);
     expect(reportItem.message.content).toContain("Chat compression report");
+  });
+
+  it("adjacent_deterministic_report_does_not_hide_legacy_compressed_assistant", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      compressionReportMessage({
+        message_id: "manual-compression-report",
+        extra: {
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "deterministic",
+            source_hash: "source-hash-1",
+            source_message_ids: ["user-before", "assistant-old-1"],
+          },
+        },
+      }),
+      compressedAssistantMessage({ message_id: "legacy-internal-summary" }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+    const summarizationItems = items.filter(
+      (item) => item.type === "summarization",
+    );
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "summarization",
+      "summarization",
+      "user",
+    ]);
+    expect(summarizationItems).toHaveLength(2);
+  });
+
+  it("adjacent_llm_report_with_mismatched_source_hash_does_not_hide_summary", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+        extra: {
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            source_hash: "source-hash-1",
+            source_message_ids: ["user-before", "assistant-old-1"],
+          },
+        },
+      }),
+      matchingCompressedAssistantMessage({
+        message_id: "mismatched-internal-summary",
+        extra: {
+          compression: {
+            kind: "llm_segment_summary",
+            source_hash: "different-source-hash",
+            source_message_ids: ["user-before", "assistant-old-1"],
+          },
+        },
+      }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+    const summarizationItems = items.filter(
+      (item) => item.type === "summarization",
+    );
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "summarization",
+      "summarization",
+      "user",
+    ]);
+    expect(summarizationItems).toHaveLength(2);
+  });
+
+  it("adjacent_report_missing_compression_kind_does_not_hide_summary", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      compressionReportMessage({
+        message_id: "compression-report",
+        extra: {
+          compression_report: {
+            kind: "chat_compression_report",
+            source_hash: "source-hash-1",
+            source_message_ids: ["user-before", "assistant-old-1"],
+          },
+        },
+      }),
+      matchingCompressedAssistantMessage({ message_id: "internal-summary" }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+    const summarizationItems = items.filter(
+      (item) => item.type === "summarization",
+    );
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "summarization",
+      "summarization",
+      "user",
+    ]);
+    expect(summarizationItems).toHaveLength(2);
   });
 
   it("legacy_compressed_assistant_without_report_still_renders_summary_card", () => {
@@ -373,8 +513,10 @@ describe("ChatContent display items", () => {
     ];
     const nextMessages: ChatMessages = [
       userBefore,
-      compressionReportMessage({ message_id: "compression-report" }),
-      compressedAssistantMessage({ message_id: "internal-summary" }),
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+      matchingCompressedAssistantMessage({ message_id: "internal-summary" }),
       userAfter,
     ];
     const previousItems = buildDisplayItems(previousMessages, false);

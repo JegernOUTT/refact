@@ -5,6 +5,8 @@ import {
   DiffChunk,
   DiffMessage,
   ErrorMessage,
+  getAssistantCompressionMetadata,
+  getCompressionReportMetadata,
   isChatContextFileMessage,
   isDiffMessage,
   isCompressedAssistantMessage,
@@ -211,12 +213,64 @@ function isCompressedAssistantPairedWithReport(
 ): boolean {
   const message = messages[index];
   if (!isCompressedAssistantMessage(message)) return false;
-  const previousIsReport =
-    index > 0 && isCompressionReportMessage(messages[index - 1]);
-  const nextIsReport =
+  const previousMatches =
+    index > 0 &&
+    isMatchingLlmSegmentCompressionReport(messages[index - 1], message);
+  const nextMatches =
     index + 1 < messages.length &&
-    isCompressionReportMessage(messages[index + 1]);
-  return previousIsReport || nextIsReport;
+    isMatchingLlmSegmentCompressionReport(messages[index + 1], message);
+  return previousMatches || nextMatches;
+}
+
+type CompressionIdentityMetadata = {
+  source_hash?: unknown;
+  source_message_ids?: unknown;
+};
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function nonEmptyStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  return value.every(nonEmptyString) ? value : null;
+}
+
+function compressionIdentityMatches(
+  reportMetadata: CompressionIdentityMetadata,
+  assistantMetadata: CompressionIdentityMetadata,
+): boolean {
+  if (
+    nonEmptyString(reportMetadata.source_hash) &&
+    nonEmptyString(assistantMetadata.source_hash)
+  ) {
+    return reportMetadata.source_hash === assistantMetadata.source_hash;
+  }
+
+  const reportSourceIds = nonEmptyStringArray(
+    reportMetadata.source_message_ids,
+  );
+  const assistantSourceIds = nonEmptyStringArray(
+    assistantMetadata.source_message_ids,
+  );
+  if (!reportSourceIds || !assistantSourceIds) return false;
+  if (reportSourceIds.length !== assistantSourceIds.length) return false;
+  return reportSourceIds.every((id, index) => id === assistantSourceIds[index]);
+}
+
+function isMatchingLlmSegmentCompressionReport(
+  reportMessage: ChatMessages[number],
+  assistantMessage: AssistantMessage,
+): boolean {
+  if (!isCompressionReportMessage(reportMessage)) return false;
+  const reportMetadata = getCompressionReportMetadata(reportMessage);
+  if (reportMetadata?.compression_kind !== "llm_segment_summary") {
+    return false;
+  }
+
+  const assistantMetadata = getAssistantCompressionMetadata(assistantMessage);
+  if (assistantMetadata?.kind !== "llm_segment_summary") return false;
+  return compressionIdentityMatches(reportMetadata, assistantMetadata);
 }
 
 type AssistantDisplayClass =
