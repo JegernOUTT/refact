@@ -1059,6 +1059,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                         queued_items: [],
                         send_immediately: thread.messages.length > 0,
                         attached_images: [],
+                        background_agents: {},
                         confirmation: {
                             pause: false,
                             pause_reasons: [],
