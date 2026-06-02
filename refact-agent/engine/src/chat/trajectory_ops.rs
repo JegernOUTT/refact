@@ -173,6 +173,26 @@ pub async fn handoff_select(
     }
     selected.extend(conversation);
 
+    // Carry the chat's plan into the handed-off chat so it starts with the same plan as
+    // ground truth: an existing plan banner (+ deltas), or a single plan()/task_done
+    // report pinned as a fresh plan banner. Dedupe by message_id in case the plan was
+    // already picked up by the positional conversation selection above.
+    let plan_messages = crate::agentic::mode_transition::carried_plan_messages(messages);
+    if !plan_messages.is_empty() {
+        let existing_ids: std::collections::HashSet<String> = selected
+            .iter()
+            .map(|message| message.message_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        for plan_message in plan_messages {
+            if plan_message.message_id.is_empty()
+                || !existing_ids.contains(&plan_message.message_id)
+            {
+                selected.push(plan_message);
+            }
+        }
+    }
+
     super::history_limit::remove_invalid_tool_calls_and_tool_calls_results(&mut selected);
 
     use refact_core::chat_types::ChatContent;

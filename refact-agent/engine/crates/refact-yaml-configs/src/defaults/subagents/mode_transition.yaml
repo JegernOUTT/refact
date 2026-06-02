@@ -87,19 +87,33 @@ messages:
     List tasks that still need to be done. One per line.
     </pending_tasks>
 
+    <plan_source>
+    If the conversation already contains an authoritative plan / spec / decision artifact that should guide the new chat, put the SINGLE MSG_ID that contains it here (for example: MSG_ID:12). The backend pins that message verbatim as the new chat's plan banner, so the new chat starts with the plan as ground truth.
+    Choose the most authoritative artifact, in priority order:
+    1. An existing pinned plan (a message already shown as a plan).
+    2. A strategic planning report — shown as [tool: plan].
+    3. A completion / task report — shown as [tool: task_done].
+    4. Planner output or a plan document referenced in the conversation.
+    Prefer this MSG_ID reference over re-writing the plan yourself, because it preserves the exact artifact. Leave this empty if no such artifact exists.
+    </plan_source>
+
     <handoff_message>
     A brief message to start the new chat, telling the assistant what to continue working on.
     </handoff_message>
 
+    Pinning a plan is independent of the target mode: if a plan-like artifact exists, set <plan_source> regardless of which mode you are transitioning to.
+
     If TARGET MODE is plan and the conversation contains an approved design/spec, include that design in <handoff_message> so Plan mode can turn it into implementation tasks.
 
-    If TARGET MODE is agent and the conversation contains a complete implementation plan, put a compact execution instruction in <handoff_message> and preserve the full plan either by selecting the exact MSG_ID/tool output that contains it or by including it in <summary> when it fits the budget. The Agent should receive the plan as ground truth.
+    If TARGET MODE is agent and the conversation contains a complete implementation plan, put a compact execution instruction in <handoff_message> and pin the full plan via <plan_source>. The Agent should receive the plan as ground truth.
 
-    If TARGET MODE is task_planner and the conversation contains a complete implementation plan, also include it verbatim:
+    Only if there is NO single message that already holds the full plan (so <plan_source> cannot point to one) and you must author it yourself, include it verbatim instead:
 
     <plan>
     Full plan text, including waves/cards or tasks, dependencies, exact files, tests, verification commands, acceptance criteria, risks, and non-goals.
     </plan>
+
+    Do not set both <plan_source> and <plan>; prefer <plan_source>.
 
     For plan handoffs, prefer a clean phase boundary: preserve finalized design/plan artifacts and high-signal decisions, not brainstorming noise or stale alternatives.
 
