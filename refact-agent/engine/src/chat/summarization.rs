@@ -627,7 +627,10 @@ fn recent_provider_usage_input_tokens(messages: &[ChatMessage]) -> Option<usize>
     })
 }
 
-fn estimated_context_pressure(messages: &[ChatMessage], effective_n_ctx: usize) -> ContextPressure {
+pub(crate) fn estimated_context_pressure(
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+) -> ContextPressure {
     let visible_messages = filter_ui_only_messages(messages.to_vec());
     let visible_pressure = compute_context_budget(&visible_messages, effective_n_ctx).pressure;
     let provider_pressure = recent_provider_usage_input_tokens(messages)
@@ -1331,6 +1334,13 @@ fn emit_compression_applied(session: &mut ChatSession) {
 
 fn emit_compression_skipped(session: &mut ChatSession, reason: CompressionReason) {
     emit_compression_status(session, CompressionPhase::Skipped, Some(reason));
+}
+
+pub(crate) fn emit_compression_skipped_status(
+    session: &mut ChatSession,
+    reason: CompressionReason,
+) {
+    emit_compression_skipped(session, reason);
 }
 
 fn emit_compression_failed(session: &mut ChatSession, reason: CompressionReason) {

@@ -41,12 +41,14 @@ use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
 use crate::chat::diagnostics::{make_ui_only_error_message, make_ui_only_retry_status_message};
+use crate::chat::history_limit::ContextPressure;
 use crate::chat::trajectory_ops::approx_token_count;
 use refact_core::llm_types::BaseModelRecord;
 
 const TOKEN_BUDGET_CADENCE: usize = 6;
 const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
+const LENGTH_STOP_NEAR_EMPTY_VISIBLE_CHARS: usize = 32;
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
 
@@ -614,6 +616,129 @@ fn is_reasoning_token_limit_stop(message: &ChatMessage) -> bool {
                 .is_some_and(|blocks| !blocks.is_empty()))
 }
 
+fn is_length_like_finish_reason(finish_reason: Option<&str>) -> bool {
+    matches!(
+        finish_reason,
+        Some("length" | "max_tokens" | "max_output_tokens" | "token_limit")
+    )
+}
+
+fn has_reasoning_or_thinking_output(message: &ChatMessage) -> bool {
+    message
+        .reasoning_content
+        .as_deref()
+        .is_some_and(|reasoning| !reasoning.trim().is_empty())
+        || message
+            .thinking_blocks
+            .as_ref()
+            .is_some_and(|blocks| !blocks.is_empty())
+}
+
+fn has_empty_or_near_empty_visible_output(message: &ChatMessage) -> bool {
+    message.content.content_text_only().trim().chars().count()
+        <= LENGTH_STOP_NEAR_EMPTY_VISIBLE_CHARS
+}
+
+pub(crate) fn is_high_pressure_length_stop(
+    message: &ChatMessage,
+    messages: &[ChatMessage],
+    effective_n_ctx: usize,
+) -> bool {
+    if message.role != "assistant"
+        || message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        || !is_length_like_finish_reason(message.finish_reason.as_deref())
+        || !has_empty_or_near_empty_visible_output(message)
+        || !has_reasoning_or_thinking_output(message)
+    {
+        return false;
+    }
+
+    matches!(
+        crate::chat::summarization::estimated_context_pressure(messages, effective_n_ctx),
+        ContextPressure::High | ContextPressure::Critical
+    )
+}
+
+fn is_length_stop_compression_candidate(message: &ChatMessage) -> bool {
+    message.role == "assistant"
+        && !message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        && is_length_like_finish_reason(message.finish_reason.as_deref())
+        && has_empty_or_near_empty_visible_output(message)
+}
+
+async fn maybe_compact_after_high_pressure_length_stop(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    thread: &ThreadParams,
+    effective_n_ctx: Option<usize>,
+) -> bool {
+    let Some(effective_n_ctx) = effective_n_ctx else {
+        let mut session = session_arc.lock().await;
+        if matches!(
+            session.runtime.state,
+            SessionState::Idle | SessionState::Completed
+        ) && session
+            .messages
+            .last()
+            .is_some_and(is_length_stop_compression_candidate)
+        {
+            crate::chat::summarization::emit_compression_skipped_status(
+                &mut session,
+                CompressionReason::EffectiveContextUnknown,
+            );
+        }
+        return false;
+    };
+    let reactive_attempt = {
+        let mut session = session_arc.lock().await;
+        if !matches!(
+            session.runtime.state,
+            SessionState::Idle | SessionState::Completed
+        ) {
+            return false;
+        }
+        let Some(message) = session.messages.last() else {
+            return false;
+        };
+        if !is_high_pressure_length_stop(message, &session.messages, effective_n_ctx) {
+            return false;
+        }
+        let reactive_attempt = session.thread.reactive_compact_attempts.unwrap_or(0) + 1;
+        if reactive_attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
+            crate::chat::summarization::emit_compression_skipped_status(
+                &mut session,
+                CompressionReason::MaxAttemptsReached,
+            );
+            return false;
+        }
+        session.thread.reactive_compact_attempts = Some(reactive_attempt);
+        session.increment_version();
+        session.touch();
+        reactive_attempt
+    };
+
+    warn!(
+        "High-pressure length stop, summarizing oldest eligible segment attempt {}/{}",
+        reactive_attempt,
+        crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
+    );
+    let compacted =
+        crate::chat::summarization::apply_segment_summarization(gcx, session_arc, thread, true)
+            .await;
+    if compacted {
+        let mut session = session_arc.lock().await;
+        session.thread.previous_response_id = None;
+        session.cache_guard_force_next = true;
+    }
+    compacted
+}
+
 async fn handle_task_agent_reasoning_token_stop(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -1098,6 +1223,17 @@ pub fn start_generation(
                         .await
                     {
                         break;
+                    }
+                    if maybe_compact_after_high_pressure_length_stop(
+                        gcx.clone(),
+                        &session_arc,
+                        &thread,
+                        effective_n_ctx,
+                    )
+                    .await
+                    {
+                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        continue;
                     }
                     if inject_priority_messages_if_any(app.clone(), session_arc.clone()).await {
                         continue;
@@ -2164,6 +2300,28 @@ mod tests {
         }
     }
 
+    fn high_pressure_usage() -> ChatUsage {
+        ChatUsage {
+            prompt_tokens: 85_000,
+            completion_tokens: 0,
+            total_tokens: 85_000,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metering_usd: None,
+        }
+    }
+
+    fn make_high_pressure_length_stop() -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            finish_reason: Some("length".to_string()),
+            reasoning_content: Some("still thinking".to_string()),
+            usage: Some(high_pressure_usage()),
+            ..Default::default()
+        }
+    }
+
     fn make_assistant_with_tool_call(tool_call_id: &str, tool_name: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
@@ -2356,6 +2514,81 @@ mod tests {
         let mut message = make_reasoning_token_limit_msg();
         message.content = ChatContent::SimpleText("visible answer".to_string());
         assert!(!is_reasoning_token_limit_stop(&message));
+    }
+
+    #[test]
+    fn length_stop_empty_reasoning_high_pressure_requests_compression() {
+        let message = make_high_pressure_length_stop();
+        let messages = vec![make_user_msg("continue"), message.clone()];
+
+        assert!(is_high_pressure_length_stop(&message, &messages, 100_000));
+    }
+
+    #[test]
+    fn length_stop_visible_answer_without_high_pressure_does_not_request_compression() {
+        let mut message = make_high_pressure_length_stop();
+        message.content = ChatContent::SimpleText("ordinary visible answer".repeat(20));
+        message.usage = Some(ChatUsage {
+            prompt_tokens: 100,
+            completion_tokens: 200,
+            total_tokens: 300,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metering_usd: None,
+        });
+        let messages = vec![make_user_msg("continue"), message.clone()];
+
+        assert!(!is_high_pressure_length_stop(&message, &messages, 100_000));
+    }
+
+    #[test]
+    fn length_stop_with_tool_calls_does_not_request_compression() {
+        let mut message = make_high_pressure_length_stop();
+        message.tool_calls = make_assistant_with_tool_call("call_123", "cat").tool_calls;
+        let messages = vec![make_user_msg("continue"), message.clone()];
+
+        assert!(!is_high_pressure_length_stop(&message, &messages, 100_000));
+    }
+
+    #[test]
+    fn max_output_tokens_alias_is_treated_like_length() {
+        let mut message = make_high_pressure_length_stop();
+        message.finish_reason = Some("max_output_tokens".to_string());
+        let messages = vec![make_user_msg("continue"), message.clone()];
+
+        assert!(is_high_pressure_length_stop(&message, &messages, 100_000));
+    }
+
+    #[tokio::test]
+    async fn length_stop_reactive_attempts_are_bounded() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut session = ChatSession::new("length-stop-bounded".to_string());
+        session.messages = vec![make_user_msg("continue"), make_high_pressure_length_stop()];
+        session.thread.reactive_compact_attempts =
+            Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS);
+        let thread = session.thread.clone();
+        let session_arc = Arc::new(AMutex::new(session));
+
+        assert!(
+            !maybe_compact_after_high_pressure_length_stop(
+                gcx,
+                &session_arc,
+                &thread,
+                Some(100_000),
+            )
+            .await
+        );
+
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session.thread.reactive_compact_attempts,
+            Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS)
+        );
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::MaxAttemptsReached)
+        );
     }
 
     #[test]
