@@ -691,10 +691,14 @@ export function isCompressedAssistantMessage(
   );
 }
 
+type NormalizedExtraMetadata =
+  | LlmSegmentSummaryCompressionMetadata
+  | ChatCompressionReportMetadata;
+
 function withNormalizedExtraMetadata(
   extra: Record<string, unknown> | undefined,
   key: "compression" | "compression_report",
-  metadata: unknown | null,
+  metadata: NormalizedExtraMetadata | null,
 ): Record<string, unknown> | undefined {
   if (metadata === null) return extra;
   return { ...(extra ?? {}), [key]: metadata };
