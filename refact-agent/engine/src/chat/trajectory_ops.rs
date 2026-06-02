@@ -622,8 +622,22 @@ mod tests {
         assert_system_prefix(&selected);
         assert_eq!(
             roles(&selected),
-            vec!["system", "assistant", "tool", "user", "assistant", "user"]
+            vec![
+                "system",
+                "assistant",
+                "tool",
+                "user",
+                "assistant",
+                "plan",
+                "user"
+            ]
         );
+        let plan = selected
+            .iter()
+            .find(|message| message.role == "plan")
+            .expect("handoff should carry plan tool output as a pinned plan");
+        assert_eq!(plan.content.content_text_only(), "planning results");
+        assert_eq!(plan.preserve, Some(true));
     }
 
     #[tokio::test]

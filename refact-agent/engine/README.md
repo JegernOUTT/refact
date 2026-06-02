@@ -118,6 +118,7 @@ Chat clients use the commands API plus `/v1/chats/subscribe` SSE events rather t
 | `src/global_context.rs` | Shared state, CLI options, provider loading, workspace initialization |
 | `src/http/routers/v1/` | HTTP route handlers |
 | `src/chat/` | Chat sessions, queues, streaming, tools, trajectories, history limits |
+| `src/chat/trajectory_ops.rs` | Handoff and trajectory selection helpers for model-switch, handoff preview/apply, and plan carry-over |
 | `src/llm/` | Provider wire-format adapters and streaming conversions |
 | `src/providers/` | Provider implementations and registry |
 | `src/tools/` | Built-in tools and file-edit/search/task/agent tool implementations |
