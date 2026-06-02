@@ -40,7 +40,9 @@ use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
-use crate::chat::diagnostics::{make_ui_only_error_message, make_ui_only_retry_status_message};
+use crate::chat::diagnostics::{
+    make_ui_only_error_message, make_ui_only_retry_status_message, safe_provider_error_diagnostic,
+};
 use crate::chat::history_limit::ContextPressure;
 use crate::chat::trajectory_ops::approx_token_count;
 use refact_core::llm_types::BaseModelRecord;
@@ -76,6 +78,17 @@ fn context_limit_compaction_decision(
     } else {
         ContextLimitCompactionDecision::Attempt { attempt }
     }
+}
+
+fn safe_context_limit_error_for_log(error: &str) -> String {
+    safe_provider_error_diagnostic(error)
+}
+
+fn context_limit_final_error_message(error: &str) -> String {
+    format!(
+        "Context too large and no eligible segment summary could be applied. Original error: {}",
+        safe_provider_error_diagnostic(error)
+    )
 }
 
 async fn user_stop_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
@@ -1088,11 +1101,12 @@ pub fn start_generation(
                         attempt: reactive_attempt,
                     } => {
                         let original_error = error.message.clone();
+                        let log_error = safe_context_limit_error_for_log(&original_error);
                         warn!(
                             "Context limit error, summarizing oldest eligible segment attempt {}/{}: {}",
                             reactive_attempt,
                             crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
-                            original_error,
+                            log_error,
                         );
                         {
                             let mut session = session_arc.lock().await;
@@ -1125,10 +1139,7 @@ pub fn start_generation(
                     ContextLimitCompactionDecision::Skip => {}
                 }
                 if compaction_decision != ContextLimitCompactionDecision::Skip {
-                    error.message = format!(
-                        "Context too large and no eligible segment summary could be applied. Original error: {}",
-                        error.message
-                    );
+                    error.message = context_limit_final_error_message(&error.message);
                 }
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
@@ -2419,6 +2430,106 @@ mod tests {
             auth_token: "cc-oauth-token".to_string(),
             ..Default::default()
         }
+    }
+
+    fn final_context_limit_error_bound() -> usize {
+        context_limit_final_error_message("").len()
+            + crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
+    }
+
+    fn assert_context_limit_secret_redacted(text: &str) {
+        assert!(!text.contains("sk-test-secret"), "secret leaked: {text}");
+        assert!(
+            !text.contains("Authorization: Bearer sk-test-secret"),
+            "raw authorization header leaked: {text}"
+        );
+        assert!(
+            !text.contains("Bearer sk-test-secret"),
+            "raw bearer token leaked: {text}"
+        );
+        assert!(
+            text.contains("[REDACTED"),
+            "redaction marker missing: {text}"
+        );
+    }
+
+    #[test]
+    fn context_limit_log_error_redacts_provider_secret() {
+        let text = safe_context_limit_error_for_log(
+            "context_length_exceeded: Authorization: Bearer sk-test-secret",
+        );
+
+        assert_context_limit_secret_redacted(&text);
+        assert!(
+            text.len() <= crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS,
+            "len={}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn context_limit_final_error_redacts_provider_secret() {
+        let text = context_limit_final_error_message(
+            "context_length_exceeded: Authorization: Bearer sk-test-secret",
+        );
+
+        assert!(text.starts_with(
+            "Context too large and no eligible segment summary could be applied. Original error:"
+        ));
+        assert_context_limit_secret_redacted(&text);
+        assert!(
+            text.len() <= final_context_limit_error_bound(),
+            "len={}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn context_limit_final_error_windows_huge_provider_error() {
+        let far_tail = "FAR_TAIL_MARKER";
+        let error = format!(
+            "context_length_exceeded: Authorization: Bearer sk-test-secret {} {}",
+            "tail ".repeat(100_000),
+            far_tail,
+        );
+
+        let text = context_limit_final_error_message(&error);
+
+        assert_context_limit_secret_redacted(&text);
+        assert!(text.contains(crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED));
+        assert!(!text.contains(far_tail), "far-tail marker leaked: {text}");
+        assert!(
+            text.len() <= final_context_limit_error_bound(),
+            "len={}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn wrapped_partial_output_context_limit_error_is_sanitized() {
+        let wrapped = format!(
+            "{} Original error: context_length_exceeded: Authorization: Bearer sk-test-secret",
+            PARTIAL_OUTPUT_STREAM_ERROR,
+        );
+        let error = context_limit_error(&wrapped, true);
+        let abort = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            context_limit_compaction_decision(&error, &ThreadParams::default(), &abort),
+            ContextLimitCompactionDecision::Attempt { attempt: 1 }
+        );
+
+        let final_message = context_limit_final_error_message(&error.message);
+        let wrapped_final = format!(
+            "{} Original error: {}",
+            PARTIAL_OUTPUT_STREAM_ERROR, final_message,
+        );
+
+        assert_context_limit_secret_redacted(&wrapped_final);
+        assert!(
+            wrapped_final.len()
+                <= PARTIAL_OUTPUT_STREAM_ERROR.len() + 17 + final_context_limit_error_bound()
+        );
     }
 
     #[test]
