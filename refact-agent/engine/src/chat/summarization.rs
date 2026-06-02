@@ -323,12 +323,92 @@ fn tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
     false
 }
 
-fn current_tail_has_pending_tool_calls(messages: &[ChatMessage]) -> bool {
+fn message_has_unresolved_tool_calls_within(
+    messages: &[ChatMessage],
+    message_idx: usize,
+    end: usize,
+) -> bool {
+    let message = &messages[message_idx];
+    if message.role != "assistant" || is_ui_only_message(message) {
+        return false;
+    }
+    let Some(tool_calls) = message.tool_calls.as_ref() else {
+        return assistant_finish_reason_requests_tools(message);
+    };
+    if assistant_finish_reason_requests_tools(message) && tool_calls.is_empty() {
+        return true;
+    }
+    if tool_calls.is_empty() {
+        return false;
+    }
+
+    let mut completed_after_call = HashSet::new();
+    let mut completed_context_file_after_call = HashSet::new();
+    if message_idx < end {
+        for after in messages[message_idx + 1..=end].iter() {
+            if is_ui_only_message(after) {
+                continue;
+            }
+            match after.role.as_str() {
+                "tool" | "diff" if !after.tool_call_id.is_empty() => {
+                    completed_after_call.insert(after.tool_call_id.as_str());
+                }
+                "context_file" if !after.tool_call_id.is_empty() => {
+                    completed_context_file_after_call.insert(after.tool_call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    tool_calls.iter().any(|tool_call| {
+        !completed_after_call.contains(tool_call.id.as_str())
+            && !tool_call_is_completed_by_context_file(
+                tool_call,
+                &completed_context_file_after_call,
+            )
+    })
+}
+
+fn current_tail_has_active_pending_tool_calls(messages: &[ChatMessage]) -> bool {
     let start = messages
         .iter()
         .rposition(|message| message.role == "user")
         .map_or(0, |idx| idx + 1);
-    tail_has_pending_tool_calls(&messages[start..])
+    let mut completed_after_call = HashSet::new();
+    let mut completed_context_file_after_call = HashSet::new();
+
+    for message in messages[start..].iter().rev() {
+        if is_trimmable_tail_diagnostic(message) {
+            continue;
+        }
+        match message.role.as_str() {
+            "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                completed_after_call.insert(message.tool_call_id.as_str());
+            }
+            "context_file" if !message.tool_call_id.is_empty() => {
+                completed_context_file_after_call.insert(message.tool_call_id.as_str());
+            }
+            "tool" | "diff" | "context_file" => {}
+            "assistant" => {
+                let Some(tool_calls) = message.tool_calls.as_ref() else {
+                    return assistant_finish_reason_requests_tools(message);
+                };
+                if assistant_finish_reason_requests_tools(message) && tool_calls.is_empty() {
+                    return true;
+                }
+                return tool_calls.iter().any(|tool_call| {
+                    !completed_after_call.contains(tool_call.id.as_str())
+                        && !tool_call_is_completed_by_context_file(
+                            tool_call,
+                            &completed_context_file_after_call,
+                        )
+                });
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn is_trimmable_tail_diagnostic(message: &ChatMessage) -> bool {
@@ -395,7 +475,9 @@ fn tail_non_user_segment_candidates(messages: &[ChatMessage]) -> Vec<SummarySegm
     let mut run_start = None;
 
     for idx in last_user + 1..messages.len() {
-        if is_excluded_from_segment(&messages[idx]) {
+        let is_separator = is_excluded_from_segment(&messages[idx])
+            || message_has_unresolved_tool_calls_within(messages, idx, messages.len() - 1);
+        if is_separator {
             if let Some(start) = run_start.take() {
                 if let Some(segment) = trimmed_tail_candidate(messages, start, idx - 1) {
                     candidates.push(segment);
@@ -424,14 +506,17 @@ fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment)
 }
 
 pub fn eligible_tail_non_user_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
+    if current_tail_has_active_pending_tool_calls(messages) {
+        return None;
+    }
     tail_non_user_segment_candidates(messages)
         .into_iter()
         .find(|segment| tail_candidate_is_eligible(messages, *segment))
 }
 
 fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
-    if current_tail_has_pending_tool_calls(messages) {
-        return eligible_tail_non_user_segment(messages);
+    if current_tail_has_active_pending_tool_calls(messages) {
+        return None;
     }
     closed_non_user_segments(messages)
         .into_iter()
@@ -1300,9 +1385,7 @@ pub async fn apply_segment_summarization(
             emit_compression_skipped(&mut session, CompressionReason::NoEligibleSegment);
             return false;
         }
-        if current_tail_has_pending_tool_calls(&session.messages)
-            && eligible_tail_non_user_segment(&session.messages).is_none()
-        {
+        if current_tail_has_active_pending_tool_calls(&session.messages) {
             emit_compression_skipped(&mut session, CompressionReason::PendingToolCalls);
             return false;
         }
@@ -1962,6 +2045,113 @@ mod tests {
     }
 
     #[test]
+    fn stale_pending_tool_call_before_later_output_does_not_block_tail_candidate() {
+        let mut messages = vec![
+            user("run tool then continue"),
+            assistant_with_tool_call_id("call_stale"),
+            assistant("later independent completed output"),
+        ];
+
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 2, end: 2 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed later output",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call_stale");
+        assert!(is_segment_summary(&messages[2]));
+    }
+
+    #[test]
+    fn stale_pending_read_call_before_later_output_does_not_block_later_candidate() {
+        let mut messages = vec![
+            user("inspect tree then continue"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText(String::new()),
+                tool_calls: Some(vec![
+                    ChatToolCall {
+                        id: "call_subagent".to_string(),
+                        index: Some(0),
+                        function: ChatToolFunction {
+                            name: "subagent".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                        extra_content: None,
+                    },
+                    ChatToolCall {
+                        id: "call_tree".to_string(),
+                        index: Some(1),
+                        function: ChatToolFunction {
+                            name: "tree".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        tool_type: "function".to_string(),
+                        extra_content: None,
+                    },
+                ]),
+                finish_reason: Some("tool_calls".to_string()),
+                ..Default::default()
+            },
+            event("diagnostic between stale and useful output"),
+            assistant("later completed explanation after stale calls"),
+            tool_with_id("call_later_completed", "later unrelated result"),
+        ];
+
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 3, end: 4 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed later safe output",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].tool_calls.as_ref().unwrap().len(), 2);
+        assert_eq!(messages[2].role, "event");
+        assert!(is_segment_summary(&messages[3]));
+    }
+
+    #[test]
+    fn candidate_with_unresolved_tool_call_is_never_summarized() {
+        let mut messages = vec![
+            user("run tool"),
+            assistant("safe output before pending"),
+            assistant_with_tool_call_id("call_unresolved"),
+            assistant("safe output after pending"),
+        ];
+
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed safe prefix",
+            "test-model",
+        ));
+        assert_eq!(messages.len(), 4);
+        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(
+            messages[2].tool_calls.as_ref().unwrap()[0].id,
+            "call_unresolved"
+        );
+        assert_eq!(
+            messages[3].content.content_text_only(),
+            "safe output after pending"
+        );
+    }
+
+    #[test]
     fn tail_segment_prior_tool_result_does_not_satisfy_pending_call() {
         let mut messages = vec![
             user("run tool"),
@@ -2027,7 +2217,7 @@ mod tests {
         ];
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
         assert_eq!(eligible_tail_non_user_segment(&messages), None);
         assert!(!summarize_oldest_segment_with_static_summary(
             &mut messages,
@@ -2114,7 +2304,7 @@ mod tests {
         ];
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
         assert_eq!(
             closed_non_user_segments(&messages),
             vec![SummarySegment { start: 1, end: 1 }]
@@ -2140,11 +2330,35 @@ mod tests {
         ];
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
         assert_eq!(
             closed_non_user_segments(&messages),
             vec![SummarySegment { start: 1, end: 1 }]
         );
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn active_pending_tail_still_blocks_closed_segment() {
+        let mut messages = vec![
+            user("first"),
+            assistant("closed old"),
+            user("second"),
+            assistant_with_tool_call_id("call_active"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 1, end: 1 }]
+        );
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
         assert!(!summarize_oldest_segment_with_static_summary(
             &mut messages,
             "should not apply",
@@ -2163,7 +2377,7 @@ mod tests {
             tool_with_id("call_done", "done"),
         ];
 
-        assert!(!current_tail_has_pending_tool_calls(&messages));
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
         assert_eq!(
             first_eligible_segment(&messages),
             Some(SummarySegment { start: 1, end: 1 })
@@ -2188,7 +2402,7 @@ mod tests {
             context_file_with_tool_call_id("call_done", "read result"),
         ];
 
-        assert!(!current_tail_has_pending_tool_calls(&messages));
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
         assert_eq!(
             first_eligible_segment(&messages),
             Some(SummarySegment { start: 1, end: 1 })
@@ -2214,7 +2428,7 @@ mod tests {
         ];
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
         assert!(!summarize_oldest_segment_with_static_summary(
             &mut messages,
             "should not apply",
@@ -2233,7 +2447,7 @@ mod tests {
             context_file_with_tool_call_id("call_alias", "history context"),
         ];
 
-        assert!(!current_tail_has_pending_tool_calls(&messages));
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
         assert_eq!(
             first_eligible_segment(&messages),
             Some(SummarySegment { start: 1, end: 1 })
@@ -2257,7 +2471,7 @@ mod tests {
         ];
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
         assert!(!summarize_oldest_segment_with_static_summary(
             &mut messages,
             "should not apply",
@@ -2277,7 +2491,7 @@ mod tests {
         ];
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
         assert!(!summarize_oldest_segment_with_static_summary(
             &mut messages,
             "should not apply",
@@ -2299,7 +2513,7 @@ mod tests {
         ];
         let before = serde_json::to_string(&messages).unwrap();
 
-        assert!(current_tail_has_pending_tool_calls(&messages));
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
         assert!(!summarize_oldest_segment_with_static_summary(
             &mut messages,
             "should not apply",
