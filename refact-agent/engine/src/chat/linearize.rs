@@ -1,6 +1,7 @@
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::diagnostics::is_ui_only_message;
 use refact_chat_history::compression_exemption::{exemption_for, CompressionExemption};
+use refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE;
 use std::collections::{HashMap, HashSet};
 
 fn is_authoritative_summary(msg: &ChatMessage) -> bool {
@@ -28,6 +29,14 @@ fn is_legacy_range_summary(msg: &ChatMessage) -> bool {
     is_authoritative_summary(msg) && msg.summarized_range.is_some()
 }
 
+fn is_visual_compression_report(msg: &ChatMessage) -> bool {
+    msg.role == COMPRESSION_REPORT_ROLE
+}
+
+fn is_linearization_only_message(msg: &ChatMessage) -> bool {
+    msg.role == "summarization" || is_legacy_range_summary(msg) || is_visual_compression_report(msg)
+}
+
 fn legacy_summary_ranges(messages: &[ChatMessage]) -> Vec<(usize, usize, String)> {
     messages
         .iter()
@@ -47,7 +56,7 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
     if summaries.is_empty() {
         return messages
             .into_iter()
-            .filter(|message| message.role != "summarization" && !is_legacy_range_summary(message))
+            .filter(|message| !is_linearization_only_message(message))
             .collect();
     }
 
@@ -96,7 +105,7 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
                 });
             }
         }
-        if msg.role == "summarization" || is_legacy_range_summary(msg) || suppressed.contains(&i) {
+        if is_linearization_only_message(msg) || suppressed.contains(&i) {
             continue;
         }
         result.push(msg.clone());
@@ -144,6 +153,23 @@ mod tests {
             summarized_range: range,
             summarization_tier: Some("llm_segment_summary".to_string()),
             extra,
+            ..Default::default()
+        }
+    }
+
+    fn compression_report(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: COMPRESSION_REPORT_ROLE.to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            summarization_tier: Some("tier1_llm".to_string()),
+            extra: serde_json::Map::from_iter([(
+                "compression_report".to_string(),
+                serde_json::json!({
+                    "kind": "chat_compression_report",
+                    "compression_kind": "llm_segment_summary",
+                    "source_message_count": 1,
+                }),
+            )]),
             ..Default::default()
         }
     }
@@ -354,5 +380,53 @@ mod tests {
         assert_eq!(result[0].content.content_text_only(), "A exact bytes");
         assert_eq!(result[1].content.content_text_only(), "summary");
         assert_eq!(result[2].content.content_text_only(), "B exact bytes");
+    }
+
+    #[test]
+    fn linearize_drops_compression_report_but_keeps_internal_segment_summary() {
+        let messages = vec![
+            user("before compression"),
+            compression_report("visible report must not reach the model"),
+            summarization("internal summary stays model-visible", None),
+            user("after compression"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+        let text: Vec<String> = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert_eq!(
+            text,
+            vec![
+                "before compression",
+                "internal summary stays model-visible",
+                "after compression"
+            ]
+        );
+    }
+
+    #[test]
+    fn linearize_drops_compression_report_when_legacy_range_summaries_exist() {
+        let messages = vec![
+            user("first"),
+            assistant("old assistant"),
+            compression_report("visible range report must not reach the model"),
+            user("second"),
+            summarization("legacy summary", Some((1, 1))),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+        let text: Vec<String> = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert_eq!(text, vec!["first", "legacy summary", "second"]);
     }
 }
