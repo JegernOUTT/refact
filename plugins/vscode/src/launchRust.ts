@@ -109,76 +109,79 @@ export class RustBinaryBlob {
     }
 
     public async settings_changed() {
-        for (let i = 0; i < 5; i++) {
-            console.log(`RUST settings changed, attempt to restart ${i + 1}`);
-            let xdebug = this.x_debug();
-            let port: number;
-            let ping_response: string;
+        try {
+            for (let i = 0; i < 5; i++) {
+                console.log(`RUST settings changed, attempt to restart ${i + 1}`);
+                let xdebug = this.x_debug();
+                let port: number;
+                let ping_response: string;
 
-            if (xdebug === 0) {
-                if (this.lsp_client) { // running
-                    port = this.port;  // keep the same port
-                    ping_response = this.ping_response;
+                if (xdebug === 0) {
+                    if (this.lsp_client) { // running
+                        port = this.port;  // keep the same port
+                        ping_response = this.ping_response;
+                    } else {
+                        port = Math.floor(Math.random() * 20) + 9080;
+                        ping_response = `ping-${Math.floor(Math.random() * 0x10000000000000000).toString(16)}`;
+                    }
                 } else {
-                    port = Math.floor(Math.random() * 20) + 9080;
-                    ping_response = `ping-${Math.floor(Math.random() * 0x10000000000000000).toString(16)}`;
+                    port = DEBUG_HTTP_PORT;
+                    console.log(`RUST debug is set, don't start the rust binary. Will attempt HTTP port ${DEBUG_HTTP_PORT}, LSP port ${DEBUG_LSP_PORT}`);
+                    console.log("Also, will try to read caps. If that fails, things like lists of available models will be empty.");
+                    this.cmdline = [];
+                    await this.terminate();  // terminate our own
+                    await this.read_caps();  // debugging rust already running, can read here
+
+                    await this.fetch_toolbox_config();
+                    // await register_commands();
+                    await this.start_lsp_socket();
+                    return;
                 }
-            } else {
-                port = DEBUG_HTTP_PORT;
-                console.log(`RUST debug is set, don't start the rust binary. Will attempt HTTP port ${DEBUG_HTTP_PORT}, LSP port ${DEBUG_LSP_PORT}`);
-                console.log("Also, will try to read caps. If that fails, things like lists of available models will be empty.");
-                this.cmdline = [];
-                await this.terminate();  // terminate our own
-                await this.read_caps();  // debugging rust already running, can read here
+                const httpHost = vscode.workspace.getConfiguration().get<string>("refactai.httpHost")?.trim() || "0.0.0.0";
+                let new_cmdline: string[] = [
+                    join(this.asset_path, "refact-lsp"),
+                    "--ping-message", ping_response,
+                    "--http-port", port.toString(),
+                    "--http-host", httpHost,
+                    "--lsp-stdin-stdout", "1",
+                ];
 
-                await this.fetch_toolbox_config();
-                // await register_commands();
-                await this.start_lsp_socket();
-                return;
-            }
-            const httpHost = vscode.workspace.getConfiguration().get<string>("refactai.httpHost")?.trim() || "0.0.0.0";
-            let new_cmdline: string[] = [
-                join(this.asset_path, "refact-lsp"),
-                "--ping-message", ping_response,
-                "--http-port", port.toString(),
-                "--http-host", httpHost,
-                "--lsp-stdin-stdout", "1",
-            ];
+                if (vscode.workspace.getConfiguration().get<boolean>("refactai.vecdb")) {
+                    new_cmdline.push("--vecdb");
+                    const vecdb_limit = vscode.workspace.getConfiguration().get<number>("refactai.vecdbFileLimit") ?? 15000;
+                    new_cmdline.push(`--vecdb-max-files`);
+                    new_cmdline.push(`${vecdb_limit}`);
+                }
+                if (vscode.workspace.getConfiguration().get<boolean>("refactai.ast")) {
+                    new_cmdline.push("--ast");
+                    const ast_limit = vscode.workspace.getConfiguration().get<number>("refactai.astFileLimit") ?? 15000;
+                    new_cmdline.push(`--ast-max-files`);
+                    new_cmdline.push(`${ast_limit}`);
+                }
+                let insecureSSL = vscode.workspace.getConfiguration().get("refactai.insecureSSL");
+                if (insecureSSL) {
+                    new_cmdline.push("--insecure");
+                }
+                let experimental = vscode.workspace.getConfiguration().get("refactai.xperimental");
+                if (experimental) {
+                    new_cmdline.push("--experimental");
+                }
 
-            if (vscode.workspace.getConfiguration().get<boolean>("refactai.vecdb")) {
-                new_cmdline.push("--vecdb");
-                const vecdb_limit = vscode.workspace.getConfiguration().get<number>("refactai.vecdbFileLimit") ?? 15000;
-                new_cmdline.push(`--vecdb-max-files`);
-                new_cmdline.push(`${vecdb_limit}`);
+                let cmdline_existing: string = this.cmdline.join(" ");
+                let cmdline_new: string = new_cmdline.join(" ");
+                if (cmdline_existing !== cmdline_new) {
+                    this.cmdline = new_cmdline;
+                    this.port = port;
+                    this.ping_response = ping_response;
+                    await this.launch();
+                }
+                if (this.lsp_disposable !== undefined) {
+                    break;
+                }
             }
-            if (vscode.workspace.getConfiguration().get<boolean>("refactai.ast")) {
-                new_cmdline.push("--ast");
-                const ast_limit = vscode.workspace.getConfiguration().get<number>("refactai.astFileLimit") ?? 15000;
-                new_cmdline.push(`--ast-max-files`);
-                new_cmdline.push(`${ast_limit}`);
-            }
-            let insecureSSL = vscode.workspace.getConfiguration().get("refactai.insecureSSL");
-            if (insecureSSL) {
-                new_cmdline.push("--insecure");
-            }
-            let experimental = vscode.workspace.getConfiguration().get("refactai.xperimental");
-            if (experimental) {
-                new_cmdline.push("--experimental");
-            }
-
-            let cmdline_existing: string = this.cmdline.join(" ");
-            let cmdline_new: string = new_cmdline.join(" ");
-            if (cmdline_existing !== cmdline_new) {
-                this.cmdline = new_cmdline;
-                this.port = port;
-                this.ping_response = ping_response;
-                await this.launch();
-            }
-            if (this.lsp_disposable !== undefined) {
-                break;
-            }
+        } finally {
+            global.side_panel?.handleSettingsChange();
         }
-        global.side_panel?.handleSettingsChange();
     }
 
     public async launch() {

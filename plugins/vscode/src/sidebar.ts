@@ -1003,7 +1003,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             ? rawPort
             : 0;
         const completeManual = await getKeyBindingForChat("refactaicmd.completionManual");
-        const shiftEnterToSubmit = vscode.workspace.getConfiguration()?.get<boolean>("refactai.shiftEnterToSubmit")?? false;
+        const shiftEnterToSubmit = vscode.workspace.getConfiguration()?.get<boolean>("refactai.submitChatWithShiftEnter")?? false;
 
         const currentActiveWorkspaceName = this.getActiveWorkspace();
         const currentProject = this.getCurrentProjectInfo();

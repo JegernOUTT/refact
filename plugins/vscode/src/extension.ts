@@ -325,6 +325,7 @@ export function activate(context: vscode.ExtensionContext)
             e.affectsConfiguration("refactai.astFileLimit") ||
             e.affectsConfiguration("refactai.vecdb") ||
             e.affectsConfiguration("refactai.vecdbFileLimit") ||
+            e.affectsConfiguration("refactai.httpHost") ||
             e.affectsConfiguration("refactai.xperimental")
         ) {
             if (config_debounce) {
