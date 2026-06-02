@@ -28,6 +28,8 @@ import {
   selectChatId,
   selectThreadPauseById,
   selectIsCompressingById,
+  selectCompressionPhaseById,
+  selectCompressionPulseSeqById,
 } from "../../features/Chat/Thread/selectors";
 import {
   createChatWithId,
@@ -97,6 +99,16 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const isCompressing = useAppSelector((s) =>
     selectIsCompressingById(s, renderChatId),
   );
+  const compressionPhase = useAppSelector((s) =>
+    selectCompressionPhaseById(s, renderChatId),
+  );
+  const compressionPulseSeq = useAppSelector((s) =>
+    selectCompressionPulseSeqById(s, renderChatId),
+  );
+  const compressionActive =
+    isCompressing ||
+    compressionPhase === "checking" ||
+    compressionPhase === "running";
   const snapshotReceived = useAppSelector((s) =>
     selectSnapshotReceivedById(s, renderChatId),
   );
@@ -119,16 +131,29 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const prevChatIdRef = useRef(renderChatId);
   const prevDisplayMessagesRef = useRef<ChatMessages | null>(null);
   const prevDisplayItemsRef = useRef<DisplayItem[] | null>(null);
-  const [visibleCompression, setVisibleCompression] = useState(isCompressing);
+  const [visibleCompression, setVisibleCompression] =
+    useState(compressionActive);
   const compressionVisibleSinceRef = useRef<number | null>(
-    isCompressing ? Date.now() : null,
+    compressionActive ? Date.now() : null,
   );
+  const handledCompressionPulseSeqRef = useRef(compressionPulseSeq);
+  const compressionPulseActive =
+    compressionPulseSeq !== undefined &&
+    compressionPulseSeq !== handledCompressionPulseSeqRef.current;
 
   useEffect(() => {
-    if (isCompressing) {
+    if (compressionActive) {
       compressionVisibleSinceRef.current = Date.now();
       setVisibleCompression(true);
       return;
+    }
+
+    if (compressionPulseActive) {
+      handledCompressionPulseSeqRef.current = compressionPulseSeq;
+      if (compressionVisibleSinceRef.current === null) {
+        compressionVisibleSinceRef.current = Date.now();
+        setVisibleCompression(true);
+      }
     }
 
     const visibleSince = compressionVisibleSinceRef.current;
@@ -151,18 +176,21 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     }, remaining);
 
     return () => window.clearTimeout(timeoutId);
-  }, [isCompressing]);
+  }, [compressionActive, compressionPulseActive, compressionPulseSeq]);
 
   useEffect(() => {
     if (prevChatIdRef.current !== renderChatId) {
       collapsibleState.reset();
       prevDisplayMessagesRef.current = null;
       prevDisplayItemsRef.current = null;
-      compressionVisibleSinceRef.current = isCompressing ? Date.now() : null;
-      setVisibleCompression(isCompressing);
+      compressionVisibleSinceRef.current = compressionActive
+        ? Date.now()
+        : null;
+      setVisibleCompression(compressionActive);
+      handledCompressionPulseSeqRef.current = compressionPulseSeq;
       prevChatIdRef.current = renderChatId;
     }
-  }, [renderChatId, collapsibleState, isCompressing]);
+  }, [renderChatId, collapsibleState, compressionActive, compressionPulseSeq]);
 
   const handleBranch = useCallback(
     (messageId: string) => {
@@ -248,7 +276,8 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
   const showLoading =
     switching ||
-    (!isCompressing &&
+    (!visibleCompression &&
+      !compressionActive &&
       ((!snapshotReceived && messages.length === 0) ||
         (sseStatus === "connecting" && messages.length === 0)));
 

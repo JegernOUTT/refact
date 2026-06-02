@@ -437,6 +437,12 @@ export function selectCompressionReasonById(
 ): CompressionReason | undefined {
   return state.chat.threads[id]?.compression_reason;
 }
+export function selectCompressionPulseSeqById(
+  state: RootState,
+  id: string,
+): string | undefined {
+  return state.chat.threads[id]?.compression_pulse_seq;
+}
 
 export const selectSnapshotReceived = (state: RootState) =>
   state.chat.threads[state.chat.current_thread_id]?.snapshot_received ?? false;

@@ -231,6 +231,55 @@ describe("ChatContent compression progress", () => {
     expect(queuedContainer?.className).toContain("queuedMessagesContainer");
   });
 
+  it("shows progress when fast compression start and applied events are batched", () => {
+    vi.useFakeTimers({ now: 0 });
+    const { store } = renderChatContent(
+      makeChatState({ messages: [userMessage("hello")] }),
+    );
+    const chatId = store.getState().chat.current_thread_id;
+
+    act(() => {
+      store.dispatch({
+        type: "chatThread/applyChatEvent",
+        payload: {
+          chat_id: chatId,
+          type: "runtime_updated",
+          seq: "1",
+          state: "generating",
+          is_compressing: true,
+          compression_phase: "checking",
+        },
+      });
+      store.dispatch({
+        type: "chatThread/applyChatEvent",
+        payload: {
+          chat_id: chatId,
+          type: "runtime_updated",
+          seq: "2",
+          state: "idle",
+          is_compressing: false,
+          compression_phase: "applied",
+        },
+      });
+    });
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(499);
+    });
+
+    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+
+    expect(
+      screen.queryByTestId("compression-progress"),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps fast compression visible for the minimum duration", () => {
     vi.useFakeTimers({ now: 0 });
     const { store } = renderChatContent(makeChatState({ isCompressing: true }));

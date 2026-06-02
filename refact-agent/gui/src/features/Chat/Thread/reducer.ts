@@ -358,6 +358,11 @@ function clearCompressionState(rt: Draft<ChatThreadRuntime>) {
   rt.is_compressing = false;
   rt.compression_phase = undefined;
   rt.compression_reason = undefined;
+  rt.compression_pulse_seq = undefined;
+}
+
+function compressionPhaseIsActive(phase: CompressionPhase | undefined) {
+  return phase === "checking" || phase === "running";
 }
 
 function shouldReplaceBackgroundAgent(
@@ -1422,6 +1427,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           compression_reason: normalizeCompressionReason(
             event.runtime.compression_reason,
           ),
+          compression_pulse_seq: undefined,
           task_widget_expanded: existingRuntime?.task_widget_expanded ?? false,
           last_applied_seq: event.seq,
           message_index_by_id: rebuildMessageIndexById(snapshotMessages),
@@ -1967,6 +1973,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
         } else if (newState !== "error") {
           rt.error = null;
         }
+        const wasCompressionActive =
+          rt.is_compressing || compressionPhaseIsActive(rt.compression_phase);
         if (typeof event.is_compressing === "boolean") {
           rt.is_compressing = event.is_compressing;
         } else if (
@@ -1986,6 +1994,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if (nextCompressionPhase) {
           rt.compression_phase = nextCompressionPhase;
           rt.compression_reason = nextCompressionReason;
+          rt.compression_pulse_seq =
+            nextCompressionPhase === "applied" && wasCompressionActive
+              ? event.seq
+              : undefined;
         } else if (
           newState === "idle" ||
           newState === "completed" ||
@@ -1994,6 +2006,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         ) {
           rt.compression_phase = undefined;
           rt.compression_reason = undefined;
+          rt.compression_pulse_seq = undefined;
         }
         rt.last_applied_seq = event.seq;
         break;

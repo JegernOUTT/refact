@@ -219,6 +219,7 @@ export type ChatThreadRuntime = {
   compression_phase?: CompressionPhase;
   /** Latest structured compression skip/failure reason from the engine */
   compression_reason?: CompressionReason;
+  compression_pulse_seq?: string;
   /** Task progress widget expanded/collapsed state */
   task_widget_expanded: boolean;
   /** Actual session state from backend (for waiting_user_input, completed, etc.) */

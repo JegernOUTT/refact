@@ -61,6 +61,9 @@ describe("Chat Thread Reducer - Edge Cases", () => {
   const selectCompressionReason = (state: Chat) =>
     state.threads[chatId]?.compression_reason;
 
+  const selectCompressionPulseSeq = (state: Chat) =>
+    state.threads[chatId]?.compression_pulse_seq;
+
   describe("preserve streaming fields on final message_added", () => {
     test("should keep reasoning_content from streaming when message_added arrives", () => {
       let state = chatReducer(
@@ -425,6 +428,57 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       expect(selectCompressionPhase(state)).toBe("running");
       expect(selectCompressionReason(state)).toBeUndefined();
       expect(state.threads[chatId]!.streaming).toBe(true);
+    });
+
+    test("runtime_updated applied after active compression marks pulse", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "generating",
+          is_compressing: true,
+          compression_phase: "checking",
+        }),
+      );
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "3",
+          type: "runtime_updated",
+          state: "idle",
+          is_compressing: false,
+          compression_phase: "applied",
+        }),
+      );
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBe("applied");
+      expect(selectCompressionPulseSeq(state)).toBe("3");
+    });
+
+    test("runtime_updated standalone applied stores terminal phase without pulse", () => {
+      let state = chatReducer(initialState, applyChatEvent(createSnapshot([])));
+
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "runtime_updated",
+          state: "idle",
+          is_compressing: false,
+          compression_phase: "applied",
+        }),
+      );
+
+      expect(selectCompression(state)).toBe(false);
+      expect(selectCompressionPhase(state)).toBe("applied");
+      expect(selectCompressionPulseSeq(state)).toBeUndefined();
     });
 
     test("runtime_updated skipped stores structured reason without active compression", () => {
