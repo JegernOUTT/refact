@@ -164,6 +164,9 @@ pub fn is_segment_summary(message: &ChatMessage) -> bool {
 }
 
 fn is_excluded_from_segment(message: &ChatMessage) -> bool {
+    if is_segment_summary(message) {
+        return true;
+    }
     if matches!(
         message.role.as_str(),
         "system" | "user" | "cd_instruction" | COMPRESSION_REPORT_ROLE
@@ -1718,6 +1721,23 @@ mod tests {
         }
     }
 
+    fn legacy_segment_summary_without_source_hash() -> ChatMessage {
+        ChatMessage {
+            message_id: "legacy-summary".to_string(),
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("legacy compressed summary".to_string()),
+            summarization_tier: Some(SUMMARY_KIND.to_string()),
+            extra: serde_json::Map::from_iter([(
+                "compression".to_string(),
+                json!({
+                    "kind": SUMMARY_KIND,
+                    "source_message_ids": ["old-assistant"],
+                }),
+            )]),
+            ..Default::default()
+        }
+    }
+
     fn tool(text: &str) -> ChatMessage {
         ChatMessage {
             role: "tool".to_string(),
@@ -2156,10 +2176,7 @@ mod tests {
         assert!(is_excluded_from_segment(&report));
 
         let paired = vec![user("first"), report, summary, user("second")];
-        assert_eq!(
-            closed_non_user_segments(&paired),
-            vec![SummarySegment { start: 2, end: 2 }]
-        );
+        assert!(closed_non_user_segments(&paired).is_empty());
         assert_eq!(first_eligible_segment(&paired), None);
     }
 
@@ -2415,10 +2432,7 @@ mod tests {
             error_message("context_length_exceeded retry"),
         ];
 
-        assert_eq!(
-            closed_non_user_segments(&messages),
-            vec![SummarySegment { start: 1, end: 1 }]
-        );
+        assert!(closed_non_user_segments(&messages).is_empty());
         assert_eq!(
             eligible_tail_non_user_segment(&messages),
             Some(SummarySegment { start: 4, end: 6 })
@@ -3098,22 +3112,12 @@ mod tests {
 
     #[test]
     fn legacy_segment_summary_without_source_hash_is_not_summarized_again() {
-        let legacy_summary = ChatMessage {
-            message_id: "legacy-summary".to_string(),
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("legacy compressed summary".to_string()),
-            summarization_tier: Some(SUMMARY_KIND.to_string()),
-            extra: serde_json::Map::from_iter([(
-                "compression".to_string(),
-                json!({
-                    "kind": SUMMARY_KIND,
-                    "source_message_ids": ["old-assistant"],
-                }),
-            )]),
-            ..Default::default()
-        };
+        let legacy_summary = legacy_segment_summary_without_source_hash();
         assert!(is_segment_summary(&legacy_summary));
-        assert!(legacy_summary.extra["compression"].get("source_hash").is_none());
+        assert!(is_excluded_from_segment(&legacy_summary));
+        assert!(legacy_summary.extra["compression"]
+            .get("source_hash")
+            .is_none());
 
         let mut tail_messages = vec![user("first"), legacy_summary.clone()];
         let tail_before = serde_json::to_string(&tail_messages).unwrap();
@@ -3128,10 +3132,7 @@ mod tests {
 
         let mut closed_messages = vec![user("first"), legacy_summary, user("second")];
         let closed_before = serde_json::to_string(&closed_messages).unwrap();
-        assert_eq!(
-            closed_non_user_segments(&closed_messages),
-            vec![SummarySegment { start: 1, end: 1 }]
-        );
+        assert!(closed_non_user_segments(&closed_messages).is_empty());
         assert_eq!(first_eligible_segment(&closed_messages), None);
         assert!(!summarize_oldest_segment_with_static_summary(
             &mut closed_messages,
@@ -3141,6 +3142,73 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&closed_messages).unwrap(),
             closed_before
+        );
+    }
+
+    #[test]
+    fn legacy_summary_inside_closed_segment_splits_and_preserves_summary() {
+        let legacy_summary = legacy_segment_summary_without_source_hash();
+        let legacy_before = serde_json::to_string(&legacy_summary).unwrap();
+        let mut messages = vec![
+            user("first"),
+            legacy_summary,
+            event("notice"),
+            assistant("new completed output"),
+            user("second"),
+        ];
+
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 2, end: 3 }]
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 2, end: 3 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed post-summary run",
+            "test-model",
+        ));
+
+        assert_eq!(serde_json::to_string(&messages[1]).unwrap(), legacy_before);
+        assert_segment_report_summary_pair(
+            &messages,
+            2,
+            2,
+            "test-model",
+            "compressed post-summary run",
+        );
+        assert_eq!(messages[4].content.content_text_only(), "second");
+    }
+
+    #[test]
+    fn legacy_summary_inside_tail_segment_splits_and_preserves_summary() {
+        let legacy_summary = legacy_segment_summary_without_source_hash();
+        let legacy_before = serde_json::to_string(&legacy_summary).unwrap();
+        let mut messages = vec![user("first"), legacy_summary, assistant("new tail output")];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 2, end: 2 })
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 2, end: 2 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed tail after legacy summary",
+            "test-model",
+        ));
+
+        assert_eq!(serde_json::to_string(&messages[1]).unwrap(), legacy_before);
+        assert_segment_report_summary_pair(
+            &messages,
+            2,
+            1,
+            "test-model",
+            "compressed tail after legacy summary",
         );
     }
 
