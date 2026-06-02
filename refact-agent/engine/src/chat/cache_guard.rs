@@ -999,6 +999,73 @@ mod tests {
         assert!(is_anthropic_cache_prefix_compatible(&prev, &next));
     }
 
+    #[test]
+    fn comparable_anthropic_prefix_allows_completed_tool_event_turn_before_new_marker() {
+        let prev = sanitize_body_for_cache_guard(&json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "start"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "think", "signature": "sig"},
+                        {"type": "text", "text": "calling shell"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "t_shell", "input": {"command": "echo hi"}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "old output"},
+                        {"type": "text", "text": "old event", "cache_control": {"type": "ephemeral"}}
+                    ]
+                }
+            ]
+        }));
+        let next = sanitize_body_for_cache_guard(&json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "start"}]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "think", "signature": "sig"},
+                        {"type": "text", "text": "calling shell"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "t_shell", "input": {"command": "echo hi"}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "old output"},
+                        {"type": "text", "text": "old event"}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "next think", "signature": "sig2"},
+                        {"type": "text", "text": "next call"},
+                        {"type": "tool_use", "id": "toolu_2", "name": "t_shell", "input": {"command": "echo next"}}
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_2", "content": "next output"},
+                        {"type": "text", "text": "latest user text", "cache_control": {"type": "ephemeral"}}
+                    ]
+                }
+            ]
+        }));
+
+        assert!(is_anthropic_cache_prefix_compatible(&prev, &next));
+    }
+
     #[tokio::test]
     async fn cache_guard_allows_anthropic_suffix_changes_after_explicit_cache_marker() {
         let app = app_with_cache_priced_model("test/model-with-cache").await;

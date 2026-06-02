@@ -514,9 +514,10 @@ fn convert_to_anthropic(
                     Some(f) => f(&raw_text),
                     None => raw_text,
                 };
-                if is_context_role(role) && !pending_tool_results.is_empty() {
-                    // Inside a tool-results group: add as a plain text content block
-                    // so it is delivered in the same user turn as the tool outputs.
+                if !pending_tool_results.is_empty() {
+                    // Keep supplemental context/events with the pending tool-result turn.
+                    // Delaying them until a later assistant turn rewrites Anthropic message
+                    // positions and can invalidate prompt-cache prefix comparisons.
                     pending_tool_results.push(json!({"type": "text", "text": text}));
                 } else {
                     pending_context_text.push(PendingText {
@@ -2445,6 +2446,82 @@ mod tests {
         assert_eq!(content[0]["content"], "tool output");
         assert_eq!(content[1]["type"], "text");
         assert_eq!(content[1]["text"], "now fix it");
+    }
+
+    #[test]
+    fn test_event_after_tool_result_stays_with_tool_result_turn() {
+        use refact_core::chat_types::{ChatContent, ChatToolCall, ChatToolFunction};
+
+        let mut event_extra = serde_json::Map::new();
+        event_extra.insert(
+            "event".to_string(),
+            json!({
+                "subkind": "system_notice",
+                "source": "tools.shell",
+                "payload": {"decision": "approve"}
+            }),
+        );
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    extra_content: None,
+                    function: ChatToolFunction {
+                        name: "shell".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    index: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("tool output".to_string()),
+                tool_call_id: "call_1".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "event".to_string(),
+                content: ChatContent::SimpleText("User approved".to_string()),
+                extra: event_extra,
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("next tool".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_2".to_string(),
+                    tool_type: "function".to_string(),
+                    extra_content: None,
+                    function: ChatToolFunction {
+                        name: "shell".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    index: None,
+                }]),
+                ..Default::default()
+            },
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[3]["role"], "assistant");
+        let tool_turn_content = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(tool_turn_content[0]["type"], "tool_result");
+        assert_eq!(tool_turn_content[0]["tool_use_id"], "call_1");
+        assert_eq!(tool_turn_content[1]["type"], "text");
+        assert!(tool_turn_content[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("User approved"));
     }
 
     #[test]
