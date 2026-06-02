@@ -418,7 +418,7 @@ fn models_dev_model_to_model_caps(
         reasoning_effort_options: reasoning_controls.reasoning_effort_options,
         supports_thinking_budget: reasoning_controls.supports_thinking_budget,
         supports_adaptive_thinking_budget: reasoning_controls.supports_adaptive_thinking_budget,
-        supports_cache_control: models_dev_model_supports_cache_control(model),
+        supports_cache_control: false,
         tokenizer: "fake".to_string(),
         pricing: model_cost_to_pricing(model),
         raw_cost: model
@@ -428,16 +428,6 @@ fn models_dev_model_to_model_caps(
         status: non_empty_status(model.status.as_deref()),
         ..Default::default()
     }
-}
-
-fn models_dev_model_supports_cache_control(model: &ModelsDevModel) -> bool {
-    model.cost.as_ref().is_some_and(|cost| {
-        cost.cache_read.is_some()
-            || cost.cache_write.is_some()
-            || cost
-                .context_over_200k
-                .is_some_and(|tier| tier.cache_read.is_some() || tier.cache_write.is_some())
-    })
 }
 
 fn reasoning_control_rules() -> &'static [ReasoningControlRule] {
@@ -1020,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn model_caps_enable_cache_control_when_cache_pricing_exists() {
+    fn model_caps_do_not_enable_cache_control_when_cache_pricing_exists() {
         let model = test_model(Some(ModelsDevCost {
             input: Some(3.0),
             output: Some(15.0),
@@ -1031,24 +1021,11 @@ mod tests {
 
         let caps = models_dev_model_to_model_caps("anthropic", &test_provider(), &model);
 
-        assert!(caps.supports_cache_control);
-    }
-
-    #[test]
-    fn model_caps_do_not_enable_cache_control_without_cache_pricing() {
-        let model = test_model(Some(ModelsDevCost {
-            input: Some(3.0),
-            output: Some(15.0),
-            ..Default::default()
-        }));
-
-        let caps = models_dev_model_to_model_caps("anthropic", &test_provider(), &model);
-
         assert!(!caps.supports_cache_control);
     }
 
     #[test]
-    fn model_caps_enable_cache_control_when_long_context_cache_pricing_exists() {
+    fn model_caps_do_not_enable_cache_control_when_long_context_cache_pricing_exists() {
         let model = test_model(Some(ModelsDevCost {
             input: Some(3.0),
             output: Some(15.0),
@@ -1062,6 +1039,6 @@ mod tests {
 
         let caps = models_dev_model_to_model_caps("anthropic", &test_provider(), &model);
 
-        assert!(caps.supports_cache_control);
+        assert!(!caps.supports_cache_control);
     }
 }

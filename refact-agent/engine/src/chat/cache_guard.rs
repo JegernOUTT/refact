@@ -524,6 +524,10 @@ pub async fn check_or_pause_cache_guard(
         let session = session_arc.lock().await;
         session.thread.task_meta.clone()
     };
+    if !has_anthropic_explicit_cache_markers(request_body) {
+        return Ok(CacheGuardOutcome::Pass(None));
+    }
+
     if !is_guard_enabled_for_task_meta(app.clone(), model_id, task_meta.as_ref()).await {
         return Ok(CacheGuardOutcome::Pass(None));
     }
@@ -1044,6 +1048,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_guard_skips_requests_without_explicit_cache_markers() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        let prev_body = json!({
+            "model": "test",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
+            }]
+        });
+        let previous_snapshot = body_for_cache_guard(&prev_body);
+        {
+            let mut session = session_arc.lock().await;
+            session.cache_guard_snapshot = Some(previous_snapshot.clone());
+        }
+
+        let next_body = json!({
+            "model": "test",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "call_function_test_1",
+                    "name": "cat",
+                    "input": {"paths": "refact-agent/gui/src/components/Buttons/index.tsx"}
+                }]
+            }]
+        });
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, CacheGuardOutcome::Pass(None)));
+        let session = session_arc.lock().await;
+        assert!(session.runtime.pause_reasons.is_empty());
+        assert_eq!(
+            session.cache_guard_snapshot.as_ref(),
+            Some(&previous_snapshot)
+        );
+    }
+
+    #[tokio::test]
     async fn cache_guard_pauses_when_anthropic_explicit_cache_prefix_changes() {
         let app = app_with_cache_priced_model("test/model-with-cache").await;
         let session = session_with_task_role(None);
@@ -1456,8 +1508,13 @@ mod tests {
     async fn cache_guard_violation_in_normal_chat_pauses() {
         let app = app_with_cache_priced_model("test/model-with-cache").await;
         let session = session_with_task_role(None);
-        let prev_body =
-            json!({"messages": [{"role": "user", "content": "hello"}], "model": "test"});
+        let prev_body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
         let session_arc = Arc::new(tokio::sync::Mutex::new(session));
 
         {
@@ -1465,8 +1522,13 @@ mod tests {
             s.cache_guard_snapshot = Some(sanitize_body_for_cache_guard(&prev_body));
         }
 
-        let next_body =
-            json!({"messages": [{"role": "assistant", "content": "hi"}], "model": "test"});
+        let next_body = json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
         let outcome = check_or_pause_cache_guard(
             app,
             session_arc.clone(),
@@ -1489,7 +1551,14 @@ mod tests {
         let app = app_with_cache_priced_model("test/model-with-cache").await;
         let session = session_with_task_role(None);
         let prev_body = json!({
-            "messages": [{"role": "user", "content": "Bearer sk-secret-123 api_key=abcd"}],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Bearer sk-secret-123 api_key=abcd",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }],
             "model": "test"
         });
         let session_arc = Arc::new(tokio::sync::Mutex::new(session));
@@ -1500,7 +1569,14 @@ mod tests {
         }
 
         let next_body = json!({
-            "messages": [{"role": "assistant", "content": "changed Bearer sk-secret-123 api_key=abcd"}],
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "changed Bearer sk-secret-123 api_key=abcd",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }],
             "model": "test"
         });
         let outcome = check_or_pause_cache_guard(
@@ -1529,16 +1605,19 @@ mod tests {
         let app = app_with_cache_priced_model("test/model-with-cache").await;
         let session = session_with_task_role(None);
         let prev_body = json!({
-            "input": (0..900).map(|i| json!({
-                "type": "message",
+            "messages": (0..900).map(|i| json!({
                 "role": "user",
-                "content": [{"type": "input_text", "text": format!("safe-prefix-{i}")}]
+                "content": [{
+                    "type": "text",
+                    "text": format!("safe-prefix-{i}"),
+                    "cache_control": {"type": "ephemeral"}
+                }]
             })).collect::<Vec<_>>(),
             "metadata": {"auth_token": "raw-token-value"},
             "model": "test"
         });
         let mut next_body = prev_body.clone();
-        for item in next_body["input"].as_array_mut().unwrap() {
+        for item in next_body["messages"].as_array_mut().unwrap() {
             item["extra"] = json!("Bearer sk-secret-123 api_key=abcd");
         }
         next_body["metadata"]["auth_token"] = json!("changed-raw-token-value");
@@ -1605,18 +1684,28 @@ mod tests {
     async fn cache_guard_force_next_allows_one_intentional_reset() {
         let app = app_with_cache_priced_model("test/model-with-cache").await;
         let session = session_with_task_role(None);
-        let prev_body =
-            json!({"messages": [{"role": "user", "content": "hello"}], "model": "test"});
+        let prev_body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
         let session_arc = Arc::new(tokio::sync::Mutex::new(session));
 
         {
             let mut s = session_arc.lock().await;
-            s.cache_guard_snapshot = Some(sanitize_body_for_cache_guard(&prev_body));
+            s.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
             s.cache_guard_force_next = true;
         }
 
-        let next_body =
-            json!({"messages": [{"role": "assistant", "content": "hi"}], "model": "test"});
+        let next_body = json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
         let outcome = check_or_pause_cache_guard(
             app,
             session_arc.clone(),
