@@ -1,5 +1,9 @@
 import React, { useMemo, useState } from "react";
 import { Box, Flex } from "@radix-ui/themes";
+import {
+  getAssistantCompressionMetadata,
+  getCompressionReportMetadata,
+} from "../../services/refact/types";
 import type {
   ChatCompressionReportMetadata,
   SummarizationMessage as SummarizationMessageType,
@@ -77,28 +81,15 @@ type MetadataStat = {
   suffix?: string;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function parseNumberStat(value: unknown, suffix = ""): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return `${value.toLocaleString()}${suffix}`;
 }
 
-function parseCompressionReportMetadata(
-  extra: Record<string, unknown> | undefined,
-): ChatCompressionReportMetadata | null {
-  const report = extra?.compression_report;
-  if (!isRecord(report)) return null;
-  if (report.kind !== "chat_compression_report") return null;
-  return report as ChatCompressionReportMetadata;
-}
-
 function statsFromCompressionReportMetadata(
-  extra: Record<string, unknown> | undefined,
+  message: SummarizationMessageType,
 ): StatCell[] | null {
-  const report = parseCompressionReportMetadata(extra);
+  const report = getCompressionReportMetadata(message);
   if (!report) return null;
 
   const STAT_FIELDS: MetadataStat[] = [
@@ -159,10 +150,10 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const reactiveStats = useMemo(() => {
     if (tier !== "tier2_reactive") return null;
     return (
-      statsFromCompressionReportMetadata(message.extra) ??
+      statsFromCompressionReportMetadata(message) ??
       parseReactiveStats(contentText)
     );
-  }, [tier, contentText, message.extra]);
+  }, [tier, contentText, message]);
 
   const meta = metaForTier(tier);
 
@@ -172,11 +163,9 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
       }`
     : null;
 
-  const compressionMeta = message.extra?.compression as
-    | Record<string, unknown>
-    | undefined;
+  const compressionMeta = getAssistantCompressionMetadata(message);
   const sourceCount = Array.isArray(compressionMeta?.source_message_ids)
-    ? (compressionMeta.source_message_ids as unknown[]).length
+    ? compressionMeta.source_message_ids.length
     : null;
   const summaryModel =
     typeof compressionMeta?.summary_model === "string"

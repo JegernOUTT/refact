@@ -110,6 +110,23 @@ describe("SummarizationMessage", () => {
     expect(screen.getByText(/1,234 tokens summarized/u)).toBeInTheDocument();
   });
 
+  it("shows flattened assistant summary metadata in the header", () => {
+    render(
+      <SummarizationMessage
+        message={makeMessage({
+          compression: {
+            kind: "llm_segment_summary",
+            source_message_ids: ["user-1", "assistant-1"],
+            summary_model: "summary-model",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("2 messages")).toBeInTheDocument();
+    expect(screen.getByText(/summary-model/u)).toBeInTheDocument();
+  });
+
   it("expands to reveal the body when the header is clicked", async () => {
     const { user } = render(
       <SummarizationMessage
@@ -224,6 +241,35 @@ describe("SummarizationMessage", () => {
     expect(stats).toHaveTextContent("3,000");
     expect(stats).toHaveTextContent("Reduction");
     expect(stats).toHaveTextContent("30%");
+  });
+
+  it("renders flattened compression report metadata stats", async () => {
+    const { user } = render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier2_reactive",
+          content: "Compaction happened. Details moved to top-level metadata.",
+          compression_report: {
+            kind: "chat_compression_report",
+            context_messages_dropped: 3,
+            tokens_before: 10000,
+            tokens_after: 7000,
+            estimated_tokens_saved: 3000,
+          },
+        })}
+      />,
+    );
+
+    await user.click(screen.getByTestId("summarization-card-header"));
+    const stats = screen.getByTestId("summarization-card-stats");
+    expect(stats).toHaveTextContent("Context messages dropped");
+    expect(stats).toHaveTextContent("3");
+    expect(stats).toHaveTextContent("Tokens before");
+    expect(stats).toHaveTextContent("10,000");
+    expect(stats).toHaveTextContent("Tokens after");
+    expect(stats).toHaveTextContent("7,000");
+    expect(stats).toHaveTextContent("Tokens saved");
+    expect(stats).toHaveTextContent("3,000");
   });
 
   it("renders context messages dropped from compression report metadata", async () => {

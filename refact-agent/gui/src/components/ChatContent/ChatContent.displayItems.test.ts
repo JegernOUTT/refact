@@ -169,6 +169,34 @@ describe("ChatContent display items", () => {
     expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
   });
 
+  it("renders assistant messages with top-level compression as summarization display items", () => {
+    const messages: ChatMessages = [
+      assistantMessage({
+        content: "persisted compressed summary",
+        compression: {
+          kind: "llm_segment_summary",
+          source_message_ids: ["user-1", "assistant-1"],
+          summary_model: "summary-model",
+        },
+      }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]?.type).toBe("summarization");
+    if (items[0]?.type !== "summarization") {
+      throw new Error("Expected summarization item");
+    }
+    expect(items[0].message.extra).toEqual({
+      compression: {
+        kind: "llm_segment_summary",
+        source_message_ids: ["user-1", "assistant-1"],
+        summary_model: "summary-model",
+      },
+    });
+  });
+
   it("matches full rebuild when same-index activate_skill-only assistant becomes visible", () => {
     const previousMessages: ChatMessages = [
       activateSkillOnlyAssistantMessage(),
@@ -228,6 +256,34 @@ describe("ChatContent display items", () => {
     expect(items[1].message.summarized_token_estimate).toBe(42);
     expect(items[1].message.extra).toEqual({
       compression_report: { kind: "chat_compression_report" },
+    });
+  });
+
+  it("renders compression_report messages with top-level metadata as summarization display items", () => {
+    const messages: ChatMessages = [
+      compressionReportMessage({
+        extra: undefined,
+        compression_report: {
+          kind: "chat_compression_report",
+          context_files_removed: 2,
+          estimated_tokens_saved: 3000,
+        },
+      }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]?.type).toBe("summarization");
+    if (items[0]?.type !== "summarization") {
+      throw new Error("Expected summarization item");
+    }
+    expect(items[0].message.extra).toEqual({
+      compression_report: {
+        kind: "chat_compression_report",
+        context_files_removed: 2,
+        estimated_tokens_saved: 3000,
+      },
     });
   });
 

@@ -354,6 +354,7 @@ export interface AssistantMessage extends BaseMessage, CostInfo {
   usage?: Usage | null;
   summarized_token_estimate?: number;
   summarization_tier?: string;
+  compression?: LlmSegmentSummaryCompressionMetadata;
   extra?: Record<string, unknown>;
 }
 
@@ -478,12 +479,36 @@ export type SummarizationTier =
   | "tier1_merged"
   | "tier2_reactive";
 
+export type LlmSegmentSummaryCompressionMetadata = Record<string, unknown> & {
+  kind: "llm_segment_summary";
+};
+
+function isLlmSegmentSummaryCompressionMetadata(
+  value: unknown,
+): value is LlmSegmentSummaryCompressionMetadata {
+  return isRecord(value) && value.kind === "llm_segment_summary";
+}
+
+export function getAssistantCompressionMetadata(message: {
+  extra?: Record<string, unknown>;
+  compression?: unknown;
+}): LlmSegmentSummaryCompressionMetadata | null {
+  const nested = message.extra?.compression;
+  if (isLlmSegmentSummaryCompressionMetadata(nested)) return nested;
+  if (isLlmSegmentSummaryCompressionMetadata(message.compression)) {
+    return message.compression;
+  }
+  return null;
+}
+
 export interface SummarizationMessage extends BaseMessage {
   role: "summarization";
   content: string;
   summarized_range?: [number, number];
   summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;
+  compression?: LlmSegmentSummaryCompressionMetadata;
+  compression_report?: ChatCompressionReportMetadata;
 }
 
 export type ChatCompressionReportMetadata = {
@@ -497,6 +522,24 @@ export type ChatCompressionReportMetadata = {
   reduction_percent?: number;
 };
 
+function isChatCompressionReportMetadata(
+  value: unknown,
+): value is ChatCompressionReportMetadata {
+  return isRecord(value) && value.kind === "chat_compression_report";
+}
+
+export function getCompressionReportMetadata(message: {
+  extra?: Record<string, unknown>;
+  compression_report?: unknown;
+}): ChatCompressionReportMetadata | null {
+  const nested = message.extra?.compression_report;
+  if (isChatCompressionReportMetadata(nested)) return nested;
+  if (isChatCompressionReportMetadata(message.compression_report)) {
+    return message.compression_report;
+  }
+  return null;
+}
+
 export type CompressionReportExtra = Record<string, unknown> & {
   compression_report?: ChatCompressionReportMetadata;
 };
@@ -506,6 +549,7 @@ export interface CompressionReportMessage extends BaseMessage {
   content: string;
   summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;
+  compression_report?: ChatCompressionReportMetadata;
   extra?: CompressionReportExtra;
 }
 
@@ -641,17 +685,25 @@ export function isCompressionReportMessage(
 export function isCompressedAssistantMessage(
   message: ChatMessage,
 ): message is AssistantMessage {
-  if (message.role !== "assistant") return false;
-  const extra = message.extra;
-  if (!isRecord(extra)) return false;
-  const compression = extra.compression;
-  if (!isRecord(compression)) return false;
-  return compression.kind === "llm_segment_summary";
+  return (
+    message.role === "assistant" &&
+    getAssistantCompressionMetadata(message) !== null
+  );
+}
+
+function withNormalizedExtraMetadata(
+  extra: Record<string, unknown> | undefined,
+  key: "compression" | "compression_report",
+  metadata: unknown | null,
+): Record<string, unknown> | undefined {
+  if (metadata === null) return extra;
+  return { ...(extra ?? {}), [key]: metadata };
 }
 
 export function syntheticSummarizationMessage(
   msg: AssistantMessage,
 ): SummarizationMessage {
+  const compression = getAssistantCompressionMetadata(msg);
   return {
     role: "summarization",
     content: typeof msg.content === "string" ? msg.content : "",
@@ -661,13 +713,15 @@ export function syntheticSummarizationMessage(
       typeof msg.summarized_token_estimate === "number"
         ? msg.summarized_token_estimate
         : undefined,
-    extra: msg.extra,
+    compression: compression ?? undefined,
+    extra: withNormalizedExtraMetadata(msg.extra, "compression", compression),
   };
 }
 
 export function syntheticCompressionReportMessage(
   msg: CompressionReportMessage,
 ): SummarizationMessage {
+  const compressionReport = getCompressionReportMetadata(msg);
   return {
     role: "summarization",
     content: msg.content,
@@ -677,7 +731,12 @@ export function syntheticCompressionReportMessage(
       typeof msg.summarized_token_estimate === "number"
         ? msg.summarized_token_estimate
         : undefined,
-    extra: msg.extra,
+    compression_report: compressionReport ?? undefined,
+    extra: withNormalizedExtraMetadata(
+      msg.extra,
+      "compression_report",
+      compressionReport,
+    ),
   };
 }
 
