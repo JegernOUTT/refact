@@ -210,13 +210,13 @@ function isCompressedAssistantPairedWithReport(
   index: number,
 ): boolean {
   const message = messages[index];
-  if (!message || !isCompressedAssistantMessage(message)) return false;
-  const previous = messages[index - 1];
-  const next = messages[index + 1];
-  return Boolean(
-    (previous && isCompressionReportMessage(previous)) ||
-      (next && isCompressionReportMessage(next)),
-  );
+  if (!isCompressedAssistantMessage(message)) return false;
+  const previousIsReport =
+    index > 0 && isCompressionReportMessage(messages[index - 1]);
+  const nextIsReport =
+    index + 1 < messages.length &&
+    isCompressionReportMessage(messages[index + 1]);
+  return previousIsReport || nextIsReport;
 }
 
 type AssistantDisplayClass =

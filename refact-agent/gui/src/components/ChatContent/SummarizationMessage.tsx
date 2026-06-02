@@ -232,7 +232,7 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
     [message],
   );
   const bodyStats = useMemo(() => {
-    if (reportStats || tier !== "tier2_reactive") return null;
+    if (reportStats !== null || tier !== "tier2_reactive") return null;
     return parseReactiveStats(contentText);
   }, [tier, reportStats, contentText]);
 
@@ -249,11 +249,10 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
     ? sourceMessageCountFromReport(compressionReport)
     : null;
   const sourceCount =
-    reportSourceCount !== null
-      ? reportSourceCount
-      : Array.isArray(compressionMeta?.source_message_ids)
-        ? compressionMeta.source_message_ids.length
-        : null;
+    reportSourceCount ??
+    (Array.isArray(compressionMeta?.source_message_ids)
+      ? compressionMeta.source_message_ids.length
+      : null);
   const summaryModel =
     typeof compressionReport?.summary_model === "string"
       ? compressionReport.summary_model
