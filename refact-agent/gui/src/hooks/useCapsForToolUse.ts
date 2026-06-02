@@ -3,11 +3,7 @@ import { selectThreadMode } from "../features/Chat/Thread/selectors";
 import { useAppSelector, useGetCapsQuery, useAppDispatch } from ".";
 import { useGetChatModesQuery } from "../services/refact/chatModes";
 
-import {
-  getSelectedChatModel,
-  setChatModel,
-  setMaxNewTokens,
-} from "../features/Chat";
+import { getSelectedChatModel, setChatModel } from "../features/Chat";
 import { isLegacyRefactModel } from "../utils/modelProviders";
 
 export const PAID_AGENT_LIST = [
@@ -53,14 +49,22 @@ export function useCapsForToolUse() {
         caps.data?.chat_default_model === value
           ? caps.data.chat_default_model
           : value;
-      const action = setChatModel(model);
-      dispatch(action);
       const tokens = caps.data?.chat_models[value]?.n_ctx;
-      if (tokens !== undefined) {
-        dispatch(setMaxNewTokens(tokens));
-      }
+      const previousTokens = caps.data?.chat_models[currentModel]?.n_ctx;
+      dispatch(
+        setChatModel({
+          model,
+          modelMaxContextTokens: tokens,
+          previousModelMaxContextTokens: previousTokens,
+        }),
+      );
     },
-    [caps.data?.chat_default_model, caps.data?.chat_models, dispatch],
+    [
+      caps.data?.chat_default_model,
+      caps.data?.chat_models,
+      currentModel,
+      dispatch,
+    ],
   );
 
   const isMultimodalitySupportedForCurrentModel = useMemo(() => {

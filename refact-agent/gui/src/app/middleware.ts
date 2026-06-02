@@ -35,6 +35,7 @@ import {
   setAutoApproveEditingTools,
   setAutoApproveDangerousCommands,
   setIncreaseMaxTokens,
+  setMaxNewTokens,
   setAreFollowUpsEnabled,
   setSystemPrompt,
   setReasoningEffort,
@@ -1235,8 +1236,16 @@ startListening({
     const state = listenerApi.getState();
     const apiKey = state.config.apiKey;
     const chatId = state.chat.current_thread_id;
+    const runtime = chatId ? state.chat.threads[chatId] : undefined;
 
-    if (!hasConfiguredEngineEndpoint(state) || !chatId) return;
+    if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
+
+    const patch: Record<string, unknown> = {
+      model: action.payload.model,
+    };
+    if (action.payload.modelMaxContextTokens !== undefined) {
+      patch.context_tokens_cap = runtime.thread.context_tokens_cap ?? null;
+    }
 
     try {
       const { sendChatCommand } = await import(
@@ -1244,7 +1253,38 @@ startListening({
       );
       await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
         type: "set_params",
-        patch: { model: action.payload },
+        patch,
+      });
+    } catch {
+      /* ignore */
+    }
+  },
+});
+
+startListening({
+  actionCreator: setMaxNewTokens,
+  effect: async (_action, listenerApi) => {
+    const state = listenerApi.getState();
+    const apiKey = state.config.apiKey;
+    const chatId = state.chat.current_thread_id;
+    const runtime = chatId ? state.chat.threads[chatId] : undefined;
+
+    if (!hasConfiguredEngineEndpoint(state) || !chatId || !runtime) return;
+
+    const previousCap =
+      listenerApi.getOriginalState().chat.threads[chatId]?.thread
+        .context_tokens_cap;
+    if (previousCap === runtime.thread.context_tokens_cap) return;
+
+    try {
+      const { sendChatCommand } = await import(
+        "../services/refact/chatCommands"
+      );
+      await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
+        type: "set_params",
+        patch: {
+          context_tokens_cap: runtime.thread.context_tokens_cap ?? null,
+        },
       });
     } catch {
       /* ignore */

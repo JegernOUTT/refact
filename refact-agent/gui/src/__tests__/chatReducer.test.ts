@@ -11,6 +11,8 @@ import {
   applyChatEvent,
   setTemperature,
   setMaxTokens,
+  setChatModel,
+  setMaxNewTokens,
 } from "../features/Chat/Thread/actions";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 
@@ -478,6 +480,312 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       // claude-3-5-sonnet should be preserved, not overridden by gpt-4o
       expect(afterCaps.threads[otherChatId]?.thread.model).toBe(
         "claude-3-5-sonnet",
+      );
+    });
+
+    test("caps_fulfilled_updates_auto_context_cap_after_model_switch", () => {
+      const capsPayload = {
+        chat_default_model: "old-model",
+        chat_models: {
+          "old-model": { n_ctx: 8192 },
+          "new-model": { n_ctx: 128000 },
+        },
+      };
+
+      const capsAction = {
+        type: "caps/executeQuery/fulfilled",
+        payload: capsPayload,
+        meta: {
+          requestId: "test",
+          requestStatus: "fulfilled" as const,
+          arg: { endpointName: "getCaps" },
+        },
+      };
+
+      const initialized = chatReducer(initialState, capsAction);
+      expect(initialized.threads[chatId]?.thread.context_tokens_cap).toBe(8192);
+
+      const switchedModel = chatReducer(
+        initialized,
+        setChatModel({ model: "new-model" }),
+      );
+      const afterCaps = chatReducer(switchedModel, capsAction);
+
+      expect(
+        afterCaps.threads[chatId]?.thread.currentMaximumContextTokens,
+      ).toBe(128000);
+      expect(afterCaps.threads[chatId]?.thread.context_tokens_cap).toBe(128000);
+    });
+
+    test("caps_fulfilled_preserves_lower_explicit_context_cap_after_model_switch", () => {
+      const capsPayload = {
+        chat_default_model: "old-model",
+        chat_models: {
+          "old-model": { n_ctx: 8192 },
+          "new-model": { n_ctx: 128000 },
+        },
+      };
+
+      const capsAction = {
+        type: "caps/executeQuery/fulfilled",
+        payload: capsPayload,
+        meta: {
+          requestId: "test",
+          requestStatus: "fulfilled" as const,
+          arg: { endpointName: "getCaps" },
+        },
+      };
+
+      const initialized = chatReducer(initialState, capsAction);
+      const existingRuntime = initialized.threads[chatId];
+      expect(existingRuntime).toBeDefined();
+      const withExplicitCap: Chat = {
+        ...initialized,
+        threads: {
+          ...initialized.threads,
+          [chatId]: {
+            ...existingRuntime!,
+            thread: {
+              ...existingRuntime!.thread,
+              context_tokens_cap: 4096,
+            },
+          },
+        },
+      };
+
+      const switchedModel = chatReducer(
+        withExplicitCap,
+        setChatModel({ model: "new-model" }),
+      );
+      const afterCaps = chatReducer(switchedModel, capsAction);
+
+      expect(
+        afterCaps.threads[chatId]?.thread.currentMaximumContextTokens,
+      ).toBe(128000);
+      expect(afterCaps.threads[chatId]?.thread.context_tokens_cap).toBe(4096);
+    });
+
+    test("caps_fulfilled_preserves_explicit_cap_after_preview_updates_current_context", () => {
+      const capsPayload = {
+        chat_default_model: "old-model",
+        chat_models: {
+          "old-model": { n_ctx: 8192 },
+          "new-model": { n_ctx: 128000 },
+        },
+      };
+
+      const capsAction = {
+        type: "caps/executeQuery/fulfilled",
+        payload: capsPayload,
+        meta: {
+          requestId: "test",
+          requestStatus: "fulfilled" as const,
+          arg: { endpointName: "getCaps" },
+        },
+      };
+      const previewAction = {
+        type: "commands/executeQuery/fulfilled",
+        payload: {
+          messages: [],
+          files: [],
+          current_context: 1024,
+          number_context: 4096,
+        },
+        meta: {
+          requestId: "preview-test",
+          requestStatus: "fulfilled" as const,
+          arg: { endpointName: "getCommandPreview" },
+        },
+      };
+
+      const initialized = chatReducer(initialState, capsAction);
+      const existingRuntime = initialized.threads[chatId];
+      expect(existingRuntime).toBeDefined();
+      const withExplicitCap: Chat = {
+        ...initialized,
+        threads: {
+          ...initialized.threads,
+          [chatId]: {
+            ...existingRuntime!,
+            thread: {
+              ...existingRuntime!.thread,
+              context_tokens_cap: 4096,
+            },
+          },
+        },
+      };
+      const afterPreview = chatReducer(withExplicitCap, previewAction);
+      expect(
+        afterPreview.threads[chatId]?.thread.currentMaximumContextTokens,
+      ).toBe(4096);
+      expect(
+        afterPreview.threads[chatId]?.thread.modelMaximumContextTokens,
+      ).toBe(8192);
+
+      const switchedModel = chatReducer(
+        afterPreview,
+        setChatModel({ model: "new-model" }),
+      );
+      const afterCaps = chatReducer(switchedModel, capsAction);
+
+      expect(afterCaps.threads[chatId]?.thread.modelMaximumContextTokens).toBe(
+        128000,
+      );
+      expect(afterCaps.threads[chatId]?.thread.context_tokens_cap).toBe(4096);
+    });
+
+    test("set_max_new_tokens_updates_auto_context_cap_after_model_switch", () => {
+      const withOldModelLimit = chatReducer(
+        initialState,
+        setMaxNewTokens(8192),
+      );
+      const withNewModel = chatReducer(
+        withOldModelLimit,
+        setChatModel({ model: "new-model" }),
+      );
+      const afterLimitUpdate = chatReducer(
+        withNewModel,
+        setMaxNewTokens(128000),
+      );
+
+      expect(
+        afterLimitUpdate.threads[chatId]?.thread.currentMaximumContextTokens,
+      ).toBe(128000);
+      expect(afterLimitUpdate.threads[chatId]?.thread.context_tokens_cap).toBe(
+        128000,
+      );
+    });
+
+    test("snapshot_preserves_model_context_limit_before_model_switch", () => {
+      const capsPayload = {
+        chat_default_model: "old-model",
+        chat_models: {
+          "old-model": { n_ctx: 8192 },
+          "new-model": { n_ctx: 128000 },
+        },
+      };
+
+      const capsAction = {
+        type: "caps/executeQuery/fulfilled",
+        payload: capsPayload,
+        meta: {
+          requestId: "test",
+          requestStatus: "fulfilled" as const,
+          arg: { endpointName: "getCaps" },
+        },
+      };
+      const snapshotEvent: ChatEventEnvelope = {
+        chat_id: chatId,
+        seq: "1",
+        type: "snapshot",
+        thread: {
+          id: chatId,
+          title: "Test",
+          model: "old-model",
+          mode: "agent",
+          tool_use: "agent",
+          boost_reasoning: false,
+          context_tokens_cap: null,
+          include_project_info: true,
+          checkpoints_enabled: false,
+          is_title_generated: false,
+        },
+        runtime: {
+          state: "idle",
+          paused: false,
+          error: null,
+          queue_size: 0,
+          pause_reasons: [],
+          queued_items: [],
+        },
+        background_agents: [],
+        messages: [],
+      };
+
+      const initialized = chatReducer(initialState, capsAction);
+      const afterSnapshot = chatReducer(
+        initialized,
+        applyChatEvent(snapshotEvent),
+      );
+      const switchedModel = chatReducer(
+        afterSnapshot,
+        setChatModel({ model: "new-model" }),
+      );
+      const afterCaps = chatReducer(switchedModel, capsAction);
+
+      expect(
+        afterSnapshot.threads[chatId]?.thread.modelMaximumContextTokens,
+      ).toBe(8192);
+      expect(afterCaps.threads[chatId]?.thread.modelMaximumContextTokens).toBe(
+        128000,
+      );
+      expect(afterCaps.threads[chatId]?.thread.context_tokens_cap).toBe(128000);
+    });
+
+    test("model_switch_updates_auto_context_cap_without_existing_model_limit", () => {
+      const existingRuntime = initialState.threads[chatId];
+      expect(existingRuntime).toBeDefined();
+      const restoredState: Chat = {
+        ...initialState,
+        threads: {
+          ...initialState.threads,
+          [chatId]: {
+            ...existingRuntime!,
+            thread: {
+              ...existingRuntime!.thread,
+              model: "old-model",
+              context_tokens_cap: 8192,
+              currentMaximumContextTokens: undefined,
+              modelMaximumContextTokens: undefined,
+            },
+          },
+        },
+      };
+
+      const switchedModel = chatReducer(
+        restoredState,
+        setChatModel({
+          model: "new-model",
+          modelMaxContextTokens: 128000,
+          previousModelMaxContextTokens: 8192,
+        }),
+      );
+
+      expect(
+        switchedModel.threads[chatId]?.thread.modelMaximumContextTokens,
+      ).toBe(128000);
+      expect(switchedModel.threads[chatId]?.thread.context_tokens_cap).toBe(
+        128000,
+      );
+    });
+
+    test("model_switch_updates_auto_context_cap_with_stale_previous_limit", () => {
+      const withOldModelLimit = chatReducer(
+        initialState,
+        setMaxNewTokens(8192),
+      );
+      const firstSwitch = chatReducer(
+        withOldModelLimit,
+        setChatModel({
+          model: "middle-model",
+          modelMaxContextTokens: 128000,
+          previousModelMaxContextTokens: 8192,
+        }),
+      );
+      const secondSwitch = chatReducer(
+        firstSwitch,
+        setChatModel({
+          model: "new-model",
+          modelMaxContextTokens: 200000,
+          previousModelMaxContextTokens: 8192,
+        }),
+      );
+
+      expect(firstSwitch.threads[chatId]?.thread.context_tokens_cap).toBe(
+        128000,
+      );
+      expect(secondSwitch.threads[chatId]?.thread.context_tokens_cap).toBe(
+        200000,
       );
     });
   });

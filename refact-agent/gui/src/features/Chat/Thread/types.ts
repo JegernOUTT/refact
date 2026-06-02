@@ -122,6 +122,7 @@ export type ChatThread = {
   new_chat_suggested: SuggestedChat;
   auto_approve_editing_tools?: boolean;
   auto_approve_dangerous_commands?: boolean;
+  modelMaximumContextTokens?: number;
   currentMaximumContextTokens?: number;
   currentMessageContextTokens?: number;
   increase_max_tokens?: boolean;

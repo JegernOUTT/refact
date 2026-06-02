@@ -125,6 +125,27 @@ const createChatThread = (
   };
 };
 
+function syncThreadContextLimitToModelMax(
+  thread: Draft<ChatThread>,
+  modelMaxContextTokens: number,
+  previousModelMaxContextTokens = thread.modelMaximumContextTokens,
+): void {
+  const previousStoredModelMaxContextTokens = thread.modelMaximumContextTokens;
+  const currentCap = thread.context_tokens_cap;
+
+  thread.modelMaximumContextTokens = modelMaxContextTokens;
+  thread.currentMaximumContextTokens = modelMaxContextTokens;
+
+  if (
+    currentCap === undefined ||
+    currentCap > modelMaxContextTokens ||
+    currentCap === previousModelMaxContextTokens ||
+    currentCap === previousStoredModelMaxContextTokens
+  ) {
+    thread.context_tokens_cap = modelMaxContextTokens;
+  }
+}
+
 const createThreadRuntime = (
   tool_use: ToolUse,
   integration?: IntegrationMeta | null,
@@ -565,7 +586,15 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
   builder.addCase(setChatModel, (state, action) => {
     const rt = getCurrentRuntime(state);
-    if (rt) rt.thread.model = action.payload;
+    if (!rt) return;
+    rt.thread.model = action.payload.model;
+    if (action.payload.modelMaxContextTokens !== undefined) {
+      syncThreadContextLimitToModelMax(
+        rt.thread,
+        action.payload.modelMaxContextTokens,
+        action.payload.previousModelMaxContextTokens,
+      );
+    }
   });
 
   builder.addCase(setSystemPrompt, (state, action) => {
@@ -1145,13 +1174,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(setMaxNewTokens, (state, action) => {
     const rt = getCurrentRuntime(state);
     if (rt) {
-      rt.thread.currentMaximumContextTokens = action.payload;
-      if (
-        rt.thread.context_tokens_cap === undefined ||
-        rt.thread.context_tokens_cap > action.payload
-      ) {
-        rt.thread.context_tokens_cap = action.payload;
-      }
+      syncThreadContextLimitToModelMax(rt.thread, action.payload);
     }
   });
 
@@ -1338,6 +1361,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
             event.thread.auto_approve_dangerous_commands ??
             existing?.auto_approve_dangerous_commands ??
             false,
+          modelMaximumContextTokens: existing?.modelMaximumContextTokens,
+          currentMaximumContextTokens: existing?.currentMaximumContextTokens,
+          currentMessageContextTokens: existing?.currentMessageContextTokens,
           increase_max_tokens: existing?.increase_max_tokens ?? false,
           new_chat_suggested: { wasSuggested: false },
           is_task_chat: isTaskChat,
@@ -2059,15 +2085,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
       const currentModelMaximumContextTokens =
         action.payload.chat_models[model].n_ctx;
-
-      rt.thread.currentMaximumContextTokens = currentModelMaximumContextTokens;
-
-      if (
-        rt.thread.context_tokens_cap === undefined ||
-        rt.thread.context_tokens_cap > currentModelMaximumContextTokens
-      ) {
-        rt.thread.context_tokens_cap = currentModelMaximumContextTokens;
-      }
+      syncThreadContextLimitToModelMax(
+        rt.thread,
+        currentModelMaximumContextTokens,
+      );
     },
   );
 

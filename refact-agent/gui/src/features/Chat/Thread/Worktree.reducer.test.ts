@@ -196,6 +196,23 @@ describe("Worktree chat thread reducer", () => {
     );
   });
 
+  test("thread params patch sends context token cap", () => {
+    const thread: ChatThread = {
+      id: "chat-context-cap",
+      messages: [],
+      model: "gpt-4",
+      mode: "agent",
+      tool_use: "agent",
+      new_chat_suggested: { wasSuggested: false },
+      context_tokens_cap: 128000,
+    };
+
+    expect(buildThreadParamsPatch(thread, true)).toHaveProperty(
+      "context_tokens_cap",
+      128000,
+    );
+  });
+
   test("thread params patch preserves worktree by id only", () => {
     const thread: ChatThread = {
       id: "chat-patch",

@@ -68,6 +68,8 @@ function buildThreadParamsPatch(
   if ("frequency_penalty" in thread)
     patch.frequency_penalty = thread.frequency_penalty;
   if ("max_tokens" in thread) patch.max_tokens = thread.max_tokens;
+  if (thread.context_tokens_cap !== undefined)
+    patch.context_tokens_cap = thread.context_tokens_cap;
   if ("reasoning_effort" in thread)
     patch.reasoning_effort = thread.reasoning_effort;
   if ("thinking_budget" in thread)
@@ -277,7 +279,15 @@ export const backUpMessages = createAction<
   }
 >("chatThread/backUpMessages");
 
-export const setChatModel = createAction<string>("chatThread/setChatModel");
+export type SetChatModelPayload = {
+  model: string;
+  modelMaxContextTokens?: number;
+  previousModelMaxContextTokens?: number;
+};
+
+export const setChatModel = createAction<SetChatModelPayload>(
+  "chatThread/setChatModel",
+);
 export const getSelectedChatModel = (state: RootState) => {
   const runtime = state.chat.threads[state.chat.current_thread_id] as
     | { thread: { model: string } }
