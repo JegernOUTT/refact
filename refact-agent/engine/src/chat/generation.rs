@@ -67,7 +67,10 @@ fn context_limit_compaction_decision(
     if !error.retry_decision().is_context_limit() || abort_flag.load(Ordering::SeqCst) {
         return ContextLimitCompactionDecision::Skip;
     }
-    let attempt = thread.reactive_compact_attempts.unwrap_or(0) + 1;
+    let attempt = thread
+        .reactive_compact_attempts
+        .unwrap_or(0)
+        .saturating_add(1);
     if attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
         ContextLimitCompactionDecision::MaxAttemptsReached
     } else {
@@ -732,7 +735,11 @@ async fn maybe_compact_after_high_pressure_length_stop(
         if !is_high_pressure_length_stop(message, &session.messages, effective_n_ctx) {
             return false;
         }
-        let reactive_attempt = session.thread.reactive_compact_attempts.unwrap_or(0) + 1;
+        let reactive_attempt = session
+            .thread
+            .reactive_compact_attempts
+            .unwrap_or(0)
+            .saturating_add(1);
         if reactive_attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
             crate::chat::summarization::emit_compression_skipped_status(
                 &mut session,
@@ -2605,8 +2612,7 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut session = ChatSession::new("length-stop-bounded".to_string());
         session.messages = vec![make_user_msg("continue"), make_high_pressure_length_stop()];
-        session.thread.reactive_compact_attempts =
-            Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS);
+        session.thread.reactive_compact_attempts = Some(usize::MAX);
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
@@ -2621,10 +2627,7 @@ mod tests {
         );
 
         let session = session_arc.lock().await;
-        assert_eq!(
-            session.thread.reactive_compact_attempts,
-            Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS)
-        );
+        assert_eq!(session.thread.reactive_compact_attempts, Some(usize::MAX));
         assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
         assert_eq!(
             session.compression_reason,
@@ -2819,6 +2822,19 @@ mod tests {
         let mut thread = ThreadParams::default();
         thread.reactive_compact_attempts =
             Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS);
+        let error = context_limit_error("context_length_exceeded", false);
+
+        assert_eq!(
+            context_limit_compaction_decision(&error, &thread, &abort),
+            ContextLimitCompactionDecision::MaxAttemptsReached
+        );
+    }
+
+    #[test]
+    fn test_context_limit_reactive_compact_attempts_saturate_at_usize_max() {
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let mut thread = ThreadParams::default();
+        thread.reactive_compact_attempts = Some(usize::MAX);
         let error = context_limit_error("context_length_exceeded", false);
 
         assert_eq!(

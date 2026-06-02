@@ -36,6 +36,8 @@ use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
 
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 1;
+const PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS: usize = 2_000;
+const PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED: &str = "\n...[truncated]";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
 
@@ -61,23 +63,55 @@ async fn emit_parent_compaction_diagnostics(
     ) else {
         return;
     };
-    let status = if compacted {
-        format!(
-            "Context limit error handled by summarizing the oldest closed non-user segment (attempt {}):\n{}",
-            attempt, error,
-        )
-    } else {
-        format!(
-            "Context limit error could not summarize an eligible closed non-user segment (attempt {}):\n{}",
-            attempt, error,
-        )
-    };
+    let status = parent_compaction_diagnostic_status(error, attempt, compacted);
     let msg = json!({
         "tool_call_id": tool_call_id,
         "subchat_id": status,
         "attached_files": []
     });
     let _ = parent_tx.lock().await.send(msg);
+}
+
+fn parent_compaction_diagnostic_status(error: &str, attempt: usize, compacted: bool) -> String {
+    let prefix = if compacted {
+        format!(
+            "Context limit error handled by summarizing the oldest closed non-user segment (attempt {}):\n",
+            attempt,
+        )
+    } else {
+        format!(
+            "Context limit error could not summarize an eligible closed non-user segment (attempt {}):\n",
+            attempt,
+        )
+    };
+    let remaining = PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS.saturating_sub(prefix.len());
+    format!(
+        "{}{}",
+        prefix,
+        redact_and_cap_parent_diagnostic(error, remaining)
+    )
+}
+
+fn redact_and_cap_parent_diagnostic(error: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let redacted = refact_core::string_utils::redact_sensitive(error)
+        .trim()
+        .to_string();
+    if redacted.len() <= max_chars {
+        return redacted;
+    }
+    if max_chars <= PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED.len() {
+        return crate::llm::safe_truncate(PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, max_chars)
+            .to_string();
+    }
+    let keep = max_chars - PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED.len();
+    format!(
+        "{}{}",
+        crate::llm::safe_truncate(&redacted, keep).trim_end(),
+        PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED,
+    )
 }
 
 fn append_reactive_compaction_diagnostic(
@@ -2002,10 +2036,12 @@ async fn subchat_single_internal(
 #[cfg(test)]
 mod subchat_tests {
     use super::{
-        apply_subchat_reactive_compaction, parent_thread_worktree,
+        apply_subchat_reactive_compaction, emit_parent_compaction_diagnostics,
+        parent_compaction_diagnostic_status, parent_thread_worktree,
         register_stateful_subchat_worktree, resolve_subchat_model, resolve_subchat_params,
         resolve_subchat_worktree, should_compact_context_limit_error, stateful_thread_from_config,
-        SubchatConfig, ToolsPolicy, PARTIAL_OUTPUT_STREAM_ERROR,
+        SubchatConfig, ToolsPolicy, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
     use crate::chat::diagnostics::is_ui_only_message;
     use crate::chat::trajectories::save_trajectory_as;
@@ -2234,6 +2270,37 @@ mod subchat_tests {
             .and_then(|v| v.as_str())
             .unwrap()
             .contains("could not summarize an eligible closed non-user segment"));
+    }
+
+    #[tokio::test]
+    async fn subchat_parent_compaction_diagnostic_redacts_provider_secret() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = test_subchat_config();
+        config.parent_tool_call_id = Some("call_1".to_string());
+        config.parent_subchat_tx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(tx)));
+        let error = "context_length_exceeded: Authorization: Bearer sk-test-secret request failed";
+
+        emit_parent_compaction_diagnostics(&config, error, 1, true).await;
+
+        let first = rx.try_recv().unwrap();
+        let status = first.get("subchat_id").and_then(|v| v.as_str()).unwrap();
+        assert!(status.contains("handled by summarizing"));
+        assert!(status.contains("attempt 1"));
+        assert!(!status.contains("sk-test-secret"));
+        assert!(!status.contains("Authorization: Bearer sk-test-secret"));
+        assert!(status.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn subchat_parent_compaction_diagnostic_caps_long_provider_error() {
+        let error = format!("context_length_exceeded: {}", "x".repeat(4_000));
+
+        let status = parent_compaction_diagnostic_status(&error, 9, false);
+
+        assert!(status.contains("could not summarize an eligible closed non-user segment"));
+        assert!(status.contains("attempt 9"));
+        assert!(status.len() <= PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS);
+        assert!(status.ends_with(PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED));
     }
 
     #[test]
