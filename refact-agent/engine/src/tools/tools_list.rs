@@ -775,6 +775,28 @@ mod tests {
 
         assert_eq!(subagents, vec![true]);
     }
+
+    #[tokio::test]
+    async fn task_planner_includes_web_tools() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
+            &gcx.config_dir,
+        )
+        .await
+        .unwrap();
+
+        let tool_names = get_tools_for_mode(gcx.clone(), "task_planner", None)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<Vec<_>>();
+
+        assert!(tool_names.contains(&"web".to_string()), "{tool_names:?}");
+        assert!(
+            tool_names.contains(&"web_search".to_string()),
+            "{tool_names:?}"
+        );
+    }
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,11 +125,13 @@ impl Tool for ToolSubagent {
             .ok_or_else(|| "subagent config 'subagent' not found".to_string())?
             .tools;
         let spawn_tools = if let Some(tools) = &tools_arg {
-            validate_read_only_tools(tools, &configured_tools)?;
-            Some(tools.clone())
+            Some(normalize_read_only_tools(tools, &configured_tools)?)
         } else {
             Some(configured_tools)
         };
+        let prompt_tools = tools_arg
+            .as_ref()
+            .map(|_| spawn_tools.clone().unwrap_or_default());
 
         if subchat_depth >= MAX_SUBCHAT_DEPTH.saturating_sub(1) {
             return Err(format!(
@@ -144,7 +146,7 @@ impl Tool for ToolSubagent {
             parent_tool_call_id: Some(tool_call_id.clone()),
             config_name: "subagent".to_string(),
             title: short_title("Subagent", &task),
-            prompt: build_subagent_prompt(&task, &expected_result, &tools_arg, max_steps),
+            prompt: build_subagent_prompt(&task, &expected_result, &prompt_tools, max_steps),
             tools: spawn_tools,
             target_files: vec![],
             max_steps,
@@ -263,29 +265,67 @@ fn parse_optional_bool(
     }
 }
 
-fn validate_read_only_tools(tools: &[String], configured_tools: &[String]) -> Result<(), String> {
-    if let Some(bad) = tools.iter().find(|tool| {
-        !is_allowed_for_subagent(tool) || !is_configured_for_subagent(tool, configured_tools)
-    }) {
-        return Err(format!(
-            "Tool '{}' is not in the allowed set for subagents ({}). Use delegate() for implementation/editing.",
-            bad,
-            format_allowed_tools(configured_tools)
-        ));
+fn normalize_read_only_tools(
+    tools: &[String],
+    configured_tools: &[String],
+) -> Result<Vec<String>, String> {
+    let mut normalized_tools = Vec::new();
+    let mut seen = HashSet::new();
+    for tool in tools {
+        let canonical = canonical_subagent_tool(tool);
+        if !is_allowed_for_subagent(&canonical)
+            || !is_configured_for_subagent(&canonical, configured_tools)
+        {
+            let bad = tool.trim();
+            let bad = if bad.is_empty() { tool.as_str() } else { bad };
+            return Err(format!(
+                "Tool '{}' is not in the allowed set for subagents ({}). Use delegate() for implementation/editing.",
+                bad,
+                format_allowed_tools(configured_tools)
+            ));
+        }
+        if seen.insert(canonical.clone()) {
+            normalized_tools.push(canonical);
+        }
     }
-    Ok(())
+    Ok(normalized_tools)
+}
+
+#[cfg(test)]
+fn validate_read_only_tools(tools: &[String], configured_tools: &[String]) -> Result<(), String> {
+    normalize_read_only_tools(tools, configured_tools).map(|_| ())
+}
+
+fn canonical_subagent_tool(tool: &str) -> String {
+    let mut normalized = tool.trim().to_ascii_lowercase();
+    if normalized.starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX) {
+        normalized = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&normalized);
+    }
+    if matches!(normalized.as_str(), "grep" | "glob") {
+        return "search_pattern".to_string();
+    }
+    crate::llm::adapters::claude_code_compat::CC_TOOL_RENAMES
+        .iter()
+        .find_map(|(original, renamed)| {
+            if *renamed == normalized.as_str() {
+                Some((*original).to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(normalized)
 }
 
 fn is_allowed_for_subagent(tool: &str) -> bool {
-    let normalized = tool.trim().to_ascii_lowercase();
+    let normalized = canonical_subagent_tool(tool);
     ALLOWED_FOR_SUBAGENT.contains(&normalized.as_str())
 }
 
 fn is_configured_for_subagent(tool: &str, configured_tools: &[String]) -> bool {
-    let normalized = tool.trim().to_ascii_lowercase();
+    let normalized = canonical_subagent_tool(tool);
     configured_tools
         .iter()
-        .any(|configured| configured.trim().eq_ignore_ascii_case(&normalized))
+        .any(|configured| canonical_subagent_tool(configured) == normalized)
 }
 
 fn format_allowed_tools(configured_tools: &[String]) -> String {
@@ -569,6 +609,50 @@ mod tests {
     }
 
     #[test]
+    fn cc_alias_tool_names_are_accepted_and_canonicalized() {
+        let configured_tools = configured_read_only_tools();
+
+        assert_eq!(
+            normalize_read_only_tools(&["regex_search".to_string()], &configured_tools).unwrap(),
+            vec!["search_pattern".to_string()]
+        );
+        assert_eq!(
+            normalize_read_only_tools(&["t_regex_search".to_string()], &configured_tools).unwrap(),
+            vec!["search_pattern".to_string()]
+        );
+        assert_eq!(
+            normalize_read_only_tools(&["t_set_tasks".to_string()], &configured_tools).unwrap(),
+            vec!["tasks_set".to_string()]
+        );
+        assert_eq!(
+            normalize_read_only_tools(&["set_tasks".to_string()], &configured_tools).unwrap(),
+            vec!["tasks_set".to_string()]
+        );
+        assert_eq!(
+            normalize_read_only_tools(&["Grep".to_string()], &configured_tools).unwrap(),
+            vec!["search_pattern".to_string()]
+        );
+        assert_eq!(
+            normalize_read_only_tools(&["Glob".to_string()], &configured_tools).unwrap(),
+            vec!["search_pattern".to_string()]
+        );
+    }
+
+    #[test]
+    fn duplicate_aliases_collapse_to_single_canonical_tool() {
+        let configured_tools = configured_read_only_tools();
+
+        assert_eq!(
+            normalize_read_only_tools(
+                &["search_pattern".to_string(), "regex_search".to_string()],
+                &configured_tools,
+            )
+            .unwrap(),
+            vec!["search_pattern".to_string()]
+        );
+    }
+
+    #[test]
     fn tools_empty_uses_default_toolset_without_rejection() {
         let args = HashMap::from_iter([("tools".to_string(), json!("  ,  "))]);
         let tools = parse_optional_csv(&args, "tools").unwrap();
@@ -724,6 +808,65 @@ mod tests {
             *captured_tools.lock().unwrap(),
             Some(configured_read_only_tools())
         );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn explicit_alias_tools_are_canonicalized_for_spawn_and_prompt() {
+        let ccx = test_context("parent-alias-tools").await;
+        let captured_tools = Arc::new(StdMutex::new(None));
+        let captured_prompt = Arc::new(StdMutex::new(None));
+        let runner_tools = captured_tools.clone();
+        let runner_prompt = captured_prompt.clone();
+        let _runner = crate::agents::spawn::install_test_runner(Arc::new(
+            move |_gcx, mut messages, config| {
+                *runner_prompt.lock().unwrap() = Some(
+                    messages
+                        .iter()
+                        .map(|message| message.content.content_text_only())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+                *runner_tools.lock().unwrap() = Some(match config.tools {
+                    ToolsPolicy::All => vec!["ALL".to_string()],
+                    ToolsPolicy::None => vec![],
+                    ToolsPolicy::Only(tools) => tools,
+                });
+                Box::pin(async move {
+                    messages.push(ChatMessage::new(
+                        "assistant".to_string(),
+                        "alias wait result".to_string(),
+                    ));
+                    Ok(SubchatResult {
+                        messages,
+                        metering: Map::new(),
+                        chat_id: Some("ignored".to_string()),
+                    })
+                })
+            },
+        ));
+        let mut args = args_with("inspect alias path", "complete answer");
+        args.insert("wait".to_string(), json!("true"));
+        args.insert("tools".to_string(), json!("regex_search,t_set_tasks"));
+        let mut tool = ToolSubagent {
+            config_path: "builtin_tools.yaml".to_string(),
+        };
+
+        let (_, contexts) = tool
+            .tool_execute(ccx, &"call-alias".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *captured_tools.lock().unwrap(),
+            Some(vec!["search_pattern".to_string(), "tasks_set".to_string()])
+        );
+        let prompt = captured_prompt.lock().unwrap().clone().unwrap_or_default();
+        assert!(prompt.contains("search_pattern, tasks_set"));
+        assert!(!prompt.contains("regex_search,t_set_tasks"));
+        let message = single_message(contexts);
+        let text = message_text(&message);
+        assert!(text.contains("alias wait result"));
     }
 
     #[test]
