@@ -383,7 +383,9 @@ fn current_tail_has_active_pending_tool_calls(messages: &[ChatMessage]) -> bool 
     let mut completed_context_file_after_call = HashSet::new();
 
     for message in messages[start..].iter().rev() {
-        if is_trimmable_tail_diagnostic(message) {
+        if message.role == crate::chat::internal_roles::PLAN_ROLE
+            || is_trimmable_tail_diagnostic(message)
+        {
             continue;
         }
         match message.role.as_str() {
@@ -2041,6 +2043,51 @@ mod tests {
         assert_eq!(messages[4].role, crate::chat::internal_roles::EVENT_ROLE);
         assert!(is_ui_only_message(&messages[4]));
         assert_eq!(messages[5].role, "error");
+    }
+
+    #[test]
+    fn trailing_plan_does_not_hide_pending_tool_call() {
+        let mut messages = vec![
+            user("first turn"),
+            assistant("old completed output"),
+            user("second turn"),
+            assistant_with_tool_call_id("call_active"),
+            plan("## Plan\n- continue after the tool"),
+        ];
+        let before = serde_json::to_string(&messages).unwrap();
+
+        assert!(current_tail_has_active_pending_tool_calls(&messages));
+        assert_eq!(eligible_tail_non_user_segment(&messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
+    }
+
+    #[test]
+    fn completed_output_after_plan_boundary_remains_eligible() {
+        let mut messages = vec![
+            user("start planning"),
+            plan("## Plan\n- produce completed output"),
+            assistant("completed output after plan"),
+        ];
+
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
+        assert!(closed_non_user_segments(&messages).is_empty());
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 2, end: 2 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed plan tail",
+            "test-model",
+        ));
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, crate::chat::internal_roles::PLAN_ROLE);
+        assert!(is_segment_summary(&messages[2]));
     }
 
     #[test]
