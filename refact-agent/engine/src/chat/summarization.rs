@@ -172,26 +172,30 @@ fn is_excluded_from_segment(message: &ChatMessage) -> bool {
     exemption_for(message) == CompressionExemption::Never
 }
 
+fn is_segment_boundary(message: &ChatMessage) -> bool {
+    message.role == "user" || message.role == crate::chat::internal_roles::PLAN_ROLE
+}
+
 pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment> {
-    let user_indices: Vec<usize> = messages
+    let boundary_indices: Vec<usize> = messages
         .iter()
         .enumerate()
-        .filter_map(|(idx, msg)| (msg.role == "user").then_some(idx))
+        .filter_map(|(idx, msg)| is_segment_boundary(msg).then_some(idx))
         .collect();
-    if user_indices.len() < 2 {
+    if boundary_indices.len() < 2 {
         return Vec::new();
     }
 
     let mut segments = Vec::new();
-    for pair in user_indices.windows(2) {
-        let left_user = pair[0];
-        let right_user = pair[1];
-        let mut start = left_user + 1;
-        while start < right_user && is_excluded_from_segment(&messages[start]) {
+    for pair in boundary_indices.windows(2) {
+        let left_boundary = pair[0];
+        let right_boundary = pair[1];
+        let mut start = left_boundary + 1;
+        while start < right_boundary && is_excluded_from_segment(&messages[start]) {
             start += 1;
         }
         let mut idx = start;
-        while idx < right_user {
+        while idx < right_boundary {
             if is_excluded_from_segment(&messages[idx]) {
                 if start < idx {
                     segments.push(SummarySegment {
@@ -200,7 +204,7 @@ pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment>
                     });
                 }
                 idx += 1;
-                while idx < right_user && is_excluded_from_segment(&messages[idx]) {
+                while idx < right_boundary && is_excluded_from_segment(&messages[idx]) {
                     idx += 1;
                 }
                 start = idx;
@@ -208,10 +212,10 @@ pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment>
                 idx += 1;
             }
         }
-        if start < right_user {
+        if start < right_boundary {
             segments.push(SummarySegment {
                 start,
-                end: right_user - 1,
+                end: right_boundary - 1,
             });
         }
     }
@@ -468,13 +472,13 @@ fn trimmed_tail_candidate(
 }
 
 fn tail_non_user_segment_candidates(messages: &[ChatMessage]) -> Vec<SummarySegment> {
-    let Some(last_user) = messages.iter().rposition(|message| message.role == "user") else {
+    let Some(last_boundary) = messages.iter().rposition(is_segment_boundary) else {
         return Vec::new();
     };
     let mut candidates = Vec::new();
     let mut run_start = None;
 
-    for idx in last_user + 1..messages.len() {
+    for idx in last_boundary + 1..messages.len() {
         let is_separator = is_excluded_from_segment(&messages[idx])
             || message_has_unresolved_tool_calls_within(messages, idx, messages.len() - 1);
         if is_separator {
@@ -580,7 +584,10 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
     closed_non_user_segments(messages)
         .into_iter()
         .find(|segment| {
+            let candidate = &messages[segment.start..=segment.end];
             !segment_is_matching_summary(messages, *segment)
+                && has_tail_summarizable_output(candidate)
+                && !tail_has_pending_tool_calls(candidate)
                 && !segment_contains_external_tool_completion(messages, *segment)
         })
         .or_else(|| eligible_tail_non_user_segment(messages))
@@ -1678,11 +1685,7 @@ mod tests {
     }
 
     fn plan(text: &str) -> ChatMessage {
-        ChatMessage {
-            role: "plan".to_string(),
-            content: ChatContent::SimpleText(text.to_string()),
-            ..Default::default()
-        }
+        crate::chat::internal_roles::plan("task_planner", 1, text.to_string(), None)
     }
 
     fn cd_instruction(text: &str) -> ChatMessage {
@@ -1999,6 +2002,45 @@ mod tests {
                 SummarySegment { start: 3, end: 3 },
             ]
         );
+    }
+
+    #[test]
+    fn planner_context_limit_tail_selects_safe_completed_segment() {
+        let mut messages = vec![
+            user("start planning"),
+            plan("## Plan\n- keep this base plan"),
+            cd_instruction("internal planner instruction"),
+            assistant_with_named_tool_call("call_read", "cat"),
+            context_file_with_tool_call_id("call_read", "read output that belongs with call"),
+            diff_message("edited src/lib.rs"),
+            ui_only_event("diagnostic separator"),
+            error_message("context_length_exceeded"),
+        ];
+
+        assert!(!current_tail_has_active_pending_tool_calls(&messages));
+        assert!(closed_non_user_segments(&messages).is_empty());
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 3, end: 5 })
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 3, end: 5 })
+        );
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed planner tool work",
+            "test-model",
+        ));
+
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, crate::chat::internal_roles::PLAN_ROLE);
+        assert_eq!(messages[2].role, "cd_instruction");
+        assert!(is_segment_summary(&messages[3]));
+        assert_eq!(messages[4].role, crate::chat::internal_roles::EVENT_ROLE);
+        assert!(is_ui_only_message(&messages[4]));
+        assert_eq!(messages[5].role, "error");
     }
 
     #[test]

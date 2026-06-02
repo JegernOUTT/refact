@@ -52,6 +52,29 @@ const LENGTH_STOP_NEAR_EMPTY_VISIBLE_CHARS: usize = 32;
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextLimitCompactionDecision {
+    Skip,
+    Attempt { attempt: usize },
+    MaxAttemptsReached,
+}
+
+fn context_limit_compaction_decision(
+    error: &LlmStreamError,
+    thread: &ThreadParams,
+    abort_flag: &AtomicBool,
+) -> ContextLimitCompactionDecision {
+    if !error.retry_decision().is_context_limit() || abort_flag.load(Ordering::SeqCst) {
+        return ContextLimitCompactionDecision::Skip;
+    }
+    let attempt = thread.reactive_compact_attempts.unwrap_or(0) + 1;
+    if attempt > crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS {
+        ContextLimitCompactionDecision::MaxAttemptsReached
+    } else {
+        ContextLimitCompactionDecision::Attempt { attempt }
+    }
+}
+
 async fn user_stop_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
     let session = session_arc.lock().await;
     session.user_interrupt_flag.load(Ordering::SeqCst)
@@ -1049,13 +1072,14 @@ pub fn start_generation(
                     }
                     continue;
                 }
-                if retry_decision.is_context_limit() && !abort_flag.load(Ordering::SeqCst) {
-                    let reactive_attempt = {
-                        let session = session_arc.lock().await;
-                        session.thread.reactive_compact_attempts.unwrap_or(0) + 1
-                    };
-                    if reactive_attempt <= crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS
-                    {
+                let compaction_decision = {
+                    let session = session_arc.lock().await;
+                    context_limit_compaction_decision(&error, &session.thread, &abort_flag)
+                };
+                match compaction_decision {
+                    ContextLimitCompactionDecision::Attempt {
+                        attempt: reactive_attempt,
+                    } => {
                         let original_error = error.message.clone();
                         warn!(
                             "Context limit error, summarizing oldest eligible segment attempt {}/{}: {}",
@@ -1084,6 +1108,16 @@ pub fn start_generation(
                             continue;
                         }
                     }
+                    ContextLimitCompactionDecision::MaxAttemptsReached => {
+                        let mut session = session_arc.lock().await;
+                        crate::chat::summarization::emit_compression_skipped_status(
+                            &mut session,
+                            CompressionReason::MaxAttemptsReached,
+                        );
+                    }
+                    ContextLimitCompactionDecision::Skip => {}
+                }
+                if compaction_decision != ContextLimitCompactionDecision::Skip {
                     error.message = format!(
                         "Context too large and no eligible segment summary could be applied. Original error: {}",
                         error.message
@@ -2365,6 +2399,13 @@ mod tests {
         }
     }
 
+    fn context_limit_error(message: &str, partial_output_emitted: bool) -> LlmStreamError {
+        LlmStreamError {
+            message: message.to_string(),
+            partial_output_emitted,
+        }
+    }
+
     fn claude_code_model() -> BaseModelRecord {
         BaseModelRecord {
             wire_format: crate::llm::WireFormat::AnthropicMessages,
@@ -2750,23 +2791,73 @@ mod tests {
     }
 
     #[test]
-    fn test_context_limit_reactive_compact_attempts_are_bounded() {
-        let mut reactive_attempts = 0usize;
-        let max = crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS;
-        let first_attempt_allowed = reactive_attempts < max;
-        if first_attempt_allowed {
-            reactive_attempts += 1;
-        }
-        let second_attempt_allowed = reactive_attempts < max;
-        if second_attempt_allowed {
-            reactive_attempts += 1;
-        }
-        let third_attempt_blocked = reactive_attempts >= max;
+    fn test_context_limit_gate_recognizes_explicit_and_wrapped_errors() {
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let thread = ThreadParams::default();
+        let explicit = context_limit_error("context_length_exceeded: reduce prompt", false);
+        let wrapped = context_limit_error(
+            &format!(
+                "{} Original error: context_length_exceeded",
+                PARTIAL_OUTPUT_STREAM_ERROR,
+            ),
+            true,
+        );
 
-        assert!(first_attempt_allowed);
-        assert!(second_attempt_allowed);
-        assert!(third_attempt_blocked);
-        assert_eq!(reactive_attempts, max);
+        assert_eq!(
+            context_limit_compaction_decision(&explicit, &thread, &abort),
+            ContextLimitCompactionDecision::Attempt { attempt: 1 }
+        );
+        assert_eq!(
+            context_limit_compaction_decision(&wrapped, &thread, &abort),
+            ContextLimitCompactionDecision::Attempt { attempt: 1 }
+        );
+    }
+
+    #[test]
+    fn test_context_limit_reactive_compact_attempts_are_bounded() {
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let mut thread = ThreadParams::default();
+        thread.reactive_compact_attempts =
+            Some(crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS);
+        let error = context_limit_error("context_length_exceeded", false);
+
+        assert_eq!(
+            context_limit_compaction_decision(&error, &thread, &abort),
+            ContextLimitCompactionDecision::MaxAttemptsReached
+        );
+    }
+
+    #[test]
+    fn normal_chat_context_limit_requests_reactive_compaction() {
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let mut thread = ThreadParams::default();
+        thread.mode = "agent".to_string();
+        let error = context_limit_error("context_length_exceeded", false);
+
+        assert_eq!(
+            context_limit_compaction_decision(&error, &thread, &abort),
+            ContextLimitCompactionDecision::Attempt { attempt: 1 }
+        );
+    }
+
+    #[test]
+    fn task_planner_context_limit_requests_reactive_compaction() {
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let mut thread = ThreadParams::default();
+        thread.mode = "task_planner".to_string();
+        thread.task_meta = Some(TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some("planner-task-1-1".to_string()),
+        });
+        let error = context_limit_error("context_length_exceeded", false);
+
+        assert_eq!(
+            context_limit_compaction_decision(&error, &thread, &abort),
+            ContextLimitCompactionDecision::Attempt { attempt: 1 }
+        );
     }
 
     #[test]
@@ -2798,13 +2889,13 @@ mod tests {
     #[test]
     fn test_context_limit_compaction_allows_partial_output_errors() {
         let abort = std::sync::atomic::AtomicBool::new(false);
-        let partial_context_error = crate::chat::stream_core::LlmStreamError {
-            message: format!(
+        let partial_context_error = context_limit_error(
+            &format!(
                 "{} Original error: context_length_exceeded",
                 PARTIAL_OUTPUT_STREAM_ERROR,
             ),
-            partial_output_emitted: true,
-        };
+            true,
+        );
 
         assert!(partial_context_error.retry_decision().is_context_limit());
         assert!(!partial_context_error.should_retry(0, &abort));
@@ -2817,16 +2908,62 @@ mod tests {
     #[test]
     fn test_context_limit_compaction_blocked_by_abort_flag() {
         let abort = std::sync::atomic::AtomicBool::new(true);
-        let partial_context_error = crate::chat::stream_core::LlmStreamError {
-            message: "context_length_exceeded".to_string(),
-            partial_output_emitted: false,
-        };
+        let partial_context_error = context_limit_error("context_length_exceeded", false);
 
         assert!(partial_context_error.retry_decision().is_context_limit());
-        assert!(
-            !(partial_context_error.retry_decision().is_context_limit()
-                && !abort.load(Ordering::SeqCst))
+        assert_eq!(
+            context_limit_compaction_decision(
+                &partial_context_error,
+                &ThreadParams::default(),
+                &abort,
+            ),
+            ContextLimitCompactionDecision::Skip
         );
+    }
+
+    #[tokio::test]
+    async fn context_limit_no_eligible_segment_emits_visible_skip() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut session = ChatSession::new("context-limit-no-eligible".to_string());
+        session.messages = vec![make_user_msg("continue")];
+        session.start_stream();
+        let error = context_limit_error("context_length_exceeded", false);
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let decision = context_limit_compaction_decision(&error, &session.thread, &abort);
+        assert_eq!(
+            decision,
+            ContextLimitCompactionDecision::Attempt { attempt: 1 }
+        );
+        let thread = session.thread.clone();
+        let session_arc = Arc::new(AMutex::new(session));
+
+        {
+            let mut session = session_arc.lock().await;
+            session.clear_stream_for_retry();
+            session.add_message(make_ui_only_error_message(&error.message));
+            session.thread.reactive_compact_attempts = Some(1);
+        }
+
+        assert!(
+            !crate::chat::summarization::apply_segment_summarization(
+                gcx,
+                &session_arc,
+                &thread,
+                true,
+            )
+            .await
+        );
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::NoEligibleSegment)
+        );
+        assert!(session
+            .messages
+            .iter()
+            .any(crate::chat::diagnostics::is_ui_only_message));
     }
 
     #[test]
