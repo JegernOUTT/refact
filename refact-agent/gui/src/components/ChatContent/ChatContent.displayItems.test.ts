@@ -377,6 +377,60 @@ describe("ChatContent display items", () => {
     expect(reportItem.message.content).toContain("Chat compression report");
   });
 
+  it("matching_llm_report_after_summary_does_not_hide_legacy_summary", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      matchingCompressedAssistantMessage({ message_id: "legacy-summary" }),
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+    const summarizationItems = items.filter(
+      (item) => item.type === "summarization",
+    );
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "summarization",
+      "summarization",
+      "user",
+    ]);
+    expect(summarizationItems).toHaveLength(2);
+    expect(summarizationItems[0]?.messageIndex).toBe(1);
+    expect(summarizationItems[1]?.messageIndex).toBe(2);
+  });
+
+  it("incremental_appending_matching_report_after_summary_preserves_summary", () => {
+    const userBefore = userMessage({ message_id: "user-before" });
+    const summary = matchingCompressedAssistantMessage({
+      message_id: "legacy-summary",
+    });
+    const previousMessages: ChatMessages = [userBefore, summary];
+    const nextMessages: ChatMessages = [
+      ...previousMessages,
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).not.toBeNull();
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    expect(
+      (incrementalItems ?? []).filter((item) => item.type === "summarization"),
+    ).toHaveLength(2);
+  });
+
   it("adjacent_deterministic_report_does_not_hide_legacy_compressed_assistant", () => {
     const messages: ChatMessages = [
       userMessage({ message_id: "user-before" }),

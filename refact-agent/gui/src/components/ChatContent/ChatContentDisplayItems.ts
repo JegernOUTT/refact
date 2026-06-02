@@ -212,14 +212,11 @@ function isCompressedAssistantPairedWithReport(
   index: number,
 ): boolean {
   const message = messages[index];
-  if (!isCompressedAssistantMessage(message)) return false;
-  const previousMatches =
+  return (
+    isCompressedAssistantMessage(message) &&
     index > 0 &&
-    isMatchingLlmSegmentCompressionReport(messages[index - 1], message);
-  const nextMatches =
-    index + 1 < messages.length &&
-    isMatchingLlmSegmentCompressionReport(messages[index + 1], message);
-  return previousMatches || nextMatches;
+    isMatchingLlmSegmentCompressionReport(messages[index - 1], message)
+  );
 }
 
 type CompressionIdentityMetadata = {
