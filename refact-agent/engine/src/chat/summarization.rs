@@ -163,14 +163,6 @@ pub fn is_segment_summary(message: &ChatMessage) -> bool {
         == Some(SUMMARY_KIND)
 }
 
-fn segment_summary_source_hash(message: &ChatMessage) -> Option<&str> {
-    message
-        .extra
-        .get("compression")
-        .and_then(|value| value.get("source_hash"))
-        .and_then(|value| value.as_str())
-}
-
 fn is_excluded_from_segment(message: &ChatMessage) -> bool {
     if matches!(
         message.role.as_str(),
@@ -256,10 +248,8 @@ fn source_message_ids(messages: &[ChatMessage]) -> Vec<String> {
         .collect()
 }
 
-fn segment_is_matching_summary(messages: &[ChatMessage], segment: SummarySegment) -> bool {
-    segment.start == segment.end
-        && is_segment_summary(&messages[segment.start])
-        && segment_summary_source_hash(&messages[segment.start]).is_some()
+fn segment_is_existing_summary(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+    segment.start == segment.end && is_segment_summary(&messages[segment.start])
 }
 
 fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
@@ -519,7 +509,7 @@ fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment)
         && has_tail_summarizable_output(tail)
         && !tail_has_pending_tool_calls(tail)
         && !segment_contains_external_tool_completion(messages, segment)
-        && !segment_is_matching_summary(messages, segment)
+        && !segment_is_existing_summary(messages, segment)
 }
 
 fn segment_contains_external_tool_completion(
@@ -597,7 +587,7 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
         .into_iter()
         .find(|segment| {
             let candidate = &messages[segment.start..=segment.end];
-            !segment_is_matching_summary(messages, *segment)
+            !segment_is_existing_summary(messages, *segment)
                 && has_tail_summarizable_output(candidate)
                 && !tail_has_pending_tool_calls(candidate)
                 && !segment_contains_external_tool_completion(messages, *segment)
@@ -3104,6 +3094,54 @@ mod tests {
             "test-model",
         ));
         assert_eq!(serde_json::to_string(&messages).unwrap(), once);
+    }
+
+    #[test]
+    fn legacy_segment_summary_without_source_hash_is_not_summarized_again() {
+        let legacy_summary = ChatMessage {
+            message_id: "legacy-summary".to_string(),
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("legacy compressed summary".to_string()),
+            summarization_tier: Some(SUMMARY_KIND.to_string()),
+            extra: serde_json::Map::from_iter([(
+                "compression".to_string(),
+                json!({
+                    "kind": SUMMARY_KIND,
+                    "source_message_ids": ["old-assistant"],
+                }),
+            )]),
+            ..Default::default()
+        };
+        assert!(is_segment_summary(&legacy_summary));
+        assert!(legacy_summary.extra["compression"].get("source_hash").is_none());
+
+        let mut tail_messages = vec![user("first"), legacy_summary.clone()];
+        let tail_before = serde_json::to_string(&tail_messages).unwrap();
+        assert_eq!(eligible_tail_non_user_segment(&tail_messages), None);
+        assert_eq!(first_eligible_segment(&tail_messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut tail_messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&tail_messages).unwrap(), tail_before);
+
+        let mut closed_messages = vec![user("first"), legacy_summary, user("second")];
+        let closed_before = serde_json::to_string(&closed_messages).unwrap();
+        assert_eq!(
+            closed_non_user_segments(&closed_messages),
+            vec![SummarySegment { start: 1, end: 1 }]
+        );
+        assert_eq!(first_eligible_segment(&closed_messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut closed_messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(
+            serde_json::to_string(&closed_messages).unwrap(),
+            closed_before
+        );
     }
 
     #[test]
