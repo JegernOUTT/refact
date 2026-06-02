@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as AMutex, mpsc};
 use serde_json::{json, Value};
@@ -37,6 +37,7 @@ use crate::worktrees::types::WorktreeReference;
 
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 1;
 const PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS: usize = 2_000;
+const PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS: usize = 512;
 const PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED: &str = "\n...[truncated]";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
@@ -93,14 +94,57 @@ fn parent_compaction_diagnostic_status(error: &str, attempt: usize, compacted: b
 }
 
 fn redact_and_cap_parent_diagnostic(error: &str, max_chars: usize) -> String {
+    redact_and_cap_context_limit_diagnostic(error, max_chars)
+}
+
+fn safe_context_limit_error_for_log(error: &str) -> String {
+    redact_and_cap_context_limit_diagnostic(error, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS)
+}
+
+fn redact_and_cap_context_limit_diagnostic(error: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    let redacted = refact_core::string_utils::redact_sensitive(error)
+    let (window, window_truncated) = bounded_context_limit_diagnostic_window(
+        error,
+        max_chars,
+        PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
+    );
+    let mut redacted = redact_context_limit_diagnostic_sensitive(window)
         .trim()
         .to_string();
+    if window_truncated || error.len() > max_chars {
+        redacted = format!(
+            "{}{}",
+            redacted.trim_end(),
+            PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED,
+        );
+    }
+    cap_context_limit_diagnostic(&redacted, max_chars)
+}
+
+fn bounded_context_limit_diagnostic_window(
+    error: &str,
+    max_chars: usize,
+    extra_scan_chars: usize,
+) -> (&str, bool) {
+    let scan_cap = max_chars.saturating_add(extra_scan_chars);
+    let window = crate::llm::safe_truncate(error, scan_cap);
+    (window, window.len() < error.len())
+}
+
+fn redact_context_limit_diagnostic_sensitive(text: &str) -> String {
+    static SK_PLACEHOLDER: OnceLock<regex::Regex> = OnceLock::new();
+    let redacted = refact_core::string_utils::redact_sensitive(text);
+    SK_PLACEHOLDER
+        .get_or_init(|| regex::Regex::new(r"sk-[A-Za-z0-9_-]{8,}").unwrap())
+        .replace_all(&redacted, "[REDACTED_SK_TOKEN]")
+        .into_owned()
+}
+
+fn cap_context_limit_diagnostic(redacted: &str, max_chars: usize) -> String {
     if redacted.len() <= max_chars {
-        return redacted;
+        return redacted.to_string();
     }
     if max_chars <= PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED.len() {
         return crate::llm::safe_truncate(PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, max_chars)
@@ -1207,12 +1251,11 @@ async fn run_subchat_loop(
                     ) =>
                 {
                     let original_error = err.clone();
+                    let log_error = safe_context_limit_error_for_log(&original_error);
                     context_limit_compact_count += 1;
                     warn!(
                         "Subchat context limit, applying segment summarization attempt {}/{}: {}",
-                        context_limit_compact_count,
-                        MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                        original_error,
+                        context_limit_compact_count, MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS, log_error,
                     );
                     apply_subchat_reactive_compaction(
                         ccx.lock().await.global_context.clone(),
@@ -1326,12 +1369,13 @@ async fn run_subchat_with_wrap_up(
                     ) =>
                 {
                     let original_error = err.clone();
+                    let log_error = safe_context_limit_error_for_log(&original_error);
                     context_limit_compact_count += 1;
                     warn!(
                         "Subchat wrap-up context limit, applying segment summarization attempt {}/{}: {}",
                         context_limit_compact_count,
                         MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                        original_error,
+                        log_error,
                     );
                     apply_subchat_reactive_compaction(
                         ccx.lock().await.global_context.clone(),
@@ -1418,12 +1462,13 @@ async fn run_subchat_with_wrap_up(
                 ) =>
             {
                 let original_error = err.clone();
+                let log_error = safe_context_limit_error_for_log(&original_error);
                 context_limit_compact_count += 1;
                 warn!(
                     "Subchat wrap-up final context limit, applying segment summarization attempt {}/{}: {}",
                     context_limit_compact_count,
                     MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                    original_error,
+                    log_error,
                 );
                 apply_subchat_reactive_compaction(
                     ccx.lock().await.global_context.clone(),
@@ -2039,8 +2084,10 @@ mod subchat_tests {
         apply_subchat_reactive_compaction, emit_parent_compaction_diagnostics,
         parent_compaction_diagnostic_status, parent_thread_worktree,
         register_stateful_subchat_worktree, resolve_subchat_model, resolve_subchat_params,
-        resolve_subchat_worktree, should_compact_context_limit_error, stateful_thread_from_config,
-        SubchatConfig, ToolsPolicy, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        resolve_subchat_worktree, safe_context_limit_error_for_log,
+        should_compact_context_limit_error, stateful_thread_from_config, SubchatConfig,
+        ToolsPolicy, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
     use crate::chat::diagnostics::is_ui_only_message;
@@ -2292,6 +2339,18 @@ mod subchat_tests {
     }
 
     #[test]
+    fn subchat_context_limit_log_error_redacts_provider_secret() {
+        let error = "context_length_exceeded: Authorization: Bearer sk-test-secret";
+
+        let log_error = safe_context_limit_error_for_log(error);
+
+        assert!(!log_error.contains("sk-test-secret"));
+        assert!(!log_error.contains("Authorization: Bearer sk-test-secret"));
+        assert!(log_error.contains("[REDACTED"));
+        assert!(log_error.len() <= PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS);
+    }
+
+    #[test]
     fn subchat_parent_compaction_diagnostic_caps_long_provider_error() {
         let error = format!("context_length_exceeded: {}", "x".repeat(4_000));
 
@@ -2301,6 +2360,43 @@ mod subchat_tests {
         assert!(status.contains("attempt 9"));
         assert!(status.len() <= PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS);
         assert!(status.ends_with(PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED));
+    }
+
+    #[test]
+    fn subchat_parent_compaction_diagnostic_windows_huge_provider_error() {
+        let far_tail = "FAR_TAIL_MARKER";
+        let error = format!(
+            "context_length_exceeded: Authorization: Bearer sk-test-secret {} {}",
+            "x".repeat(200_000),
+            far_tail,
+        );
+
+        let status = parent_compaction_diagnostic_status(&error, 1, true);
+
+        assert!(status.len() <= PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS);
+        assert!(status.ends_with(PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED));
+        assert!(!status.contains("sk-test-secret"));
+        assert!(!status.contains("Authorization: Bearer sk-test-secret"));
+        assert!(status.contains("[REDACTED"));
+        assert!(!status.contains(far_tail));
+    }
+
+    #[test]
+    fn subchat_context_limit_log_error_redacts_secret_near_lookahead_boundary() {
+        let prefix_len = PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS.saturating_sub(80);
+        let error = format!(
+            "context_length_exceeded: {} Authorization: Bearer sk-boundarysecretvalue {}",
+            "x".repeat(prefix_len),
+            "y".repeat(PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS * 2),
+        );
+
+        let log_error = safe_context_limit_error_for_log(&error);
+
+        assert!(log_error.len() <= PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS);
+        assert!(log_error.ends_with(PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED));
+        assert!(!log_error.contains("sk-boundarysecretvalue"));
+        assert!(!log_error.contains("Authorization: Bearer sk-boundarysecretvalue"));
+        assert!(log_error.contains("[REDACTED"));
     }
 
     #[test]
