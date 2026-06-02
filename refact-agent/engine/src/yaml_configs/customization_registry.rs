@@ -1231,6 +1231,116 @@ mod tests {
     }
 
     #[test]
+    fn test_default_ultra_agent_mode_loads_as_visible_mode() {
+        let registry = load_default_registry_for_tests();
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+        assert!(!registry
+            .mode_overrides
+            .iter()
+            .any(|mode| mode.id == "ultra_agent"));
+
+        let ultra_agent = registry
+            .modes
+            .get("ultra_agent")
+            .expect("ultra_agent mode should load as a visible mode");
+
+        assert_eq!(ultra_agent.id, "ultra_agent");
+        assert_eq!(ultra_agent.title, "Ultra Agent");
+        assert!(!ultra_agent.specific);
+        assert_eq!(ultra_agent.base.as_deref(), Some("agent"));
+        assert!(ultra_agent.match_models.is_none());
+        assert_eq!(ultra_agent.ui.order, Some(12));
+        assert!(ultra_agent.ui.tags.iter().any(|tag| tag == "deep"));
+        assert!(ultra_agent.ui.tags.iter().any(|tag| tag == "orchestration"));
+
+        for marker in [
+            "## Ultra Agent Mode",
+            "## Core Philosophy: Orchestrate Hard, Verify Harder",
+            "## Workflow",
+            "## Delegation Strategy",
+            "## Plan Discipline",
+            "## Verification and Review",
+            "## Boundaries",
+            "subagent()",
+            "delegate()",
+            "strategic_planning()",
+            "code_review()",
+            "ask_questions()",
+            "%BUDDY_PERSONALITY%",
+            "%PROJECT_TREE%",
+        ] {
+            assert!(
+                ultra_agent.prompt.contains(marker),
+                "ultra_agent prompt missing marker '{}': {}",
+                marker,
+                ultra_agent.prompt
+            );
+        }
+
+        let mut visible_modes: Vec<_> = registry
+            .modes
+            .values()
+            .filter(|mode| !mode.specific)
+            .collect();
+        visible_modes.sort_by(|a, b| {
+            a.ui.order
+                .unwrap_or(100)
+                .cmp(&b.ui.order.unwrap_or(100))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        let agent_index = visible_modes
+            .iter()
+            .position(|mode| mode.id == "agent")
+            .expect("agent mode should be visible");
+        let ultra_index = visible_modes
+            .iter()
+            .position(|mode| mode.id == "ultra_agent")
+            .expect("ultra_agent mode should be visible");
+        let learn_index = visible_modes
+            .iter()
+            .position(|mode| mode.id == "learn")
+            .expect("learn mode should be visible");
+
+        assert!(agent_index < ultra_index);
+        assert!(ultra_index < learn_index);
+    }
+
+    #[test]
+    fn test_default_ultra_agent_mode_uses_xhigh_defaults_and_agent_tools() {
+        let registry = load_default_registry_for_tests();
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+
+        let agent = registry
+            .modes
+            .get("agent")
+            .expect("agent mode should exist");
+        let ultra_agent = registry
+            .modes
+            .get("ultra_agent")
+            .expect("ultra_agent mode should exist");
+
+        assert_mode_inherits_agent_surface(agent, ultra_agent);
+        assert_eq!(
+            ultra_agent
+                .model_defaults
+                .default
+                .as_ref()
+                .and_then(|defaults| defaults.reasoning_effort.as_deref()),
+            Some("xhigh")
+        );
+        assert_eq!(
+            ultra_agent
+                .model_defaults
+                .thinking
+                .as_ref()
+                .and_then(|defaults| defaults.reasoning_effort.as_deref()),
+            Some("xhigh")
+        );
+    }
+
+    #[test]
     fn test_provider_agent_overlays_do_not_replace_tool_or_capability_surface() {
         let forbidden_top_level = [
             "tools",
