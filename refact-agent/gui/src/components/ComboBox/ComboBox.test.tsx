@@ -665,6 +665,19 @@ describe("ComboBox slash commands", () => {
     });
   });
 
+  test("auto-submit uses the accepted slash command value", async () => {
+    const onSubmitAcceptedValueSpy = vi.fn();
+    const { user, ...app } = render(
+      <SlashApp onSubmitAcceptedValue={onSubmitAcceptedValueSpy} />,
+    );
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/");
+    await user.keyboard("{ArrowDown}{Enter}");
+    await waitFor(() => {
+      expect(onSubmitAcceptedValueSpy).toHaveBeenCalledWith("/review");
+    });
+  });
+
   test("selecting slash command with argument_hint via Enter does not auto-submit", async () => {
     const onSubmitSpy = vi.fn();
     const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);

@@ -12,11 +12,16 @@ import { useAppSelector, useEventsBusForIDE } from "../../hooks";
 import { SlashCommandSuggestion } from "../SlashCommands";
 import { selectSubmitOption } from "../../features/Config/configSlice";
 
+function isCompletionAcceptKey(key: string) {
+  return key === "Tab" || key === "Enter" || key === " " || key === "Space";
+}
+
 export type ComboBoxProps = {
   commands: CommandCompletionResponse;
   onChange: (value: string) => void;
   value: string;
   onSubmit: React.KeyboardEventHandler<HTMLTextAreaElement>;
+  onSubmitAcceptedValue?: (value: string) => void;
   placeholder?: string;
   render: (props: TextAreaProps) => React.ReactElement;
   requestCommandsCompletion: DebouncedState<
@@ -28,6 +33,7 @@ export type ComboBoxProps = {
 export const ComboBox: React.FC<ComboBoxProps> = ({
   commands,
   onSubmit,
+  onSubmitAcceptedValue,
   placeholder,
   onChange,
   value,
@@ -90,7 +96,7 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
 
   const handleReplace = useCallback(
     (input: string) => {
-      if (!ref.current) return;
+      if (!ref.current) return null;
       const nextValue = replaceRange(
         ref.current.value,
         commands.replace,
@@ -100,6 +106,7 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
       requestCommandsCompletion.cancel();
       onChange(nextValue);
       setMoveCursorTo(commands.replace[0] + input.length);
+      return nextValue;
     },
     [closeCombobox, commands.replace, onChange, requestCommandsCompletion],
   );
@@ -108,7 +115,7 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       const state = combobox.getState();
 
-      if (state.open && event.key === "Tab") {
+      if (state.open && isCompletionAcceptKey(event.key)) {
         event.preventDefault();
       }
       if (state.open) return;
@@ -164,10 +171,19 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
         closeCombobox();
       }
 
-      const tabOrEnterOrSpace =
-        event.key === "Tab" || event.key === "Enter" || event.key === "Space";
+      const tabOrEnterOrSpace = isCompletionAcceptKey(event.key);
 
-      const command = state.activeValue ?? combobox.item(state.activeId)?.value;
+      const activeItemValue = combobox.item(state.activeId)?.value;
+      const selectedItemValue =
+        activeItemValue && matches.includes(activeItemValue)
+          ? activeItemValue
+          : undefined;
+      const activeValue =
+        typeof state.activeValue === "string" &&
+        matches.includes(state.activeValue)
+          ? state.activeValue
+          : undefined;
+      const command = selectedItemValue ?? activeValue ?? matches[0];
 
       if (state.open && tabOrEnterOrSpace && command) {
         event.preventDefault();
@@ -177,11 +193,17 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
           closeCombobox();
           onHelpClick();
         } else {
-          handleReplace(command);
+          const nextValue = handleReplace(command);
           if (event.key === "Enter") {
             const detail = commands.completion_details?.[command];
             if (detail !== undefined && !detail.argument_hint) {
-              setTimeout(() => onSubmit(event), 0);
+              setTimeout(() => {
+                if (nextValue !== null && onSubmitAcceptedValue) {
+                  onSubmitAcceptedValue(nextValue);
+                } else {
+                  onSubmit(event);
+                }
+              }, 0);
             }
           }
         }
@@ -195,7 +217,9 @@ export const ComboBox: React.FC<ComboBoxProps> = ({
     [
       onHelpClick,
       onSubmit,
+      onSubmitAcceptedValue,
       commands,
+      matches,
       closeCombobox,
       escapeKeyPressed,
       combobox,

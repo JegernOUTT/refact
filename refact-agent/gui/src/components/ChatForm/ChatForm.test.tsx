@@ -109,6 +109,39 @@ describe("ChatForm", () => {
     expect(fakeOnSubmit).toHaveBeenCalledWith(expected, "after_flow");
   });
 
+  test("submits the accepted slash command instead of the typed prefix", async () => {
+    const fakeOnSubmit = vi.fn();
+    server.use(
+      http.post("*/v1/at-command-completion", () => {
+        return HttpResponse.json({
+          completions: ["/review"],
+          completion_details: {
+            "/review": {
+              description: "Review code for issues",
+              source: "global_refact",
+              kind: "skill",
+            },
+          },
+          replace: [0, 1],
+          is_cmd_executable: false,
+        });
+      }),
+    );
+
+    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />);
+    const textarea = app.container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    if (!textarea) return;
+
+    await user.type(textarea, "/");
+    await waitFor(() => expect(app.queryByText("/review")).not.toBeNull());
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(fakeOnSubmit).toHaveBeenCalledWith("/review\n", "after_flow");
+    });
+  });
+
   test("dedupes preview tile when attached file is returned with a shortened path", async () => {
     const previewSpy = vi.fn();
     server.use(

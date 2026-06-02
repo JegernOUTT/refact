@@ -339,8 +339,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     );
 
   const handleSubmit = useCallback(
-    (sendPolicy: SendPolicy = "after_flow") => {
-      const trimmedValue = value.trim();
+    (sendPolicy: SendPolicy = "after_flow", inputValue = value) => {
+      const trimmedValue = inputValue.trim();
       const hasImages = attachedImages.length > 0;
       const hasTextFiles = textFiles.length > 0;
       const canSubmit =
@@ -733,6 +733,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                   onChange={handleChange}
                   onSubmit={(event) => {
                     handleEnter(event);
+                  }}
+                  onSubmitAcceptedValue={(acceptedValue) => {
+                    handleSubmit("after_flow", acceptedValue);
                   }}
                   placeholder={
                     isVoiceActive
