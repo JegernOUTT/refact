@@ -7,7 +7,7 @@ import {
   type WorktreeRecordView,
   type WorktreeStatus,
 } from "../../services/refact";
-import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
+import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
 
@@ -131,12 +131,9 @@ export const WorktreeDiffPanel: React.FC<WorktreeDiffPanelProps> = ({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content
         className={styles.diffDialog}
-        onPointerDown={(event) => {
-          if (!closeOnNonInteractiveContentClick) return;
-          closeDialogOnNonInteractivePointerDown(event, () =>
-            onOpenChange(false),
-          );
-        }}
+        {...(closeOnNonInteractiveContentClick
+          ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
+          : {})}
       >
         <Dialog.Title>Worktree diff</Dialog.Title>
         <Dialog.Description size="2" color="gray">

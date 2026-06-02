@@ -29,7 +29,7 @@ import {
   SectionConfig,
 } from "../../services/refact/projectInformation";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
+import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { selectCurrentThreadId } from "../../features/Chat";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
 
@@ -144,9 +144,7 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
       <Dialog.Content
         maxWidth="800px"
         style={{ maxHeight: "80vh", overflow: "hidden" }}
-        onPointerDown={(event) =>
-          closeDialogOnNonInteractivePointerDown(event, onClose)
-        }
+        {...dialogNonInteractiveCloseHandlers(onClose)}
       >
         <Flex justify="between" align="center" mb="3">
           <Dialog.Title style={{ margin: 0 }}>
@@ -503,11 +501,7 @@ export const ProjectInformationDialog: React.FC<Props> = ({
       <Dialog.Root open={open} onOpenChange={onOpenChange}>
         <Dialog.Content
           maxWidth="600px"
-          onPointerDown={(event) =>
-            closeDialogOnNonInteractivePointerDown(event, () =>
-              onOpenChange(false),
-            )
-          }
+          {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
         >
           <Dialog.Title>Project Information</Dialog.Title>
           <Flex align="center" justify="center" py="6">
@@ -517,17 +511,12 @@ export const ProjectInformationDialog: React.FC<Props> = ({
       </Dialog.Root>
     );
   }
-
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content
         maxWidth="600px"
         style={{ overflow: "hidden" }}
-        onPointerDown={(event) =>
-          closeDialogOnNonInteractivePointerDown(event, () =>
-            onOpenChange(false),
-          )
-        }
+        {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
       >
         <Dialog.Title>Project Information</Dialog.Title>
         <Dialog.Description size="2" color="gray" mb="4">

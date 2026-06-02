@@ -22,7 +22,7 @@ import { push } from "../../features/Pages/pagesSlice";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { regenerate } from "../../services/refact/chatCommands";
-import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
+import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import styles from "./ModeTransitionDialog.module.css";
 
 function extractErrorMessage(err: unknown): string {
@@ -218,11 +218,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
       <Dialog.Content
         maxWidth="500px"
         className={styles.dialogContent}
-        onPointerDown={(event) =>
-          closeDialogOnNonInteractivePointerDown(event, () =>
-            handleOpenChange(false),
-          )
-        }
+        {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
       >
         <Dialog.Title>
           <Flex align="center" gap="2">

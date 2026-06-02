@@ -27,7 +27,7 @@ import {
   selectThreadWorktree,
 } from "../../features/Chat/Thread";
 import { regenerate } from "../../services/refact/chatCommands";
-import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
+import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import {
   useCreateTaskMutation,
   useDeleteTaskMutation,
@@ -229,11 +229,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       <Dialog.Content
         maxWidth="500px"
         className={styles.dialogContent}
-        onPointerDown={(event) =>
-          closeDialogOnNonInteractivePointerDown(event, () =>
-            handleOpenChange(false),
-          )
-        }
+        {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
       >
         <Dialog.Title>
           <Flex align="center" gap="2">

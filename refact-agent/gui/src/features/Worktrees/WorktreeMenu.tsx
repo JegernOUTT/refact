@@ -25,7 +25,7 @@ import {
 } from "../../services/refact";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
+import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { selectApiKey, selectConfig } from "../Config/configSlice";
 import { selectChatId, setThreadWorktree } from "../Chat/Thread";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
@@ -424,11 +424,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
       <Dialog.Root open={deleteOpen} onOpenChange={setDeleteOpen}>
         <Dialog.Content
           maxWidth="420px"
-          onPointerDown={(event) =>
-            closeDialogOnNonInteractivePointerDown(event, () =>
-              setDeleteOpen(false),
-            )
-          }
+          {...dialogNonInteractiveCloseHandlers(() => setDeleteOpen(false))}
         >
           <Dialog.Title>Delete worktree</Dialog.Title>
           <Dialog.Description size="2" color="gray">

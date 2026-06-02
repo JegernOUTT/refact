@@ -1,4 +1,4 @@
-import type { PointerEvent } from "react";
+import type { HTMLAttributes, SyntheticEvent } from "react";
 
 const DIALOG_INTERACTIVE_SELECTOR = [
   "button",
@@ -6,7 +6,6 @@ const DIALOG_INTERACTIVE_SELECTOR = [
   "textarea",
   "select",
   "a[href]",
-  "label",
   "summary",
   '[contenteditable=""]',
   '[contenteditable="true"]',
@@ -27,15 +26,45 @@ const DIALOG_INTERACTIVE_SELECTOR = [
   "[data-radix-collection-item]",
 ].join(",");
 
-export function closeDialogOnNonInteractivePointerDown(
-  event: PointerEvent<HTMLElement>,
+type DialogCloseHandlers = Pick<
+  HTMLAttributes<HTMLElement>,
+  "onPointerDownCapture" | "onMouseDownCapture" | "onClickCapture"
+>;
+
+function targetElement(target: EventTarget | null): Element | null {
+  if (target instanceof Element) return target;
+  if (target instanceof Node) return target.parentElement;
+  return null;
+}
+
+function isInteractiveDialogTarget(element: Element): boolean {
+  if (element.closest(DIALOG_INTERACTIVE_SELECTOR)) return true;
+
+  const label = element.closest("label");
+  return Boolean(label?.querySelector(DIALOG_INTERACTIVE_SELECTOR));
+}
+
+export function closeDialogOnNonInteractiveEvent(
+  event: SyntheticEvent<HTMLElement>,
   close: () => void,
 ): void {
-  const target = event.target;
-  if (!(target instanceof Element)) return;
-  if (target.closest(DIALOG_INTERACTIVE_SELECTOR)) return;
+  const element = targetElement(event.target);
+  if (!element || isInteractiveDialogTarget(element)) return;
 
   event.preventDefault();
   event.stopPropagation();
   close();
+}
+
+export function dialogNonInteractiveCloseHandlers(
+  close: () => void,
+): DialogCloseHandlers {
+  const handleClose = (event: SyntheticEvent<HTMLElement>) =>
+    closeDialogOnNonInteractiveEvent(event, close);
+
+  return {
+    onPointerDownCapture: handleClose,
+    onMouseDownCapture: handleClose,
+    onClickCapture: handleClose,
+  };
 }

@@ -19,7 +19,7 @@ import {
   type WorktreeRecordView,
 } from "../../services/refact";
 import { tasksApi } from "../../services/refact/tasks";
-import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
+import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { mergeConflictFiles } from "./worktreeConflict";
 import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
@@ -208,12 +208,9 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Content
         className={styles.mergeDialog}
-        onPointerDown={(event) => {
-          if (!closeOnNonInteractiveContentClick) return;
-          closeDialogOnNonInteractivePointerDown(event, () =>
-            onOpenChange(false),
-          );
-        }}
+        {...(closeOnNonInteractiveContentClick
+          ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
+          : {})}
       >
         <Dialog.Title>Merge worktree</Dialog.Title>
         <Dialog.Description size="2" color="gray">
