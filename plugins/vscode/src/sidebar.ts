@@ -29,6 +29,7 @@ import {
     ideChatPageChange,
     ideEscapeKeyPressed,
     ideIsChatStreaming,
+    ideIsChatReady,
     setCurrentProjectInfo,
     ideToolCall,
     ToolEditResult,
@@ -603,6 +604,9 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         if(ideIsChatStreaming.match(e)) {
             return this.handleStreamingChange(e.payload);
         }
+        if(ideIsChatReady.match(e)) {
+            return this.handleChatReady(e.payload);
+        }
         if (ideSetCodeCompletionModel.match(e)) {
             return this.handleSetCodeCompletionModel(e.payload);
         }
@@ -802,6 +806,16 @@ export class PanelWebview implements vscode.WebviewViewProvider {
 
     async handleStreamingChange(state: boolean) {
         global.is_chat_streaming = state;
+    }
+
+    handleChatReady(state: boolean) {
+        if (!state) {
+            return;
+        }
+        this.handleSettingsChange();
+        this.sendCurrentProjectInfo();
+        this.postActiveFileInfo();
+        this.sendSnippetToChat();
     }
 
     async handleSetCodeCompletionModel(model: string) {
