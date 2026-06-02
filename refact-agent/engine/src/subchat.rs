@@ -194,9 +194,11 @@ async fn apply_subchat_reactive_compaction(
         Ok(true) => true,
         Ok(false) => false,
         Err(failure) => {
+            let failure_for_log =
+                crate::chat::summarization::safe_segment_summary_failure_for_log(&failure);
             warn!(
                 "Subchat context-limit segment summarization failed; preserving original messages: {}",
-                failure
+                failure_for_log
             );
             *messages = original_messages;
             append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
@@ -2091,6 +2093,7 @@ mod subchat_tests {
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
     use crate::chat::diagnostics::is_ui_only_message;
+    use crate::chat::summarization::{safe_segment_summary_failure_for_log, SegmentSummaryFailure};
     use crate::chat::trajectories::save_trajectory_as;
     use crate::call_validation::{
         ChatContent, ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters,
@@ -2348,6 +2351,22 @@ mod subchat_tests {
         assert!(!log_error.contains("Authorization: Bearer sk-test-secret"));
         assert!(log_error.contains("[REDACTED"));
         assert!(log_error.len() <= PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS);
+    }
+
+    #[test]
+    fn subchat_compaction_failure_log_text_redacts_summarizer_secret() {
+        let failure = SegmentSummaryFailure::Transient(
+            "summarizer failed: Authorization: Bearer sk-test-secret".to_string(),
+        );
+
+        let log_error = safe_segment_summary_failure_for_log(&failure);
+
+        assert!(!log_error.contains("sk-test-secret"));
+        assert!(!log_error.contains("Authorization: Bearer sk-test-secret"));
+        assert!(log_error.contains("[REDACTED"));
+        assert!(
+            log_error.len() <= crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
+        );
     }
 
     #[test]

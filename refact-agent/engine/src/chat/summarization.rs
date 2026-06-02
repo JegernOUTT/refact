@@ -7,7 +7,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::call_validation::{ChatContent, ChatMessage, ChatUsage, DiffChunk};
-use crate::chat::diagnostics::{filter_ui_only_messages, is_ui_only_message};
+use crate::chat::diagnostics::{
+    filter_ui_only_messages, is_ui_only_message, safe_provider_error_diagnostic,
+};
 use crate::chat::history_limit::{compute_context_budget, pressure_for_used_tokens, ContextPressure};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason, SessionState};
@@ -76,6 +78,10 @@ impl SegmentSummaryFailure {
             SegmentSummaryFailure::NoModelAvailable | SegmentSummaryFailure::InputTooLarge { .. }
         )
     }
+}
+
+pub(crate) fn safe_segment_summary_failure_for_log(failure: &SegmentSummaryFailure) -> String {
+    safe_provider_error_diagnostic(&failure.to_string())
 }
 
 fn public_compression_failure_text(failure: &SegmentSummaryFailure) -> String {
@@ -1532,7 +1538,11 @@ pub async fn apply_segment_summarization(
         Err(failure) => {
             let mut session = session_arc.lock().await;
             if finish_compression_failure_if_owned(&mut session, attempt, &failure) {
-                warn!("Segment summarization failed before subchat: {}", failure);
+                let failure_for_log = safe_segment_summary_failure_for_log(&failure);
+                warn!(
+                    "Segment summarization failed before subchat: {}",
+                    failure_for_log
+                );
             }
             return false;
         }
@@ -1575,13 +1585,14 @@ pub async fn apply_segment_summarization(
         Err(failure) => {
             let mut session = session_arc.lock().await;
             if finish_compression_failure_if_owned(&mut session, attempt, &failure) {
+                let failure_for_log = safe_segment_summary_failure_for_log(&failure);
                 if failure.is_structural() {
                     warn!(
                         "Segment summarization structurally disabled for this session: {}",
-                        failure
+                        failure_for_log
                     );
                 } else {
-                    warn!("Segment summarization failed: {}", failure);
+                    warn!("Segment summarization failed: {}", failure_for_log);
                 }
             }
             false
@@ -4330,5 +4341,44 @@ mod tests {
         }
         .is_structural());
         assert!(!SegmentSummaryFailure::Transient("network".to_string()).is_structural());
+    }
+
+    #[test]
+    fn segment_summary_failure_log_text_redacts_transient_provider_secret() {
+        let failure = SegmentSummaryFailure::Transient(
+            "provider failed: Authorization: Bearer sk-test-secret".to_string(),
+        );
+
+        let log_error = safe_segment_summary_failure_for_log(&failure);
+
+        assert!(!log_error.contains("sk-test-secret"));
+        assert!(!log_error.contains("Authorization: Bearer sk-test-secret"));
+        assert!(log_error.contains("[REDACTED"));
+        assert!(
+            log_error.len() <= crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn segment_summary_failure_log_text_windows_huge_transient_error() {
+        let far_tail = "FAR_TAIL_MARKER";
+        let failure = SegmentSummaryFailure::Transient(format!(
+            "provider failed: Authorization: Bearer sk-test-secret {} {}",
+            "x".repeat(200_000),
+            far_tail,
+        ));
+
+        let log_error = safe_segment_summary_failure_for_log(&failure);
+
+        assert!(
+            log_error.len() <= crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
+        );
+        assert!(
+            log_error.contains(crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED)
+        );
+        assert!(!log_error.contains("sk-test-secret"));
+        assert!(!log_error.contains("Authorization: Bearer sk-test-secret"));
+        assert!(log_error.contains("[REDACTED"));
+        assert!(!log_error.contains(far_tail));
     }
 }
