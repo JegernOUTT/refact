@@ -1,4 +1,5 @@
 pub mod autonomous_workflows;
+pub mod conductor;
 pub mod conversation_ledger;
 pub mod diagnostics;
 pub mod drafts;
