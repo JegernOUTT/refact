@@ -12,6 +12,7 @@ use crate::files_correction::correct_to_nearest_filename;
 use crate::global_context::GlobalContext;
 use crate::subchat::{run_subchat, run_subchat_once_with_parent, resolve_subchat_config_with_parent};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
+use crate::worktrees::scope::ExecutionScope;
 
 pub const DEFAULT_MAX_FILES: usize = 30;
 pub const DEFAULT_GATHER_MAX_STEPS: usize = 10;
@@ -93,6 +94,51 @@ pub fn get_last_assistant_content(messages: &[ChatMessage]) -> String {
         .find(|m| m.role == "assistant")
         .map(|m| m.content.to_text_with_image_placeholders())
         .unwrap_or_default()
+}
+
+pub fn resolve_gathered_file_path_with_scope(
+    execution_scope: Option<&ExecutionScope>,
+    file_str: &str,
+) -> Option<PathBuf> {
+    let Some(scope) = execution_scope.filter(|scope| scope.is_enforced()) else {
+        return None;
+    };
+
+    match scope.resolve_existing_path(&PathBuf::from(file_str)) {
+        Ok(scoped) if scoped.path.is_file() => Some(scoped.path),
+        Ok(scoped) => {
+            tracing::warn!(
+                "file-gathering skipped non-file path '{}' resolved to '{}'",
+                file_str,
+                scoped.path.display()
+            );
+            None
+        }
+        Err(err) => {
+            tracing::warn!(
+                "file-gathering failed to resolve scoped path '{}': {}",
+                file_str,
+                err
+            );
+            None
+        }
+    }
+}
+
+async fn resolve_gathered_file_path(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    file_str: &str,
+) -> Option<PathBuf> {
+    if let Some(path) = resolve_gathered_file_path_with_scope(execution_scope, file_str) {
+        return Some(path);
+    }
+    if execution_scope.is_some_and(|scope| scope.is_enforced()) {
+        return None;
+    }
+
+    let candidates = correct_to_nearest_filename(gcx, &file_str.to_string(), false, 1).await;
+    candidates.first().map(PathBuf::from)
 }
 
 pub struct GatherFilesParams<'a> {
@@ -276,12 +322,13 @@ pub async fn gather_files_phase(
 
     tracing::info!("{}: gathered {} files", gather_subagent_id, files.len());
 
+    let execution_scope = parent_worktree.as_ref().map(ExecutionScope::from_worktree);
     let mut valid_paths = Vec::new();
     let mut seen = HashSet::new();
     for file_str in files {
-        let candidates = correct_to_nearest_filename(gcx.clone(), &file_str, false, 1).await;
-        if let Some(corrected) = candidates.first() {
-            let path = PathBuf::from(corrected);
+        if let Some(path) =
+            resolve_gathered_file_path(gcx.clone(), execution_scope.as_ref(), &file_str).await
+        {
             if !seen.contains(&path) {
                 seen.insert(path.clone());
                 valid_paths.push(path);

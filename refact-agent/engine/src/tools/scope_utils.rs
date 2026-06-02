@@ -1636,4 +1636,31 @@ mod worktree_scope_read_tools {
             "escaped underscore should appear in filter: {filter}"
         );
     }
+
+    #[test]
+    fn worktree_scope_gathered_file_validation_uses_worktree_paths() {
+        let fixture = make_fixture();
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+
+        let relative = crate::tools::subagent_phases::resolve_gathered_file_path_with_scope(
+            Some(&scope),
+            "src/lib.rs",
+        )
+        .unwrap();
+        let source_absolute = crate::tools::subagent_phases::resolve_gathered_file_path_with_scope(
+            Some(&scope),
+            &fixture.source.join("src").join("lib.rs").to_string_lossy(),
+        )
+        .unwrap();
+
+        assert_eq!(relative, fixture.root.join("src").join("lib.rs"));
+        assert_eq!(source_absolute, fixture.root.join("src").join("lib.rs"));
+        assert!(
+            crate::tools::subagent_phases::resolve_gathered_file_path_with_scope(
+                Some(&scope),
+                "src/source_only.rs",
+            )
+            .is_none()
+        );
+    }
 }

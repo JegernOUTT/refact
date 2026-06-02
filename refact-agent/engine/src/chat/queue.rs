@@ -28,6 +28,46 @@ use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{WorktreeMeta, WorktreeReference};
 
+pub fn worktree_activation_message(worktree: &WorktreeMeta) -> ChatMessage {
+    let branch = worktree.branch.as_deref().unwrap_or("unknown");
+    let base = worktree.base_branch.as_deref().unwrap_or("unknown");
+    ChatMessage {
+        role: "cd_instruction".to_string(),
+        content: ChatContent::SimpleText(format!(
+            "💿 WORKTREE_ENABLED\n\nActive worktree scope is now ON for this chat.\n\n- Worktree id: `{}`\n- Branch: `{}`\n- Base/target branch: `{}`\n- Worktree root: `{}`\n- Source workspace root: `{}`\n\nEffects for this thread:\n- File reads, edits, shell commands, searches, and @file resolution should operate inside the worktree root unless a tool explicitly says otherwise.\n- Treat the main workspace as the merge target and do not edit it directly for this chat.\n- Use relative paths as usual; absolute paths outside the worktree may be rejected or remapped.\n- To merge completed work, call `worktree_merge` or use the Worktrees UI merge action.\n- If you need to leave the isolated scope, ask the user to detach the worktree first.",
+            worktree.id,
+            branch,
+            base,
+            worktree.root.display(),
+            worktree.source_workspace_root.display()
+        )),
+        tool_call_id: "worktree_enabled".to_string(),
+        ..Default::default()
+    }
+}
+
+pub fn worktree_disabled_message(worktree: Option<&WorktreeMeta>) -> ChatMessage {
+    let previous = worktree
+        .map(|worktree| {
+            let branch = worktree.branch.as_deref().unwrap_or("unknown");
+            format!(
+                "\n\nPrevious worktree scope:\n- Worktree id: `{}`\n- Branch: `{}`\n- Worktree root: `{}`",
+                worktree.id,
+                branch,
+                worktree.root.display()
+            )
+        })
+        .unwrap_or_default();
+    ChatMessage {
+        role: "cd_instruction".to_string(),
+        content: ChatContent::SimpleText(format!(
+            "💿 WORKTREE_DISABLED\n\nActive worktree scope is now OFF for this chat. File reads, edits, shell commands, searches, and @file resolution should use the main workspace again.{previous}"
+        )),
+        tool_call_id: "worktree_disabled".to_string(),
+        ..Default::default()
+    }
+}
+
 async fn push_user_activity(app: AppState, action: UserAction) {
     app.activity_sink.record_user_action(action).await;
 }
@@ -574,6 +614,7 @@ pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
 #[derive(Clone)]
 pub struct WorktreeSetParamsUpdate {
     pub worktree: Option<WorktreeMeta>,
+    pub previous_worktree: Option<WorktreeMeta>,
     pub changed: bool,
     pub sse_value: serde_json::Value,
 }
@@ -709,6 +750,7 @@ pub async fn resolve_worktree_setparams_update(
             != Some(view.meta.id.as_str());
         return Ok(Some(WorktreeSetParamsUpdate {
             worktree: Some(view.meta.clone()),
+            previous_worktree: thread.worktree.clone(),
             changed,
             sse_value: serde_json::to_value(view.meta).unwrap_or(serde_json::Value::Null),
         }));
@@ -720,6 +762,7 @@ pub async fn resolve_worktree_setparams_update(
         }
         return Ok(Some(WorktreeSetParamsUpdate {
             worktree: None,
+            previous_worktree: thread.worktree.clone(),
             changed: thread.worktree.is_some(),
             sse_value: serde_json::Value::Null,
         }));
@@ -1246,6 +1289,13 @@ pub async fn process_command_queue(
                 let (mut changed, sanitized_patch) =
                     apply_setparams_patch(&mut session.thread, &patch);
                 let mode_changed = session.thread.mode != old_mode;
+                let worktree_message = worktree_update
+                    .as_ref()
+                    .filter(|update| update.changed)
+                    .map(|update| match update.worktree.as_ref() {
+                        Some(worktree) => worktree_activation_message(worktree),
+                        None => worktree_disabled_message(update.previous_worktree.as_ref()),
+                    });
                 if let Some(update) = worktree_update.clone() {
                     session.thread.worktree = update.worktree;
                     changed |= update.changed;
@@ -1287,6 +1337,9 @@ pub async fn process_command_queue(
                         "chat.session",
                     )
                     .await;
+                }
+                if let Some(message) = worktree_message {
+                    session.add_message(message);
                 }
                 drop(session);
                 if changed {
@@ -2002,6 +2055,23 @@ mod tests {
         }
     }
 
+    fn sample_worktree(id: &str) -> WorktreeMeta {
+        WorktreeMeta {
+            id: id.to_string(),
+            kind: "chat".to_string(),
+            root: std::path::PathBuf::from(format!("/tmp/{id}-worktree")),
+            source_workspace_root: std::path::PathBuf::from("/tmp/source"),
+            repo_root: std::path::PathBuf::from("/tmp/source"),
+            branch: Some(format!("refact/chat/{id}")),
+            base_branch: Some("main".to_string()),
+            base_commit: None,
+            task_id: None,
+            card_id: None,
+            agent_id: None,
+            enforce: true,
+        }
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)
@@ -2445,6 +2515,36 @@ mod tests {
         assert!(!changed);
         assert!(thread.worktree.is_none());
         assert!(sanitized.get("worktree").is_none());
+    }
+
+    #[test]
+    fn worktree_scope_messages_announce_attach_and_detach() {
+        let worktree = sample_worktree("wt-msg");
+
+        let enabled = worktree_activation_message(&worktree);
+        let disabled = worktree_disabled_message(Some(&worktree));
+
+        assert_eq!(enabled.role, "cd_instruction");
+        assert_eq!(enabled.tool_call_id, "worktree_enabled");
+        assert!(enabled
+            .content
+            .content_text_only()
+            .contains("WORKTREE_ENABLED"));
+        assert!(enabled
+            .content
+            .content_text_only()
+            .contains("Worktree root"));
+        assert_eq!(disabled.role, "cd_instruction");
+        assert_eq!(disabled.tool_call_id, "worktree_disabled");
+        assert!(disabled
+            .content
+            .content_text_only()
+            .contains("WORKTREE_DISABLED"));
+        assert!(disabled
+            .content
+            .content_text_only()
+            .contains("main workspace"));
+        assert!(disabled.content.content_text_only().contains("wt-msg"));
     }
 
     #[tokio::test]
