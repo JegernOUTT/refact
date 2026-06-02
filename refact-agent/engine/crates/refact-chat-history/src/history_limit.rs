@@ -21,6 +21,23 @@ pub struct ContextBudgetReport {
     pub pressure: ContextPressure,
 }
 
+pub fn pressure_for_used_tokens(used_tokens: usize, effective_n_ctx: usize) -> ContextPressure {
+    if effective_n_ctx == 0 {
+        return ContextPressure::Low;
+    }
+
+    let pct_used = used_tokens.saturating_mul(100) / effective_n_ctx;
+    if pct_used < 70 {
+        ContextPressure::Low
+    } else if pct_used < 85 {
+        ContextPressure::Medium
+    } else if pct_used < 95 {
+        ContextPressure::High
+    } else {
+        ContextPressure::Critical
+    }
+}
+
 pub fn compute_context_budget(
     messages: &[ChatMessage],
     effective_n_ctx: usize,
@@ -32,20 +49,7 @@ pub fn compute_context_budget(
         .collect();
     let used_tokens_estimate = crate::trajectory_ops::approx_token_count(&measured_messages);
     let remaining_estimate = (effective_n_ctx as isize) - (used_tokens_estimate as isize);
-    let pressure = if effective_n_ctx == 0 {
-        ContextPressure::Low
-    } else {
-        let pct_used = used_tokens_estimate.saturating_mul(100) / effective_n_ctx;
-        if pct_used < 70 {
-            ContextPressure::Low
-        } else if pct_used < 85 {
-            ContextPressure::Medium
-        } else if pct_used < 95 {
-            ContextPressure::High
-        } else {
-            ContextPressure::Critical
-        }
-    };
+    let pressure = pressure_for_used_tokens(used_tokens_estimate, effective_n_ctx);
     ContextBudgetReport {
         used_tokens_estimate,
         effective_n_ctx,

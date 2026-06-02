@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::call_validation::{ChatContent, ChatMessage, DiffChunk};
+use crate::call_validation::{ChatContent, ChatMessage, ChatUsage, DiffChunk};
 use crate::chat::diagnostics::{filter_ui_only_messages, is_ui_only_message};
-use crate::chat::history_limit::{compute_context_budget, ContextPressure};
+use crate::chat::history_limit::{compute_context_budget, pressure_for_used_tokens, ContextPressure};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, ChatSession, CompressionPhase, CompressionReason, SessionState};
 use crate::global_context::GlobalContext;
@@ -586,9 +586,54 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
         .or_else(|| eligible_tail_non_user_segment(messages))
 }
 
+fn pressure_rank(pressure: &ContextPressure) -> usize {
+    match pressure {
+        ContextPressure::Low => 0,
+        ContextPressure::Medium => 1,
+        ContextPressure::High => 2,
+        ContextPressure::Critical => 3,
+    }
+}
+
+fn max_pressure(left: ContextPressure, right: ContextPressure) -> ContextPressure {
+    if pressure_rank(&left) >= pressure_rank(&right) {
+        left
+    } else {
+        right
+    }
+}
+
+fn provider_usage_input_tokens(usage: &ChatUsage) -> Option<usize> {
+    if usage.prompt_tokens > 0
+        || usage.cache_read_tokens.is_some()
+        || usage.cache_creation_tokens.is_some()
+    {
+        return Some(
+            usage
+                .prompt_tokens
+                .saturating_add(usage.cache_read_tokens.unwrap_or(0))
+                .saturating_add(usage.cache_creation_tokens.unwrap_or(0)),
+        );
+    }
+    (usage.total_tokens > 0).then(|| usage.total_tokens.saturating_sub(usage.completion_tokens))
+}
+
+fn recent_provider_usage_input_tokens(messages: &[ChatMessage]) -> Option<usize> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != "assistant" || is_ui_only_message(message) {
+            return None;
+        }
+        message.usage.as_ref().and_then(provider_usage_input_tokens)
+    })
+}
+
 fn estimated_context_pressure(messages: &[ChatMessage], effective_n_ctx: usize) -> ContextPressure {
     let visible_messages = filter_ui_only_messages(messages.to_vec());
-    compute_context_budget(&visible_messages, effective_n_ctx).pressure
+    let visible_pressure = compute_context_budget(&visible_messages, effective_n_ctx).pressure;
+    let provider_pressure = recent_provider_usage_input_tokens(messages)
+        .map(|used_tokens| pressure_for_used_tokens(used_tokens, effective_n_ctx))
+        .unwrap_or(ContextPressure::Low);
+    max_pressure(visible_pressure, provider_pressure)
 }
 
 fn role_label(role: &str) -> &str {
@@ -3113,6 +3158,32 @@ mod tests {
         );
     }
 
+    fn usage(
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        total_tokens: usize,
+        cache_read_tokens: Option<usize>,
+        cache_creation_tokens: Option<usize>,
+    ) -> ChatUsage {
+        ChatUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            metering_usd: None,
+        }
+    }
+
+    fn assistant_with_usage(message_usage: ChatUsage) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("provider usage".to_string()),
+            usage: Some(message_usage),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn pressure_check_can_be_low() {
         let messages = vec![user("hello"), assistant("hi"), user("again")];
@@ -3120,6 +3191,113 @@ mod tests {
             estimated_context_pressure(&messages, 1_000_000),
             ContextPressure::Low
         ));
+    }
+
+    #[test]
+    fn pressure_uses_provider_cache_read_when_visible_approx_is_low() {
+        let messages = vec![
+            user("hello"),
+            assistant_with_usage(usage(1_000, 500, 85_500, Some(84_000), None)),
+            user("again"),
+        ];
+
+        assert_eq!(
+            estimated_context_pressure(&messages, 100_000),
+            ContextPressure::High
+        );
+    }
+
+    #[test]
+    fn pressure_uses_provider_cache_creation_when_cache_recreated() {
+        let messages = vec![
+            user("hello"),
+            assistant_with_usage(usage(1_000, 500, 85_500, None, Some(84_000))),
+            user("again"),
+        ];
+
+        assert_eq!(
+            estimated_context_pressure(&messages, 100_000),
+            ContextPressure::High
+        );
+    }
+
+    #[test]
+    fn pressure_falls_back_to_visible_approx_without_usage() {
+        let low_messages = vec![user("hello"), assistant("hi"), user("again")];
+        let high_messages = vec![
+            user("hello"),
+            assistant(&"visible pressure ".repeat(20_000)),
+            user("again"),
+        ];
+
+        assert_eq!(
+            estimated_context_pressure(&low_messages, 100_000),
+            ContextPressure::Low
+        );
+        assert!(matches!(
+            estimated_context_pressure(&high_messages, 4_096),
+            ContextPressure::High | ContextPressure::Critical
+        ));
+    }
+
+    #[test]
+    fn provider_usage_does_not_lower_visible_pressure() {
+        let high_visible = assistant(&"visible pressure ".repeat(20_000));
+        let no_usage = vec![user("hello"), high_visible.clone(), user("again")];
+        let low_usage = vec![
+            user("hello"),
+            high_visible,
+            assistant_with_usage(usage(10, 10, 20, None, None)),
+            user("again"),
+        ];
+
+        for messages in [no_usage, low_usage] {
+            assert!(matches!(
+                estimated_context_pressure(&messages, 4_096),
+                ContextPressure::High | ContextPressure::Critical
+            ));
+        }
+    }
+
+    #[test]
+    fn pressure_ignores_completion_tokens_when_input_usage_exists() {
+        let messages = vec![
+            user("hello"),
+            assistant_with_usage(usage(1_000, 90_000, 91_000, None, None)),
+            user("again"),
+        ];
+
+        assert_eq!(
+            estimated_context_pressure(&messages, 100_000),
+            ContextPressure::Low
+        );
+    }
+
+    #[test]
+    fn pressure_falls_back_to_total_minus_completion_without_input_usage() {
+        let messages = vec![
+            user("hello"),
+            assistant_with_usage(usage(0, 5_000, 90_000, None, None)),
+            user("again"),
+        ];
+
+        assert_eq!(
+            estimated_context_pressure(&messages, 100_000),
+            ContextPressure::High
+        );
+    }
+
+    #[test]
+    fn provider_usage_pressure_handles_zero_context_window() {
+        let messages = vec![
+            user("hello"),
+            assistant_with_usage(usage(usize::MAX, 0, usize::MAX, Some(usize::MAX), None)),
+        ];
+
+        assert_eq!(
+            estimated_context_pressure(&messages, 0),
+            ContextPressure::Low
+        );
     }
 
     #[test]
