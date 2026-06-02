@@ -25,6 +25,7 @@ import {
 } from "../../services/refact";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { useAppDispatch, useAppSelector } from "../../hooks";
+import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
 import { selectApiKey, selectConfig } from "../Config/configSlice";
 import { selectChatId, setThreadWorktree } from "../Chat/Thread";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
@@ -405,6 +406,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         worktree={currentWorktree}
         record={currentRecord}
         onOpenChange={setDiffOpen}
+        closeOnNonInteractiveContentClick
       />
 
       <MergeWorktreeModal
@@ -416,10 +418,18 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         onMerged={handleMerged}
         onAskRefact={handleAskRefact}
         onOpenWorktree={onOpenInNewWindow}
+        closeOnNonInteractiveContentClick
       />
 
       <Dialog.Root open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <Dialog.Content maxWidth="420px">
+        <Dialog.Content
+          maxWidth="420px"
+          onPointerDown={(event) =>
+            closeDialogOnNonInteractivePointerDown(event, () =>
+              setDeleteOpen(false),
+            )
+          }
+        >
           <Dialog.Title>Delete worktree</Dialog.Title>
           <Dialog.Description size="2" color="gray">
             Delete or discard the selected worktree from disk.

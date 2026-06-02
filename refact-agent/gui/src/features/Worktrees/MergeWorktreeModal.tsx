@@ -19,6 +19,7 @@ import {
   type WorktreeRecordView,
 } from "../../services/refact";
 import { tasksApi } from "../../services/refact/tasks";
+import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
 import { mergeConflictFiles } from "./worktreeConflict";
 import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
@@ -37,6 +38,7 @@ type MergeWorktreeModalProps = {
     response: MergeWorktreeResponse,
   ) => void | Promise<void>;
   onOpenWorktree?: () => void | Promise<void>;
+  closeOnNonInteractiveContentClick?: boolean;
 };
 
 function displayWorktreeLabel(
@@ -92,6 +94,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   onMerged,
   onAskRefact,
   onOpenWorktree,
+  closeOnNonInteractiveContentClick = false,
 }) => {
   const dispatch = useAppDispatch();
   const [strategy, setStrategy] = useState<WorktreeMergeStrategy>("squash");
@@ -203,7 +206,15 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className={styles.mergeDialog}>
+      <Dialog.Content
+        className={styles.mergeDialog}
+        onPointerDown={(event) => {
+          if (!closeOnNonInteractiveContentClick) return;
+          closeDialogOnNonInteractivePointerDown(event, () =>
+            onOpenChange(false),
+          );
+        }}
+      >
         <Dialog.Title>Merge worktree</Dialog.Title>
         <Dialog.Description size="2" color="gray">
           Merge {label} into a target branch.

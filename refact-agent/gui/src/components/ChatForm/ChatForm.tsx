@@ -78,6 +78,20 @@ function isInsideComposerSurface(
   return false;
 }
 
+function isInsideComposerControls(element: Element): boolean {
+  return Boolean(
+    element.closest(
+      [
+        `.${styles.inputHeader}`,
+        `.${styles.topControlsRow}`,
+        `.${styles.topStatusControls}`,
+        `.${styles.bottomControlsRow}`,
+        `.${styles.bottomActionControls}`,
+      ].join(","),
+    ),
+  );
+}
+
 import {
   BackToSideBarButton,
   UnifiedSendButton,
@@ -194,6 +208,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [isComposerExpanded, setIsComposerExpanded] = React.useState(false);
   const [openComposerMenus, setOpenComposerMenus] = React.useState(0);
   const composerRef = React.useRef<HTMLDivElement>(null);
+  const composerPointerDownInsideRef = React.useRef(false);
+  const clearComposerPointerDownRef = React.useRef<number | null>(null);
   const isOnline = useIsOnline();
   const { isContextFull } = useUsageCounter();
   const messages = useAppSelector(selectMessages);
@@ -463,11 +479,32 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     }
   }, []);
 
+  useEffect(
+    () => () => {
+      if (clearComposerPointerDownRef.current !== null) {
+        window.clearTimeout(clearComposerPointerDownRef.current);
+      }
+    },
+    [],
+  );
+
   const handleComposerPointerDownCapture = useCallback(
     (event: React.PointerEvent<HTMLFormElement>) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
+      composerPointerDownInsideRef.current = true;
+      if (clearComposerPointerDownRef.current !== null) {
+        window.clearTimeout(clearComposerPointerDownRef.current);
+      }
+      clearComposerPointerDownRef.current = window.setTimeout(() => {
+        composerPointerDownInsideRef.current = false;
+        clearComposerPointerDownRef.current = null;
+      }, 80);
+
       if (isEditableElement(target)) return;
+
+      setIsComposerExpanded(true);
+      if (isInsideComposerControls(target)) return;
 
       event.preventDefault();
       focusComposerInput();
@@ -482,6 +519,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       if (isInsideComposerSurface(nextTarget, root)) return;
 
       window.setTimeout(() => {
+        if (composerPointerDownInsideRef.current) {
+          setIsComposerExpanded(true);
+          return;
+        }
+
         const activeElement = document.activeElement;
         if (isInsideComposerSurface(activeElement, root)) return;
         setIsComposerExpanded(openComposerMenus > 0);
@@ -552,7 +594,10 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         !event.altKey
       ) {
         const target = event.target;
-        if (target instanceof Element && isEditableElement(target)) return;
+        if (target instanceof Element) {
+          if (isEditableElement(target)) return;
+          if (isInsideRadixPortal(target)) return;
+        }
         event.preventDefault();
         focusComposerInput();
       }

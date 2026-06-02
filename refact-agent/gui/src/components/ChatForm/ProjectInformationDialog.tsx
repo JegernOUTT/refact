@@ -29,6 +29,7 @@ import {
   SectionConfig,
 } from "../../services/refact/projectInformation";
 import { useAppDispatch, useAppSelector } from "../../hooks";
+import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
 import { selectCurrentThreadId } from "../../features/Chat";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
 
@@ -143,6 +144,9 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
       <Dialog.Content
         maxWidth="800px"
         style={{ maxHeight: "80vh", overflow: "hidden" }}
+        onPointerDown={(event) =>
+          closeDialogOnNonInteractivePointerDown(event, onClose)
+        }
       >
         <Flex justify="between" align="center" mb="3">
           <Dialog.Title style={{ margin: 0 }}>
@@ -497,7 +501,14 @@ export const ProjectInformationDialog: React.FC<Props> = ({
   if (isLoading) {
     return (
       <Dialog.Root open={open} onOpenChange={onOpenChange}>
-        <Dialog.Content maxWidth="600px">
+        <Dialog.Content
+          maxWidth="600px"
+          onPointerDown={(event) =>
+            closeDialogOnNonInteractivePointerDown(event, () =>
+              onOpenChange(false),
+            )
+          }
+        >
           <Dialog.Title>Project Information</Dialog.Title>
           <Flex align="center" justify="center" py="6">
             <Text color="gray">Loading...</Text>
@@ -509,7 +520,15 @@ export const ProjectInformationDialog: React.FC<Props> = ({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="600px" style={{ overflow: "hidden" }}>
+      <Dialog.Content
+        maxWidth="600px"
+        style={{ overflow: "hidden" }}
+        onPointerDown={(event) =>
+          closeDialogOnNonInteractivePointerDown(event, () =>
+            onOpenChange(false),
+          )
+        }
+      >
         <Dialog.Title>Project Information</Dialog.Title>
         <Dialog.Description size="2" color="gray" mb="4">
           Configure what project information is included in chat context. Token

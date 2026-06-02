@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Dialog, Flex, Text, TextField } from "@radix-ui/themes";
+import { closeDialogOnNonInteractivePointerDown } from "../../utils/dialogPointerClose";
 import styles from "./Worktrees.module.css";
 
 export type CreateWorktreeValues = {
@@ -77,7 +78,15 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className={styles.createDialog} maxWidth="420px">
+      <Dialog.Content
+        className={styles.createDialog}
+        maxWidth="420px"
+        onPointerDown={(event) =>
+          closeDialogOnNonInteractivePointerDown(event, () =>
+            onOpenChange(false),
+          )
+        }
+      >
         <Dialog.Title>Create worktree</Dialog.Title>
         <Dialog.Description size="2" color="gray">
           Create a new git worktree and attach it to this chat.
