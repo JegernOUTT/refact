@@ -1,15 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use std::collections::HashMap;
 
 use crate::subchat::{run_subchat_once_with_parent, resolve_subchat_params, resolve_subchat_model};
-use crate::tools::tools_description::{
-    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
-};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
 use crate::tools::subagent_phases::{gather_files_phase, GatherFilesParams};
 use crate::call_validation::{
@@ -30,13 +28,19 @@ pub struct ToolCodeReview {
 
 static TOKENS_EXTRA_BUDGET_PERCENT: f32 = 0.06;
 
-fn get_gather_files_params(config: &CodeSubagentConfig) -> GatherFilesParams<'_> {
+fn get_gather_files_params(
+    config: &CodeSubagentConfig,
+    focus: Option<String>,
+    seed_files: Vec<String>,
+) -> GatherFilesParams<'_> {
     GatherFilesParams {
         default_subagent_id: "code_review_gather_files",
         title: "Code Review: Gathering Files",
         default_system_prompt: config.gather_system_prompt.as_deref().unwrap_or(""),
         user_instruction:
-            "Based on the conversation above, identify all relevant files that need to be reviewed.",
+            "Based on the conversation above, identify every file relevant to the review. Cast a wide net \u{2014} more related files is better.",
+        focus,
+        seed_files,
     }
 }
 
@@ -46,6 +50,7 @@ async fn make_review_prompt(
     important_paths: &[PathBuf],
     previous_messages: &[ChatMessage],
     config: &CodeSubagentConfig,
+    focus: Option<&str>,
 ) -> Result<String, String> {
     let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
@@ -80,7 +85,10 @@ async fn make_review_prompt(
         .ok_or("reviewer_prompt not configured for code_review")?;
 
     let mut tokens_budget: i64 = (subchat_params.subchat_n_ctx - required_tokens) as i64;
-    let final_message = reviewer_prompt.clone();
+    let final_message = match focus.map(str::trim).filter(|f| !f.is_empty()) {
+        Some(focus) => format!("{reviewer_prompt}\n\n# Focus \u{2014} what to check\n{focus}"),
+        None => reviewer_prompt.clone(),
+    };
     tokens_budget -= count_text_tokens_with_fallback(tokenizer.clone(), &final_message) as i64;
 
     let mut context = String::new();
@@ -171,6 +179,7 @@ async fn execute_code_review(
     external_messages: Vec<ChatMessage>,
     tool_call_id: String,
     config: &CodeSubagentConfig,
+    focus: Option<&str>,
 ) -> Result<(String, serde_json::Map<String, serde_json::Value>), String> {
     let (subchat_tx, abort_flag, parent_depth, parent_task_meta, parent_worktree) = {
         let ccx_lock = ccx.lock().await;
@@ -191,6 +200,7 @@ async fn execute_code_review(
         &important_paths,
         &external_messages,
         config,
+        focus,
     )
     .await?;
 
@@ -251,8 +261,23 @@ impl Tool for ToolCodeReview {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Perform a thorough code review. Automatically identifies relevant files and checks for bugs, integration issues, missing tests, code style, and consistency.".to_string(),
-            input_schema: json_schema_from_params(&[], &[]),
+            description: "Perform a thorough code review. Optionally pass `what_to_check` (focus/scope) and `files` (initial guess of relevant paths \u{2014} the reviewer starts there and finds more). Finds all related files and checks for bugs, broken integration/wiring, missing tests, inconsistency, and AI-generated 'slop'.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "what_to_check": {
+                        "type": "string",
+                        "description": "Optional. What to review and what to look for (focus/scope). If omitted, the scope is inferred from the conversation."
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional. Initial guess of relevant file paths. The reviewer starts from these and still searches for more related files."
+                    }
+                },
+                "required": [],
+                "additionalProperties": false
+            }),
             output_schema: None,
             annotations: None,
         }
@@ -262,9 +287,29 @@ impl Tool for ToolCodeReview {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        _args: &HashMap<String, Value>,
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let gcx = ccx.lock().await.app.gcx.clone();
+
+        let what_to_check = args
+            .get("what_to_check")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let seed_files: Vec<String> = args
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let config = load_code_subagent_config(gcx.clone(), "code_review", None).await?;
 
@@ -273,7 +318,7 @@ impl Tool for ToolCodeReview {
             ccx_lock.messages.clone()
         };
 
-        let gather_params = get_gather_files_params(&config);
+        let gather_params = get_gather_files_params(&config, what_to_check.clone(), seed_files);
 
         tracing::info!("code_review: phase 1 - gathering relevant files");
         let important_paths = gather_files_phase(
@@ -298,6 +343,7 @@ impl Tool for ToolCodeReview {
             external_messages,
             tool_call_id.clone(),
             &config,
+            what_to_check.as_deref(),
         )
         .await?;
 

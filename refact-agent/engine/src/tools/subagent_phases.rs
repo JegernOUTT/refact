@@ -146,6 +146,40 @@ pub struct GatherFilesParams<'a> {
     pub title: &'a str,
     pub default_system_prompt: &'a str,
     pub user_instruction: &'a str,
+    pub focus: Option<String>,
+    pub seed_files: Vec<String>,
+}
+
+fn build_gather_instruction(params: &GatherFilesParams<'_>) -> String {
+    let mut instruction = params.user_instruction.to_string();
+    if let Some(focus) = params
+        .focus
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        instruction.push_str(&format!("\n\nFocus \u{2014} what to look for:\n{focus}"));
+    }
+    if !params.seed_files.is_empty() {
+        let seeds = params.seed_files.join("\n");
+        instruction.push_str(&format!(
+            "\n\nSeed files to start from, then EXPAND well beyond them (find every related file; do not limit yourself to this list):\n{seeds}"
+        ));
+    }
+    instruction
+}
+
+fn merge_files_with_seeds(seeds: &[String], parsed: Vec<String>, max_files: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(seeds.len() + parsed.len());
+    let mut seen = HashSet::new();
+    for candidate in seeds.iter().chain(parsed.iter()) {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out.truncate(max_files);
+    out
 }
 
 pub async fn gather_files_phase(
@@ -260,6 +294,8 @@ pub async fn gather_files_phase(
         }
     }
 
+    let gather_instruction = build_gather_instruction(params);
+
     messages.push(event(
         EventSubkind::SystemNotice,
         "tool.subagent_phases",
@@ -271,7 +307,7 @@ pub async fn gather_files_phase(
             "max_files": max_files,
             "attempt": "initial",
         }),
-        params.user_instruction.to_string(),
+        gather_instruction,
     ));
 
     tracing::info!("{}: starting file-gathering subagent", gather_subagent_id);
@@ -315,10 +351,12 @@ pub async fn gather_files_phase(
         let retry_response = get_last_assistant_content(&retry_result.messages);
         files = parse_relevant_files(&retry_response, max_files);
 
-        if files.is_empty() {
+        if files.is_empty() && params.seed_files.is_empty() {
             return Err("File-gathering subagent failed to provide a valid file list".to_string());
         }
     }
+
+    let files = merge_files_with_seeds(&params.seed_files, files, max_files);
 
     tracing::info!("{}: gathered {} files", gather_subagent_id, files.len());
 

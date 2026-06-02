@@ -46,6 +46,8 @@ fn get_gather_files_params(config: &CodeSubagentConfig) -> GatherFilesParams<'_>
         default_system_prompt: config.gather_system_prompt.as_deref().unwrap_or(""),
         user_instruction:
             "Based on the conversation above, identify all relevant files for solving this problem.",
+        focus: None,
+        seed_files: Vec::new(),
     }
 }
 
