@@ -200,6 +200,12 @@ pub fn cc_rename_base_tool(base_name: &str) -> &str {
     base_name
 }
 
+fn is_cc_known_refact_tool_name(name: &str) -> bool {
+    CC_TOOL_RENAMES
+        .iter()
+        .any(|(original, renamed)| *original == name || *renamed == name)
+}
+
 pub fn cc_resolve_tool_name(name: &str) -> String {
     if name.starts_with(MCP_TOOL_PREFIX) {
         let base = &name[MCP_TOOL_PREFIX.len()..];
@@ -453,19 +459,17 @@ pub fn apply_cc_tool_use_in_messages(messages: &mut Value) {
                             }
                         }
                         if !matched {
-                            // Either "mcp_cat" (no rename entry → t_cat) or a real MCP tool.
-                            // Heuristic: if base has underscores suggesting it's a server tool
-                            // name (e.g. "github_create_issue"), keep it bare.
-                            // For Refact builtins with no rename entry (cat, tree…): use t_ prefix.
-                            // We can't easily distinguish here so apply t_ prefix to both —
-                            // dispatch will try both forms.
-                            let renamed = cc_rename_base_tool(base);
-                            block["name"] = json!(format!("{}{}", MCP_TOOL_PREFIX, renamed));
+                            if !base.contains('_') {
+                                block["name"] = json!(format!("{}{}", MCP_TOOL_PREFIX, base));
+                            } else {
+                                block["name"] = json!(base);
+                            }
                         }
                     } else {
-                        // Unprefixed — apply rename + t_ prefix
-                        let renamed = cc_rename_base_tool(&name);
-                        block["name"] = json!(format!("{}{}", MCP_TOOL_PREFIX, renamed));
+                        if is_cc_known_refact_tool_name(&name) || !name.contains('_') {
+                            let renamed = cc_rename_base_tool(&name);
+                            block["name"] = json!(format!("{}{}", MCP_TOOL_PREFIX, renamed));
+                        }
                     }
                 }
             }
@@ -679,6 +683,9 @@ mod tests {
                     {"type": "tool_use", "id": "c2", "name": "strategic_planning", "input": {}},
                     {"type": "tool_use", "id": "c3", "name": "t_already", "input": {}},
                     {"type": "tool_use", "id": "c4", "name": "t_strategic_planning", "input": {}},
+                    {"type": "tool_use", "id": "c5", "name": "mcp_github_create_issue", "input": {}},
+                    {"type": "tool_use", "id": "c6", "name": "github_create_issue", "input": {}},
+                    {"type": "tool_use", "id": "c7", "name": "mcp_tree", "input": {}},
                 ]
             }
         ]);
@@ -688,6 +695,9 @@ mod tests {
         assert_eq!(content[2]["name"], "t_plan"); // rename + prefix
         assert_eq!(content[3]["name"], "t_already"); // already t_-prefixed, no rename entry → unchanged
         assert_eq!(content[4]["name"], "t_plan"); // old-style t_strategic_planning → t_plan
+        assert_eq!(content[5]["name"], "github_create_issue"); // real MCP history → outbound bare name
+        assert_eq!(content[6]["name"], "github_create_issue"); // already outbound bare name → unchanged
+        assert_eq!(content[7]["name"], "t_tree"); // old internal mcp_ alias stays a CC tool name
     }
 
     #[test]

@@ -14,6 +14,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_THINKING_BUDGET: usize = 8192;
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 const ANTHROPIC_CACHE_CONTROL_MARKER_LIMIT: usize = 4;
+const ANTHROPIC_CACHE_LOOKBACK_STRIDE_BLOCKS: usize = 14;
 
 const PROTECTED_FIELDS: &[&str] = &[
     "model",
@@ -905,15 +906,52 @@ fn anthropic_cache_control() -> Value {
 
 fn inject_anthropic_cache_control(body: &mut Value) {
     let cache_control = anthropic_cache_control();
+    let mut remaining_markers = ANTHROPIC_CACHE_CONTROL_MARKER_LIMIT;
+    let prefer_message_breakpoints = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            message_content_positions(messages).len() > ANTHROPIC_CACHE_LOOKBACK_STRIDE_BLOCKS * 2
+        })
+        .unwrap_or(false);
 
-    if let Some(system) = body.get_mut("system") {
-        add_system_cache_breakpoint(system, &cache_control);
+    if prefer_message_breakpoints {
+        add_body_message_cache_breakpoints(body, &cache_control, &mut remaining_markers);
     }
-    if let Some(tools) = body.get_mut("tools") {
-        add_tool_cache_breakpoint(tools, &cache_control);
+
+    if remaining_markers > 0 {
+        if let Some(system) = body.get_mut("system") {
+            if add_system_cache_breakpoint(system, &cache_control) {
+                remaining_markers = remaining_markers.saturating_sub(1);
+            }
+        }
+    }
+    if remaining_markers > 0 {
+        if let Some(tools) = body.get_mut("tools") {
+            if add_tool_cache_breakpoint(tools, &cache_control) {
+                remaining_markers = remaining_markers.saturating_sub(1);
+            }
+        }
+    }
+    if !prefer_message_breakpoints {
+        add_body_message_cache_breakpoints(body, &cache_control, &mut remaining_markers);
+    }
+}
+
+fn add_body_message_cache_breakpoints(
+    body: &mut Value,
+    cache_control: &Value,
+    remaining_markers: &mut usize,
+) {
+    if *remaining_markers == 0 {
+        return;
     }
     if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
-        add_message_cache_breakpoint(messages, &cache_control);
+        *remaining_markers = remaining_markers.saturating_sub(add_message_cache_breakpoints(
+            messages,
+            cache_control,
+            *remaining_markers,
+        ));
     }
 }
 
@@ -935,25 +973,135 @@ fn add_system_cache_breakpoint(system: &mut Value, cache_control: &Value) -> boo
     }
 }
 
+#[cfg(test)]
 fn add_message_cache_breakpoint(messages: &mut [Value], cache_control: &Value) -> bool {
-    if messages.is_empty() {
-        return false;
+    add_message_cache_breakpoints(messages, cache_control, 1) > 0
+}
+
+fn add_message_cache_breakpoints(
+    messages: &mut [Value],
+    cache_control: &Value,
+    max_markers: usize,
+) -> usize {
+    if max_markers == 0 {
+        return 0;
     }
 
-    let Some(preferred_index) = messages
+    let Some(latest) = latest_user_message_cache_position(messages) else {
+        return 0;
+    };
+    let positions = select_message_cache_breakpoints(messages, latest, max_markers);
+    let mut added = 0;
+    for position in positions {
+        if insert_message_cache_breakpoint(messages, position, cache_control) {
+            added += 1;
+        }
+    }
+    added
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MessageContentPosition {
+    message_index: usize,
+    content_index: usize,
+}
+
+fn select_message_cache_breakpoints(
+    messages: &[Value],
+    latest: MessageContentPosition,
+    max_markers: usize,
+) -> Vec<MessageContentPosition> {
+    let positions = message_content_positions(messages);
+    let Some(latest_seq) = positions
         .iter()
-        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .position(|position| position.message_content == latest)
     else {
-        return false;
+        return Vec::new();
     };
 
-    let Some(content) = messages[preferred_index]
-        .get_mut("content")
+    let mut selected = vec![latest];
+    let mut cursor = latest_seq;
+    while selected.len() < max_markers && cursor >= ANTHROPIC_CACHE_LOOKBACK_STRIDE_BLOCKS {
+        let window_start = cursor - ANTHROPIC_CACHE_LOOKBACK_STRIDE_BLOCKS;
+        let Some(next_cursor) = positions[window_start..cursor]
+            .iter()
+            .position(|position| position.cacheable)
+            .map(|offset| window_start + offset)
+        else {
+            break;
+        };
+        selected.push(positions[next_cursor].message_content);
+        cursor = next_cursor;
+    }
+    selected
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MessageProviderBlockPosition {
+    message_content: MessageContentPosition,
+    cacheable: bool,
+}
+
+fn message_content_positions(messages: &[Value]) -> Vec<MessageProviderBlockPosition> {
+    let mut positions = Vec::new();
+    for (message_index, message) in messages.iter().enumerate() {
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for (content_index, block) in content.iter().enumerate() {
+            positions.push(MessageProviderBlockPosition {
+                message_content: MessageContentPosition {
+                    message_index,
+                    content_index,
+                },
+                cacheable: is_cacheable_content_block(block),
+            });
+        }
+    }
+    positions
+}
+
+fn latest_user_message_cache_position(messages: &[Value]) -> Option<MessageContentPosition> {
+    if messages.is_empty() {
+        return None;
+    }
+
+    let preferred_index = messages
+        .iter()
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))?;
+
+    let content = messages[preferred_index]
+        .get("content")
+        .and_then(Value::as_array)?;
+    latest_user_message_content_index(content).map(|content_index| MessageContentPosition {
+        message_index: preferred_index,
+        content_index,
+    })
+}
+
+fn latest_user_message_content_index(content: &[Value]) -> Option<usize> {
+    content
+        .iter()
+        .rposition(is_cacheable_text_content_block)
+        .or_else(|| content.iter().rposition(is_cacheable_content_block))
+}
+
+fn insert_message_cache_breakpoint(
+    messages: &mut [Value],
+    position: MessageContentPosition,
+    cache_control: &Value,
+) -> bool {
+    let Some(obj) = messages
+        .get_mut(position.message_index)
+        .and_then(|message| message.get_mut("content"))
         .and_then(Value::as_array_mut)
+        .and_then(|content| content.get_mut(position.content_index))
+        .and_then(Value::as_object_mut)
     else {
         return false;
     };
-    add_cache_to_latest_user_message_block(content, cache_control)
+    obj.insert("cache_control".to_string(), cache_control.clone());
+    true
 }
 
 fn add_tool_cache_breakpoint(tools: &mut Value, cache_control: &Value) -> bool {
@@ -966,29 +1114,6 @@ fn add_tool_cache_breakpoint(tools: &mut Value, cache_control: &Value) -> bool {
             continue;
         }
         if let Some(obj) = tool.as_object_mut() {
-            obj.insert("cache_control".to_string(), cache_control.clone());
-            return true;
-        }
-    }
-    false
-}
-
-fn add_cache_to_latest_user_message_block(content: &mut [Value], cache_control: &Value) -> bool {
-    for block in content.iter_mut().rev() {
-        if !is_cacheable_text_content_block(block) {
-            continue;
-        }
-        if let Some(obj) = block.as_object_mut() {
-            obj.insert("cache_control".to_string(), cache_control.clone());
-            return true;
-        }
-    }
-
-    for block in content.iter_mut().rev() {
-        if !is_cacheable_content_block(block) {
-            continue;
-        }
-        if let Some(obj) = block.as_object_mut() {
             obj.insert("cache_control".to_string(), cache_control.clone());
             return true;
         }
@@ -1751,6 +1876,90 @@ mod tests {
 
         assert!(count_cache_control_markers(&http.body) <= 4);
         assert_eq!(count_cache_control_markers(&http.body), 3);
+    }
+
+    #[test]
+    fn anthropic_cache_adds_rolling_message_breakpoint_for_long_conversations() {
+        let messages = (0..=44)
+            .map(|index| {
+                let role = if index % 2 == 0 { "user" } else { "assistant" };
+                json!({
+                    "role": role,
+                    "content": [{"type": "text", "text": format!("message block {index}")}]
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut body = json!({
+            "system": [{"type": "text", "text": "stable system"}],
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+            "messages": messages,
+        });
+
+        inject_anthropic_cache_control(&mut body);
+
+        let message_markers = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .flat_map(|(message_index, message)| {
+                message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, block)| block.get("cache_control").is_some())
+                    .map(move |(content_index, _)| (message_index, content_index))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(count_cache_control_markers(&body), 4);
+        assert_eq!(message_markers, vec![(2, 0), (16, 0), (30, 0), (44, 0)]);
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert!(body["tools"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_cache_rolling_breakpoints_count_provider_blocks() {
+        let messages = (0..=24)
+            .map(|index| {
+                let role = if index % 2 == 0 { "user" } else { "assistant" };
+                json!({
+                    "role": role,
+                    "content": [
+                        {"type": "text", "text": format!("message block {index}")},
+                        {"type": "thinking", "thinking": format!("thinking block {index}"), "signature": "sig"}
+                    ]
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut body = json!({"messages": messages});
+
+        inject_anthropic_cache_control(&mut body);
+
+        let message_markers = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .flat_map(|(message_index, message)| {
+                message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, block)| block.get("cache_control").is_some())
+                    .map(move |(content_index, _)| (message_index, content_index))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(message_markers, vec![(3, 0), (10, 0), (17, 0), (24, 0)]);
+        for marker in message_markers {
+            assert_eq!(
+                body["messages"][marker.0]["content"][marker.1]["type"],
+                "text"
+            );
+        }
     }
 
     #[test]
