@@ -5,7 +5,10 @@ import { createDefaultChatState, render, screen } from "../../utils/test-utils";
 import type { RootState } from "../../app/store";
 import type { ChatMessages } from "../../services/refact";
 import { switchToThread } from "../../features/Chat/Thread/actions";
-import type { ChatThreadRuntime } from "../../features/Chat/Thread/types";
+import type {
+  ChatThreadRuntime,
+  QueuedItem,
+} from "../../features/Chat/Thread/types";
 
 function userMessage(content: string): ChatMessages[number] {
   return {
@@ -20,11 +23,13 @@ function makeRuntime({
   isCompressing = false,
   snapshotReceived = true,
   isStreaming = false,
+  queuedItems = [],
 }: {
   messages?: ChatMessages;
   isCompressing?: boolean;
   snapshotReceived?: boolean;
   isStreaming?: boolean;
+  queuedItems?: QueuedItem[];
 } = {}): ChatThreadRuntime {
   const chat = createDefaultChatState();
   const chatId = chat.current_thread_id;
@@ -33,6 +38,7 @@ function makeRuntime({
   runtime.is_compressing = isCompressing;
   runtime.snapshot_received = snapshotReceived;
   runtime.streaming = isStreaming;
+  runtime.queued_items = queuedItems;
   return runtime;
 }
 
@@ -41,12 +47,14 @@ function makeChatState({
   isCompressing = false,
   snapshotReceived = true,
   isStreaming = false,
+  queuedItems = [],
   sseStatus,
 }: {
   messages?: ChatMessages;
   isCompressing?: boolean;
   snapshotReceived?: boolean;
   isStreaming?: boolean;
+  queuedItems?: QueuedItem[];
   sseStatus?: "disconnected" | "connecting" | "connected";
 } = {}): Partial<RootState> {
   const chat = createDefaultChatState();
@@ -56,6 +64,7 @@ function makeChatState({
   runtime.is_compressing = isCompressing;
   runtime.snapshot_received = snapshotReceived;
   runtime.streaming = isStreaming;
+  runtime.queued_items = queuedItems;
   return {
     chat,
     ...(sseStatus
@@ -189,6 +198,37 @@ describe("ChatContent compression progress", () => {
         .getByTestId("compression-progress")
         .closest("[data-testid='chat-virtuoso-item']"),
     ).toBeNull();
+  });
+
+  it("renders queued messages inside the chat-width overlay", () => {
+    const preview = "queued message ".repeat(20).trim();
+    renderChatContent(
+      makeChatState({
+        messages: [userMessage("hello")],
+        queuedItems: [
+          {
+            client_request_id: "queued-1",
+            priority: false,
+            command_type: "user_message",
+            preview,
+            content: preview,
+          },
+        ],
+      }),
+    );
+
+    const queuedText = screen.getByText(preview);
+    const queuedCard = queuedText.closest("[class*='queuedMessage']");
+    const queuedContent = queuedText.closest(
+      "[class*='queuedMessagesContent']",
+    );
+    const queuedContainer = queuedText.closest(
+      "[class*='queuedMessagesContainer']",
+    );
+
+    expect(queuedCard?.className).toContain("queuedMessage");
+    expect(queuedContent?.className).toContain("queuedMessagesContent");
+    expect(queuedContainer?.className).toContain("queuedMessagesContainer");
   });
 
   it("keeps fast compression visible for the minimum duration", () => {

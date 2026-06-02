@@ -14,6 +14,7 @@ import { PlanBanner } from "./PlanBanner";
 
 const threadId = "plan-banner-thread";
 const nowMs = 1_700_000_000_000;
+let writeTextMock: ReturnType<typeof vi.fn<(text: string) => Promise<void>>>;
 
 function makePlan(
   version: number,
@@ -104,6 +105,13 @@ describe("PlanBanner", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
+    writeTextMock = vi.fn<(text: string) => Promise<void>>(() =>
+      Promise.resolve(),
+    );
+    Object.defineProperty(window.navigator.clipboard, "writeText", {
+      configurable: true,
+      value: writeTextMock,
+    });
     vi.spyOn(Date, "now").mockReturnValue(nowMs);
   });
 
@@ -122,10 +130,21 @@ describe("PlanBanner", () => {
   it("renders header with mode, version, and humanized age for one plan", () => {
     renderPlanBanner([makePlan(1)]);
 
-    expect(screen.getByText("📋 Plan — agent · v1 · 2m ago")).toBeTruthy();
+    expect(screen.getByText("Plan — agent · v1 · 2m ago")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Plan 1" })).toBeTruthy();
     expect(screen.getByText("item 1")).toBeTruthy();
     expect(screen.queryByText("Edit plan")).toBeNull();
+  });
+
+  it("copies synthesized plan text without toggling collapse", () => {
+    renderPlanBanner([makePlan(1), makePlanDelta("first update", "delta-1")]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy plan" }));
+
+    expect(writeTextMock).toHaveBeenCalledWith(
+      "## Plan 1\n\n- item 1\n\n---\n\n## Plan updates\n\nfirst update",
+    );
+    expect(screen.getByTestId("plan-banner-body")).toBeTruthy();
   });
 
   it("renders synthesized plan text with ordered updates", () => {
@@ -164,7 +183,7 @@ describe("PlanBanner", () => {
       }),
     ]);
 
-    const header = screen.getByText("📋 Plan — Mode unknown · v? · recently");
+    const header = screen.getByText("Plan — Mode unknown · v? · recently");
     expect(header.textContent).not.toContain("undefined");
     expect(header.textContent).not.toContain("vundefined");
     expect(header.textContent).not.toContain("NaN");
@@ -191,9 +210,11 @@ describe("PlanBanner", () => {
     renderPlanBanner([makePlan(1)]);
 
     const banner = screen.getByTestId("plan-banner");
+    const card = screen.getByTestId("plan-banner-card");
     const body = screen.getByTestId("plan-banner-body");
     expect(banner.className).toContain("sticky");
-    expect(banner.firstElementChild?.className).toContain("card");
+    expect(banner.firstElementChild?.className).toContain("container");
+    expect(card.className).toContain("card");
     expect(body.className).toContain("body");
     expect(body).toBeTruthy();
   });

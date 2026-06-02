@@ -180,9 +180,9 @@
 .queuedMessagesContainer {
   position: absolute;
   bottom: 60px;
-  right: 50px;
-  left: var(--space-2);
-  padding: var(--space-2);
+  left: 0;
+  right: 0;
+  padding: var(--space-2) 0;
   pointer-events: none;
   z-index: 5;
 }
@@ -191,13 +191,19 @@
   pointer-events: auto;
 }
 
+.queuedMessagesContent {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 .queuedMessage {
   --base-card-surface-box-shadow: 0 0 0 1px var(--amber-6);
   background: color-mix(in oklab, var(--amber-3) 40%, var(--color-surface));
   border-radius: var(--radius-2);
   padding: var(--space-2) var(--space-3);
   margin-left: auto;
-  max-width: 85%;
+  max-width: calc(100% - var(--space-2) * 4.5);
 }
 
 .queuedMessagePriority {

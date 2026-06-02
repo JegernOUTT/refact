@@ -934,6 +934,22 @@ mod tests {
     }
 
     #[test]
+    fn counts_nested_anthropic_message_cache_markers() {
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "ok"},
+                    {"type": "text", "text": "continue", "cache_control": {"type": "ephemeral"}}
+                ]
+            }]
+        });
+
+        assert!(has_anthropic_explicit_cache_markers(&body));
+        assert_eq!(count_anthropic_cache_control_markers(&body), 1);
+    }
+
+    #[test]
     fn anthropic_cache_guard_body_keeps_only_explicit_cache_prefix() {
         let body = json!({
             "messages": [

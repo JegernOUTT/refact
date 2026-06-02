@@ -1,6 +1,14 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Box, Button, Flex, Text } from "@radix-ui/themes";
-import { useAppSelector } from "../../../hooks";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { CheckIcon, CopyIcon } from "@radix-ui/react-icons";
+import { Box, Button, Container, Flex, Text } from "@radix-ui/themes";
+import classNames from "classnames";
+import { useAppSelector, useCopyToClipboard } from "../../../hooks";
 import { selectPlanBannerState } from "../../../features/Chat/Thread/selectors";
 import { Markdown } from "../../Markdown";
 import styles from "./PlanBanner.module.css";
@@ -52,6 +60,7 @@ function writeCollapsed(threadId: string, collapsed: boolean): void {
 }
 
 export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
+  const copyToClipboard = useCopyToClipboard();
   const {
     base: plan,
     synthesizedText,
@@ -59,11 +68,14 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
   } = useAppSelector((state) => selectPlanBannerState(state, threadId));
   const [collapsed, setCollapsed] = useState(() => readCollapsed(threadId));
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const copyTimerRef = useRef<number | null>(null);
   const metadata = useMemo(
     () => (plan ? getPlanMetadata(plan) : undefined),
     [plan],
   );
+  const planText = synthesizedText ?? plan?.content ?? "";
 
   useEffect(() => {
     setCollapsed(readCollapsed(threadId));
@@ -77,18 +89,24 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
     setHistoryOpen(false);
   }, [threadId]);
 
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
+
   const title = useMemo(() => {
     if (!plan) return "";
     const mode = metadata?.mode ?? "Mode unknown";
     const version =
       metadata?.version !== undefined ? `v${metadata.version}` : "v?";
-    return `📋 Plan — ${mode} · ${version} · ${humanizedAgeFrom(
+    return `Plan — ${mode} · ${version} · ${humanizedAgeFrom(
       metadata?.created_at_ms,
       nowMs,
     )}`;
   }, [metadata, nowMs, plan]);
-
-  if (!plan) return null;
 
   const handleToggle = () => {
     const nextCollapsed = !collapsed;
@@ -101,36 +119,73 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
     setHistoryOpen(true);
   };
 
+  const handleCopyClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      if (!planText) return;
+
+      copyToClipboard(planText);
+      setCopied(true);
+
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copyTimerRef.current = null;
+      }, 2000);
+    },
+    [copyToClipboard, planText],
+  );
+
+  if (!plan) return null;
+
   return (
     <Box className={styles.sticky} data-testid="plan-banner">
-      <Box className={styles.card}>
-        <Flex
-          align="center"
-          gap="2"
-          className={styles.header}
-          onClick={handleToggle}
-          data-testid="plan-banner-header"
-        >
-          <span className={styles.icon}>📋</span>
-          <Text size="1" className={styles.title}>
-            {title}
-          </Text>
-          <Button
-            type="button"
-            size="1"
-            variant="ghost"
-            color="gray"
-            onClick={handleHistoryClick}
+      <Container className={styles.container}>
+        <Box className={styles.card} data-testid="plan-banner-card">
+          <Flex
+            align="center"
+            gap="2"
+            className={styles.header}
+            onClick={handleToggle}
+            data-testid="plan-banner-header"
           >
-            History
-          </Button>
-        </Flex>
-        {!collapsed && (
-          <Box className={styles.body} data-testid="plan-banner-body">
-            <Markdown>{synthesizedText ?? plan.content}</Markdown>
-          </Box>
-        )}
-      </Box>
+            <span className={styles.icon}>📋</span>
+            <Text size="1" className={styles.title}>
+              {title}
+            </Text>
+            <span className={styles.actions}>
+              <button
+                type="button"
+                className={classNames(
+                  styles.actionButton,
+                  copied && styles.copiedButton,
+                )}
+                onClick={handleCopyClick}
+                title="Copy plan"
+                aria-label="Copy plan"
+              >
+                {copied ? <CheckIcon /> : <CopyIcon />}
+              </button>
+              <Button
+                type="button"
+                size="1"
+                variant="ghost"
+                color="gray"
+                onClick={handleHistoryClick}
+              >
+                History
+              </Button>
+            </span>
+          </Flex>
+          {!collapsed && (
+            <Box className={styles.body} data-testid="plan-banner-body">
+              <Markdown>{planText}</Markdown>
+            </Box>
+          )}
+        </Box>
+      </Container>
       <PlanHistoryModal
         open={historyOpen}
         onOpenChange={setHistoryOpen}

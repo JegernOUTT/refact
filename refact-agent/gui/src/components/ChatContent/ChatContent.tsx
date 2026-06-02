@@ -497,15 +497,17 @@ export const ChatContent: React.FC<ChatContentProps> = ({
 
         {queuedItems.length > 0 && (
           <Box className={styles.queuedMessagesContainer}>
-            <Flex direction="column" gap="2" align="end">
-              {queuedItems.map((item, index) => (
-                <QueuedMessage
-                  key={item.client_request_id}
-                  queuedItem={item}
-                  position={index + 1}
-                />
-              ))}
-            </Flex>
+            <Container className={styles.queuedMessagesContent}>
+              <Flex direction="column" gap="2" align="end">
+                {queuedItems.map((item, index) => (
+                  <QueuedMessage
+                    key={item.client_request_id}
+                    queuedItem={item}
+                    position={index + 1}
+                  />
+                ))}
+              </Flex>
+            </Container>
           </Box>
         )}
       </Box>
