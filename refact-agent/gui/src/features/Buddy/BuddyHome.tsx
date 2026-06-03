@@ -103,6 +103,12 @@ const DRAFT_KIND_LABELS: Record<DraftKind, string> = {
 
 const REVIEWABLE_DRAFT_KINDS: DraftKind[] = ["agents_md", "pulse_report"];
 
+type ClipboardWriter = {
+  clipboard?: {
+    writeText?: (text: string) => Promise<void>;
+  };
+};
+
 const RECENT_ERROR_WINDOW_MS = 6 * 60 * 60 * 1000;
 const RECENT_ERROR_REFRESH_MS = 60 * 1000;
 
@@ -132,7 +138,7 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
     if (!draft) return;
     setCopyError(null);
     try {
-      const clipboard = navigator.clipboard as Partial<Clipboard> | undefined;
+      const clipboard = (navigator as ClipboardWriter).clipboard;
       if (typeof clipboard?.writeText !== "function") {
         throw new Error("Clipboard API unavailable");
       }
