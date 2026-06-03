@@ -164,6 +164,12 @@ pub struct GoalLedger {
     pub chat_ids: Vec<String>,
     pub memos: Vec<ConductorMemo>,
     pub pending_questions: Vec<PendingQuestion>,
+    #[serde(default)]
+    pub no_progress_wakes: u32,
+    #[serde(default)]
+    pub turn_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wake_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -404,6 +410,9 @@ mod tests {
                     answer: Some("Yes".to_string()),
                     answered_at: Some("2026-06-03T00:00:02Z".to_string()),
                 }],
+                no_progress_wakes: 1,
+                turn_failures: 0,
+                last_wake_at: Some("2026-06-03T00:00:04Z".to_string()),
                 last_progress_at: Some("2026-06-03T00:00:03Z".to_string()),
                 last_wake_reason: Some(ConductorWakeReason::Heartbeat),
             },

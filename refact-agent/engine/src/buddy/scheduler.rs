@@ -316,6 +316,7 @@ impl BuddyScheduler {
     ) {
         super::conductor::wake::enqueue_all_wake(gcx.gcx.clone(), ConductorWakeReason::Heartbeat)
             .await;
+        super::conductor::conduct_loop::run_due_conductor_wakes(gcx.gcx.clone()).await;
 
         let ctx_opt = {
             let buddy = buddy_arc.lock().await;
