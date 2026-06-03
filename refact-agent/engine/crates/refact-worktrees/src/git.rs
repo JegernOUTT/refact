@@ -3,7 +3,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use git2::{DiffOptions, Repository, Status, StatusOptions, StatusShow};
+use git2::{DiffOptions, Repository, Signature, StashFlags, Status, StatusOptions, StatusShow};
+use uuid::Uuid;
 
 use crate::types::{WorktreeDiffFile, WorktreeDiffStats, WorktreeStatus};
 
@@ -20,6 +21,11 @@ pub struct WorktreeDiffParts {
     pub stats: WorktreeDiffStats,
     pub patch: String,
     pub patch_truncated: bool,
+}
+
+pub struct PreflightMergeResult {
+    pub conflicts: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,7 +170,7 @@ pub fn create_worktree(
         Some(base) => commit_for_branch(&repo, base)?,
         None => head_commit(&repo)?,
     };
-    let dirty_source = has_uncommitted_changes(&repo).unwrap_or(false);
+    let dirty_source = has_porcelain_changes(&repo_root).unwrap_or(false);
 
     let commit_oid =
         git2::Oid::from_str(&base_commit).map_err(|e| format!("Invalid commit OID: {}", e))?;
@@ -484,7 +490,10 @@ fn parse_name_status(output: &str, numstat: &str, source: &str) -> Vec<WorktreeD
 
 fn count_file_lines(path: &Path) -> Option<usize> {
     const MAX_LINE_COUNT_BYTES: u64 = 1_000_000;
-    let metadata = std::fs::metadata(path).ok()?;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
     if metadata.len() > MAX_LINE_COUNT_BYTES {
         return None;
     }
@@ -556,6 +565,32 @@ fn append_untracked_patch(
             return;
         }
         let file_path = root.join(&file.path);
+        let Ok(metadata) = std::fs::symlink_metadata(&file_path) else {
+            continue;
+        };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            let Ok(target) = std::fs::read_link(&file_path) else {
+                continue;
+            };
+            append_patch_section(
+                patch,
+                &format!("untracked symlink {}", file.path),
+                &format!(
+                    "diff --git a/{} b/{}\nnew file mode 120000\n--- /dev/null\n+++ b/{}\n@@\n+{}\n",
+                    file.path,
+                    file.path,
+                    file.path,
+                    target.to_string_lossy()
+                ),
+                max_bytes,
+                truncated,
+            );
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
         let Ok(mut source) = std::fs::File::open(&file_path) else {
             continue;
         };
@@ -715,16 +750,234 @@ pub fn branch_exists(root: &Path, branch: &str) -> Result<bool, String> {
     Ok(run_git(root, &["rev-parse", "--verify", &reference]).is_ok())
 }
 
-pub fn ensure_clean_worktree(root: &Path, label: &str) -> Result<(), String> {
+pub fn ensure_no_merge_in_progress(root: &Path, label: &str) -> Result<(), String> {
     discover_repo(root)?;
-    if run_git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok() {
+    if has_merge_in_progress(root) {
         return Err(format!("{} has a merge in progress", label));
     }
+    Ok(())
+}
+
+pub fn has_merge_in_progress(root: &Path) -> bool {
+    run_git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
+}
+
+pub fn ensure_clean_worktree(root: &Path, label: &str) -> Result<(), String> {
+    ensure_no_merge_in_progress(root, label)?;
+    if has_porcelain_changes(root)? {
+        Err(format!("{} has uncommitted changes", label))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn has_porcelain_changes(root: &Path) -> Result<bool, String> {
+    Ok(!run_git(root, &["status", "--porcelain"])?.trim().is_empty())
+}
+
+pub fn ensure_dirty_worktree_on_branch(
+    root: &Path,
+    label: &str,
+    expected_branch: &str,
+) -> Result<(), String> {
+    ensure_no_merge_in_progress(root, label)?;
+    if !has_porcelain_changes(root)? {
+        return Ok(());
+    }
+    ensure_checkout_on_branch(root, label, expected_branch)
+}
+
+pub fn ensure_checkout_on_branch(
+    root: &Path,
+    label: &str,
+    expected_branch: &str,
+) -> Result<(), String> {
+    let repo = discover_repo(root)?;
+    match current_branch(&repo).as_deref() {
+        Some(current_branch) if current_branch == expected_branch => Ok(()),
+        Some(current_branch) => Err(format!(
+            "{} is checked out on a different branch '{}'; expected branch '{}'",
+            label, current_branch, expected_branch
+        )),
+        None => Err(format!(
+            "{} is checked out on detached HEAD {}; expected branch '{}'",
+            label,
+            head_rev(root)?,
+            expected_branch
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DirtyWorktreeStash {
+    pub original_branch: Option<String>,
+    pub original_head: String,
+    stash_marker: String,
+    stash_oid: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoreStashedChangesResult {
+    pub critical_ok: bool,
+    pub warnings: Vec<String>,
+}
+
+pub fn stash_dirty_worktree(
+    root: &Path,
+    label: &str,
+    expected_branch: Option<&str>,
+) -> Result<Option<DirtyWorktreeStash>, String> {
+    ensure_no_merge_in_progress(root, label)?;
     let status = run_git(root, &["status", "--porcelain"])?;
     if status.trim().is_empty() {
-        Ok(())
-    } else {
-        Err(format!("{} has uncommitted changes", label))
+        return Ok(None);
+    }
+
+    let mut repo = discover_repo(root)?;
+    let original_branch = current_branch(&repo);
+    let original_head = head_rev(root)?;
+    if let Some(expected_branch) = expected_branch {
+        ensure_checkout_on_branch(root, label, expected_branch)?;
+    }
+    let stash_marker = format!("Refact worktree merge target workspace {}", Uuid::new_v4());
+    let stasher = Signature::now("Refact Agent", "agent@refact.ai")
+        .map_err(|e| format!("Failed to create stash author: {}", e))?;
+    let stash_oid = repo
+        .stash_save(&stasher, &stash_marker, Some(StashFlags::INCLUDE_UNTRACKED))
+        .map_err(|e| format!("Failed to stash target workspace changes: {}", e))?
+        .to_string();
+    let stash = DirtyWorktreeStash {
+        original_branch,
+        original_head,
+        stash_marker,
+        stash_oid,
+    };
+    if let Err(e) = ensure_clean_worktree(root, label) {
+        let restore_result = restore_stashed_changes(root, &stash);
+        let restore_details = if restore_result.critical_ok && restore_result.warnings.is_empty() {
+            "target workspace changes were restored".to_string()
+        } else if restore_result.critical_ok {
+            format!(
+                "target workspace changes were restored with warnings: {}",
+                restore_result.warnings.join("; ")
+            )
+        } else {
+            format!(
+                "failed to restore target workspace changes; they remain saved in git stash {}: {}",
+                stash.stash_oid,
+                restore_result.warnings.join("; ")
+            )
+        };
+        return Err(format!("{}; {}", e, restore_details));
+    }
+
+    Ok(Some(stash))
+}
+
+fn stash_entry_for_marker(root: &Path, marker: &str) -> Result<Option<(String, String)>, String> {
+    Ok(
+        run_git(root, &["stash", "list", "--format=%gd%x00%H%x00%s"])?
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, '\0');
+                let stash_ref = parts.next()?;
+                let oid = parts.next()?;
+                let subject = parts.next()?;
+                subject
+                    .contains(marker)
+                    .then(|| (stash_ref.to_string(), oid.to_string()))
+            })
+            .find(|(_, oid)| !oid.trim().is_empty()),
+    )
+}
+
+pub fn apply_and_drop_stash(
+    root: &Path,
+    stash: &DirtyWorktreeStash,
+) -> Result<Vec<String>, String> {
+    run_git(root, &["stash", "apply", "--index", &stash.stash_oid]).map_err(|e| {
+        format!(
+            "Failed to reapply target workspace changes after merge: {}; changes remain saved in git stash {}",
+            e, stash.stash_oid
+        )
+    })?;
+
+    let mut warnings = Vec::new();
+    match stash_entry_for_marker(root, &stash.stash_marker) {
+        Ok(Some(stash_ref)) => {
+            if let Err(e) = run_git(root, &["stash", "drop", &stash_ref.0]) {
+                warnings.push(format!(
+                    "Target workspace changes were reapplied, but dropping git stash {} failed: {}",
+                    stash_ref.0, e
+                ));
+            }
+        }
+        Ok(None) => warnings.push(format!(
+            "Target workspace changes were reapplied, but git stash {} was not found for cleanup",
+            stash.stash_oid
+        )),
+        Err(e) => warnings.push(format!(
+            "Target workspace changes were reapplied, but locating git stash {} for cleanup failed: {}",
+            stash.stash_oid, e
+        )),
+    }
+    Ok(warnings)
+}
+
+pub fn reset_hard(root: &Path, rev: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Err(e) = run_git(root, &["reset", "--hard", rev]) {
+        warnings.push(format!(
+            "Failed to reset target workspace to {}: {}",
+            rev, e
+        ));
+    }
+    warnings
+}
+
+pub fn restore_stashed_changes(
+    root: &Path,
+    stash: &DirtyWorktreeStash,
+) -> RestoreStashedChangesResult {
+    let mut warnings = Vec::new();
+    let mut critical_ok = true;
+    let reset_warnings = reset_hard(root, "HEAD");
+    if !reset_warnings.is_empty() {
+        critical_ok = false;
+    }
+    warnings.extend(reset_warnings);
+    let checkout_result = match stash.original_branch.as_deref() {
+        Some(branch) => checkout_branch(root, branch),
+        None => run_git(root, &["checkout", &stash.original_head]).map(|_| ()),
+    };
+    if let Err(e) = checkout_result {
+        warnings.push(format!(
+            "Failed to restore original target workspace checkout: {}",
+            e
+        ));
+        return RestoreStashedChangesResult {
+            critical_ok: false,
+            warnings,
+        };
+    }
+    let reset_warnings = reset_hard(root, &stash.original_head);
+    if !reset_warnings.is_empty() {
+        critical_ok = false;
+    }
+    warnings.extend(reset_warnings);
+    match apply_and_drop_stash(root, stash) {
+        Ok(drop_warnings) => warnings.extend(drop_warnings),
+        Err(e) => {
+            critical_ok = false;
+            warnings.push(format!(
+                "Failed to restore target workspace changes after rolling back merge: {}",
+                e
+            ));
+        }
+    }
+    RestoreStashedChangesResult {
+        critical_ok,
+        warnings,
     }
 }
 
@@ -751,11 +1004,20 @@ pub fn diff_between(root: &Path, base: &str, branch: &str) -> String {
 }
 
 pub fn commit_all(root: &Path, message: &str) -> Result<Option<String>, String> {
+    ensure_no_merge_in_progress(root, "Source worktree")?;
     let status = run_git(root, &["status", "--porcelain"])?;
     if status.trim().is_empty() {
         return Ok(None);
     }
-    run_git(root, &["add", "-A"])?;
+    let staged_patch = run_git(root, &["diff", "--cached", "--binary"])?;
+    if let Err(e) = run_git(root, &["add", "-A"]) {
+        let restore_warnings = restore_index_from_patch(root, &staged_patch);
+        return Err(format_commit_failure_with_restore(
+            "Failed to stage source worktree changes before auto-commit",
+            &e,
+            restore_warnings,
+        ));
+    }
     let commit_result = run_git(
         root,
         &[
@@ -770,46 +1032,116 @@ pub fn commit_all(root: &Path, message: &str) -> Result<Option<String>, String> 
         ],
     );
     match commit_result {
-        Ok(_) => head_rev(root).map(Some),
-        Err(e) if e.contains("nothing to commit") => Ok(None),
-        Err(e) => Err(e),
+        Ok(_) => Ok(Some(head_rev(root)?)),
+        Err(e) if e.contains("nothing to commit") => {
+            let restore_warnings = restore_index_from_patch(root, &staged_patch);
+            if restore_warnings.is_empty() {
+                Ok(None)
+            } else {
+                Err(format_commit_failure_with_restore(
+                    "Auto-commit found nothing to commit",
+                    &e,
+                    restore_warnings,
+                ))
+            }
+        }
+        Err(e) => {
+            let restore_warnings = restore_index_from_patch(root, &staged_patch);
+            Err(format_commit_failure_with_restore(
+                "Failed to auto-commit source worktree changes",
+                &e,
+                restore_warnings,
+            ))
+        }
     }
 }
 
-pub fn parse_conflict_files(status: &str) -> Vec<String> {
-    status
-        .lines()
-        .filter(|line| {
-            let bytes = line.as_bytes();
-            bytes.len() >= 2
-                && (bytes[0] == b'U'
-                    || bytes[1] == b'U'
-                    || (bytes[0] == b'A' && bytes[1] == b'A')
-                    || (bytes[0] == b'D' && bytes[1] == b'D'))
-        })
-        .filter_map(|line| line.get(3..).map(|path| path.to_string()))
-        .collect()
+fn restore_index_from_patch(root: &Path, staged_patch: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Err(e) = run_git(root, &["reset", "--mixed", "HEAD"]) {
+        warnings.push(format!(
+            "Failed to restore source worktree index after auto-commit failure: {}",
+            e
+        ));
+        return warnings;
+    }
+    if staged_patch.trim().is_empty() {
+        return warnings;
+    }
+
+    let mut patch_file = match tempfile::NamedTempFile::new() {
+        Ok(file) => file,
+        Err(e) => {
+            warnings.push(format!(
+                "Failed to create temporary staged patch for source index restoration: {}",
+                e
+            ));
+            return warnings;
+        }
+    };
+    if let Err(e) = std::io::Write::write_all(&mut patch_file, staged_patch.as_bytes()) {
+        warnings.push(format!(
+            "Failed to write temporary staged patch for source index restoration: {}",
+            e
+        ));
+        return warnings;
+    }
+    let patch_path = patch_file.path().to_string_lossy().to_string();
+    if let Err(e) = run_git(
+        root,
+        &[
+            "apply",
+            "--cached",
+            "--binary",
+            "--whitespace=nowarn",
+            &patch_path,
+        ],
+    ) {
+        warnings.push(format!(
+            "Failed to restore source worktree staged changes after auto-commit failure: {}",
+            e
+        ));
+    }
+    warnings
+}
+
+fn format_commit_failure_with_restore(
+    context: &str,
+    error: &str,
+    restore_warnings: Vec<String>,
+) -> String {
+    if restore_warnings.is_empty() {
+        format!("{}: {}; source worktree index was restored", context, error)
+    } else {
+        format!(
+            "{}: {}; source worktree index restoration warnings: {}",
+            context,
+            error,
+            restore_warnings.join("; ")
+        )
+    }
 }
 
 pub fn conflict_files_for_path(root: &Path) -> Vec<String> {
-    parse_conflict_files(&run_git_lossy(root, &["status", "--porcelain"]))
-}
-
-pub fn abort_merge(root: &Path) -> bool {
-    cleanup_failed_merge(root).is_empty()
+    run_git(root, &["diff", "--name-only", "--diff-filter=U"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|file| !file.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 pub fn cleanup_failed_merge(root: &Path) -> Vec<String> {
-    if run_git(root, &["merge", "--abort"]).is_ok() {
-        return Vec::new();
+    let mut warnings = Vec::new();
+    if has_merge_in_progress(root) {
+        if let Err(e) = run_git(root, &["merge", "--abort"]) {
+            warnings.push(format!("Failed to abort merge: {}", e));
+        }
+    } else {
+        warnings.extend(reset_hard(root, "HEAD"));
     }
-    match run_git(root, &["reset", "--hard", "HEAD"]) {
-        Ok(_) => Vec::new(),
-        Err(e) => vec![format!(
-            "Failed to reset target workspace after merge failure: {}",
-            e
-        )],
-    }
+    warnings
 }
 
 pub fn preflight_merge_conflicts(
@@ -817,7 +1149,7 @@ pub fn preflight_merge_conflicts(
     target_branch: &str,
     source_branch: &str,
     strategy: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<PreflightMergeResult, String> {
     let temp = tempfile::Builder::new()
         .prefix("refact-merge-preflight-")
         .tempdir()
@@ -839,29 +1171,39 @@ pub fn preflight_merge_conflicts(
         )
     };
     let conflicts = conflict_files_for_path(&preflight_path);
-    let mut remove_warnings = Vec::new();
+    let mut warnings = Vec::new();
     if let Err(e) = run_git(
         source_root,
         &["worktree", "remove", "--force", preflight_str],
     ) {
-        remove_warnings.push(e);
+        warnings.push(format!("Failed to remove merge preflight worktree: {}", e));
     }
     if preflight_path.exists() {
         if let Err(e) = std::fs::remove_dir_all(&preflight_path) {
-            remove_warnings.push(e.to_string());
+            warnings.push(format!(
+                "Failed to remove merge preflight directory '{}': {}",
+                preflight_path.display(),
+                e
+            ));
         }
     }
     match merge_result {
-        Ok(_) => Ok(Vec::new()),
-        Err(_e) if !conflicts.is_empty() => Ok(conflicts),
+        Ok(_) => Ok(PreflightMergeResult {
+            conflicts: Vec::new(),
+            warnings,
+        }),
+        Err(_e) if !conflicts.is_empty() => Ok(PreflightMergeResult {
+            conflicts,
+            warnings,
+        }),
         Err(e) => {
-            if remove_warnings.is_empty() {
+            if warnings.is_empty() {
                 Err(format!("Merge preflight failed: {}", e))
             } else {
                 Err(format!(
                     "Merge preflight failed: {}; cleanup warnings: {}",
                     e,
-                    remove_warnings.join("; ")
+                    warnings.join("; ")
                 ))
             }
         }

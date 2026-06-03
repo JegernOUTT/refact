@@ -33,6 +33,14 @@ fn strategy_from_str(strategy: &str) -> Result<WorktreeMergeStrategy, String> {
     }
 }
 
+fn strategy_arg(args: &HashMap<String, Value>) -> Result<&str, String> {
+    match args.get("strategy") {
+        None => Ok("squash"),
+        Some(Value::String(strategy)) => Ok(strategy.as_str()),
+        Some(_) => Err("'strategy' must be a string".to_string()),
+    }
+}
+
 fn cleanup_summary(response: &MergeWorktreeResponse) -> String {
     match response.cleanup.as_ref() {
         Some(cleanup) => format!(
@@ -93,6 +101,24 @@ fn append_post_merge_check_message(
     }
 }
 
+fn append_merge_warnings(message: &mut String, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    message.push_str("\n\n## Warnings");
+    for warning in warnings {
+        message.push_str(&format!("\n- {}", warning));
+    }
+}
+
+fn response_warnings(response: &MergeWorktreeResponse) -> Vec<String> {
+    let mut warnings = response.warnings.clone();
+    if let Some(cleanup) = response.cleanup.as_ref() {
+        warnings.extend(cleanup.warnings.clone());
+    }
+    warnings
+}
+
 fn merge_response_message(
     card_id: &str,
     response: &MergeWorktreeResponse,
@@ -102,7 +128,7 @@ fn merge_response_message(
         let _ = post_merge_check;
     }
     if let Some(conflict) = response.conflict.as_ref() {
-        return format!(
+        let mut message = format!(
             "# Merge Conflicts Detected\n\n**Card:** {}\n**Branch:** {} → {}\n**Strategy:** {}\n**Aborted:** {}\n\n## Conflicting Files\n{}\n\n{}",
             card_id,
             response.source_branch,
@@ -121,15 +147,19 @@ fn merge_response_message(
             },
             conflict.instructions
         );
+        append_merge_warnings(&mut message, &response_warnings(response));
+        return message;
     }
     if response.status == "nothing_to_merge" {
-        return format!(
+        let mut message = format!(
             "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {} → {}\n**Commits ahead of base:** 0\n\nCleanup: {}.",
             card_id,
             response.source_branch,
             response.target_branch,
             cleanup_summary(response)
         );
+        append_merge_warnings(&mut message, &response_warnings(response));
+        return message;
     }
     let mut message = format!(
         "# Agent Work Merged\n\n**Card:** {}\n**Strategy:** {}\n**Branch:** {} → {}\n**Cleanup:** {}\n\nThe agent's work has been successfully merged back to the target branch.",
@@ -142,15 +172,28 @@ fn merge_response_message(
     if let Some(result) = post_merge_check {
         append_post_merge_check_message(&mut message, result);
     }
+    append_merge_warnings(&mut message, &response_warnings(response));
     message
 }
 
 fn parse_force(args: &HashMap<String, Value>) -> Result<bool, String> {
-    crate::tools::task_tool_helpers::parse_bool_arg_strict(args, "force", false)
+    parse_schema_bool_arg(args, "force", false)
 }
 
 fn parse_auto_revert(args: &HashMap<String, Value>) -> Result<bool, String> {
-    crate::tools::task_tool_helpers::parse_bool_arg_strict(args, "auto_revert", false)
+    parse_schema_bool_arg(args, "auto_revert", false)
+}
+
+fn parse_schema_bool_arg(
+    args: &HashMap<String, Value>,
+    name: &str,
+    default: bool,
+) -> Result<bool, String> {
+    match args.get(name) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("'{}' must be a boolean", name)),
+    }
 }
 
 fn parse_auto_revert_timeout(args: &HashMap<String, Value>) -> Result<Duration, String> {
@@ -163,15 +206,91 @@ fn parse_auto_revert_timeout(args: &HashMap<String, Value>) -> Result<Duration, 
         Value::Number(number) => number
             .as_u64()
             .ok_or_else(|| "auto_revert_timeout_secs must be a positive integer".to_string())?,
-        Value::String(text) => text
-            .parse::<u64>()
-            .map_err(|_| "auto_revert_timeout_secs must be a positive integer".to_string())?,
         _ => return Err("auto_revert_timeout_secs must be a positive integer".to_string()),
     };
     if secs == 0 {
         return Err("auto_revert_timeout_secs must be greater than zero".to_string());
     }
     Ok(Duration::from_secs(secs))
+}
+
+fn required_string_arg<'a>(
+    args: &'a HashMap<String, Value>,
+    name: &str,
+) -> Result<&'a str, String> {
+    match args.get(name) {
+        Some(Value::String(value)) if value.trim().is_empty() => Err(format!("Missing '{}'", name)),
+        Some(Value::String(value)) if value.trim() == value.as_str() => Ok(value.as_str()),
+        Some(Value::String(_)) => Err(format!(
+            "'{}' must not have leading or trailing whitespace",
+            name
+        )),
+        Some(Value::Null) | None => Err(format!("Missing '{}'", name)),
+        Some(_) => Err(format!("'{}' must be a string", name)),
+    }
+}
+
+fn ensure_legacy_agent_worktree_checkout(
+    workspace_root: &std::path::Path,
+    agent_worktree: &str,
+    agent_branch: &str,
+) -> Result<(), String> {
+    let workspace_root = workspace_root
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize workspace root: {}", e))?;
+    let agent_worktree_path = std::path::Path::new(agent_worktree);
+    let agent_worktree_root = agent_worktree_path
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize agent worktree: {}", e))?;
+    if agent_worktree_root == workspace_root {
+        return Err("Agent worktree path points at the main workspace; refusing to auto-commit main workspace changes".to_string());
+    }
+    let status = crate::worktrees::git::status_for_path(&agent_worktree_root);
+    if !status.is_git_worktree {
+        return Err(format!(
+            "Agent worktree path '{}' is not a git worktree",
+            agent_worktree
+        ));
+    }
+    let agent_top_level =
+        crate::worktrees::git::run_git(&agent_worktree_root, &["rev-parse", "--show-toplevel"])?;
+    let agent_top_level = std::path::Path::new(agent_top_level.trim())
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize agent worktree root: {}", e))?;
+    if agent_top_level != agent_worktree_root {
+        return Err(format!(
+            "Agent worktree path '{}' is not the git worktree root; refusing to auto-commit it",
+            agent_worktree
+        ));
+    }
+    let workspace_common_dir =
+        crate::worktrees::git::run_git(&workspace_root, &["rev-parse", "--git-common-dir"])?;
+    let agent_common_dir =
+        crate::worktrees::git::run_git(&agent_worktree_root, &["rev-parse", "--git-common-dir"])?;
+    let canonical_git_dir =
+        |root: &std::path::Path, common_dir: &str| -> Result<std::path::PathBuf, String> {
+            let path = std::path::Path::new(common_dir.trim());
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            };
+            path.canonicalize()
+                .map_err(|e| format!("Failed to canonicalize git common dir: {}", e))
+        };
+    if canonical_git_dir(&workspace_root, &workspace_common_dir)?
+        != canonical_git_dir(&agent_worktree_root, &agent_common_dir)?
+    {
+        return Err(
+            "Agent worktree belongs to a different repository; refusing to auto-commit it"
+                .to_string(),
+        );
+    }
+    crate::worktrees::git::ensure_checkout_on_branch(
+        &agent_worktree_root,
+        "Agent worktree",
+        agent_branch,
+    )
 }
 
 fn verifier_merge_block_message(card_id: &str, concerns: &[String]) -> String {
@@ -331,6 +450,9 @@ async fn merge_registered_task_worktree(
         .ok_or("Task has no base branch set")?;
     let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new(cache_dir, workspace_root.to_path_buf())?;
+    service
+        .validate_registered_worktree_checkout(&worktree_id)
+        .await?;
     let diff = service.diff_worktree(&worktree_id).await.ok();
     let changed_files = diff
         .as_ref()
@@ -342,7 +464,8 @@ async fn merge_registered_task_worktree(
         })
         .unwrap_or_default();
     let commit_message = match commit_message_override {
-        Some(message) if !message.trim().is_empty() => message,
+        Some(message) if !message.trim().is_empty() => Some(message),
+        _ if changed_files.is_empty() => None,
         _ => {
             let diff_text = diff
                 .as_ref()
@@ -355,8 +478,8 @@ async fn merge_registered_task_worktree(
             )
             .await
             {
-                Ok(message) if !message.trim().is_empty() => message,
-                _ => format!("Card {}: {}", card_id, card.title),
+                Ok(message) if !message.trim().is_empty() => Some(message),
+                _ => Some(format!("Card {}: {}", card_id, card.title)),
             }
         }
     };
@@ -366,9 +489,9 @@ async fn merge_registered_task_worktree(
             MergeWorktreeRequest {
                 strategy: strategy_from_str(strategy)?,
                 delete_after_merge: true,
-                include_uncommitted: false,
+                include_uncommitted: true,
                 target_branch: Some(target_branch),
-                commit_message: Some(commit_message),
+                commit_message,
                 generate_commit_message: false,
             },
         )
@@ -436,7 +559,7 @@ impl Tool for ToolTaskMergeAgent {
             experimental: false,
             allow_parallel: false,
             description: "Merge an agent's work back to the main branch and always cleanup the worktree after a successful merge or no-op merged state. The agent must have completed work on a card with an associated git branch and worktree.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID whose agent branch to merge"), ("strategy", "string", "Merge strategy: 'merge' (default) or 'squash'"), ("force", "boolean", "Override a failed verifier_report and merge anyway"), ("auto_revert", "boolean", "Opt in to post-merge verification and automatic git revert on deterministic regression"), ("auto_revert_timeout_secs", "integer", "Timeout for post-merge verification and revert commands, default 300 seconds")], &["card_id"]),
+            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID whose agent branch to merge"), ("strategy", "string", "Merge strategy: 'squash' (default) or 'merge'"), ("force", "boolean", "Override a failed verifier_report and merge anyway"), ("auto_revert", "boolean", "Opt in to post-merge verification and automatic git revert on deterministic regression"), ("auto_revert_timeout_secs", "integer", "Timeout for post-merge verification and revert commands, default 300 seconds")], &["card_id"]),
             output_schema: None,
             annotations: None,
         }
@@ -467,15 +590,9 @@ impl Tool for ToolTaskMergeAgent {
 
         let task_id = require_bound_planner_task(&ccx, args).await?;
 
-        let card_id = args
-            .get("card_id")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing 'card_id'")?;
+        let card_id = required_string_arg(args, "card_id")?;
 
-        let strategy = args
-            .get("strategy")
-            .and_then(|v| v.as_str())
-            .unwrap_or("merge");
+        let strategy = strategy_arg(args)?;
         let force = parse_force(args)?;
         let auto_revert = parse_auto_revert(args)?;
         let auto_revert_timeout = parse_auto_revert_timeout(args)?;
@@ -541,12 +658,6 @@ impl Tool for ToolTaskMergeAgent {
             .as_ref()
             .ok_or(format!("Card {} has no agent worktree", card_id))?;
 
-        let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
-            std::path::Path::new(agent_worktree),
-            base_branch,
-            agent_branch,
-        );
-
         let run_git = |args: &[&str]| -> Result<String, String> {
             let output = Command::new("git")
                 .args(args)
@@ -560,6 +671,86 @@ impl Tool for ToolTaskMergeAgent {
                 Err(String::from_utf8_lossy(&output.stderr).to_string())
             }
         };
+
+        ensure_legacy_agent_worktree_checkout(workspace_root, agent_worktree, agent_branch)?;
+
+        let merge_in_progress = run_git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
+        if merge_in_progress {
+            let status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+            let conflict_files: Vec<String> = status
+                .lines()
+                .filter(|l| {
+                    let bytes = l.as_bytes();
+                    bytes.len() >= 2
+                        && (bytes[0] == b'U'
+                            || bytes[1] == b'U'
+                            || (bytes[0] == b'A' && bytes[1] == b'A')
+                            || (bytes[0] == b'D' && bytes[1] == b'D'))
+                })
+                .filter_map(|l| l.get(3..).map(|s| s.to_string()))
+                .collect();
+
+            let conflict_msg = format!(
+                r#"# Merge Already In Progress
+
+A previous merge is still in progress with unresolved conflicts.
+
+## Conflicting Files
+{}
+
+## How to Resolve
+
+### Option 1: Resolve conflicts
+1. Use `cat <file>` to see conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
+2. Use `update_textdoc` to resolve each conflict
+3. Stage and commit: `git add -A && git commit -m "Resolved conflicts"`
+
+### Option 2: Abort and retry
+```
+git merge --abort
+```
+Then call `merge_agent` again."#,
+                if conflict_files.is_empty() {
+                    "None detected (check `git status`)".to_string()
+                } else {
+                    conflict_files
+                        .iter()
+                        .map(|f| format!("- {}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            );
+
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(conflict_msg),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                })],
+            ));
+        }
+
+        let main_status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+        if !main_status.trim().is_empty() {
+            return Err(
+                "Main workspace has uncommitted changes. Please commit or stash before merging."
+                    .to_string(),
+            );
+        }
+
+        let _auto_committed_legacy_worktree = crate::worktrees::git::commit_all(
+            std::path::Path::new(agent_worktree),
+            &format!("Card {}: {}", card_id, card.title),
+        )?;
+
+        let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
+            std::path::Path::new(agent_worktree),
+            base_branch,
+            agent_branch,
+        );
 
         let commits_ahead_result = run_git(&[
             "rev-list",
@@ -668,73 +859,6 @@ impl Tool for ToolTaskMergeAgent {
             ));
         }
 
-        let merge_in_progress = run_git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
-        if merge_in_progress {
-            let status = run_git(&["status", "--porcelain"]).unwrap_or_default();
-            let conflict_files: Vec<String> = status
-                .lines()
-                .filter(|l| {
-                    let bytes = l.as_bytes();
-                    bytes.len() >= 2
-                        && (bytes[0] == b'U'
-                            || bytes[1] == b'U'
-                            || (bytes[0] == b'A' && bytes[1] == b'A')
-                            || (bytes[0] == b'D' && bytes[1] == b'D'))
-                })
-                .filter_map(|l| l.get(3..).map(|s| s.to_string()))
-                .collect();
-
-            let conflict_msg = format!(
-                r#"# Merge Already In Progress
-
-A previous merge is still in progress with unresolved conflicts.
-
-## Conflicting Files
-{}
-
-## How to Resolve
-
-### Option 1: Resolve conflicts
-1. Use `cat <file>` to see conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
-2. Use `update_textdoc` to resolve each conflict
-3. Stage and commit: `git add -A && git commit -m "Resolved conflicts"`
-
-### Option 2: Abort and retry
-```
-git merge --abort
-```
-Then call `merge_agent` again."#,
-                if conflict_files.is_empty() {
-                    "None detected (check `git status`)".to_string()
-                } else {
-                    conflict_files
-                        .iter()
-                        .map(|f| format!("- {}", f))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            );
-
-            return Ok((
-                false,
-                vec![ContextEnum::ChatMessage(ChatMessage {
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(conflict_msg),
-                    tool_calls: None,
-                    tool_call_id: tool_call_id.clone(),
-                    ..Default::default()
-                })],
-            ));
-        }
-
-        let main_status = run_git(&["status", "--porcelain"]).unwrap_or_default();
-        if !main_status.trim().is_empty() {
-            return Err(
-                "Main workspace has uncommitted changes. Please commit or stash before merging."
-                    .to_string(),
-            );
-        }
-
         // Generate commit message before acquiring the lock: git diff base...agent is read-only
         // and produces the same content as git diff --cached after a squash merge.
         let diff =
@@ -759,7 +883,17 @@ Then call `merge_agent` again."#,
         let merge_result = if strategy == "squash" {
             run_git(&["merge", "--squash", agent_branch])
         } else {
-            run_git(&["merge", "--no-ff", agent_branch, "-m", &commit_msg])
+            crate::worktrees::git::run_git_with_refact_author(
+                workspace_root,
+                &[
+                    "merge",
+                    "--no-ff",
+                    "--no-gpg-sign",
+                    agent_branch,
+                    "-m",
+                    &commit_msg,
+                ],
+            )
         };
 
         if let Err(e) = merge_result {
@@ -843,7 +977,10 @@ Use `cat <file>` to see conflict markers in each file."#,
         }
 
         if strategy == "squash" {
-            let commit_result = run_git(&["commit", "-m", &commit_msg]);
+            let commit_result = crate::worktrees::git::run_git_with_refact_author(
+                workspace_root,
+                &["commit", "--no-gpg-sign", "-m", &commit_msg],
+            );
             if let Err(e) = commit_result {
                 if !e.contains("nothing to commit") {
                     return Err(format!("Failed to commit squash merge: {}", e));
@@ -1124,6 +1261,116 @@ mod worktree_merge_tool_tests {
         }
     }
 
+    fn merged_response_with_warning() -> MergeWorktreeResponse {
+        MergeWorktreeResponse {
+            id: "wt-1".to_string(),
+            status: "merged".to_string(),
+            merged: true,
+            strategy: "squash".to_string(),
+            source_branch: "refact/task/T-1".to_string(),
+            target_branch: "main".to_string(),
+            committed_uncommitted: None,
+            merge_commit: Some("abc123".to_string()),
+            cleanup: None,
+            conflict: None,
+            affected_references: Vec::new(),
+            affected_reference_count: 0,
+            warnings: vec!["stash cleanup needs inspection".to_string()],
+        }
+    }
+
+    fn merged_response_with_cleanup_warning() -> MergeWorktreeResponse {
+        MergeWorktreeResponse {
+            cleanup: Some(crate::worktrees::types::WorktreeRemovalResult {
+                worktree_deleted: true,
+                branch_deleted: false,
+                registry_deleted: true,
+                stale_path: false,
+                warnings: vec!["branch deletion failed".to_string()],
+            }),
+            warnings: Vec::new(),
+            ..merged_response_with_warning()
+        }
+    }
+
+    #[test]
+    fn merge_agent_response_message_includes_warnings() {
+        let message = merge_response_message("T-1", &merged_response_with_warning(), None);
+
+        assert!(message.contains("## Warnings"));
+        assert!(message.contains("stash cleanup needs inspection"));
+    }
+
+    #[test]
+    fn merge_agent_response_message_includes_cleanup_warnings() {
+        let message = merge_response_message("T-1", &merged_response_with_cleanup_warning(), None);
+
+        assert!(message.contains("## Warnings"));
+        assert!(message.contains("branch deletion failed"));
+    }
+
+    #[test]
+    fn merge_agent_strategy_arg_defaults_to_squash() {
+        assert_eq!(strategy_arg(&HashMap::new()).unwrap(), "squash");
+    }
+
+    #[test]
+    fn merge_agent_strategy_arg_rejects_non_string_values() {
+        let args = HashMap::from([("strategy".to_string(), Value::Bool(true))]);
+
+        assert!(strategy_arg(&args)
+            .unwrap_err()
+            .contains("must be a string"));
+    }
+
+    #[test]
+    fn merge_agent_bool_args_reject_non_boolean_values() {
+        let args = HashMap::from([("force".to_string(), Value::String("false".to_string()))]);
+
+        assert!(parse_force(&args)
+            .unwrap_err()
+            .contains("must be a boolean"));
+
+        let args = HashMap::from([(
+            "auto_revert".to_string(),
+            Value::String("false".to_string()),
+        )]);
+
+        assert!(parse_auto_revert(&args)
+            .unwrap_err()
+            .contains("must be a boolean"));
+    }
+
+    #[test]
+    fn merge_agent_timeout_rejects_string_values() {
+        let args = HashMap::from([(
+            "auto_revert_timeout_secs".to_string(),
+            Value::String("120".to_string()),
+        )]);
+
+        assert!(parse_auto_revert_timeout(&args)
+            .unwrap_err()
+            .contains("positive integer"));
+    }
+
+    #[test]
+    fn merge_agent_card_id_rejects_non_string_values() {
+        let args = HashMap::from([("card_id".to_string(), Value::Bool(true))]);
+
+        assert!(required_string_arg(&args, "card_id")
+            .unwrap_err()
+            .contains("must be a string"));
+    }
+
+    #[test]
+    fn merge_agent_card_id_rejects_surrounding_whitespace() {
+        let args = HashMap::from([("card_id".to_string(), Value::String(" T-1 ".to_string()))]);
+
+        assert!(required_string_arg(&args, "card_id")
+            .unwrap_err()
+            .contains("leading or trailing whitespace"));
+    }
+
     #[test]
     fn merge_agent_refuses_when_verifier_failed_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
@@ -1308,7 +1555,107 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn merge_agent_with_commits_ahead_and_dirty_worktree_retains_worktree() {
+    async fn merge_agent_refuses_legacy_worktree_pointing_at_main_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        std::fs::write(source.join("main-dirty.txt"), "main dirty\n").unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, "main", &source),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let err = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("main workspace"), "{err}");
+        assert_eq!(
+            run_git(&source, &["rev-list", "--count", "HEAD"]).trim(),
+            "1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("main-dirty.txt")).unwrap(),
+            "main dirty\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_agent_refuses_legacy_worktree_pointing_inside_main_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        init_repo(&source);
+        std::fs::write(source.join("src/main-dirty.txt"), "main dirty\n").unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, "main", &source.join("src")),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let err = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("not the git worktree root"), "{err}");
+        assert_eq!(
+            run_git(&source, &["rev-list", "--count", "HEAD"]).trim(),
+            "1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("src/main-dirty.txt")).unwrap(),
+            "main dirty\n"
+        );
+    }
+
+    #[test]
+    fn merge_agent_legacy_validation_rejects_detached_and_wrong_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-validate");
+        let branch = "refact/task/task-1/card/T-1/agent-validate";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+
+        run_git(&agent_worktree, &["checkout", "-b", "other-agent-branch"]);
+        let err = ensure_legacy_agent_worktree_checkout(
+            &source,
+            agent_worktree.to_str().unwrap(),
+            branch,
+        )
+        .unwrap_err();
+        assert!(err.contains("different branch"), "{err}");
+
+        let head = run_git(&agent_worktree, &["rev-parse", "HEAD"]);
+        run_git(&agent_worktree, &["checkout", "--detach", head.trim()]);
+        let err = ensure_legacy_agent_worktree_checkout(
+            &source,
+            agent_worktree.to_str().unwrap(),
+            branch,
+        )
+        .unwrap_err();
+        assert!(err.contains("detached HEAD"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn merge_agent_with_commits_ahead_and_dirty_worktree_auto_commits_and_cleans_up() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1338,18 +1685,18 @@ mod worktree_merge_tool_tests {
             .await
             .unwrap();
 
-        assert!(!source.join("dirty.txt").exists());
-        assert!(agent_worktree.exists());
-        assert!(branch_exists(&source, branch));
+        assert_eq!(
+            std::fs::read_to_string(source.join("dirty.txt")).unwrap(),
+            "uncommitted\n"
+        );
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
-        assert_eq!(card.agent_branch.as_deref(), Some(branch));
-        assert_eq!(
-            card.agent_worktree.as_deref(),
-            Some(agent_worktree.to_str().unwrap())
-        );
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
         assert!(card.agent_worktree_name.is_none());
-        assert!(tool_text(&result).contains("retained"));
+        assert!(tool_text(&result).contains("cleaned up"));
     }
 
     #[tokio::test]
@@ -1393,7 +1740,89 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn merge_agent_preserves_dirty_zero_commit_legacy_worktree() {
+    async fn merge_agent_legacy_regular_merge_ignores_gpgsign_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-regular-gpg");
+        let branch = "refact/task/task-1/card/T-1/agent-regular-gpg";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        run_git(
+            &agent_worktree,
+            &["commit", "--allow-empty", "-m", "agent empty change"],
+        );
+        run_git(&source, &["config", "commit.gpgsign", "true"]);
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("strategy".to_string(), json!("merge")),
+        ]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert!(tool_text(&result).contains("merged"));
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
+    }
+
+    #[tokio::test]
+    async fn merge_agent_legacy_squash_uses_refact_author_without_repo_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-squash-no-identity");
+        let branch = "refact/task/task-1/card/T-1/agent-squash-no-identity";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        commit_file(
+            &agent_worktree,
+            "squash-no-identity.txt",
+            "agent change\n",
+            "agent file change",
+        );
+        run_git(&source, &["config", "--unset", "user.email"]);
+        run_git(&source, &["config", "--unset", "user.name"]);
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert!(tool_text(&result).contains("merged"));
+        assert_eq!(
+            run_git(&source, &["log", "-1", "--format=%an <%ae>"]).trim(),
+            "Refact Agent <agent@refact.ai>"
+        );
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
+    }
+
+    #[tokio::test]
+    async fn merge_agent_auto_commits_dirty_zero_commit_legacy_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1419,18 +1848,58 @@ mod worktree_merge_tool_tests {
             .await
             .unwrap();
 
-        assert!(agent_worktree.exists());
-        assert!(branch_exists(&source, branch));
+        assert_eq!(
+            std::fs::read_to_string(source.join("dirty.txt")).unwrap(),
+            "uncommitted\n"
+        );
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
-        assert_eq!(card.agent_branch.as_deref(), Some(branch));
-        assert_eq!(
-            card.agent_worktree.as_deref(),
-            Some(agent_worktree.to_str().unwrap())
-        );
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
         assert!(card.agent_worktree_name.is_none());
         let text = tool_text(&result);
-        assert!(text.contains("preserved") || text.contains("retained"));
+        assert!(text.contains("Merged") || text.contains("merged"));
+    }
+
+    #[tokio::test]
+    async fn merge_agent_legacy_dirty_main_blocks_before_agent_auto_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-main-dirty");
+        let branch = "refact/task/task-1/card/T-1/agent-main-dirty";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        std::fs::write(agent_worktree.join("dirty.txt"), "agent dirty\n").unwrap();
+        std::fs::write(source.join("main-dirty.txt"), "main dirty\n").unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let err = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.contains("Main workspace has uncommitted changes"),
+            "{err}"
+        );
+        assert_eq!(
+            run_git(&agent_worktree, &["rev-list", "--count", "HEAD"]).trim(),
+            "1"
+        );
+        assert!(run_git(&agent_worktree, &["status", "--porcelain"]).contains("dirty.txt"));
     }
 
     #[tokio::test]
@@ -1574,7 +2043,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn merge_agent_registered_path_refuses_dirty_worktree_cleanup() {
+    async fn merge_agent_registered_path_auto_commits_dirty_worktree_and_cleans_up() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1606,7 +2075,7 @@ mod worktree_merge_tool_tests {
         )
         .await;
 
-        let err = merge_registered_task_worktree(
+        let result = merge_registered_task_worktree(
             gcx.clone(),
             &source.canonicalize().unwrap(),
             "task-1",
@@ -1619,25 +2088,89 @@ mod worktree_merge_tool_tests {
             Duration::from_secs(5),
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.contains("uncommitted changes"), "{err}");
-        assert!(root.exists());
+        assert!(result.is_some());
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "registered committed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("dirty.txt")).unwrap(),
+            "registered dirty\n"
+        );
+        assert!(!root.exists());
         assert!(service
             .get_worktree(&created.worktree.meta.id)
             .await
-            .is_ok());
-        assert!(branch_exists(&source, &branch));
+            .is_err());
+        assert!(!branch_exists(&source, &branch));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
-        assert_eq!(card.agent_branch.as_deref(), Some(branch.as_str()));
-        assert_eq!(card.agent_worktree.as_deref(), Some(root.to_str().unwrap()));
-        assert_eq!(
-            card.agent_worktree_name.as_deref(),
-            Some(created.worktree.meta.id.as_str())
-        );
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(card.target_files.contains(&"dirty.txt".to_string()));
     }
 
+    #[tokio::test]
+    async fn merge_agent_registered_path_validates_checkout_before_diff_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        let cache_dir = gcx.cache_dir.clone();
+        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/task/task-1/card/T-1/agent-wrong-checkout".to_string()),
+                kind: Some("task_agent".to_string()),
+                task_id: Some("task-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                chat_id: Some("agent-chat-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let branch = created.worktree.meta.branch.clone().unwrap();
+        let root = created.worktree.meta.root.clone();
+        run_git(&root, &["checkout", "-b", "manual-task-branch"]);
+        std::fs::write(root.join("wrong-branch.txt"), "do not diff\n").unwrap();
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card(&created.worktree.meta.id, &branch, &root),
+        )
+        .await;
+
+        let err = merge_registered_task_worktree(
+            gcx.clone(),
+            &source.canonicalize().unwrap(),
+            "task-1",
+            "T-1",
+            "squash",
+            "tool-call",
+            None,
+            false,
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("different branch"), "{err}");
+        assert_eq!(
+            run_git(&root, &["branch", "--show-current"]).trim(),
+            "manual-task-branch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("wrong-branch.txt")).unwrap(),
+            "do not diff\n"
+        );
+    }
     #[test]
     fn merge_agent_refuses_doing_card_without_force() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));

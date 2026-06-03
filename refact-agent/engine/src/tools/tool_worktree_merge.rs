@@ -14,8 +14,8 @@ use crate::tools::tools_description::{
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy};
 
-fn strategy_from_arg(strategy: Option<&str>) -> Result<WorktreeMergeStrategy, String> {
-    match strategy.unwrap_or("squash") {
+fn strategy_from_str(strategy: &str) -> Result<WorktreeMergeStrategy, String> {
+    match strategy {
         "merge" => Ok(WorktreeMergeStrategy::Merge),
         "squash" => Ok(WorktreeMergeStrategy::Squash),
         other => Err(format!(
@@ -25,18 +25,135 @@ fn strategy_from_arg(strategy: Option<&str>) -> Result<WorktreeMergeStrategy, St
     }
 }
 
-fn bool_arg(args: &HashMap<String, Value>, name: &str, default: bool) -> bool {
-    args.get(name)
-        .and_then(|value| value.as_bool())
-        .unwrap_or(default)
+fn strategy_arg(args: &HashMap<String, Value>) -> Result<WorktreeMergeStrategy, String> {
+    match args.get("strategy") {
+        None => Ok(WorktreeMergeStrategy::Squash),
+        Some(Value::String(strategy)) => strategy_from_str(strategy),
+        Some(_) => Err("'strategy' must be a string".to_string()),
+    }
 }
 
-fn string_arg(args: &HashMap<String, Value>, name: &str) -> Option<String> {
-    args.get(name)
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn merged_response_with_warning() -> MergeWorktreeResponse {
+        MergeWorktreeResponse {
+            id: "wt-1".to_string(),
+            status: "merged".to_string(),
+            merged: true,
+            strategy: "squash".to_string(),
+            source_branch: "refact/chat/test".to_string(),
+            target_branch: "main".to_string(),
+            committed_uncommitted: None,
+            merge_commit: Some("abc123".to_string()),
+            cleanup: None,
+            conflict: None,
+            affected_references: Vec::new(),
+            affected_reference_count: 0,
+            warnings: vec!["stash cleanup needs inspection".to_string()],
+        }
+    }
+
+    fn merged_response_with_cleanup_warning() -> MergeWorktreeResponse {
+        MergeWorktreeResponse {
+            cleanup: Some(crate::worktrees::types::WorktreeRemovalResult {
+                worktree_deleted: true,
+                branch_deleted: false,
+                registry_deleted: true,
+                stale_path: false,
+                warnings: vec!["branch deletion failed".to_string()],
+            }),
+            warnings: Vec::new(),
+            ..merged_response_with_warning()
+        }
+    }
+
+    #[test]
+    fn merge_response_message_includes_warnings() {
+        let message = merge_response_message(&merged_response_with_warning());
+
+        assert!(message.contains("## Warnings"));
+        assert!(message.contains("stash cleanup needs inspection"));
+    }
+
+    #[test]
+    fn merge_response_message_includes_cleanup_warnings() {
+        let message = merge_response_message(&merged_response_with_cleanup_warning());
+
+        assert!(message.contains("## Warnings"));
+        assert!(message.contains("branch deletion failed"));
+    }
+
+    #[test]
+    fn strategy_defaults_to_squash() {
+        assert_eq!(
+            strategy_arg(&HashMap::new()).unwrap(),
+            WorktreeMergeStrategy::Squash
+        );
+    }
+
+    #[test]
+    fn strategy_arg_rejects_non_string_values() {
+        let args = HashMap::from([("strategy".to_string(), Value::Bool(true))]);
+
+        assert!(strategy_arg(&args)
+            .unwrap_err()
+            .contains("must be a string"));
+    }
+
+    #[test]
+    fn bool_arg_rejects_non_boolean_values() {
+        let args = HashMap::from([(
+            "delete_after_merge".to_string(),
+            Value::String("false".to_string()),
+        )]);
+
+        assert!(bool_arg(&args, "delete_after_merge", true)
+            .unwrap_err()
+            .contains("must be a boolean"));
+
+        let args = HashMap::from([(
+            "include_uncommitted".to_string(),
+            Value::String("false".to_string()),
+        )]);
+
+        assert!(bool_arg(&args, "include_uncommitted", true)
+            .unwrap_err()
+            .contains("must be a boolean"));
+    }
+
+    #[test]
+    fn string_arg_rejects_non_string_values() {
+        let args = HashMap::from([("target_branch".to_string(), Value::Bool(true))]);
+
+        assert!(string_arg(&args, "target_branch")
+            .unwrap_err()
+            .contains("must be a string"));
+    }
+}
+
+fn bool_arg(args: &HashMap<String, Value>, name: &str, default: bool) -> Result<bool, String> {
+    match args.get(name) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("'{}' must be a boolean", name)),
+    }
+}
+
+fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option<String>, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(_) => Err(format!("'{}' must be a string", name)),
+    }
 }
 
 fn cleanup_summary(response: &MergeWorktreeResponse) -> String {
@@ -55,6 +172,24 @@ fn cleanup_summary(response: &MergeWorktreeResponse) -> String {
     }
 }
 
+fn append_warnings(message: &mut String, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    message.push_str("\n\n## Warnings");
+    for warning in warnings {
+        message.push_str(&format!("\n- {}", warning));
+    }
+}
+
+fn response_warnings(response: &MergeWorktreeResponse) -> Vec<String> {
+    let mut warnings = response.warnings.clone();
+    if let Some(cleanup) = response.cleanup.as_ref() {
+        warnings.extend(cleanup.warnings.clone());
+    }
+    warnings
+}
+
 fn merge_response_message(response: &MergeWorktreeResponse) -> String {
     if let Some(conflict) = response.conflict.as_ref() {
         let files = if conflict.files.is_empty() {
@@ -67,7 +202,7 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        return format!(
+        let mut message = format!(
             "# Worktree Merge Conflicts\n\n**Worktree:** {}\n**Branch:** {} → {}\n**Strategy:** {}\n**Aborted:** {}\n\n## Conflicting Files\n{}\n\n{}",
             response.id,
             response.source_branch,
@@ -77,19 +212,23 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
             files,
             conflict.instructions
         );
+        append_warnings(&mut message, &response_warnings(response));
+        return message;
     }
 
     if response.status == "nothing_to_merge" {
-        return format!(
+        let mut message = format!(
             "# Nothing to Merge\n\n**Worktree:** {}\n**Branch:** {} → {}\n\nCleanup: {}.",
             response.id,
             response.source_branch,
             response.target_branch,
             cleanup_summary(response)
         );
+        append_warnings(&mut message, &response_warnings(response));
+        return message;
     }
 
-    format!(
+    let mut message = format!(
         "# Worktree Merged\n\n**Worktree:** {}\n**Strategy:** {}\n**Branch:** {} → {}\n**Merge commit:** {}\n**Cleanup:** {}\n\nThe worktree changes have been merged into the target branch.",
         response.id,
         response.strategy,
@@ -97,7 +236,9 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
         response.target_branch,
         response.merge_commit.as_deref().unwrap_or("unknown"),
         cleanup_summary(response)
-    )
+    );
+    append_warnings(&mut message, &response_warnings(response));
+    message
 }
 
 async fn service_from_gcx(
@@ -163,7 +304,7 @@ impl Tool for ToolWorktreeMerge {
                     ("strategy", "string", "Merge strategy: 'squash' (default) or 'merge'."),
                     ("commit_message", "string", "Optional commit message override. If omitted, Refact generates one from the diff."),
                     ("delete_after_merge", "boolean", "Delete the worktree and source branch after a successful merge or nothing-to-merge cleanup. Defaults to true."),
-                    ("include_uncommitted", "boolean", "Auto-commit dirty worktree changes before merging. Defaults to false."),
+                    ("include_uncommitted", "boolean", "Auto-commit dirty worktree changes before merging. Defaults to true."),
                 ],
                 &[],
             ),
@@ -187,34 +328,41 @@ impl Tool for ToolWorktreeMerge {
             (ccx.app.gcx.clone(), ccx.execution_scope_worktree())
         };
 
-        let worktree_id = string_arg(args, "worktree_id")
+        let worktree_id = string_arg(args, "worktree_id")?
             .or_else(|| active_worktree.as_ref().map(|worktree| worktree.id.clone()))
             .ok_or_else(|| {
                 "Missing 'worktree_id' and this chat has no active worktree".to_string()
             })?;
-        let source_workspace_root = string_arg(args, "source_workspace_root").or_else(|| {
+        let source_workspace_root = string_arg(args, "source_workspace_root")?.or_else(|| {
             active_worktree
                 .as_ref()
                 .map(|worktree| worktree.source_workspace_root.to_string_lossy().to_string())
         });
-        let strategy = strategy_from_arg(args.get("strategy").and_then(|value| value.as_str()))?;
-        let delete_after_merge = bool_arg(args, "delete_after_merge", true);
-        let include_uncommitted = bool_arg(args, "include_uncommitted", false);
-        let target_branch = string_arg(args, "target_branch");
+        let strategy = strategy_arg(args)?;
+        let delete_after_merge = bool_arg(args, "delete_after_merge", true)?;
+        let include_uncommitted = bool_arg(args, "include_uncommitted", true)?;
+        let target_branch = string_arg(args, "target_branch")?;
 
         let service = service_from_gcx(gcx.clone(), source_workspace_root).await?;
-        let commit_message = match string_arg(args, "commit_message") {
+        let commit_message = match string_arg(args, "commit_message")? {
             Some(message) => Some(message),
             None => {
-                let diff = service.diff_worktree(&worktree_id).await?;
-                match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
-                    gcx.clone(),
-                    &diff.patch,
-                    &target_branch,
-                )
-                .await
-                {
-                    Ok(message) if !message.trim().is_empty() => Some(message),
+                service
+                    .validate_registered_worktree_checkout(&worktree_id)
+                    .await?;
+                match service.diff_worktree(&worktree_id).await {
+                    Ok(diff) if !diff.files.is_empty() => {
+                        match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
+                            gcx.clone(),
+                            &diff.patch,
+                            &target_branch,
+                        )
+                        .await
+                        {
+                            Ok(message) if !message.trim().is_empty() => Some(message),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 }
             }

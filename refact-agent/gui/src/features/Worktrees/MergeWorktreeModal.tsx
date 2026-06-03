@@ -76,11 +76,24 @@ function isMerged(response: MergeWorktreeResponse): boolean {
   return response.merged === true && !hasMergeConflict(response);
 }
 
+function didCleanupNoop(response: MergeWorktreeResponse): boolean {
+  const cleanup = response.cleanup;
+  return (
+    response.status === "nothing_to_merge" &&
+    cleanup != null &&
+    (cleanup.worktree_deleted || cleanup.branch_deleted || cleanup.registry_deleted)
+  );
+}
+
 function responseSummary(response: MergeWorktreeResponse): string {
   if (hasMergeConflict(response)) return "Merge conflicts detected.";
   if (response.merged === true) return "Merge completed.";
   if (response.status === "nothing_to_merge") return "Nothing to merge.";
   return response.message ?? response.status ?? "Merge finished.";
+}
+
+function responseWarnings(response: MergeWorktreeResponse): string[] {
+  return [...(response.warnings ?? []), ...(response.cleanup?.warnings ?? [])];
 }
 
 export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
@@ -99,7 +112,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const dispatch = useAppDispatch();
   const [strategy, setStrategy] = useState<WorktreeMergeStrategy>("squash");
   const [deleteAfterMerge, setDeleteAfterMerge] = useState(true);
-  const [includeUncommitted, setIncludeUncommitted] = useState(false);
+  const [includeUncommitted, setIncludeUncommitted] = useState(true);
   const [targetBranch, setTargetBranch] = useState(
     initialTargetBranch(record, worktree, defaultTargetBranch),
   );
@@ -115,13 +128,14 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     () => (result ? mergeConflictFiles(result) : []),
     [result],
   );
+  const warnings = useMemo(() => (result ? responseWarnings(result) : []), [result]);
   const resolvedTaskId = taskId ?? record?.meta.task_id ?? worktree?.task_id;
 
   useEffect(() => {
     if (!open) return;
     setStrategy("squash");
     setDeleteAfterMerge(true);
-    setIncludeUncommitted(false);
+    setIncludeUncommitted(true);
     setTargetBranch(initialTargetBranch(record, worktree, defaultTargetBranch));
     setResult(null);
     setError(null);
@@ -144,6 +158,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
       setError("No worktree selected.");
       return;
     }
+    setResult(null);
     setError(null);
     setActionFeedback(null);
     try {
@@ -160,7 +175,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
       }).unwrap();
       setResult(response);
       invalidateTask();
-      if (isMerged(response)) {
+      if (isMerged(response) || didCleanupNoop(response)) {
         onMerged?.(response);
       }
     } catch (mergeError) {
@@ -259,7 +274,7 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                   }
                   disabled={mergeState.isLoading}
                 />
-                Delete worktree after successful merge
+                Delete worktree after merge or if there is nothing to merge
               </Flex>
             </Text>
             <Text as="label" size="2">
@@ -357,10 +372,10 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                   {actionFeedback}
                 </Text>
               )}
-              {result.warnings && result.warnings.length > 0 && (
+              {warnings.length > 0 && (
                 <Flex direction="column" gap="1">
-                  {result.warnings.map((warning) => (
-                    <Text key={warning} size="1" color="amber">
+                  {warnings.map((warning, index) => (
+                    <Text key={`${index}-${warning}`} size="1" color="amber">
                       {warning}
                     </Text>
                   ))}

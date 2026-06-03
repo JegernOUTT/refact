@@ -30,6 +30,10 @@ fn default_delete_after_merge() -> bool {
     true
 }
 
+fn default_include_uncommitted() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WorktreeReference {
     pub kind: String,
@@ -186,7 +190,7 @@ pub enum WorktreeMergeStrategy {
 
 impl Default for WorktreeMergeStrategy {
     fn default() -> Self {
-        Self::Merge
+        Self::Squash
     }
 }
 
@@ -205,7 +209,7 @@ pub struct MergeWorktreeRequest {
     pub strategy: WorktreeMergeStrategy,
     #[serde(default = "default_delete_after_merge")]
     pub delete_after_merge: bool,
-    #[serde(default)]
+    #[serde(default = "default_include_uncommitted")]
     pub include_uncommitted: bool,
     #[serde(default)]
     pub target_branch: Option<String>,
@@ -220,7 +224,7 @@ impl Default for MergeWorktreeRequest {
         Self {
             strategy: WorktreeMergeStrategy::default(),
             delete_after_merge: default_delete_after_merge(),
-            include_uncommitted: false,
+            include_uncommitted: default_include_uncommitted(),
             target_branch: None,
             commit_message: None,
             generate_commit_message: false,
@@ -540,15 +544,19 @@ mod tests {
         let request: MergeWorktreeRequest = serde_json::from_value(serde_json::json!({})).unwrap();
 
         assert!(request.delete_after_merge);
+        assert!(request.include_uncommitted);
+        assert_eq!(request.strategy, WorktreeMergeStrategy::Squash);
     }
 
     #[test]
     fn merge_worktree_request_respects_explicit_keep_after_merge() {
         let request: MergeWorktreeRequest = serde_json::from_value(serde_json::json!({
-            "delete_after_merge": false
+            "delete_after_merge": false,
+            "include_uncommitted": false
         }))
         .unwrap();
 
         assert!(!request.delete_after_merge);
+        assert!(!request.include_uncommitted);
     }
 }

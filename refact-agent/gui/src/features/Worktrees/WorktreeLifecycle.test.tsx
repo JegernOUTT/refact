@@ -302,7 +302,13 @@ describe("Worktree lifecycle GUI", () => {
           strategy: "squash",
           source_branch: record.meta.branch ?? "refact/task/T-1",
           target_branch: "main",
-          cleanup: null,
+          cleanup: {
+            worktree_deleted: true,
+            branch_deleted: false,
+            registry_deleted: true,
+            stale_path: false,
+            warnings: ["branch deletion failed"],
+          },
           conflict: null,
           affected_references: [],
           affected_reference_count: 1,
@@ -325,14 +331,20 @@ describe("Worktree lifecycle GUI", () => {
       { store },
     );
 
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Include uncommitted changes by auto-committing first",
+      }),
+    ).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Merge" }));
 
     expect(await screen.findByText("Merge completed.")).toBeInTheDocument();
+    expect(await screen.findByText("branch deletion failed")).toBeInTheDocument();
     expect(mergeCalls[0]).toMatchObject({
       strategy: "squash",
       target_branch: "main",
       delete_after_merge: true,
-      include_uncommitted: false,
+      include_uncommitted: true,
     });
     expect(dispatchSpy).toHaveBeenCalledWith(
       expect.objectContaining({ type: "tasksApi/invalidateTags" }),
@@ -371,6 +383,196 @@ describe("Worktree lifecycle GUI", () => {
         "Worktree has uncommitted changes; include them or commit first.",
       ),
     ).toBeInTheDocument();
+  });
+
+  test("merge modal allows opting out of uncommitted changes", async () => {
+    const record = makeRecord();
+    const mergeCalls: JsonObject[] = [];
+    server.use(
+      mergeHandler(
+        {
+          id: record.meta.id,
+          status: "merged",
+          merged: true,
+          strategy: "squash",
+          source_branch: record.meta.branch ?? "refact/task/T-1",
+          target_branch: "main",
+          cleanup: null,
+          conflict: null,
+          affected_references: [],
+          affected_reference_count: 1,
+          warnings: [],
+        },
+        mergeCalls,
+      ),
+    );
+
+    const { user } = render(
+      <MergeWorktreeModal
+        open
+        worktreeId={record.meta.id}
+        record={record}
+        onOpenChange={() => undefined}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Include uncommitted changes by auto-committing first",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    expect(await screen.findByText("Merge completed.")).toBeInTheDocument();
+    expect(mergeCalls[0]).toMatchObject({ include_uncommitted: false });
+  });
+
+  test("merge modal reports no-op cleanup and invokes completion callback", async () => {
+    const record = makeRecord();
+    const onMerged = vi.fn();
+    server.use(
+      mergeHandler(
+        {
+          id: record.meta.id,
+          status: "nothing_to_merge",
+          merged: false,
+          strategy: "squash",
+          source_branch: record.meta.branch ?? "refact/task/T-1",
+          target_branch: "main",
+          cleanup: {
+            worktree_deleted: true,
+            branch_deleted: true,
+            registry_deleted: true,
+            stale_path: false,
+            warnings: [],
+          },
+          conflict: null,
+          affected_references: [],
+          affected_reference_count: 1,
+          warnings: [],
+        },
+        [],
+      ),
+    );
+
+    const { user } = render(
+      <MergeWorktreeModal
+        open
+        worktreeId={record.meta.id}
+        record={record}
+        onOpenChange={() => undefined}
+        onMerged={onMerged}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+
+    expect(
+      screen.getByRole("checkbox", {
+        name: "Delete worktree after merge or if there is nothing to merge",
+      }),
+    ).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    expect(await screen.findByText("Nothing to merge.")).toBeInTheDocument();
+    expect(onMerged).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "nothing_to_merge" }),
+    );
+  });
+
+  test("merge modal does not report no-op cleanup completion when nothing was deleted", async () => {
+    const record = makeRecord();
+    const onMerged = vi.fn();
+    server.use(
+      mergeHandler(
+        {
+          id: record.meta.id,
+          status: "nothing_to_merge",
+          merged: false,
+          strategy: "squash",
+          source_branch: record.meta.branch ?? "refact/task/T-1",
+          target_branch: "main",
+          cleanup: {
+            worktree_deleted: false,
+            branch_deleted: false,
+            registry_deleted: false,
+            stale_path: false,
+            warnings: ["cleanup failed"],
+          },
+          conflict: null,
+          affected_references: [],
+          affected_reference_count: 1,
+          warnings: [],
+        },
+        [],
+      ),
+    );
+
+    const { user } = render(
+      <MergeWorktreeModal
+        open
+        worktreeId={record.meta.id}
+        record={record}
+        onOpenChange={() => undefined}
+        onMerged={onMerged}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    expect(await screen.findByText("Nothing to merge.")).toBeInTheDocument();
+    expect(onMerged).not.toHaveBeenCalled();
+  });
+
+  test("merge modal clears stale result when a retry fails", async () => {
+    const record = makeRecord();
+    let callCount = 0;
+    server.use(
+      http.post("*/v1/worktrees/:id/merge", () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return HttpResponse.json({
+            id: record.meta.id,
+            status: "merged",
+            merged: true,
+            strategy: "squash",
+            source_branch: record.meta.branch ?? "refact/task/T-1",
+            target_branch: "main",
+            cleanup: null,
+            conflict: null,
+            affected_references: [],
+            affected_reference_count: 1,
+            warnings: [],
+          });
+        }
+        return HttpResponse.json(
+          { code: "conflict", error: "Target workspace has uncommitted changes." },
+          { status: 409 },
+        );
+      }),
+    );
+
+    const { user } = render(
+      <MergeWorktreeModal
+        open
+        worktreeId={record.meta.id}
+        record={record}
+        onOpenChange={() => undefined}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    expect(await screen.findByText("Merge completed.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    expect(
+      await screen.findByText("Target workspace has uncommitted changes."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Merge completed.")).not.toBeInTheDocument();
   });
 
   test("merge conflict path lists files and exposes Ask Refact action", async () => {
@@ -489,7 +691,7 @@ describe("Worktree lifecycle GUI", () => {
       strategy: "squash",
       target_branch: "main",
       delete_after_merge: true,
-      include_uncommitted: false,
+      include_uncommitted: true,
     });
   });
 

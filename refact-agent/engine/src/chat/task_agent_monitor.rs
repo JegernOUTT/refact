@@ -135,6 +135,10 @@ fn stall_planner_notify_allowed(card: &BoardCard, now: chrono::DateTime<Utc>) ->
     true
 }
 
+fn stalled_agent_should_fail_after_notify_failure(stall_elapsed: Duration) -> bool {
+    stall_elapsed >= AGENT_STUCK_TIMEOUT
+}
+
 fn linked_agent_session_matches(session: &ChatSession, task_id: &str, card: &BoardCard) -> bool {
     let Some(meta) = session.thread.task_meta.as_ref() else {
         return false;
@@ -226,18 +230,6 @@ async fn notify_planner_about_reasoning_token_limit(
     usage: Option<&ChatUsage>,
     message_id: &str,
 ) -> Result<bool, String> {
-    if !record_stall_planner_notification(
-        app.clone(),
-        task_id,
-        card_id,
-        agent_chat_id,
-        "reasoning_token_limit",
-    )
-    .await?
-    {
-        return Ok(false);
-    }
-
     let notice = task_agent_monitor_notice(
         json!({
             "kind": "reasoning_token_limit",
@@ -264,11 +256,24 @@ async fn notify_planner_about_reasoning_token_limit(
     {
         let session = planner_session.lock().await;
         if session.thread.task_meta.is_none() {
-            return Err(format!(
+            tracing::warn!(
                 "Cannot notify task planner {}: trajectory is missing or deleted",
                 planner_chat_id
-            ));
+            );
+            return Ok(false);
         }
+    }
+
+    if !record_stall_planner_notification(
+        app.clone(),
+        task_id,
+        card_id,
+        agent_chat_id,
+        "reasoning_token_limit",
+    )
+    .await?
+    {
+        return Ok(false);
     }
 
     let processor_flag = {
@@ -488,18 +493,6 @@ async fn notify_planner_about_stalled_agent(
     let card_id = card.id.as_str();
     let short_reason = kind.short_reason();
 
-    if !record_stall_planner_notification(
-        app.clone(),
-        task_id,
-        card_id,
-        agent_chat_id,
-        short_reason,
-    )
-    .await?
-    {
-        return Ok(false);
-    }
-
     let Some(planner_chat_id) = planner_chat_id else {
         tracing::warn!(
             "Cannot notify planner about stalled agent for card {} in task {}: no planner_chat_id",
@@ -539,11 +532,24 @@ async fn notify_planner_about_stalled_agent(
     {
         let session = planner_session.lock().await;
         if session.thread.task_meta.is_none() {
-            return Err(format!(
+            tracing::warn!(
                 "Cannot notify task planner {}: trajectory is missing or deleted",
                 planner_chat_id
-            ));
+            );
+            return Ok(false);
         }
+    }
+
+    if !record_stall_planner_notification(
+        app.clone(),
+        task_id,
+        card_id,
+        agent_chat_id,
+        short_reason,
+    )
+    .await?
+    {
+        return Ok(false);
     }
 
     let processor_flag = {
@@ -1033,10 +1039,11 @@ pub(crate) async fn notify_planner_agents_finished(
     {
         let session = planner_session.lock().await;
         if session.thread.task_meta.is_none() {
-            return Err(format!(
+            tracing::warn!(
                 "Cannot notify task planner {}: trajectory is missing or deleted",
                 planner_chat_id
-            ));
+            );
+            return Ok(());
         }
     }
 
@@ -1752,7 +1759,7 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                     )
                     .await?;
                 } else if stall_planner_notify_allowed(card, now) {
-                    let _ = notify_planner_about_stalled_agent(
+                    let notify_result = notify_planner_about_stalled_agent(
                         app.clone(),
                         task_id,
                         card,
@@ -1761,7 +1768,37 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                         kind,
                         stall_elapsed,
                     )
-                    .await?;
+                    .await;
+                    let planner_notified = match notify_result {
+                        Ok(notified) => notified,
+                        Err(error) => {
+                            tracing::warn!(
+                                "Failed to notify planner about stalled agent for card {} in task {}: {}",
+                                card.id,
+                                task_id,
+                                error
+                            );
+                            false
+                        }
+                    };
+                    if !planner_notified
+                        && stalled_agent_should_fail_after_notify_failure(stall_elapsed)
+                    {
+                        mark_agent_as_failed(
+                            app.clone(),
+                            task_id,
+                            &card.id,
+                            card.assignee.as_deref(),
+                            planner_chat_id.as_deref(),
+                            &format!(
+                                "{} for {}, planner notification unavailable",
+                                kind.short_reason(),
+                                humantime::format_duration(stall_elapsed)
+                            ),
+                            AgentFailureKind::TransientExhausted,
+                        )
+                        .await?;
+                    }
                 }
                 continue;
             }
@@ -2128,6 +2165,16 @@ mod tests {
     #[test]
     fn test_tool_stall_timeout_constant() {
         assert_eq!(TOOL_STALL_TIMEOUT.as_secs(), 8 * 60);
+    }
+
+    #[test]
+    fn stalled_agent_fail_after_notify_failure_waits_for_hard_timeout() {
+        assert!(!stalled_agent_should_fail_after_notify_failure(
+            AGENT_STUCK_TIMEOUT - Duration::from_secs(1)
+        ));
+        assert!(stalled_agent_should_fail_after_notify_failure(
+            AGENT_STUCK_TIMEOUT
+        ));
     }
 
     #[test]

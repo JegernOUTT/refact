@@ -28,33 +28,6 @@ pub(crate) fn optional_string(args: &HashMap<String, Value>, key: &str) -> Optio
         .map(str::to_string)
 }
 
-pub(crate) fn parse_bool_arg_strict(
-    args: &HashMap<String, Value>,
-    arg_name: &str,
-    default: bool,
-) -> Result<bool, String> {
-    match args.get(arg_name) {
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(Value::String(s)) => {
-            let trimmed = s.trim();
-            if trimmed.eq_ignore_ascii_case("true") {
-                Ok(true)
-            } else if trimmed.eq_ignore_ascii_case("false") {
-                Ok(false)
-            } else {
-                Err(format!(
-                    "{arg_name} must be a boolean ('true' or 'false'), got '{s}'"
-                ))
-            }
-        }
-        Some(Value::Null) => Err(format!("{arg_name} must be a boolean, got null")),
-        Some(Value::Number(_)) => Err(format!("{arg_name} must be a boolean, got number")),
-        Some(Value::Array(_)) => Err(format!("{arg_name} must be a boolean, got array")),
-        Some(Value::Object(_)) => Err(format!("{arg_name} must be a boolean, got object")),
-        None => Ok(default),
-    }
-}
-
 pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -262,81 +235,6 @@ mod tests {
             agent_id: (role == "agents").then(|| "agent-1".to_string()),
             card_id: (role == "agents").then(|| "T-1".to_string()),
             planner_chat_id: Some("planner-chat".to_string()),
-        }
-    }
-
-    #[test]
-    fn parse_bool_arg_strict_accepts_true_false_case_insensitive() {
-        let args = args(&[
-            ("flag_true", json!(true)),
-            ("flag_false", json!(false)),
-            ("str_true", json!("true")),
-            ("str_false", json!("false")),
-            ("str_upper", json!("TRUE")),
-            ("str_mixed", json!("  False  ")),
-        ]);
-        assert_eq!(
-            parse_bool_arg_strict(&args, "flag_true", false).unwrap(),
-            true
-        );
-        assert_eq!(
-            parse_bool_arg_strict(&args, "flag_false", true).unwrap(),
-            false
-        );
-        assert_eq!(
-            parse_bool_arg_strict(&args, "str_true", false).unwrap(),
-            true
-        );
-        assert_eq!(
-            parse_bool_arg_strict(&args, "str_false", true).unwrap(),
-            false
-        );
-        assert_eq!(
-            parse_bool_arg_strict(&args, "str_upper", false).unwrap(),
-            true
-        );
-        assert_eq!(
-            parse_bool_arg_strict(&args, "str_mixed", true).unwrap(),
-            false
-        );
-        assert_eq!(parse_bool_arg_strict(&args, "missing", true).unwrap(), true);
-        assert_eq!(
-            parse_bool_arg_strict(&args, "missing", false).unwrap(),
-            false
-        );
-    }
-
-    #[test]
-    fn parse_bool_arg_strict_rejects_other_strings() {
-        let args = args(&[
-            ("tru", json!("tru")),
-            ("yes", json!("yes")),
-            ("one", json!("1")),
-            ("force", json!("force")),
-        ]);
-        for key in &["tru", "yes", "one", "force"] {
-            let err = parse_bool_arg_strict(&args, key, false).unwrap_err();
-            assert!(
-                err.contains("'true' or 'false'"),
-                "expected descriptive error for '{key}': {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_bool_arg_strict_rejects_non_string_non_bool_types() {
-        let args = args(&[
-            ("num", json!(1)),
-            ("arr", json!([])),
-            ("obj", json!({})),
-            ("null_val", Value::Null),
-        ]);
-        for key in &["num", "arr", "obj", "null_val"] {
-            let err = parse_bool_arg_strict(&args, key, false).unwrap_err();
-            assert!(
-                err.contains("must be a boolean"),
-                "expected error for '{key}': {err}"
-            );
         }
     }
 

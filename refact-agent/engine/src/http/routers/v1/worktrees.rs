@@ -60,11 +60,27 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
 
 fn status_for_error(error: &str) -> StatusCode {
     let lower = error.to_lowercase();
-    if lower.contains("not found") {
+    if lower.contains("not found") || (lower.contains("path") && lower.contains("does not exist")) {
         StatusCode::NOT_FOUND
-    } else if lower.contains("conflict") || lower.contains("merge in progress") {
+    } else if lower.contains("conflict")
+        || lower.contains("merge in progress")
+        || lower.contains("uncommitted changes")
+        || lower.contains("different branch")
+        || lower.contains("detached head")
+        || lower.contains("auto-commit")
+        || lower.contains("not a git worktree")
+        || lower.contains("not the git worktree root")
+        || lower.contains("belongs to a different repository")
+        || lower.contains("already exists")
+        || lower.contains("active reference")
+        || lower.contains("force_referenced")
+        || lower.contains("refusing")
+    {
         StatusCode::CONFLICT
     } else if lower.contains("invalid")
+        || lower.contains("worktree id")
+        || lower.contains("must contain only")
+        || lower.contains("too long")
         || lower.contains("not a git repository")
         || lower.contains("no project root")
         || lower.contains("outside registry")
@@ -268,20 +284,24 @@ pub async fn handle_v1_worktrees_merge(
             .unwrap_or_default()
             .is_empty()
     {
-        let diff = service
-            .diff_worktree(&id)
+        service
+            .validate_registered_worktree_checkout(&id)
             .await
             .map_err(map_service_error)?;
-        let prompt = request
-            .target_branch
-            .clone()
-            .or_else(|| diff.base_branch.clone())
-            .map(|target| format!("Merge worktree into {}", target));
-        if let Ok(message) =
-            generate_commit_message_by_diff(gcx.clone(), &diff.patch, &prompt).await
-        {
-            if !message.trim().is_empty() {
-                request.commit_message = Some(message);
+        if let Ok(diff) = service.diff_worktree(&id).await {
+            if !diff.files.is_empty() {
+                let prompt = request
+                    .target_branch
+                    .clone()
+                    .or_else(|| diff.base_branch.clone())
+                    .map(|target| format!("Merge worktree into {}", target));
+                if let Ok(message) =
+                    generate_commit_message_by_diff(gcx.clone(), &diff.patch, &prompt).await
+                {
+                    if !message.trim().is_empty() {
+                        request.commit_message = Some(message);
+                    }
+                }
             }
         }
     }
@@ -322,4 +342,48 @@ pub async fn handle_v1_worktrees_open(
         .await
         .map(Json)
         .map_err(map_service_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_for_error_maps_user_correctable_worktree_states_to_conflict() {
+        for message in [
+            "Worktree has uncommitted changes; set include_uncommitted=true",
+            "Target workspace has uncommitted changes on a different branch",
+            "Target workspace has uncommitted changes on detached HEAD",
+            "Failed to auto-commit source worktree changes",
+            "Branch 'refact/chat/test' already exists",
+            "Worktree 'wt_1' is not a git worktree",
+            "Worktree 'wt_1' path '/tmp/wt_1' is not the git worktree root",
+            "Worktree 'wt_1' path '/tmp/wt_1' belongs to a different repository",
+            "Worktree 'wt_1' still has 1 active reference(s) (kinds: chat); pass force_referenced=true to delete anyway.",
+        ] {
+            assert_eq!(status_for_error(message), StatusCode::CONFLICT, "{message}");
+        }
+    }
+
+    #[test]
+    fn status_for_error_maps_missing_worktree_path_to_not_found() {
+        assert_eq!(
+            status_for_error("Worktree 'wt_1' path '/tmp/wt_1' does not exist"),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn status_for_error_maps_invalid_worktree_id_to_bad_request() {
+        for message in [
+            "Worktree ID must contain only ASCII alphanumeric characters, hyphens, or underscores",
+            "Worktree ID is too long",
+        ] {
+            assert_eq!(
+                status_for_error(message),
+                StatusCode::BAD_REQUEST,
+                "{message}"
+            );
+        }
+    }
 }
