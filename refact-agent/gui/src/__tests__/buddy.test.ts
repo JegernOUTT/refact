@@ -334,7 +334,7 @@ function makeOpportunity(
 ): BuddyOpportunity {
   return {
     id: "opp-1",
-    kind: "diagnostic_investigation",
+    kind: "task_health",
     summary: "Test opportunity",
     priority: "normal",
     confidence: 0.8,
@@ -356,11 +356,11 @@ function makeChatRuntimeEvent(
 ): BuddyRuntimeEvent {
   return {
     id: "runtime-1",
-    signal_type: "chat_error",
+    signal_type: "ordinary_status",
     title: "Runtime notice",
     source: "chat",
-    status: "failed",
-    priority: "high",
+    status: "completed",
+    priority: "normal",
     created_at: new Date().toISOString(),
     chat_id: "chat-a",
     ...overrides,
@@ -537,7 +537,9 @@ describe("Buddy chat notification freshness", () => {
     expect(source).toContain(
       'notificationIdentity("opportunity", opportunity.id)',
     );
-    expect(source).toContain('notificationIdentity("thread-error", chatId)');
+    expect(source).not.toContain(
+      'notificationIdentity("thread-error", chatId)',
+    );
   });
 
   test("chat companion source dedupes replayed notification ids", () => {
@@ -863,6 +865,8 @@ describe("Buddy chat notification freshness", () => {
     const runtime = makeChatRuntimeEvent({
       id: "runtime-noisy-prefix",
       title: "generic: LLM error",
+      signal_type: "ordinary_status",
+      status: "completed",
       description: "LLM error: upstream returned 429",
       controls: [],
     });
@@ -873,7 +877,7 @@ describe("Buddy chat notification freshness", () => {
 
     const { container } = renderBuddyChatCompanion(store, "chat-a");
 
-    expect(expectedText).toBe("I hit an LLM snag: upstream returned 429");
+    expect(expectedText).toBe("LLM error: upstream returned 429");
     await expectCompanionNotificationText(
       container,
       "runtime:runtime-noisy-prefix",
@@ -886,6 +890,8 @@ describe("Buddy chat notification freshness", () => {
     const runtime = makeChatRuntimeEvent({
       id: "runtime-context-window",
       title: "generic: LLM error",
+      signal_type: "ordinary_status",
+      status: "completed",
       description:
         "LLM error: Your input exceeds the context window of this model.",
       controls: [],
@@ -4437,7 +4443,7 @@ describe("buddy chat reactions settings and bubbles", () => {
         "runtime:runtime-jsonl-chat-reaction",
       );
       expect(
-        screen.queryByRole("button", { name: "Investigate" }),
+        screen.queryByRole("button", { name: "Poke trail" }),
       ).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
@@ -4491,7 +4497,7 @@ describe("buddy chat reactions settings and bubbles", () => {
           speechText,
         );
         expect(
-          screen.queryByRole("button", { name: "Investigate" }),
+          screen.queryByRole("button", { name: "Poke trail" }),
         ).not.toBeInTheDocument();
       } finally {
         vi.useRealTimers();
@@ -4511,7 +4517,7 @@ describe("buddy chat reactions settings and bubbles", () => {
       "critical-error",
     ],
   ])(
-    "%s runtime event beats live ambient chat reaction",
+    "%s runtime event stays hidden behind live ambient chat reaction",
     async (_label, overrides, eventId) => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
@@ -4551,15 +4557,15 @@ describe("buddy chat reactions settings and bubbles", () => {
 
         await expectCompanionNotification(
           container,
-          `runtime:urgent-runtime-${eventId}`,
+          `runtime:ambient-reaction-${eventId}`,
         );
         expectNoCompanionNotificationNow(
           container,
-          `runtime:ambient-reaction-${eventId}`,
+          `runtime:urgent-runtime-${eventId}`,
         );
         expect(
-          await screen.findByRole("button", { name: "Investigate" }),
-        ).toBeInTheDocument();
+          screen.queryByRole("button", { name: "Poke trail" }),
+        ).not.toBeInTheDocument();
       } finally {
         vi.useRealTimers();
       }
@@ -4613,7 +4619,7 @@ describe("buddy chat reactions settings and bubbles", () => {
         "runtime:stale-high-runtime-error",
       );
       expect(
-        screen.queryByRole("button", { name: "Investigate" }),
+        screen.queryByRole("button", { name: "Poke trail" }),
       ).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
@@ -4814,7 +4820,7 @@ describe("buddy chat reactions settings and bubbles", () => {
       { signal_type: "chat_error", status: "info", priority: "critical" },
     ],
   ])(
-    "%s runtime event still receives error controls",
+    "%s runtime error stays off the chat companion",
     async (_label, overrides) => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
@@ -4833,13 +4839,13 @@ describe("buddy chat reactions settings and bubbles", () => {
 
         const { container } = renderBuddyChatCompanion(store, "chat-a");
 
-        await expectCompanionNotification(
+        await expectNoCompanionNotification(
           container,
           `runtime:runtime-error-controls-${_label}`,
         );
         expect(
-          await screen.findByRole("button", { name: "Investigate" }),
-        ).toBeInTheDocument();
+          screen.queryByRole("button", { name: "Poke trail" }),
+        ).not.toBeInTheDocument();
       } finally {
         vi.useRealTimers();
       }
@@ -4872,7 +4878,7 @@ describe("buddy chat reactions settings and bubbles", () => {
         "runtime:runtime-task-completed-high",
       );
       expect(
-        screen.queryByRole("button", { name: "Investigate" }),
+        screen.queryByRole("button", { name: "Poke trail" }),
       ).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
@@ -5023,7 +5029,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     }
   });
 
-  test("live chat reaction beats stale thread error but critical runtime error wins", async () => {
+  test("live chat reaction beats stale thread and critical runtime errors", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     try {
@@ -5089,6 +5095,10 @@ describe("buddy chat reactions settings and bubbles", () => {
 
       await expectCompanionNotification(
         rendered.container,
+        "runtime:reaction-over-thread-error",
+      );
+      expectNoCompanionNotificationNow(
+        rendered.container,
         "runtime:critical-over-reaction",
       );
     } finally {
@@ -5096,7 +5106,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     }
   });
 
-  test("same thread error keeps first seen timestamp across rerenders", async () => {
+  test("thread errors stay silent while fresh chat reactions render", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     try {
@@ -5110,24 +5120,15 @@ describe("buddy chat reactions settings and bubbles", () => {
           error: "Stable stale error",
         },
       });
-      store.dispatch(
-        recordChatBubbleImpression({
-          id: "prior-actionable-stable-error",
-          kind: "actionable",
-        }),
-      );
       store.dispatch(setBuddySnapshot(makeSnapshot()));
 
       const rendered = renderBuddyChatCompanion(store, "chat-a");
-      await expectCompanionNotification(
+      await expectNoCompanionNotification(
         rendered.container,
         "thread-error:chat-a",
       );
 
       vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
-      rendered.rerender(
-        React.createElement(BuddyChatCompanion, { chatId: "chat-a" }),
-      );
       store.dispatch(
         enqueueRuntimeEvent(
           makeChatRuntimeEvent({
@@ -5189,7 +5190,7 @@ describe("buddy chat reactions settings and bubbles", () => {
         jokeText,
       );
       expect(
-        screen.queryByRole("button", { name: "Investigate" }),
+        screen.queryByRole("button", { name: "Poke trail" }),
       ).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
@@ -5357,10 +5358,9 @@ describe("buddy chat reactions settings and bubbles", () => {
       vi.useRealTimers();
     }
   });
-
   test("chat companion keeps selected chat reaction visible during queue churn until minimum duration", async () => {
-    const baseMs = new Date("2024-01-01T00:00:00Z").getTime();
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(baseMs);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
     try {
       const store = setUpStore();
       const reaction = makeChatRuntimeEvent({
@@ -5399,7 +5399,7 @@ describe("buddy chat reactions settings and bubbles", () => {
       store.dispatch(
         setBuddySnapshot(makeSnapshot({ runtime_queue: [staleError] })),
       );
-      nowSpy.mockReturnValue(baseMs + 9_000);
+      vi.setSystemTime(new Date("2024-01-01T00:00:09Z"));
       store.dispatch(
         setBuddySnapshot(makeSnapshot({ runtime_queue: [staleError] })),
       );
@@ -5413,22 +5413,8 @@ describe("buddy chat reactions settings and bubbles", () => {
         "runtime:reaction-pinned-through-churn",
         "Pinned gremlin refuses to be swept away.",
       );
-
-      nowSpy.mockReturnValue(baseMs + 10_100);
-      store.dispatch(
-        setBuddySnapshot(makeSnapshot({ runtime_queue: [staleError] })),
-      );
-
-      await expectNoCompanionNotification(
-        container,
-        "runtime:reaction-pinned-through-churn",
-      );
-      await expectCompanionNotification(
-        container,
-        "runtime:churn-stale-high-error",
-      );
     } finally {
-      nowSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 
@@ -5471,7 +5457,7 @@ describe("buddy chat reactions settings and bubbles", () => {
     }
   });
 
-  test.each<[string]>([["win"], ["suggestion"], ["error_alert"]])(
+  test.each<[string]>([["win"], ["suggestion"]])(
     "speech with %s intent is actionable and survives freshness expiry",
     async (intent) => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -5501,6 +5487,32 @@ describe("buddy chat reactions settings and bubbles", () => {
       }
     },
   );
+
+  test("speech with error_alert intent stays off the chat companion", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:02:00Z"));
+    try {
+      const store = setUpStore();
+      const speech = makeChatSpeech({
+        id: "error-alert-hidden",
+        text: "error alert message",
+        speech_intent: "error_alert",
+        persistent: false,
+        ttl_seconds: 300,
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(setBuddySnapshot(makeSnapshot({ active_speech: speech })));
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectNoCompanionNotification(
+        container,
+        "speech:error-alert-hidden",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("restoreChat buddy_meta handling", () => {

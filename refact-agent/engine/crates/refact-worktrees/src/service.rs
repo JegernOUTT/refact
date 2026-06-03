@@ -130,6 +130,17 @@ impl WorktreeService {
         self.record_view(record)
     }
 
+    pub async fn validate_registered_worktree_checkout(&self, id: &str) -> Result<(), String> {
+        validate_worktree_id(id)?;
+        let registry = self.load_registry_unlocked().await?;
+        let record = registry
+            .records
+            .iter()
+            .find(|record| record.meta.id == id)
+            .ok_or_else(|| format!("Worktree '{}' not found", id))?;
+        validate_registered_record_checkout(record)
+    }
+
     pub async fn create_worktree(
         &self,
         request: CreateWorktreeRequest,
@@ -463,18 +474,12 @@ impl WorktreeService {
             .position(|record| record.meta.id == id)
             .ok_or_else(|| format!("Worktree '{}' not found", id))?;
         let record = registry.records[index].clone();
-        if !record.meta.root.exists() {
-            return Err(format!(
-                "Worktree '{}' path '{}' does not exist",
-                id,
-                record.meta.root.display()
-            ));
-        }
         let source_branch = record
             .meta
             .branch
             .clone()
             .ok_or_else(|| format!("Worktree '{}' has no source branch", id))?;
+        validate_registered_record_checkout(&record)?;
         validate_branch_name(&source_branch)?;
         let target_branch = request
             .target_branch
@@ -488,18 +493,19 @@ impl WorktreeService {
         if !git::branch_exists(&record.meta.source_workspace_root, &target_branch)? {
             return Err(format!("Target branch '{}' not found", target_branch));
         }
-        git::ensure_clean_worktree(&record.meta.source_workspace_root, "Target workspace")?;
-        let status = git::status_for_path(&record.meta.root);
-        if !status.is_git_worktree {
-            return Err(format!("Worktree '{}' is not a git worktree", id));
-        }
+        git::ensure_no_merge_in_progress(&record.meta.source_workspace_root, "Target workspace")?;
+        git::ensure_dirty_worktree_on_branch(
+            &record.meta.source_workspace_root,
+            "Target workspace",
+            &target_branch,
+        )?;
         let commit_message = request
             .commit_message
             .clone()
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| fallback_merge_message(&record, &source_branch));
         let mut committed_uncommitted = None;
-        if status.dirty {
+        if git::has_porcelain_changes(&record.meta.root)? {
             if !request.include_uncommitted {
                 return Err(format!(
                     "Worktree '{}' has uncommitted changes; set include_uncommitted=true to auto-commit them first",
@@ -541,12 +547,14 @@ impl WorktreeService {
                 warnings: Vec::new(),
             });
         }
-        let conflicts = git::preflight_merge_conflicts(
+        let preflight = git::preflight_merge_conflicts(
             &record.meta.source_workspace_root,
             &target_branch,
             &source_branch,
             request.strategy.as_str(),
         )?;
+        let preflight_warnings = preflight.warnings;
+        let conflicts = preflight.conflicts;
         if !conflicts.is_empty() {
             return Ok(MergeWorktreeResponse {
                 id: id.to_string(),
@@ -561,15 +569,47 @@ impl WorktreeService {
                 conflict: Some(conflict_state(conflicts, true, false)),
                 affected_references,
                 affected_reference_count,
-                warnings: Vec::new(),
+                warnings: preflight_warnings,
             });
         }
-        git::checkout_branch(&record.meta.source_workspace_root, &target_branch).map_err(|e| {
-            format!(
-                "Failed to checkout target branch '{}': {}",
-                target_branch, e
-            )
-        })?;
+        let target_stash = git::stash_dirty_worktree(
+            &record.meta.source_workspace_root,
+            "Target workspace",
+            Some(&target_branch),
+        )?;
+        if let Err(e) = git::checkout_branch(&record.meta.source_workspace_root, &target_branch) {
+            let mut cleanup_warnings = Vec::new();
+            if let Some(stash) = target_stash.as_ref() {
+                restore_target_stash(
+                    &record.meta.source_workspace_root,
+                    stash,
+                    &mut cleanup_warnings,
+                );
+            }
+            return Err(format_merge_failure(
+                &format!("Failed to checkout target branch '{}'", target_branch),
+                &e,
+                cleanup_warnings,
+            ));
+        }
+        let target_pre_merge_head = match git::head_rev(&record.meta.source_workspace_root) {
+            Ok(head) => head,
+            Err(e) => {
+                let mut cleanup_warnings = Vec::new();
+                if let Some(stash) = target_stash.as_ref() {
+                    restore_target_stash(
+                        &record.meta.source_workspace_root,
+                        stash,
+                        &mut cleanup_warnings,
+                    );
+                }
+                return Err(format_merge_failure(
+                    "Failed to read target workspace HEAD after checkout",
+                    &e,
+                    cleanup_warnings,
+                ));
+            }
+        };
         let merge_result = if request.strategy.as_str() == "squash" {
             git::run_git(
                 &record.meta.source_workspace_root,
@@ -578,14 +618,38 @@ impl WorktreeService {
         } else {
             git::run_git_with_refact_author(
                 &record.meta.source_workspace_root,
-                &["merge", "--no-ff", &source_branch, "-m", &commit_message],
+                &[
+                    "merge",
+                    "--no-ff",
+                    "--no-gpg-sign",
+                    &source_branch,
+                    "-m",
+                    &commit_message,
+                ],
             )
         };
         if let Err(e) = merge_result {
             let conflict_files = git::conflict_files_for_path(&record.meta.source_workspace_root);
-            let cleanup_warnings = git::cleanup_failed_merge(&record.meta.source_workspace_root);
+            let merge_abort_warnings =
+                git::cleanup_failed_merge(&record.meta.source_workspace_root);
+            let merge_abort_ok = merge_abort_warnings.is_empty();
+            let mut cleanup_warnings = merge_abort_warnings;
+            let stash_restored = if let Some(stash) = target_stash.as_ref() {
+                restore_target_stash(
+                    &record.meta.source_workspace_root,
+                    stash,
+                    &mut cleanup_warnings,
+                )
+            } else {
+                true
+            };
             if !conflict_files.is_empty() {
-                let aborted = cleanup_warnings.is_empty();
+                let cleanup_ok = merge_abort_ok && stash_restored;
+                let conflict = post_cleanup_conflict_state(
+                    &record.meta.source_workspace_root,
+                    conflict_files,
+                    cleanup_ok,
+                );
                 return Ok(MergeWorktreeResponse {
                     id: id.to_string(),
                     status: "conflict".to_string(),
@@ -596,7 +660,7 @@ impl WorktreeService {
                     committed_uncommitted,
                     merge_commit: None,
                     cleanup: None,
-                    conflict: Some(conflict_state(conflict_files, aborted, !aborted)),
+                    conflict: Some(conflict),
                     affected_references,
                     affected_reference_count,
                     warnings: cleanup_warnings,
@@ -609,8 +673,15 @@ impl WorktreeService {
                 &record.meta.source_workspace_root,
                 &["commit", "-m", &commit_message, "--no-gpg-sign"],
             ) {
-                let cleanup_warnings =
+                let mut cleanup_warnings =
                     git::cleanup_failed_merge(&record.meta.source_workspace_root);
+                if let Some(stash) = target_stash.as_ref() {
+                    restore_target_stash(
+                        &record.meta.source_workspace_root,
+                        stash,
+                        &mut cleanup_warnings,
+                    );
+                }
                 return Err(format_merge_failure(
                     "Failed to commit squash merge",
                     &e,
@@ -618,7 +689,65 @@ impl WorktreeService {
                 ));
             }
         }
-        let merge_commit = Some(git::head_rev(&record.meta.source_workspace_root)?);
+        let mut warnings = preflight_warnings;
+        let merge_commit = match git::head_rev(&record.meta.source_workspace_root) {
+            Ok(head) => Some(head),
+            Err(e) => {
+                warnings.push(format!("Failed to read merge commit: {}", e));
+                None
+            }
+        };
+        if let Some(stash) = target_stash.as_ref() {
+            match git::apply_and_drop_stash(&record.meta.source_workspace_root, stash) {
+                Ok(stash_warnings) => warnings.extend(stash_warnings),
+                Err(e) => {
+                    let conflict_files =
+                        git::conflict_files_for_path(&record.meta.source_workspace_root);
+                    let mut cleanup_warnings =
+                        git::reset_hard(&record.meta.source_workspace_root, &target_pre_merge_head);
+                    let reset_ok = cleanup_warnings.is_empty();
+                    let stash_restored = restore_target_stash(
+                        &record.meta.source_workspace_root,
+                        stash,
+                        &mut cleanup_warnings,
+                    );
+                    let restored_conflicts =
+                        git::conflict_files_for_path(&record.meta.source_workspace_root);
+                    cleanup_warnings.insert(
+                        0,
+                        format!(
+                            "Failed to reapply target workspace changes after merge; merge was rolled back: {}",
+                            e
+                        ),
+                    );
+                    let cleanup_ok = reset_ok && stash_restored;
+                    let conflict = post_cleanup_conflict_state(
+                        &record.meta.source_workspace_root,
+                        if conflict_files.is_empty() {
+                            restored_conflicts
+                        } else {
+                            conflict_files
+                        },
+                        cleanup_ok,
+                    );
+                    return Ok(MergeWorktreeResponse {
+                        id: id.to_string(),
+                        status: "conflict".to_string(),
+                        merged: false,
+                        strategy: request.strategy.as_str().to_string(),
+                        source_branch,
+                        target_branch,
+                        committed_uncommitted,
+                        merge_commit: None,
+                        cleanup: None,
+                        conflict: Some(conflict),
+                        affected_references,
+                        affected_reference_count,
+                        warnings: cleanup_warnings,
+                    });
+                }
+            }
+        }
         let cleanup = if request.delete_after_merge && source_branch != target_branch {
             Some(
                 self.cleanup_registered_worktree(&mut registry, index, &record, true)
@@ -644,7 +773,7 @@ impl WorktreeService {
             conflict: None,
             affected_references,
             affected_reference_count,
-            warnings: Vec::new(),
+            warnings,
         })
     }
 
@@ -1511,6 +1640,62 @@ fn reference_key(reference: &WorktreeReference) -> String {
     )
 }
 
+fn canonical_git_path(root: &Path, git_path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(git_path.trim());
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    path.canonicalize()
+        .map_err(|e| format!("Failed to canonicalize git path: {}", e))
+}
+
+fn validate_registered_record_checkout(record: &WorktreeRegistryRecord) -> Result<(), String> {
+    if !record.meta.root.exists() {
+        return Err(format!(
+            "Worktree '{}' path '{}' does not exist",
+            record.meta.id,
+            record.meta.root.display()
+        ));
+    }
+    let registered_root = record
+        .meta
+        .root
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize worktree root: {}", e))?;
+    let top_level = git::run_git(&registered_root, &["rev-parse", "--show-toplevel"])?;
+    let top_level = canonical_git_path(&registered_root, &top_level)?;
+    if top_level != registered_root {
+        return Err(format!(
+            "Worktree '{}' path '{}' is not the git worktree root",
+            record.meta.id,
+            record.meta.root.display()
+        ));
+    }
+    let source_common_dir = git::run_git(
+        &record.meta.source_workspace_root,
+        &["rev-parse", "--git-common-dir"],
+    )?;
+    let registered_common_dir = git::run_git(&registered_root, &["rev-parse", "--git-common-dir"])?;
+    if canonical_git_path(&record.meta.source_workspace_root, &source_common_dir)?
+        != canonical_git_path(&registered_root, &registered_common_dir)?
+    {
+        return Err(format!(
+            "Worktree '{}' path '{}' belongs to a different repository",
+            record.meta.id,
+            record.meta.root.display()
+        ));
+    }
+    let source_branch = record
+        .meta
+        .branch
+        .clone()
+        .ok_or_else(|| format!("Worktree '{}' has no source branch", record.meta.id))?;
+    git::ensure_checkout_on_branch(&registered_root, "Source worktree", &source_branch)?;
+    Ok(())
+}
+
 fn fallback_merge_message(record: &WorktreeRegistryRecord, branch: &str) -> String {
     if let Some(card_id) = record.meta.card_id.as_deref() {
         format!("Merge worktree {} for card {}", branch, card_id)
@@ -1519,6 +1704,39 @@ fn fallback_merge_message(record: &WorktreeRegistryRecord, branch: &str) -> Stri
     } else {
         format!("Merge worktree {}", branch)
     }
+}
+
+fn restore_target_stash(
+    source_root: &Path,
+    stash: &git::DirtyWorktreeStash,
+    warnings: &mut Vec<String>,
+) -> bool {
+    let restore_result = git::restore_stashed_changes(source_root, stash);
+    let restored = restore_result.critical_ok
+        && git::conflict_files_for_path(source_root).is_empty()
+        && !git::has_merge_in_progress(source_root);
+    warnings.extend(restore_result.warnings);
+    restored
+}
+
+fn post_cleanup_conflict_state(
+    source_root: &Path,
+    original_files: Vec<String>,
+    cleanup_ok: bool,
+) -> WorktreeConflictState {
+    let current_files = git::conflict_files_for_path(source_root);
+    let merge_in_progress = git::has_merge_in_progress(source_root);
+    let current_files_empty = current_files.is_empty();
+    let files = if current_files.is_empty() {
+        original_files
+    } else {
+        current_files
+    };
+    conflict_state(
+        files,
+        cleanup_ok && !merge_in_progress && current_files_empty,
+        merge_in_progress,
+    )
 }
 
 fn format_merge_failure(prefix: &str, error: &str, cleanup_warnings: Vec<String>) -> String {
@@ -1539,15 +1757,18 @@ fn conflict_state(
     aborted: bool,
     merge_in_progress: bool,
 ) -> WorktreeConflictState {
+    let instructions = if aborted {
+        "Merge conflicts were detected during preflight or the merge was aborted and cleaned up; no conflict markers were left behind. Merge the source branch changes against the target branch yourself, then retry."
+    } else if merge_in_progress {
+        "Merge conflicts remain in the target workspace; resolve or abort the merge before retrying."
+    } else {
+        "The merge was stopped, but cleanup warnings were reported. Inspect the target workspace and warnings before retrying."
+    };
     WorktreeConflictState {
         files,
         aborted,
         merge_in_progress,
-        instructions: if aborted {
-            "Merge conflicts were detected during preflight or the merge was aborted and cleaned up; no conflict markers were left behind. Merge the source branch changes against the target branch yourself, then retry.".to_string()
-        } else {
-            "Merge conflicts remain in the target workspace; resolve or abort the merge before retrying.".to_string()
-        },
+        instructions: instructions.to_string(),
     }
 }
 
@@ -1963,6 +2184,32 @@ mod worktree_registry_tests {
     }
 
     #[tokio::test]
+    async fn worktree_registry_create_warns_for_dirty_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        std::fs::write(source.join("dirty-source.txt"), "dirty\n").unwrap();
+        let service = WorktreeService::new(cache, source).unwrap();
+
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-source-warning".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(created.dirty_source_warning);
+        assert!(created
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Source checkout has uncommitted changes")));
+    }
+
+    #[tokio::test]
     async fn worktree_registry_list_prunes_missing_records() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
@@ -2325,6 +2572,36 @@ mod worktree_registry_tests {
         assert!(diff.patch.len() <= 1_128);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_merge_diff_untracked_symlink_does_not_read_external_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        let outside = temp.path().join("outside-secret.txt");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(&outside, "secret outside repo\n").unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/symlink-untracked".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&outside, created.worktree.meta.root.join("leak.txt")).unwrap();
+
+        let diff = service
+            .diff_worktree(&created.worktree.meta.id)
+            .await
+            .unwrap();
+
+        assert!(diff.patch.contains("new file mode 120000"));
+        assert!(!diff.patch.contains("secret outside repo"));
+    }
+
     #[tokio::test]
     async fn worktree_merge_squash_creates_single_parent_change_on_base() {
         let temp = tempfile::tempdir().unwrap();
@@ -2376,6 +2653,416 @@ mod worktree_registry_tests {
     }
 
     #[tokio::test]
+    async fn worktree_merge_auto_commits_dirty_source_worktree_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-source-default".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        std::fs::write(
+            created.worktree.meta.root.join("file.txt"),
+            "dirty source\n",
+        )
+        .unwrap();
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty source merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(merged.merged);
+        assert!(merged.committed_uncommitted.is_some());
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "dirty source\n"
+        );
+        assert!(!git::status_for_path(&created.worktree.meta.root).dirty);
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_refuses_dirty_registered_source_on_different_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/source-branch-guard".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        run_git(
+            &created.worktree.meta.root,
+            &["checkout", "-b", "manual-branch"],
+        );
+        std::fs::write(
+            created.worktree.meta.root.join("file.txt"),
+            "dirty wrong branch\n",
+        )
+        .unwrap();
+
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("should not commit wrong branch".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("different branch"), "{error}");
+        assert_eq!(
+            run_git(&created.worktree.meta.root, &["branch", "--show-current"]).trim(),
+            "manual-branch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(created.worktree.meta.root.join("file.txt")).unwrap(),
+            "dirty wrong branch\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_refuses_dirty_registered_source_on_detached_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/source-detached-guard".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let head = run_git(&created.worktree.meta.root, &["rev-parse", "HEAD"]);
+        run_git(
+            &created.worktree.meta.root,
+            &["checkout", "--detach", head.trim()],
+        );
+        std::fs::write(
+            created.worktree.meta.root.join("file.txt"),
+            "dirty detached\n",
+        )
+        .unwrap();
+
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("should not commit detached".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("detached HEAD"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(created.worktree.meta.root.join("file.txt")).unwrap(),
+            "dirty detached\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_refuses_registered_path_replaced_by_unrelated_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/replaced-root".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let source_branch = created.worktree.meta.branch.clone().unwrap();
+        std::fs::remove_dir_all(&created.worktree.meta.root).unwrap();
+        std::fs::create_dir_all(&created.worktree.meta.root).unwrap();
+        init_repo(&created.worktree.meta.root);
+        run_git(
+            &created.worktree.meta.root,
+            &["checkout", "-b", &source_branch],
+        );
+        std::fs::write(created.worktree.meta.root.join("file.txt"), "unrelated\n").unwrap();
+
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("should reject unrelated repo".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("different repository"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_refuses_dirty_target_before_source_auto_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/target-guard-before-source-commit".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        std::fs::write(
+            created.worktree.meta.root.join("source-dirty.txt"),
+            "source dirty\n",
+        )
+        .unwrap();
+        run_git(&source, &["checkout", "-b", "target-user-dirty"]);
+        std::fs::write(source.join("target-dirty.txt"), "target dirty\n").unwrap();
+
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("should not auto commit source".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("different branch"), "{error}");
+        assert_eq!(
+            run_git(
+                &created.worktree.meta.root,
+                &["rev-list", "--count", "HEAD"]
+            )
+            .trim(),
+            "1"
+        );
+        assert!(
+            run_git(&created.worktree.meta.root, &["status", "--porcelain"])
+                .contains("source-dirty.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_refuses_dirty_target_before_noop_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/target-guard-before-noop-cleanup".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let source_branch = created.worktree.meta.branch.clone().unwrap();
+        run_git(&source, &["checkout", "-b", "target-user-dirty-noop"]);
+        std::fs::write(source.join("target-dirty.txt"), "target dirty\n").unwrap();
+
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: true,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("should not cleanup".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("different branch"), "{error}");
+        assert!(created.worktree.meta.root.exists());
+        assert!(branch_exists(&source, &source_branch));
+        assert!(service
+            .get_worktree(&created.worktree.meta.id)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_auto_commit_failure_restores_source_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-source-hook-failure".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "agent.txt",
+            "agent change\n",
+            "agent change",
+        );
+        std::fs::write(created.worktree.meta.root.join("staged.txt"), "staged\n").unwrap();
+        run_git(&created.worktree.meta.root, &["add", "staged.txt"]);
+        std::fs::write(
+            created.worktree.meta.root.join("unstaged.txt"),
+            "unstaged\n",
+        )
+        .unwrap();
+        let git_common_dir = run_git(
+            &created.worktree.meta.root,
+            &["rev-parse", "--git-common-dir"],
+        );
+        let git_common_dir = PathBuf::from(git_common_dir.trim());
+        let hook = git_common_dir.join("hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook, perms).unwrap();
+        }
+
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("source hook failure".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("Failed to auto-commit source worktree changes"));
+        assert!(run_git(
+            &created.worktree.meta.root,
+            &["diff", "--cached", "--name-only"]
+        )
+        .lines()
+        .any(|line| line == "staged.txt"));
+        assert!(!run_git(
+            &created.worktree.meta.root,
+            &["diff", "--cached", "--name-only"]
+        )
+        .lines()
+        .any(|line| line == "unstaged.txt"));
+        assert!(
+            run_git(&created.worktree.meta.root, &["status", "--porcelain"])
+                .lines()
+                .any(|line| line == "?? unstaged.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_refuses_dirty_source_with_merge_in_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/source-merge-in-progress".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent side\n",
+            "agent side",
+        );
+        commit_file(&source, "file.txt", "main side\n", "main side");
+        let merge_output = Command::new("git")
+            .args(["merge", "main"])
+            .current_dir(&created.worktree.meta.root)
+            .output()
+            .unwrap();
+        assert!(!merge_output.status.success());
+        assert!(git::has_merge_in_progress(&created.worktree.meta.root));
+
+        let error = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("should not commit source merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("Source worktree has a merge in progress"));
+        assert!(git::has_merge_in_progress(&created.worktree.meta.root));
+    }
+
+    #[tokio::test]
     async fn worktree_merge_regular_no_ff_merge_works() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
@@ -2416,6 +3103,52 @@ mod worktree_registry_tests {
         assert_eq!(
             std::fs::read_to_string(source.join("file.txt")).unwrap(),
             "regular change\n"
+        );
+        assert_eq!(head_parent_count(&source), 2);
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_regular_no_ff_ignores_gpgsign_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/regular-gpgsign".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "regular signed config change\n",
+            "agent change",
+        );
+        run_git(&source, &["config", "commit.gpgsign", "true"]);
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Merge,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("regular merge without gpg signing".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(merged.merged);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "regular signed config change\n"
         );
         assert_eq!(head_parent_count(&source), 2);
     }
@@ -2622,6 +3355,386 @@ mod worktree_registry_tests {
             .get_worktree(&created.worktree.meta.id)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_preserves_dirty_target_workspace_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-target".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent change\n",
+            "agent change",
+        );
+        std::fs::write(source.join("target-notes.txt"), "dirty target\n").unwrap();
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty target merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(merged.merged);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "agent change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("target-notes.txt")).unwrap(),
+            "dirty target\n"
+        );
+        assert!(git::status_for_path(&source).dirty);
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_preserves_dirty_target_without_repo_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-target-no-identity".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent change\n",
+            "agent change",
+        );
+        std::fs::write(source.join("target-notes.txt"), "dirty target\n").unwrap();
+        unset_user_config(&source);
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty target merge without identity".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(merged.merged);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "agent change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("target-notes.txt")).unwrap(),
+            "dirty target\n"
+        );
+        assert!(git::status_for_path(&source).dirty);
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_preserves_dirty_target_staged_and_unstaged_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        commit_file(&source, "target-base.txt", "target base\n", "target base");
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-target-index".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent change\n",
+            "agent change",
+        );
+        std::fs::write(source.join("staged-target.txt"), "staged target\n").unwrap();
+        run_git(&source, &["add", "staged-target.txt"]);
+        std::fs::write(source.join("target-base.txt"), "unstaged target\n").unwrap();
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty target index merge".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(merged.merged);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "agent change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("staged-target.txt")).unwrap(),
+            "staged target\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("target-base.txt")).unwrap(),
+            "unstaged target\n"
+        );
+        assert!(run_git(&source, &["diff", "--cached", "--name-only"])
+            .lines()
+            .any(|line| line == "staged-target.txt"));
+        assert!(run_git(&source, &["diff", "--name-only"])
+            .lines()
+            .any(|line| line == "target-base.txt"));
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_blocks_dirty_target_changes_from_different_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-target-cross-branch".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent change\n",
+            "agent change",
+        );
+        run_git(&source, &["checkout", "-b", "user-dirty"]);
+        std::fs::write(source.join("target-notes.txt"), "dirty target\n").unwrap();
+
+        let err = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty target cross branch".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("different branch"));
+        assert!(err.contains("user-dirty"));
+        assert_eq!(
+            run_git(&source, &["branch", "--show-current"]).trim(),
+            "user-dirty"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("target-notes.txt")).unwrap(),
+            "dirty target\n"
+        );
+        assert!(git::status_for_path(&source).dirty);
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_blocks_dirty_target_changes_from_detached_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-target-detached".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent change\n",
+            "agent change",
+        );
+        run_git(&source, &["checkout", "--detach", "HEAD"]);
+        let detached_head = run_git(&source, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(source.join("target-notes.txt"), "dirty detached target\n").unwrap();
+
+        let err = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty target detached".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("detached HEAD"));
+        assert_eq!(run_git(&source, &["branch", "--show-current"]).trim(), "");
+        assert_eq!(
+            run_git(&source, &["rev-parse", "HEAD"]).trim(),
+            detached_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("target-notes.txt")).unwrap(),
+            "dirty detached target\n"
+        );
+        assert!(git::status_for_path(&source).dirty);
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_conflicting_dirty_target_change_rolls_back_and_restores() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-target-conflict".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent change\n",
+            "agent change",
+        );
+        std::fs::write(source.join("file.txt"), "dirty target\n").unwrap();
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty target conflict".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(merged.status, "conflict");
+        assert!(!merged.merged);
+        let conflict = merged.conflict.unwrap();
+        assert!(conflict.aborted);
+        assert!(!conflict.merge_in_progress);
+        assert!(conflict.files.contains(&"file.txt".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "dirty target\n"
+        );
+        assert!(git::status_for_path(&source).dirty);
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_merge_untracked_dirty_target_conflict_rolls_back_and_restores() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/dirty-target-untracked-conflict".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "new-file.txt",
+            "agent file\n",
+            "agent adds file",
+        );
+        std::fs::write(source.join("new-file.txt"), "dirty target file\n").unwrap();
+
+        let merged = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: false,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("dirty target untracked conflict".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(merged.status, "conflict");
+        assert!(!merged.merged);
+        let conflict = merged.conflict.unwrap();
+        assert!(conflict.aborted);
+        assert!(!conflict.merge_in_progress);
+        assert_eq!(
+            std::fs::read_to_string(source.join("new-file.txt")).unwrap(),
+            "dirty target file\n"
+        );
+        assert!(merged
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("merge was rolled back")));
+        assert!(git::status_for_path(&source).dirty);
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
     }
 
     #[tokio::test]

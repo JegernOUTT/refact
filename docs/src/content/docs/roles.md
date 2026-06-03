@@ -12,7 +12,7 @@ The two hidden roles are:
 | `event` | Internal facts such as tool decisions, mode switches, cron fires, sleep ticks, process completions, verifier reports, and system notices. | The collapsible Event log in chat. |
 | `plan` | The agent's current and previous Markdown plans, including version metadata. | The Plan banner pinned above the chat transcript. |
 
-Hidden roles are still part of the thread. They are saved in trajectories, included in snapshots, and available to the model through provider-safe formatting. They are hidden only from the normal transcript so internal bookkeeping stays separate from human conversation.
+Hidden roles are still part of the thread. They are saved in trajectories, included in snapshots, and available to the model through provider-safe formatting. When Refact starts a new thread from existing history, it preserves these hidden roles while sanitizing UI-only fields so internal bookkeeping stays separate from human conversation.
 
 ## Why hidden roles exist
 

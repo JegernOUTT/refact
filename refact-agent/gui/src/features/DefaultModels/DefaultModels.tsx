@@ -37,7 +37,13 @@ type DefaultModelsProps = {
   draftId?: string;
 };
 
-type ModelTypeKey = "chat" | "chat_light" | "chat_thinking" | "chat_buddy";
+type ModelTypeKey =
+  | "chat"
+  | "chat_model_2"
+  | "task_planner_agent_model"
+  | "chat_light"
+  | "chat_thinking"
+  | "chat_buddy";
 
 const MODEL_TYPE_LABELS: Record<
   ModelTypeKey,
@@ -46,6 +52,14 @@ const MODEL_TYPE_LABELS: Record<
   chat: {
     title: "Default Chat Model",
     description: "The primary model used for chat conversations",
+  },
+  chat_model_2: {
+    title: "Chat Model 2",
+    description: "Secondary chat model slot for future chat workflows",
+  },
+  task_planner_agent_model: {
+    title: "Task Planner Agent Model",
+    description: "Model used by task management when spawning task agents",
   },
   chat_light: {
     title: "Light Chat Model",
@@ -158,6 +172,8 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
   const capsDefaults = useMemo(
     () => ({
       chat: capsData?.chat_default_model ?? "",
+      chat_model_2: capsData?.chat_model_2 ?? "",
+      task_planner_agent_model: capsData?.task_planner_agent_model ?? "",
       chat_light: capsData?.chat_light_model ?? "",
       chat_thinking: capsData?.chat_thinking_model ?? "",
       chat_buddy: capsData?.chat_buddy_model ?? "",
@@ -167,6 +183,8 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
 
   const [localDefaults, setLocalDefaults] = useState<ProviderDefaults>({
     chat: {},
+    chat_model_2: {},
+    task_planner_agent_model: {},
     chat_light: {},
     chat_thinking: {},
     chat_buddy: {},
@@ -186,6 +204,8 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     if (defaults) {
       const base: ProviderDefaults = {
         chat: defaults.chat,
+        chat_model_2: defaults.chat_model_2,
+        task_planner_agent_model: defaults.task_planner_agent_model,
         chat_light: defaults.chat_light,
         chat_thinking: defaults.chat_thinking,
         chat_buddy: defaults.chat_buddy ?? {},

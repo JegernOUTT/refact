@@ -10,6 +10,8 @@ export type EnrichedModel = {
   nCtx?: number;
   capabilities?: ModelCapabilities;
   isDefault?: boolean;
+  isChat2?: boolean;
+  isTaskPlannerAgent?: boolean;
   isThinking?: boolean;
   isLight?: boolean;
   isBuddy?: boolean;
@@ -37,6 +39,19 @@ const PROVIDER_PRIORITY: Record<string, number> = {
   mistral: 6,
 };
 
+export function pricingForModel(
+  pricing: Record<string, CapCost | undefined> | undefined,
+  modelKey: string,
+  displayName: string,
+): CapCost | undefined {
+  if (!pricing) return undefined;
+  return (
+    pricing[modelKey] ??
+    pricing[displayName] ??
+    pricing[modelKey.replace(/^refact\//, "")]
+  );
+}
+
 function extractCapabilities(
   capsModel: CapsResponse["chat_models"][string] | undefined,
 ): ModelCapabilities | undefined {
@@ -59,11 +74,7 @@ function getPricing(
   displayName: string,
   caps: CapsResponse,
 ): CapCost | undefined {
-  const pricing = caps.metadata?.pricing;
-  if (!pricing) return undefined;
-
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  return pricing[displayName] || pricing[modelKey.replace(/^refact\//, "")];
+  return pricingForModel(caps.metadata?.pricing, modelKey, displayName);
 }
 
 function getContextWindow(
@@ -101,6 +112,8 @@ export function enrichModels(
       nCtx: getContextWindow(capsModel),
       capabilities: extractCapabilities(capsModel),
       isDefault: caps.chat_default_model === modelKey,
+      isChat2: caps.chat_model_2 === modelKey,
+      isTaskPlannerAgent: caps.task_planner_agent_model === modelKey,
       isThinking: caps.chat_thinking_model === modelKey,
       isLight: caps.chat_light_model === modelKey,
       isBuddy: caps.chat_buddy_model === modelKey,
@@ -113,6 +126,10 @@ function sortModelsInGroup(models: EnrichedModel[]): EnrichedModel[] {
   return [...models].sort((a, b) => {
     if (a.isDefault) return -1;
     if (b.isDefault) return 1;
+    if (a.isTaskPlannerAgent) return -1;
+    if (b.isTaskPlannerAgent) return 1;
+    if (a.isChat2) return -1;
+    if (b.isChat2) return 1;
     if (a.isThinking) return -1;
     if (b.isThinking) return 1;
     if (a.isLight) return -1;

@@ -1226,7 +1226,10 @@ async fn collect_behavior_trajectory_metas(gcx: AppState) -> Vec<BehaviorTraject
         metas
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|err| {
+        tracing::warn!("buddy behavior trajectory scan task failed: {err}");
+        Vec::new()
+    })
 }
 
 async fn collect_recent_user_snippets(
@@ -1598,7 +1601,10 @@ async fn model_cost_evidence(gcx: AppState) -> Option<AutonomousEvidence> {
         )
     })
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|err| {
+        tracing::warn!("buddy model cost stats scan task failed: {err}");
+        Vec::new()
+    });
     model_cost_evidence_from_events(&events)
 }
 
@@ -1674,10 +1680,6 @@ impl BuddyJob for BuddyBehaviorLearnerJob {
         22
     }
 
-    fn records_empty_result(&self) -> bool {
-        false
-    }
-
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.pulse.trajectories.total >= 4
     }
@@ -1749,10 +1751,6 @@ impl BuddyJob for BuddyModelCostOptimizerJob {
 
     fn priority(&self) -> u32 {
         24
-    }
-
-    fn records_empty_result(&self) -> bool {
-        false
     }
 
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
@@ -2591,19 +2589,48 @@ fn scan_security_findings_from_source(
         return Vec::new();
     }
 
-    secret_patterns()
-        .iter()
-        .flat_map(|(kind, regex)| {
-            regex.find_iter(content).map(move |m| SecurityFinding {
-                path: path.to_string(),
-                source: source.to_string(),
-                kind: (*kind).to_string(),
-                preview: security_preview(content, m.start(), m.end()),
-            })
-        })
-        .take(limit)
-        .collect()
+    // Collect (kind, start, end) for every match across all patterns.
+    // We then suppress `assigned_secret` matches that overlap with a more
+    // specific pattern (github_token, gitlab_token, openai_key, bearer_token,
+    // authorization_header) so generic catches don't duplicate or override
+    // precise detections.
+    let mut raw: Vec<(&'static str, usize, usize)> = Vec::new();
+    for (kind, regex) in secret_patterns().iter() {
+        for m in regex.find_iter(content) {
+            raw.push((*kind, m.start(), m.end()));
+        }
+    }
+
+    let mut suppressed_ranges: Vec<(usize, usize)> = Vec::new();
+    for (kind, start, end) in &raw {
+        if *kind != ASSIGNED_SECRET_KIND {
+            suppressed_ranges.push((*start, *end));
+        }
+    }
+
+    let mut findings = Vec::new();
+    for (kind, start, end) in raw {
+        if kind == ASSIGNED_SECRET_KIND
+            && suppressed_ranges
+                .iter()
+                .any(|(s, e)| start < *e && end > *s)
+        {
+            continue;
+        }
+        if findings.len() >= limit {
+            break;
+        }
+        findings.push(SecurityFinding {
+            path: path.to_string(),
+            source: source.to_string(),
+            kind: kind.to_string(),
+            preview: security_preview(content, start, end),
+        });
+    }
+    findings
 }
+
+const ASSIGNED_SECRET_KIND: &str = "assigned_secret";
 
 fn push_security_findings(
     findings: &mut Vec<SecurityFinding>,
@@ -2652,13 +2679,13 @@ fn secret_patterns() -> &'static [(&'static str, Regex)] {
             (
                 "assigned_secret",
                 Regex::new(
-                    r#"(?i)\b(api[_-]?key|apikey|token|secret|password)\s*[:=]\s*[^\s"',;]+"#,
+                    r#"(?i)["']?\b(api[_-]?key|apikey|(?:access|refresh|id|client)[_-]?token|client[_-]?secret|private[_-]?key|password|secret|token)\b["']?\s*[:=]\s*["']?[^"'\s,;]{12,}"#,
                 )
                 .unwrap(),
             ),
             (
                 "authorization_header",
-                Regex::new(r#"(?i)Authorization:\s*[^\s"',]+"#).unwrap(),
+                Regex::new(r#"(?i)["']?\bAuthorization\b["']?\s*[:=]\s*["']?[^"'\n,;]+"#).unwrap(),
             ),
         ]
     })
@@ -2670,7 +2697,14 @@ fn security_preview(content: &str, start: usize, end: usize) -> String {
         .find('\n')
         .map(|idx| end + idx)
         .unwrap_or(content.len());
-    preview_text(&content[line_start..line_end], 200)
+    let line = &content[line_start..line_end];
+    let secret_start = start.saturating_sub(line_start).min(line.len());
+    let secret_end = end.saturating_sub(line_start).min(line.len());
+    let mut masked = String::with_capacity(line.len());
+    masked.push_str(&line[..secret_start]);
+    masked.push_str("[REDACTED_SECRET]");
+    masked.push_str(&line[secret_end..]);
+    preview_text(&masked, 200)
 }
 
 fn diagnostic_security_findings(diagnostics: &[DiagnosticContext]) -> Vec<SecurityFinding> {
@@ -2800,11 +2834,20 @@ fn count_dependency_manifests(project_root: &Path) -> BTreeMap<String, usize> {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if path.is_dir() {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
                 if should_skip_dir(&name) {
                     continue;
                 }
                 stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
                 continue;
             }
             scanned += 1;
@@ -2953,11 +2996,20 @@ fn count_docs_files(project_root: &Path) -> usize {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if path.is_dir() {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
                 if should_skip_dir(&name) {
                     continue;
                 }
                 stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
                 continue;
             }
             scanned += 1;
@@ -3117,10 +3169,6 @@ impl BuddyJob for SecurityWhispererJob {
         security_whisperer_definition().scheduler_priority
     }
 
-    fn records_empty_result(&self) -> bool {
-        false
-    }
-
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.pulse.git.uncommitted_files > 0
             || ctx.pulse.git.diff_lines_4h > 0
@@ -3135,7 +3183,10 @@ impl BuddyJob for SecurityWhispererJob {
                 .unwrap_or_default()
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|err| {
+            tracing::warn!("buddy security whisperer scan task failed: {err}");
+            Vec::new()
+        });
         findings.extend(diagnostic_security_findings(&ctx.recent_diagnostics));
         findings.truncate(MAX_SECURITY_FINDINGS);
         if findings.is_empty() {
@@ -3195,10 +3246,6 @@ impl BuddyJob for DependencyRadarJob {
         dependency_radar_definition().scheduler_priority
     }
 
-    fn records_empty_result(&self) -> bool {
-        false
-    }
-
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.pulse.git.uncommitted_files > 0 || ctx.pulse.git.diff_lines_4h > 0
     }
@@ -3210,7 +3257,10 @@ impl BuddyJob for DependencyRadarJob {
             dependency_manifest_evidence(git.as_ref(), &root)
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|err| {
+            tracing::warn!("buddy dependency radar scan task failed: {err}");
+            DependencyManifestEvidence::default()
+        });
         if !dependency_manifest_trigger(&evidence) {
             return BuddyJobResult::default();
         }
@@ -3238,22 +3288,24 @@ impl BuddyJob for DocsGardenerJob {
         docs_gardener_definition().scheduler_priority
     }
 
-    fn records_empty_result(&self) -> bool {
-        false
-    }
-
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.pulse.git.uncommitted_files > 0 || ctx.pulse.git.diff_lines_4h > 0
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let root = ctx.project_root.clone();
-        let evidence = tokio::task::spawn_blocking(move || {
+        let evidence = match tokio::task::spawn_blocking(move || {
             let git = collect_local_git_evidence(&root, false);
             docs_evidence(git.as_ref(), &root)
         })
         .await
-        .unwrap_or_default();
+        {
+            Ok(evidence) => evidence,
+            Err(err) => {
+                tracing::warn!("buddy docs gardener scan task failed: {err}");
+                return BuddyJobResult::default();
+            }
+        };
         if !docs_trigger(&evidence) {
             return BuddyJobResult::default();
         }
@@ -3281,10 +3333,6 @@ impl BuddyJob for ArchitectureDriftWatcherJob {
         architecture_drift_definition().scheduler_priority
     }
 
-    fn records_empty_result(&self) -> bool {
-        false
-    }
-
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         ctx.pulse.git.uncommitted_files > 0 || ctx.pulse.git.diff_lines_4h > 0
     }
@@ -3295,7 +3343,10 @@ impl BuddyJob for ArchitectureDriftWatcherJob {
             collect_local_git_evidence(&root, false).map(|git| architecture_evidence(&git))
         })
         .await
-        .unwrap_or(None);
+        .unwrap_or_else(|err| {
+            tracing::warn!("buddy architecture drift scan task failed: {err}");
+            None
+        });
         let Some(evidence) = evidence else {
             return BuddyJobResult::default();
         };
@@ -3350,6 +3401,26 @@ mod tests {
     use crate::call_validation::ChatContent;
     use crate::stats::event::LlmCallEvent;
 
+    fn create_symlink_dir_for_test(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let result = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let result = std::os::windows::fs::symlink_dir(target, link);
+
+        match result {
+            Ok(()) => true,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+                ) || err.raw_os_error() == Some(1314) =>
+            {
+                false
+            }
+            Err(err) => panic!("failed to create test symlink {link:?} -> {target:?}: {err}"),
+        }
+    }
+
     fn init_temp_git_repo() -> (tempfile::TempDir, git2::Repository) {
         let dir = tempfile::tempdir().unwrap();
         let repo = git2::Repository::init(dir.path()).unwrap();
@@ -3368,6 +3439,16 @@ mod tests {
         let mut index = repo.index().unwrap();
         index.add_path(Path::new(path)).unwrap();
         index.write().unwrap();
+    }
+
+    #[test]
+    fn scan_heavy_autonomous_jobs_record_empty_results_for_scheduler_backoff() {
+        assert!(BuddyBehaviorLearnerJob.records_empty_result());
+        assert!(BuddyModelCostOptimizerJob.records_empty_result());
+        assert!(SecurityWhispererJob.records_empty_result());
+        assert!(DependencyRadarJob.records_empty_result());
+        assert!(DocsGardenerJob.records_empty_result());
+        assert!(ArchitectureDriftWatcherJob.records_empty_result());
     }
 
     fn test_fact(kind: BuddyFactKind, payload: serde_json::Value) -> BuddyFact {
@@ -3495,6 +3576,7 @@ mod tests {
             settings: BuddySettings::default(),
             pulse: BuddyPulse::default(),
             facts: vec![],
+            recent_activities: vec![],
         }
     }
 
@@ -4023,15 +4105,10 @@ mod tests {
         std::fs::create_dir_all(&real_dir).unwrap();
         write_behavior_trajectory(&real_dir.join("real.json"), "real", 200);
 
-        #[cfg(unix)]
+        if !create_symlink_dir_for_test(dir.path(), &loop_dir)
+            || !create_symlink_dir_for_test(&real_dir, &linked_dir)
         {
-            std::os::unix::fs::symlink(dir.path(), &loop_dir).unwrap();
-            std::os::unix::fs::symlink(&real_dir, &linked_dir).unwrap();
-        }
-        #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_dir(dir.path(), &loop_dir).unwrap();
-            std::os::windows::fs::symlink_dir(&real_dir, &linked_dir).unwrap();
+            return;
         }
 
         let (candidates, stats) = collect_behavior_trajectory_candidates_from_dirs_with_stats(
@@ -4482,6 +4559,40 @@ mod tests {
     }
 
     #[test]
+    fn dependency_manifest_count_skips_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        let linked_dir = dir.path().join("linked");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(real_dir.join("Cargo.toml"), "[package]\nname='real'\n").unwrap();
+
+        if !create_symlink_dir_for_test(&real_dir, &linked_dir) {
+            return;
+        }
+
+        let counts = count_dependency_manifests(dir.path());
+
+        assert_eq!(counts.get("rust"), Some(&1));
+    }
+
+    #[test]
+    fn docs_file_count_skips_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs_dir = dir.path().join("docs");
+        let linked_dir = dir.path().join("linked-docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("guide.md"), "# Guide\n").unwrap();
+
+        if !create_symlink_dir_for_test(&docs_dir, &linked_dir) {
+            return;
+        }
+
+        let count = count_docs_files(dir.path());
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn architecture_grouping_and_thresholds_detect_drift() {
         let mut same_subsystem = Vec::new();
         for idx in 0..8 {
@@ -4563,6 +4674,80 @@ mod tests {
         assert!(!rendered.contains("plainsecret"));
         assert!(rendered.contains("[REDACTED"));
         assert!(rendered.contains("src/config.ts"));
+    }
+
+    #[test]
+    fn security_scanner_detects_quoted_assignments_and_authorization_headers() {
+        let raw = r#"
+            api_key = "super-secret-key"
+            token: 'quoted-token'
+            password = "quoted-password"
+            Authorization: "Bearer secret-auth-token"
+        "#;
+        let findings = scan_security_findings("src/config.ts", raw, 10);
+        let rendered = render_security_evidence(&findings);
+
+        assert!(findings
+            .iter()
+            .any(|finding| finding.kind == "assigned_secret"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.kind == "authorization_header"));
+        assert!(!rendered.contains("super-secret-key"));
+        assert!(!rendered.contains("quoted-token"));
+        assert!(!rendered.contains("quoted-password"));
+        assert!(!rendered.contains("secret-auth-token"));
+        assert!(rendered.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn security_scanner_detects_json_style_quoted_secret_keys() {
+        let raw = r#"{
+            "api_key": "json-api-secret",
+            "password": "json-password-secret",
+            "Authorization": "Bearer json-auth-secret"
+        }"#;
+        let findings = scan_security_findings("config.json", raw, 10);
+        let rendered = render_security_evidence(&findings);
+
+        assert!(findings
+            .iter()
+            .any(|finding| finding.kind == "assigned_secret"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.kind == "authorization_header"));
+        assert!(!rendered.contains("json-api-secret"));
+        assert!(!rendered.contains("json-password-secret"));
+        assert!(!rendered.contains("json-auth-secret"));
+        assert!(rendered.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn security_scanner_detects_compound_credential_keys() {
+        let raw = r#"{
+            "client_secret": "client-secret-value",
+            "access_token": "access-token-value",
+            "refresh-token": "refresh-token-value",
+            "private_key": "private-key-value"
+        }
+        id_token = "id-token-value"
+        "#;
+        let findings = scan_security_findings("config.json", raw, 10);
+        let rendered = render_security_evidence(&findings);
+
+        assert!(findings
+            .iter()
+            .any(|finding| finding.kind == "assigned_secret"));
+        for secret in [
+            "client-secret-value",
+            "access-token-value",
+            "refresh-token-value",
+            "private-key-value",
+            "id-token-value",
+        ] {
+            assert!(!rendered.contains(secret));
+        }
+        assert!(rendered.contains("[REDACTED"));
     }
 
     #[test]

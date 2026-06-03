@@ -408,7 +408,8 @@ pub fn parse_llm_response(response: &str) -> ParsedDecisions {
 pub fn format_annotated_messages(metadata: &ConversationMetadata) -> String {
     let mut result = String::new();
 
-    let mut tool_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut tool_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for (_, message) in &metadata.annotated_messages {
         if let Some(tool_calls) = &message.tool_calls {
             for tool_call in tool_calls {

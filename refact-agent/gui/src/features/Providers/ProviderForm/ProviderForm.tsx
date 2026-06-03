@@ -156,7 +156,13 @@ const CodexWindowRow: React.FC<{
   );
 };
 
-type DefaultModelKey = "chat" | "chat_light" | "chat_thinking" | "chat_buddy";
+type DefaultModelKey =
+  | "chat"
+  | "chat_model_2"
+  | "task_planner_agent_model"
+  | "chat_light"
+  | "chat_thinking"
+  | "chat_buddy";
 
 const DEFAULT_MODEL_FIELDS: {
   key: DefaultModelKey;
@@ -167,6 +173,16 @@ const DEFAULT_MODEL_FIELDS: {
     key: "chat",
     label: "Default chat",
     description: "Primary model for normal conversations.",
+  },
+  {
+    key: "chat_model_2",
+    label: "Chat model 2",
+    description: "Secondary chat model slot for future chat workflows.",
+  },
+  {
+    key: "task_planner_agent_model",
+    label: "Task planner agent",
+    description: "Model used by task management when spawning task agents.",
   },
   {
     key: "chat_light",
@@ -190,6 +206,8 @@ function normalizeProviderDefaults(
 ): ProviderDefaults {
   return {
     chat: defaults?.chat ?? {},
+    chat_model_2: defaults?.chat_model_2 ?? {},
+    task_planner_agent_model: defaults?.task_planner_agent_model ?? {},
     chat_light: defaults?.chat_light ?? {},
     chat_thinking: defaults?.chat_thinking ?? {},
     chat_buddy: defaults?.chat_buddy ?? {},
@@ -223,6 +241,8 @@ const ProviderDefaultModelsSetup: React.FC = () => {
   const capsDefaults = useMemo(
     () => ({
       chat: caps?.chat_default_model ?? "",
+      chat_model_2: caps?.chat_model_2 ?? "",
+      task_planner_agent_model: caps?.task_planner_agent_model ?? "",
       chat_light: caps?.chat_light_model ?? "",
       chat_thinking: caps?.chat_thinking_model ?? "",
       chat_buddy: caps?.chat_buddy_model ?? "",

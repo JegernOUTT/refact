@@ -91,6 +91,8 @@ export type CapsResponse = {
   completion_default_model: string;
   code_completion_n_ctx: number;
   embedding_model?: EmbeddingModel;
+  chat_model_2: string;
+  task_planner_agent_model: string;
   chat_thinking_model: string;
   chat_light_model: string;
   chat_buddy_model: string;
@@ -112,8 +114,17 @@ export function isCapsResponse(json: unknown): json is CapsResponse {
   if (!isCapsMetadata(json.metadata)) return false;
   if (!("chat_default_model" in json)) return false;
   if (typeof json.chat_default_model !== "string") return false;
+  if (!isOptionalStringField(json, "chat_model_2")) return false;
+  if (!isOptionalStringField(json, "task_planner_agent_model")) return false;
   if (!("chat_models" in json)) return false;
   return true;
+}
+
+function isOptionalStringField(
+  json: Record<string, unknown>,
+  field: string,
+): boolean {
+  return !(field in json) || typeof json[field] === "string";
 }
 
 type CapsErrorResponse = {

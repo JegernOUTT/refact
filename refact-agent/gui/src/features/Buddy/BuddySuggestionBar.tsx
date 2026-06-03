@@ -79,13 +79,13 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({ suggestion }) => {
     : [
         {
           id: `${suggestion.id}-investigate`,
-          label: "Investigate",
+          label: "Poke trail",
           action: "investigate_error",
           style: "primary",
         },
         {
           id: `${suggestion.id}-dismiss`,
-          label: "Ignore",
+          label: "Nope goblin",
           action: "dismiss",
           style: "secondary",
         },

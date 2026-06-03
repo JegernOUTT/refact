@@ -14,8 +14,11 @@ export type RichModelData = {
   nCtx?: number;
   capabilities?: ModelCapabilities;
   isDefault?: boolean;
+  isChat2?: boolean;
+  isTaskPlannerAgent?: boolean;
   isThinking?: boolean;
   isLight?: boolean;
+  isBuddy?: boolean;
 };
 
 type RichModelSelectItemProps = RichModelData;
@@ -26,8 +29,11 @@ export const RichModelSelectItem: React.FC<RichModelSelectItemProps> = ({
   nCtx,
   capabilities,
   isDefault,
+  isChat2,
+  isTaskPlannerAgent,
   isThinking,
   isLight,
+  isBuddy,
 }) => {
   return (
     <Flex direction="column" gap="0" style={{ lineHeight: 1.3 }}>
@@ -40,6 +46,16 @@ export const RichModelSelectItem: React.FC<RichModelSelectItemProps> = ({
             Default
           </Badge>
         )}
+        {isTaskPlannerAgent && (
+          <Badge size="1" color="indigo" variant="soft">
+            Task Agent
+          </Badge>
+        )}
+        {isChat2 && (
+          <Badge size="1" color="cyan" variant="soft">
+            Chat 2
+          </Badge>
+        )}
         {isThinking && (
           <Badge size="1" color="purple" variant="soft">
             Reasoning
@@ -48,6 +64,11 @@ export const RichModelSelectItem: React.FC<RichModelSelectItemProps> = ({
         {isLight && (
           <Badge size="1" color="green" variant="soft">
             Light
+          </Badge>
+        )}
+        {isBuddy && (
+          <Badge size="1" color="orange" variant="soft">
+            Companion
           </Badge>
         )}
       </Flex>

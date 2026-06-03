@@ -133,10 +133,7 @@ function statsFromCompressionReportMetadata(
       "Messages compressed",
       sourceMessageCount !== null ? sourceMessageCount.toLocaleString() : null,
     ),
-    ...statCell(
-      "Tokens saved",
-      parseNumberStat(report.estimated_tokens_saved),
-    ),
+    ...statCell("Tokens saved", parseNumberStat(report.estimated_tokens_saved)),
     ...statCell("Reduction", parseNumberStat(report.reduction_percent, "%")),
     ...statCell("Summary model", parseStringStat(report.summary_model)),
     ...statCell("Tokens before", parseNumberStat(report.tokens_before)),

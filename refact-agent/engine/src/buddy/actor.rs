@@ -29,9 +29,9 @@ use super::settings::BuddySettings;
 use super::snapshot::BuddySnapshot;
 use super::storage::RuntimeQueueRecord;
 use super::types::{
-    BuddyActivity, BuddyCareAction, BuddyDraft, BuddyFact, BuddyFactKind, BuddyOpportunity,
-    BuddyPersonalityProfile, BuddyPulse, BuddyQuest, BuddyRuntimeEvent, BuddySpeechItem,
-    BuddyState, BuddySuggestion, OpportunityStatus,
+    BuddyActivity, BuddyCareAction, BuddyChatPhraseBank, BuddyDraft, BuddyFact, BuddyFactKind,
+    BuddyOpportunity, BuddyPersonalityProfile, BuddyPulse, BuddyQuest, BuddyRuntimeEvent,
+    BuddySpeechItem, BuddyState, BuddySuggestion, OpportunityStatus,
 };
 use super::voice_service::{SpeechIntent, VoiceCtx, VoiceIntent, voice_service};
 
@@ -47,6 +47,10 @@ const BUDDY_DESCRIPTION_MAX_CHARS: usize = 500;
 const BUDDY_STATIC_SPEECH_FALLBACK: &str = "Tiny gremlin update: something needs attention.";
 const BUDDY_STATIC_TITLE_FALLBACK: &str = "Buddy update";
 const BUDDY_STATIC_DESCRIPTION_FALLBACK: &str = "Buddy has an update ready.";
+
+pub(crate) fn chat_phrase_bank_is_fresh(bank: &BuddyChatPhraseBank, now: DateTime<Utc>) -> bool {
+    bank.day == now.date_naive().to_string()
+}
 
 pub(crate) async fn observe_buddy_facts_parallel(
     due_observers: Vec<Arc<dyn BuddyObserver>>,
@@ -1900,6 +1904,15 @@ pub async fn buddy_background_task(gcx: AppState) {
         let mut buddy = buddy_arc.lock().await;
         if let Some(svc) = buddy.as_mut() {
             svc.set_pulse(initial_pulse);
+            if svc
+                .state
+                .chat_phrase_bank
+                .as_ref()
+                .is_some_and(|bank| !chat_phrase_bank_is_fresh(bank, Utc::now()))
+            {
+                svc.state.chat_phrase_bank = None;
+                svc.dirty = true;
+            }
         }
     }
 

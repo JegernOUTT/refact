@@ -12,6 +12,8 @@ export type UiModel = SimplifiedModel & {
   nCtx?: number;
   nCtxLabel?: string;
   isDefault?: boolean;
+  isChat2?: boolean;
+  isTaskPlannerAgent?: boolean;
   isLight?: boolean;
   isThinking?: boolean;
   isBuddy?: boolean;
@@ -34,6 +36,10 @@ export type ModelGroup = {
   description?: string;
   models: UiModel[];
 };
+
+type CapsModelMap =
+  | CapsResponse["chat_models"]
+  | CapsResponse["completion_models"];
 
 /**
  * Format context window size to human-readable format
@@ -94,20 +100,27 @@ function pickPricingKey(args: {
   const hasKey = (key: string) =>
     Object.prototype.hasOwnProperty.call(pricing, key);
 
-  // 1. Try exact match first (handles both bare and qualified names)
-  if (hasKey(modelName)) {
-    return modelName;
-  }
-
-  // 2. Try fully-qualified key if we have provider context
-  if (providerName) {
+  if (providerName && !modelName.includes("/")) {
     const qualifiedKey = `${providerName}/${modelName}`;
     if (hasKey(qualifiedKey)) {
       return qualifiedKey;
     }
   }
 
-  // 3. Try stripping any provider prefix (e.g., "openai/gpt-4o" -> "gpt-4o")
+  if (hasKey(modelName)) {
+    return modelName;
+  }
+
+  if (providerName && modelName.includes("/")) {
+    const bareModel = modelName.split("/").pop();
+    if (bareModel) {
+      const qualifiedKey = `${providerName}/${bareModel}`;
+      if (hasKey(qualifiedKey)) {
+        return qualifiedKey;
+      }
+    }
+  }
+
   if (modelName.includes("/")) {
     const bareModel = modelName.split("/").pop();
     if (bareModel && hasKey(bareModel)) {
@@ -115,8 +128,6 @@ function pickPricingKey(args: {
     }
   }
 
-  // 4. For multi-slash names (e.g., "openrouter/anthropic/claude-3-5-sonnet"),
-  //    try the last two segments as a key
   const segments = modelName.split("/");
   if (segments.length > 2) {
     const lastTwoSegments = segments.slice(-2).join("/");
@@ -147,13 +158,58 @@ function extractCapabilities(
   };
 }
 
+function resolveCapsModelKey(
+  capsModels: CapsModelMap,
+  modelName: string,
+  providerName?: string,
+): string | null {
+  if (providerName && !modelName.includes("/")) {
+    const providerKey = `${providerName}/${modelName}`;
+    if (Object.prototype.hasOwnProperty.call(capsModels, providerKey)) {
+      return providerKey;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(capsModels, modelName)) {
+    return modelName;
+  }
+
+  const legacyKey = `refact/${modelName}`;
+  if (Object.prototype.hasOwnProperty.call(capsModels, legacyKey)) {
+    return legacyKey;
+  }
+
+  const suffix = `/${modelName}`;
+  return (
+    Object.keys(capsModels)
+      .sort((a, b) => a.localeCompare(b))
+      .find((key) => key.endsWith(suffix)) ?? null
+  );
+}
+
+function modelMatchesDefault(
+  defaultModel: string,
+  modelName: string,
+  capsModelKey: string | null,
+): boolean {
+  return (
+    defaultModel === modelName ||
+    defaultModel === `refact/${modelName}` ||
+    (capsModelKey !== null && defaultModel === capsModelKey)
+  );
+}
+
 /**
  * Attach pricing, context window & capability flags to each simplified model.
  * Works even if caps/metadata/pricing is missing.
  */
 export function attachPricingAndCapabilities(
   models: SimplifiedModel[],
-  { caps, modelType }: { caps?: CapsResponse; modelType: ModelType },
+  {
+    caps,
+    modelType,
+    providerName,
+  }: { caps?: CapsResponse; modelType: ModelType; providerName?: string },
 ): UiModel[] {
   if (!caps) {
     // No caps → only attach modelType
@@ -164,20 +220,19 @@ export function attachPricingAndCapabilities(
     modelType === "chat" ? caps.chat_models : caps.completion_models;
 
   return models.map((m) => {
-    const capsModelKey = `refact/${m.name}`;
-    const capsModel = capsModels[capsModelKey];
+    const capsModelKey = resolveCapsModelKey(capsModels, m.name, providerName);
+    const capsModel = capsModelKey ? capsModels[capsModelKey] : undefined;
 
     const pricingKey = pickPricingKey({
       caps,
-      modelName: m.name,
+      modelName: capsModelKey ?? m.name,
+      providerName,
     });
-
     const pricing =
       pricingKey && caps.metadata?.pricing
         ? caps.metadata.pricing[pricingKey]
         : undefined;
 
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     const nCtx = capsModel?.n_ctx;
 
     const uiModel: UiModel = {
@@ -189,21 +244,46 @@ export function attachPricingAndCapabilities(
       nCtxLabel: nCtx ? formatContextWindow(nCtx) : undefined,
     };
 
-    // Chat-type specific flags
     if (modelType === "chat") {
-      uiModel.isDefault = caps.chat_default_model === `refact/${m.name}`;
-      uiModel.isLight = caps.chat_light_model === `refact/${m.name}`;
-      uiModel.isThinking = caps.chat_thinking_model === `refact/${m.name}`;
-      uiModel.isBuddy = caps.chat_buddy_model === `refact/${m.name}`;
-
-      if (typeof capsModel === "object") {
-        uiModel.capabilities = extractCapabilities(capsModel as CodeChatModel);
-      }
+      uiModel.isDefault = modelMatchesDefault(
+        caps.chat_default_model,
+        m.name,
+        capsModelKey,
+      );
+      uiModel.isChat2 = modelMatchesDefault(
+        caps.chat_model_2,
+        m.name,
+        capsModelKey,
+      );
+      uiModel.isTaskPlannerAgent = modelMatchesDefault(
+        caps.task_planner_agent_model,
+        m.name,
+        capsModelKey,
+      );
+      uiModel.isLight = modelMatchesDefault(
+        caps.chat_light_model,
+        m.name,
+        capsModelKey,
+      );
+      uiModel.isThinking = modelMatchesDefault(
+        caps.chat_thinking_model,
+        m.name,
+        capsModelKey,
+      );
+      uiModel.isBuddy = modelMatchesDefault(
+        caps.chat_buddy_model,
+        m.name,
+        capsModelKey,
+      );
+      uiModel.capabilities = extractCapabilities(capsModel as CodeChatModel);
     }
 
-    // Completion-type default
     if (modelType === "completion") {
-      uiModel.isDefault = caps.completion_default_model === `refact/${m.name}`;
+      uiModel.isDefault = modelMatchesDefault(
+        caps.completion_default_model,
+        m.name,
+        capsModelKey,
+      );
     }
 
     return uiModel;
@@ -219,6 +299,7 @@ export function groupModelsWithPricing(
   options: {
     caps?: CapsResponse;
     modelType: ModelType;
+    providerName?: string;
   },
 ): ModelGroup[] {
   const decorated = attachPricingAndCapabilities(models, options);
@@ -261,6 +342,8 @@ export function groupModelsWithPricing(
 
   for (const m of decorated) {
     if (m.isDefault) {
+      defaultGroup.models.push(m);
+    } else if (m.isTaskPlannerAgent === true || m.isChat2 === true) {
       defaultGroup.models.push(m);
     } else if (m.isThinking) {
       thinkingGroup.models.push(m);

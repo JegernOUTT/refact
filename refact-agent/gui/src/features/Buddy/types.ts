@@ -675,6 +675,8 @@ export type OpportunityStatus =
 
 export type DefaultsKind =
   | "chat_model"
+  | "chat_model_2"
+  | "task_planner_agent_model"
   | "chat_light_model"
   | "chat_buddy_model"
   | "chat_thinking_model";

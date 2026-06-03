@@ -163,15 +163,10 @@ pub fn is_segment_summary(message: &ChatMessage) -> bool {
         == Some(SUMMARY_KIND)
 }
 
-fn segment_summary_source_hash(message: &ChatMessage) -> Option<&str> {
-    message
-        .extra
-        .get("compression")
-        .and_then(|value| value.get("source_hash"))
-        .and_then(|value| value.as_str())
-}
-
 fn is_excluded_from_segment(message: &ChatMessage) -> bool {
+    if is_segment_summary(message) {
+        return true;
+    }
     if matches!(
         message.role.as_str(),
         "system" | "user" | "cd_instruction" | COMPRESSION_REPORT_ROLE
@@ -256,10 +251,8 @@ fn source_message_ids(messages: &[ChatMessage]) -> Vec<String> {
         .collect()
 }
 
-fn segment_is_matching_summary(messages: &[ChatMessage], segment: SummarySegment) -> bool {
-    segment.start == segment.end
-        && is_segment_summary(&messages[segment.start])
-        && segment_summary_source_hash(&messages[segment.start]).is_some()
+fn segment_is_existing_summary(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+    segment.start == segment.end && is_segment_summary(&messages[segment.start])
 }
 
 fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
@@ -519,7 +512,7 @@ fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment)
         && has_tail_summarizable_output(tail)
         && !tail_has_pending_tool_calls(tail)
         && !segment_contains_external_tool_completion(messages, segment)
-        && !segment_is_matching_summary(messages, segment)
+        && !segment_is_existing_summary(messages, segment)
 }
 
 fn segment_contains_external_tool_completion(
@@ -597,7 +590,7 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
         .into_iter()
         .find(|segment| {
             let candidate = &messages[segment.start..=segment.end];
-            !segment_is_matching_summary(messages, *segment)
+            !segment_is_existing_summary(messages, *segment)
                 && has_tail_summarizable_output(candidate)
                 && !tail_has_pending_tool_calls(candidate)
                 && !segment_contains_external_tool_completion(messages, *segment)
@@ -1299,10 +1292,6 @@ fn effective_n_ctx_for_resolved_summary_model(
     }
 }
 
-fn replace_segment(messages: &mut Vec<ChatMessage>, segment: SummarySegment, summary: ChatMessage) {
-    messages.splice(segment.start..=segment.end, [summary]);
-}
-
 fn replace_segment_with_report_and_summary(
     messages: &mut Vec<ChatMessage>,
     segment: SummarySegment,
@@ -1479,7 +1468,7 @@ pub fn summarize_oldest_segment_with_static_summary(
     let source_messages = messages[segment.start..=segment.end].to_vec();
     let summary =
         make_segment_summary_message(summary_text.to_string(), &source_messages, summary_model);
-    replace_segment(messages, segment, summary);
+    replace_segment_with_report_and_summary(messages, segment, &source_messages, summary);
     true
 }
 
@@ -1732,6 +1721,23 @@ mod tests {
         }
     }
 
+    fn legacy_segment_summary_without_source_hash() -> ChatMessage {
+        ChatMessage {
+            message_id: "legacy-summary".to_string(),
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("legacy compressed summary".to_string()),
+            summarization_tier: Some(SUMMARY_KIND.to_string()),
+            extra: serde_json::Map::from_iter([(
+                "compression".to_string(),
+                json!({
+                    "kind": SUMMARY_KIND,
+                    "source_message_ids": ["old-assistant"],
+                }),
+            )]),
+            ..Default::default()
+        }
+    }
+
     fn tool(text: &str) -> ChatMessage {
         ChatMessage {
             role: "tool".to_string(),
@@ -1921,6 +1927,24 @@ mod tests {
         assert!(content.contains("Context compression replaced"));
         assert!(content.contains("Summary kept for the model"));
         assert!(content.contains(summary_text));
+    }
+
+    fn assert_segment_report_summary_pair(
+        messages: &[ChatMessage],
+        report_idx: usize,
+        source_count: usize,
+        summary_model: &str,
+        summary_text: &str,
+    ) {
+        assert_llm_compression_report(
+            &messages[report_idx],
+            source_count,
+            summary_model,
+            summary_text,
+        );
+        let summary = &messages[report_idx + 1];
+        assert!(is_segment_summary(summary));
+        assert_eq!(summary.content.content_text_only(), summary_text);
     }
 
     #[test]
@@ -2152,10 +2176,7 @@ mod tests {
         assert!(is_excluded_from_segment(&report));
 
         let paired = vec![user("first"), report, summary, user("second")];
-        assert_eq!(
-            closed_non_user_segments(&paired),
-            vec![SummarySegment { start: 2, end: 2 }]
-        );
+        assert!(closed_non_user_segments(&paired).is_empty());
         assert_eq!(first_eligible_segment(&paired), None);
     }
 
@@ -2192,10 +2213,16 @@ mod tests {
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].role, crate::chat::internal_roles::PLAN_ROLE);
         assert_eq!(messages[2].role, "cd_instruction");
-        assert!(is_segment_summary(&messages[3]));
-        assert_eq!(messages[4].role, crate::chat::internal_roles::EVENT_ROLE);
-        assert!(is_ui_only_message(&messages[4]));
-        assert_eq!(messages[5].role, "error");
+        assert_segment_report_summary_pair(
+            &messages,
+            3,
+            3,
+            "test-model",
+            "compressed planner tool work",
+        );
+        assert_eq!(messages[5].role, crate::chat::internal_roles::EVENT_ROLE);
+        assert!(is_ui_only_message(&messages[5]));
+        assert_eq!(messages[6].role, "error");
     }
 
     #[test]
@@ -2240,7 +2267,7 @@ mod tests {
         ));
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].role, crate::chat::internal_roles::PLAN_ROLE);
-        assert!(is_segment_summary(&messages[2]));
+        assert_segment_report_summary_pair(&messages, 2, 1, "test-model", "compressed plan tail");
     }
 
     #[test]
@@ -2257,10 +2284,9 @@ mod tests {
             "compressed tail",
             "test-model",
         ));
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, "user");
-        assert!(is_segment_summary(&messages[1]));
-        assert_eq!(messages[1].content.content_text_only(), "compressed tail");
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed tail");
     }
 
     #[test]
@@ -2280,10 +2306,10 @@ mod tests {
             "compressed tail",
             "test-model",
         ));
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, "user");
-        assert!(is_segment_summary(&messages[1]));
-        assert_eq!(messages[2].role, "event");
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed tail");
+        assert_eq!(messages[3].role, "event");
     }
 
     #[test]
@@ -2304,11 +2330,11 @@ mod tests {
             "compressed subspan",
             "test-model",
         ));
-        assert_eq!(messages.len(), 4);
-        assert!(is_segment_summary(&messages[1]));
-        assert_eq!(messages[2].role, "cd_instruction");
+        assert_eq!(messages.len(), 5);
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed subspan");
+        assert_eq!(messages[3].role, "cd_instruction");
         assert_eq!(
-            messages[3].content.content_text_only(),
+            messages[4].content.content_text_only(),
             "second assistant output"
         );
     }
@@ -2331,10 +2357,10 @@ mod tests {
             "compressed body",
             "test-model",
         ));
-        assert_eq!(messages.len(), 4);
-        assert!(is_segment_summary(&messages[1]));
-        assert_eq!(messages[2].role, "error");
+        assert_eq!(messages.len(), 5);
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed body");
         assert_eq!(messages[3].role, "error");
+        assert_eq!(messages[4].role, "error");
     }
 
     #[test]
@@ -2373,10 +2399,16 @@ mod tests {
             "compressed after excluded",
             "test-model",
         ));
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 5);
         assert_eq!(messages[1].role, "event");
         assert_eq!(messages[2].role, "plan");
-        assert!(is_segment_summary(&messages[3]));
+        assert_segment_report_summary_pair(
+            &messages,
+            3,
+            1,
+            "test-model",
+            "compressed after excluded",
+        );
     }
 
     #[test]
@@ -2400,10 +2432,7 @@ mod tests {
             error_message("context_length_exceeded retry"),
         ];
 
-        assert_eq!(
-            closed_non_user_segments(&messages),
-            vec![SummarySegment { start: 1, end: 1 }]
-        );
+        assert!(closed_non_user_segments(&messages).is_empty());
         assert_eq!(
             eligible_tail_non_user_segment(&messages),
             Some(SummarySegment { start: 4, end: 6 })
@@ -2419,17 +2448,19 @@ mod tests {
             "test-model",
         ));
 
-        assert_eq!(messages.len(), 7);
+        assert_eq!(messages.len(), 8);
         assert!(is_segment_summary(&messages[1]));
         assert_eq!(messages[2].role, "user");
         assert_eq!(messages[3].role, "cd_instruction");
-        assert!(is_segment_summary(&messages[4]));
-        assert_eq!(
-            messages[4].content.content_text_only(),
-            "compressed selected tail body"
+        assert_segment_report_summary_pair(
+            &messages,
+            4,
+            3,
+            "test-model",
+            "compressed selected tail body",
         );
-        assert_eq!(messages[5].role, "error");
         assert_eq!(messages[6].role, "error");
+        assert_eq!(messages[7].role, "error");
     }
 
     #[test]
@@ -2482,9 +2513,15 @@ mod tests {
             "compressed later output",
             "test-model",
         ));
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call_stale");
-        assert!(is_segment_summary(&messages[2]));
+        assert_segment_report_summary_pair(
+            &messages,
+            2,
+            1,
+            "test-model",
+            "compressed later output",
+        );
     }
 
     #[test]
@@ -2534,10 +2571,16 @@ mod tests {
             "compressed later safe output",
             "test-model",
         ));
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 5);
         assert_eq!(messages[1].tool_calls.as_ref().unwrap().len(), 2);
         assert_eq!(messages[2].role, "event");
-        assert!(is_segment_summary(&messages[3]));
+        assert_segment_report_summary_pair(
+            &messages,
+            3,
+            2,
+            "test-model",
+            "compressed later safe output",
+        );
     }
 
     #[test]
@@ -2570,16 +2613,18 @@ mod tests {
             "test-model",
         ));
 
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call_stale");
-        assert!(is_segment_summary(&messages[2]));
-        assert_eq!(
-            messages[2].content.content_text_only(),
-            "compressed completed output after stale call"
+        assert_segment_report_summary_pair(
+            &messages,
+            2,
+            5,
+            "test-model",
+            "compressed completed output after stale call",
         );
-        assert_eq!(messages[3].role, "error");
         assert_eq!(messages[4].role, "error");
+        assert_eq!(messages[5].role, "error");
     }
 
     #[test]
@@ -2601,14 +2646,14 @@ mod tests {
             "compressed safe prefix",
             "test-model",
         ));
-        assert_eq!(messages.len(), 4);
-        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(messages.len(), 5);
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed safe prefix");
         assert_eq!(
-            messages[2].tool_calls.as_ref().unwrap()[0].id,
+            messages[3].tool_calls.as_ref().unwrap()[0].id,
             "call_unresolved"
         );
         assert_eq!(
-            messages[3].content.content_text_only(),
+            messages[4].content.content_text_only(),
             "safe output after pending"
         );
     }
@@ -2643,8 +2688,8 @@ mod tests {
             "tool turn summary",
             "test-model",
         ));
-        assert_eq!(messages.len(), 2);
-        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(messages.len(), 3);
+        assert_segment_report_summary_pair(&messages, 1, 2, "test-model", "tool turn summary");
     }
 
     #[test]
@@ -2685,8 +2730,8 @@ mod tests {
             "tool turn summary",
             "test-model",
         ));
-        assert_eq!(messages.len(), 2);
-        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(messages.len(), 3);
+        assert_segment_report_summary_pair(&messages, 1, 3, "test-model", "tool turn summary");
     }
 
     #[test]
@@ -2707,8 +2752,8 @@ mod tests {
             "read result summary",
             "test-model",
         ));
-        assert_eq!(messages.len(), 2);
-        assert!(is_segment_summary(&messages[1]));
+        assert_eq!(messages.len(), 3);
+        assert_segment_report_summary_pair(&messages, 1, 2, "test-model", "read result summary");
     }
 
     #[test]
@@ -2812,8 +2857,8 @@ mod tests {
             "closed summary",
             "test-model",
         ));
-        assert_eq!(messages[1].content.content_text_only(), "closed summary");
-        assert_eq!(messages[3].content.content_text_only(), "tail new");
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
+        assert_eq!(messages[4].content.content_text_only(), "tail new");
     }
 
     #[test]
@@ -2911,9 +2956,9 @@ mod tests {
             "closed summary",
             "test-model",
         ));
-        assert_eq!(messages[1].content.content_text_only(), "closed summary");
-        assert_eq!(messages[3].role, "assistant");
-        assert_eq!(messages[4].role, "tool");
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
+        assert_eq!(messages[4].role, "assistant");
+        assert_eq!(messages[5].role, "tool");
     }
 
     #[test]
@@ -2936,9 +2981,9 @@ mod tests {
             "closed summary",
             "test-model",
         ));
-        assert_eq!(messages[1].content.content_text_only(), "closed summary");
-        assert_eq!(messages[3].role, "assistant");
-        assert_eq!(messages[4].role, "context_file");
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
+        assert_eq!(messages[4].role, "assistant");
+        assert_eq!(messages[5].role, "context_file");
     }
 
     #[test]
@@ -2981,7 +3026,7 @@ mod tests {
             "closed summary",
             "test-model",
         ));
-        assert_eq!(messages[1].content.content_text_only(), "closed summary");
+        assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
     }
 
     #[test]
@@ -3063,6 +3108,108 @@ mod tests {
             "test-model",
         ));
         assert_eq!(serde_json::to_string(&messages).unwrap(), once);
+    }
+
+    #[test]
+    fn legacy_segment_summary_without_source_hash_is_not_summarized_again() {
+        let legacy_summary = legacy_segment_summary_without_source_hash();
+        assert!(is_segment_summary(&legacy_summary));
+        assert!(is_excluded_from_segment(&legacy_summary));
+        assert!(legacy_summary.extra["compression"]
+            .get("source_hash")
+            .is_none());
+
+        let mut tail_messages = vec![user("first"), legacy_summary.clone()];
+        let tail_before = serde_json::to_string(&tail_messages).unwrap();
+        assert_eq!(eligible_tail_non_user_segment(&tail_messages), None);
+        assert_eq!(first_eligible_segment(&tail_messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut tail_messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(serde_json::to_string(&tail_messages).unwrap(), tail_before);
+
+        let mut closed_messages = vec![user("first"), legacy_summary, user("second")];
+        let closed_before = serde_json::to_string(&closed_messages).unwrap();
+        assert!(closed_non_user_segments(&closed_messages).is_empty());
+        assert_eq!(first_eligible_segment(&closed_messages), None);
+        assert!(!summarize_oldest_segment_with_static_summary(
+            &mut closed_messages,
+            "should not apply",
+            "test-model",
+        ));
+        assert_eq!(
+            serde_json::to_string(&closed_messages).unwrap(),
+            closed_before
+        );
+    }
+
+    #[test]
+    fn legacy_summary_inside_closed_segment_splits_and_preserves_summary() {
+        let legacy_summary = legacy_segment_summary_without_source_hash();
+        let legacy_before = serde_json::to_string(&legacy_summary).unwrap();
+        let mut messages = vec![
+            user("first"),
+            legacy_summary,
+            event("notice"),
+            assistant("new completed output"),
+            user("second"),
+        ];
+
+        assert_eq!(
+            closed_non_user_segments(&messages),
+            vec![SummarySegment { start: 2, end: 3 }]
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 2, end: 3 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed post-summary run",
+            "test-model",
+        ));
+
+        assert_eq!(serde_json::to_string(&messages[1]).unwrap(), legacy_before);
+        assert_segment_report_summary_pair(
+            &messages,
+            2,
+            2,
+            "test-model",
+            "compressed post-summary run",
+        );
+        assert_eq!(messages[4].content.content_text_only(), "second");
+    }
+
+    #[test]
+    fn legacy_summary_inside_tail_segment_splits_and_preserves_summary() {
+        let legacy_summary = legacy_segment_summary_without_source_hash();
+        let legacy_before = serde_json::to_string(&legacy_summary).unwrap();
+        let mut messages = vec![user("first"), legacy_summary, assistant("new tail output")];
+
+        assert_eq!(
+            eligible_tail_non_user_segment(&messages),
+            Some(SummarySegment { start: 2, end: 2 })
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 2, end: 2 })
+        );
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "compressed tail after legacy summary",
+            "test-model",
+        ));
+
+        assert_eq!(serde_json::to_string(&messages[1]).unwrap(), legacy_before);
+        assert_segment_report_summary_pair(
+            &messages,
+            2,
+            1,
+            "test-model",
+            "compressed tail after legacy summary",
+        );
     }
 
     #[test]
@@ -3317,7 +3464,7 @@ mod tests {
     }
 
     #[test]
-    fn static_summary_creates_assistant_compression_message() {
+    fn static_summary_inserts_report_and_internal_summary() {
         let mut messages = vec![user("a"), assistant("old"), user("b")];
         assert!(summarize_oldest_segment_with_static_summary(
             &mut messages,
@@ -3325,12 +3472,14 @@ mod tests {
             "test-model",
         ));
 
-        assert_eq!(messages[1].role, "assistant");
-        assert!(is_segment_summary(&messages[1]));
-        let compression = messages[1].extra.get("compression").unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_llm_compression_report(&messages[1], 1, "test-model", "summary");
+        assert!(is_segment_summary(&messages[2]));
+        let compression = messages[2].extra.get("compression").unwrap();
         assert_eq!(compression["schema_version"], json!(2));
         assert_eq!(compression["kind"], json!(SUMMARY_KIND));
         assert_eq!(compression["summary_model"], json!("test-model"));
+        assert_eq!(messages[2].content.content_text_only(), "summary");
     }
 
     #[test]
@@ -3365,6 +3514,11 @@ mod tests {
         assert_eq!(messages[1].summarized_range, None);
         assert_eq!(
             messages[1].summarization_tier,
+            Some(SEGMENT_REPORT_TIER.to_string())
+        );
+        assert_eq!(messages[2].summarized_range, None);
+        assert_eq!(
+            messages[2].summarization_tier,
             Some(SUMMARY_KIND.to_string())
         );
     }
@@ -3383,6 +3537,8 @@ mod tests {
             "summary",
             "test-model",
         ));
+        assert_eq!(messages[1].role, COMPRESSION_REPORT_ROLE);
+        assert!(is_segment_summary(&messages[2]));
         let result = crate::chat::linearize::apply_summarization_linearize(messages);
         let text: Vec<String> = result
             .iter()

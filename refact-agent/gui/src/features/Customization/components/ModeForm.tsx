@@ -144,8 +144,11 @@ const ModelTypeSection: React.FC<ModelTypeSectionProps> = ({
                         nCtx={m.nCtx}
                         capabilities={m.capabilities}
                         isDefault={m.isDefault}
+                        isChat2={m.isChat2}
+                        isTaskPlannerAgent={m.isTaskPlannerAgent}
                         isThinking={m.isThinking}
                         isLight={m.isLight}
+                        isBuddy={m.isBuddy}
                       />
                     </span>
                   </Select.Item>

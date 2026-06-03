@@ -46,6 +46,7 @@ use crate::chat::diagnostics::{
 use crate::chat::history_limit::ContextPressure;
 use crate::chat::trajectory_ops::approx_token_count;
 use refact_core::llm_types::BaseModelRecord;
+use refact_core::provider_types::{ModelTypeDefaults, ProviderDefaults};
 
 const TOKEN_BUDGET_CADENCE: usize = 6;
 const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
@@ -89,6 +90,46 @@ fn context_limit_final_error_message(error: &str) -> String {
         "Context too large and no eligible segment summary could be applied. Original error: {}",
         safe_provider_error_diagnostic(error)
     )
+}
+
+fn partial_output_stream_error_message(original: &str) -> String {
+    format!(
+        "{} Original error: {}",
+        PARTIAL_OUTPUT_STREAM_ERROR,
+        safe_provider_error_diagnostic(original),
+    )
+}
+
+fn model_type_defaults_for_thread<'a>(
+    user_defaults: &'a ProviderDefaults,
+    defaults: &crate::caps::DefaultModels,
+    thread: &ThreadParams,
+    model_id: &str,
+) -> &'a ModelTypeDefaults {
+    if thread
+        .task_meta
+        .as_ref()
+        .is_some_and(|meta| meta.role == "agents")
+    {
+        user_defaults.defaults_for_task_planner_agent_model(
+            model_id,
+            &defaults.task_planner_agent_model,
+            &defaults.chat_default_model,
+            &defaults.chat_model_2,
+            &defaults.chat_light_model,
+            &defaults.chat_thinking_model,
+            &defaults.chat_buddy_model,
+        )
+    } else {
+        user_defaults.defaults_for_model(
+            model_id,
+            &defaults.chat_default_model,
+            &defaults.chat_model_2,
+            &defaults.chat_light_model,
+            &defaults.chat_thinking_model,
+            &defaults.chat_buddy_model,
+        )
+    }
 }
 
 async fn user_stop_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
@@ -1144,14 +1185,9 @@ pub fn start_generation(
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
                     let original = error.message.clone();
-                    warn!(
-                        "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, original
-                    );
-                    error.message = format!(
-                        "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, original
-                    );
+                    let safe_error = partial_output_stream_error_message(&original);
+                    warn!("{}", safe_error);
+                    error.message = safe_error;
                 }
 
                 let error_message = error.message;
@@ -1469,12 +1505,11 @@ pub async fn run_llm_generation(
         worktree: thread.worktree.clone(),
     };
 
-    let model_type_defaults = caps.user_defaults.defaults_for_model(
+    let model_type_defaults = model_type_defaults_for_thread(
+        &caps.user_defaults,
+        &caps.defaults,
+        &thread,
         &model_rec.base.id,
-        &caps.defaults.chat_default_model,
-        &caps.defaults.chat_light_model,
-        &caps.defaults.chat_thinking_model,
-        &caps.defaults.chat_buddy_model,
     );
     let mut parameters = SamplingParameters {
         temperature: thread.temperature.or(model_type_defaults.temperature),
@@ -2432,8 +2467,35 @@ mod tests {
         }
     }
 
+    fn shared_model_defaults() -> (ProviderDefaults, crate::caps::DefaultModels) {
+        (
+            ProviderDefaults {
+                chat: ModelTypeDefaults {
+                    temperature: Some(0.1),
+                    ..Default::default()
+                },
+                task_planner_agent_model: ModelTypeDefaults {
+                    temperature: Some(0.3),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            crate::caps::DefaultModels {
+                chat_default_model: "shared/model".to_string(),
+                task_planner_agent_model: "shared/model".to_string(),
+                ..Default::default()
+            },
+        )
+    }
+
     fn final_context_limit_error_bound() -> usize {
         context_limit_final_error_message("").len()
+            + crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
+    }
+
+    fn partial_output_error_bound() -> usize {
+        PARTIAL_OUTPUT_STREAM_ERROR.len()
+            + " Original error: ".len()
             + crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
     }
 
@@ -2465,6 +2527,37 @@ mod tests {
             "len={}",
             text.len()
         );
+    }
+
+    #[test]
+    fn model_type_defaults_for_thread_keeps_normal_chat_defaults_when_model_is_shared() {
+        let (user_defaults, defaults) = shared_model_defaults();
+        let thread = ThreadParams::default();
+
+        let selected =
+            model_type_defaults_for_thread(&user_defaults, &defaults, &thread, "shared/model");
+
+        assert_eq!(selected.temperature, Some(0.1));
+    }
+
+    #[test]
+    fn model_type_defaults_for_thread_uses_task_planner_defaults_for_task_agents() {
+        let (user_defaults, defaults) = shared_model_defaults();
+        let thread = ThreadParams {
+            task_meta: Some(TaskMeta {
+                task_id: "task-1".to_string(),
+                role: "agents".to_string(),
+                agent_id: Some("agent-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                planner_chat_id: Some("planner-chat".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let selected =
+            model_type_defaults_for_thread(&user_defaults, &defaults, &thread, "shared/model");
+
+        assert_eq!(selected.temperature, Some(0.3));
     }
 
     #[test]
@@ -2500,6 +2593,42 @@ mod tests {
         assert!(!text.contains(far_tail), "far-tail marker leaked: {text}");
         assert!(
             text.len() <= final_context_limit_error_bound(),
+            "len={}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn partial_output_stream_error_redacts_provider_secret() {
+        let text = partial_output_stream_error_message(
+            "provider failed: Authorization: Bearer sk-test-secret",
+        );
+
+        assert!(text.starts_with(PARTIAL_OUTPUT_STREAM_ERROR));
+        assert_context_limit_secret_redacted(&text);
+        assert!(
+            text.len() <= partial_output_error_bound(),
+            "len={}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn partial_output_stream_error_windows_huge_provider_error() {
+        let far_tail = "FAR_TAIL_MARKER";
+        let error = format!(
+            "provider failed: Authorization: Bearer sk-test-secret {} {}",
+            "tail ".repeat(100_000),
+            far_tail,
+        );
+
+        let text = partial_output_stream_error_message(&error);
+
+        assert_context_limit_secret_redacted(&text);
+        assert!(text.contains(crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED));
+        assert!(!text.contains(far_tail), "far-tail marker leaked: {text}");
+        assert!(
+            text.len() <= partial_output_error_bound(),
             "len={}",
             text.len()
         );

@@ -33,7 +33,7 @@ fn check_default_model(
     {
         facts.push(BuddyFact {
             kind: BuddyFactKind::BrokenModelReference,
-            key: format!("provider:broken_ref:{}", model_id),
+            key: format!("provider:broken_ref:{}:{}", field_name, model_id),
             source: "provider_health",
             payload: serde_json::json!({ "field": payload_field, "model_id": model_id }),
             seen_at: now,
@@ -42,9 +42,35 @@ fn check_default_model(
     }
 }
 
+fn check_optional_default_model(
+    facts: &mut Vec<BuddyFact>,
+    field_name: &str,
+    model_id: &str,
+    payload_field: &str,
+    available_models: &[String],
+    now: DateTime<Utc>,
+) {
+    if model_id.is_empty()
+        || available_models
+            .iter()
+            .any(|available| available == model_id)
+    {
+        return;
+    }
+
+    facts.push(BuddyFact {
+        kind: BuddyFactKind::BrokenModelReference,
+        key: format!("provider:broken_ref:{}:{}", field_name, model_id),
+        source: "provider_health",
+        payload: serde_json::json!({ "field": payload_field, "model_id": model_id }),
+        seen_at: now,
+        confidence: 0.9,
+    });
+}
+
 fn check_default_model_once(
     facts: &mut Vec<BuddyFact>,
-    seen_broken_models: &mut HashSet<String>,
+    seen_broken_models: &mut HashSet<(String, String)>,
     field_name: &str,
     model_id: &str,
     payload_field: &str,
@@ -66,7 +92,7 @@ fn check_default_model_once(
     if fact.kind != BuddyFactKind::BrokenModelReference {
         return;
     }
-    if !seen_broken_models.insert(model_id.to_string()) {
+    if !seen_broken_models.insert((field_name.to_string(), model_id.to_string())) {
         facts.pop();
     }
 }
@@ -74,7 +100,7 @@ fn check_default_model_once(
 pub fn detect_provider_health_facts(
     defaults: &DefaultModels,
     chat_models: &[String],
-    _completion_models: &[String],
+    completion_models: &[String],
     now: DateTime<Utc>,
 ) -> Vec<BuddyFact> {
     let mut facts = vec![];
@@ -83,6 +109,16 @@ pub fn detect_provider_health_facts(
             "chat_default_model",
             defaults.chat_default_model.as_str(),
             "chat_model",
+        ),
+        (
+            "chat_model_2",
+            defaults.chat_model_2.as_str(),
+            "chat_model_2",
+        ),
+        (
+            "task_planner_agent_model",
+            defaults.task_planner_agent_model.as_str(),
+            "task_planner_agent_model",
         ),
         (
             "chat_buddy_model",
@@ -112,6 +148,14 @@ pub fn detect_provider_health_facts(
             now,
         );
     }
+    check_optional_default_model(
+        &mut facts,
+        "completion_default_model",
+        defaults.completion_default_model.as_str(),
+        "completion_model",
+        completion_models,
+        now,
+    );
     facts
 }
 
@@ -136,6 +180,7 @@ impl BuddyObserver for ProviderHealthObserver {
             None => return vec![],
         };
         let chat_models: Vec<String> = caps.chat_models.keys().cloned().collect();
-        detect_provider_health_facts(&caps.defaults, &chat_models, &[], Utc::now())
+        let completion_models: Vec<String> = caps.completion_models.keys().cloned().collect();
+        detect_provider_health_facts(&caps.defaults, &chat_models, &completion_models, Utc::now())
     }
 }

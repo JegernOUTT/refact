@@ -968,6 +968,8 @@ fn validate_defaults_draft_shape(content: &str) -> Result<(), ScratchError> {
         if !matches!(
             key.as_str(),
             "chat"
+                | "chat_model_2"
+                | "task_planner_agent_model"
                 | "chat_light"
                 | "chat_thinking"
                 | "chat_buddy"

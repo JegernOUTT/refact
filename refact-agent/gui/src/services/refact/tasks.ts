@@ -435,11 +435,10 @@ export const tasksApi = createApi({
         name?: string;
         baseBranch?: string;
         baseCommit?: string;
-        defaultAgentModel?: string;
       }
     >({
       queryFn: async (
-        { taskId, name, baseBranch, baseCommit, defaultAgentModel },
+        { taskId, name, baseBranch, baseCommit },
         api,
         _opts,
         baseQuery,
@@ -449,8 +448,6 @@ export const tasksApi = createApi({
         if (name !== undefined) body.name = name;
         if (baseBranch !== undefined) body.base_branch = baseBranch;
         if (baseCommit !== undefined) body.base_commit = baseCommit;
-        if (defaultAgentModel !== undefined)
-          body.default_agent_model = defaultAgentModel;
         const result = await baseQuery({
           url: buildApiUrlFromState(state, `/v1/tasks/${taskId}/meta`),
           method: "PATCH",

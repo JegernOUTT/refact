@@ -545,9 +545,118 @@ fn apply_user_default_chat_model(
     }
 }
 
+fn resolve_user_default_completion_model(
+    model: &str,
+    completion_models: &IndexMap<String, Arc<CompletionModelRecord>>,
+) -> Option<String> {
+    if model.is_empty() {
+        return None;
+    }
+    if completion_models.contains_key(model) {
+        return Some(model.to_string());
+    }
+    if !model.contains('/') {
+        for key in completion_models.keys() {
+            if let Some(name) = key.split('/').last() {
+                if name == model {
+                    return Some(key.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn apply_user_default_completion_model(
+    target: &mut String,
+    model: Option<&str>,
+    completion_models: &IndexMap<String, Arc<CompletionModelRecord>>,
+) {
+    let Some(model) = model else {
+        return;
+    };
+
+    let model = model.trim();
+    if model.is_empty() {
+        target.clear();
+        return;
+    }
+
+    if is_legacy_refact_model(model) {
+        warn!(
+            "Legacy Refact Cloud completion default '{}' was reset to none",
+            model
+        );
+        target.clear();
+        return;
+    }
+
+    match resolve_user_default_completion_model(model, completion_models) {
+        Some(resolved) => *target = resolved,
+        None => {
+            warn!(
+                "User default completion model '{}' not found in available models; keeping configured value for setup diagnostics",
+                model
+            );
+            *target = model.to_string();
+        }
+    }
+}
+
+fn resolve_user_default_embedding_model(
+    model: &str,
+    embedding_models: &[EmbeddingModelRecord],
+) -> Option<EmbeddingModelRecord> {
+    if model.is_empty() {
+        return None;
+    }
+
+    let mut matches: Vec<&EmbeddingModelRecord> = embedding_models
+        .iter()
+        .filter(|record| record.base.id == model || record.base.name == model)
+        .collect();
+    matches.sort_by(|a, b| a.base.id.cmp(&b.base.id));
+    matches.first().map(|record| (*record).clone())
+}
+
+fn apply_user_default_embedding_model(
+    target: &mut EmbeddingModelRecord,
+    model: Option<&str>,
+    embedding_models: &[EmbeddingModelRecord],
+) {
+    let Some(model) = model else {
+        return;
+    };
+
+    let model = model.trim();
+    if model.is_empty() {
+        *target = EmbeddingModelRecord::default();
+        return;
+    }
+
+    if is_legacy_refact_model(model) {
+        warn!(
+            "Legacy Refact Cloud embedding default '{}' was reset to none",
+            model
+        );
+        *target = EmbeddingModelRecord::default();
+        return;
+    }
+
+    match resolve_user_default_embedding_model(model, embedding_models) {
+        Some(resolved) => *target = resolved,
+        None => warn!(
+            "User default embedding model '{}' not found in available models; keeping configured embedding model for setup diagnostics",
+            model
+        ),
+    }
+}
+
 fn clear_legacy_refact_chat_defaults(caps: &mut CodeAssistantCaps) {
     let defaults = &mut caps.defaults;
     clear_legacy_refact_chat_default("chat", &mut defaults.chat_default_model);
+    clear_legacy_refact_chat_default("chat 2", &mut defaults.chat_model_2);
+    clear_legacy_refact_chat_default("task planner agent", &mut defaults.task_planner_agent_model);
     clear_legacy_refact_chat_default("light", &mut defaults.chat_light_model);
     clear_legacy_refact_chat_default("thinking", &mut defaults.chat_thinking_model);
     clear_legacy_refact_chat_default("buddy", &mut defaults.chat_buddy_model);
@@ -695,7 +804,7 @@ pub async fn load_caps(
         }
     }
 
-    add_models_to_caps(&mut caps, providers);
+    let embedding_models = add_models_to_caps(&mut caps, providers);
     populate_chat_models_from_providers(&mut caps, gcx.clone()).await;
     apply_model_caps_to_all_chat_models(&mut caps);
     remove_legacy_refact_models_from_caps(&mut caps);
@@ -706,6 +815,18 @@ pub async fn load_caps(
                 &mut caps.defaults.chat_default_model,
                 &user_defaults.chat,
                 "chat",
+                &caps.chat_models,
+            );
+            apply_user_default_chat_model(
+                &mut caps.defaults.chat_model_2,
+                &user_defaults.chat_model_2,
+                "chat 2",
+                &caps.chat_models,
+            );
+            apply_user_default_chat_model(
+                &mut caps.defaults.task_planner_agent_model,
+                &user_defaults.task_planner_agent_model,
+                "task planner agent",
                 &caps.chat_models,
             );
             apply_user_default_chat_model(
@@ -726,7 +847,16 @@ pub async fn load_caps(
                 "thinking",
                 &caps.chat_models,
             );
-            remove_legacy_refact_models_from_caps(&mut caps);
+            apply_user_default_completion_model(
+                &mut caps.defaults.completion_default_model,
+                user_defaults.completion_model.as_deref(),
+                &caps.completion_models,
+            );
+            apply_user_default_embedding_model(
+                &mut caps.embedding_model,
+                user_defaults.embedding_model.as_deref(),
+                &embedding_models,
+            );
             caps.user_defaults = user_defaults;
         }
         Err(e) => {
@@ -743,79 +873,54 @@ pub async fn load_caps(
 }
 
 fn validate_default_models(caps: &CodeAssistantCaps) -> Result<(), String> {
-    if !caps.defaults.chat_default_model.is_empty() {
-        if !caps
-            .chat_models
-            .contains_key(&caps.defaults.chat_default_model)
-        {
-            if resolve_model_caps_for_provider_model(
-                &caps.model_caps,
-                &caps.defaults.chat_default_model,
-            )
-            .is_none()
-            {
-                warn!(
-                    "Default chat model '{}' is not in chat_models and not found in model capabilities registry",
-                    caps.defaults.chat_default_model
-                );
-            }
-        }
-    }
-    if !caps.defaults.chat_thinking_model.is_empty() {
-        if !caps
-            .chat_models
-            .contains_key(&caps.defaults.chat_thinking_model)
-        {
-            if resolve_model_caps_for_provider_model(
-                &caps.model_caps,
-                &caps.defaults.chat_thinking_model,
-            )
-            .is_none()
-            {
-                warn!(
-                    "Default thinking model '{}' is not in chat_models and not found in model capabilities registry",
-                    caps.defaults.chat_thinking_model
-                );
-            }
-        }
-    }
-    if !caps.defaults.chat_buddy_model.is_empty() {
-        if !caps
-            .chat_models
-            .contains_key(&caps.defaults.chat_buddy_model)
-        {
-            if resolve_model_caps_for_provider_model(
-                &caps.model_caps,
-                &caps.defaults.chat_buddy_model,
-            )
-            .is_none()
-            {
-                warn!(
-                    "Default buddy model '{}' is not in chat_models and not found in model capabilities registry",
-                    caps.defaults.chat_buddy_model
-                );
-            }
-        }
-    }
-    if !caps.defaults.chat_light_model.is_empty() {
-        if !caps
-            .chat_models
-            .contains_key(&caps.defaults.chat_light_model)
-        {
-            if resolve_model_caps_for_provider_model(
-                &caps.model_caps,
-                &caps.defaults.chat_light_model,
-            )
-            .is_none()
-            {
-                warn!(
-                    "Default light model '{}' is not in chat_models and not found in model capabilities registry",
-                    caps.defaults.chat_light_model
-                );
-            }
-        }
-    }
+    validate_default_chat_model(caps, "chat", &caps.defaults.chat_default_model);
+    validate_default_chat_model(caps, "chat 2", &caps.defaults.chat_model_2);
+    validate_default_chat_model(
+        caps,
+        "task planner agent",
+        &caps.defaults.task_planner_agent_model,
+    );
+    validate_default_chat_model(caps, "thinking", &caps.defaults.chat_thinking_model);
+    validate_default_chat_model(caps, "buddy", &caps.defaults.chat_buddy_model);
+    validate_default_chat_model(caps, "light", &caps.defaults.chat_light_model);
+    validate_default_completion_model(caps, &caps.defaults.completion_default_model);
+    validate_default_embedding_model(caps);
     Ok(())
+}
+
+fn validate_default_chat_model(caps: &CodeAssistantCaps, label: &str, model: &str) {
+    if model.is_empty() || caps.chat_models.contains_key(model) {
+        return;
+    }
+    if resolve_model_caps_for_provider_model(&caps.model_caps, model).is_none() {
+        warn!(
+            "Default {} model '{}' is not in chat_models and not found in model capabilities registry",
+            label, model
+        );
+    }
+}
+
+fn validate_default_completion_model(caps: &CodeAssistantCaps, model: &str) {
+    if model.is_empty() || caps.completion_models.contains_key(model) {
+        return;
+    }
+    warn!(
+        "Default completion model '{}' is not in completion_models",
+        model
+    );
+}
+
+fn validate_default_embedding_model(caps: &CodeAssistantCaps) {
+    let model = caps.embedding_model.base.id.as_str();
+    if model.is_empty() {
+        return;
+    }
+    if is_legacy_refact_model(model) || is_legacy_refact_model(&caps.embedding_model.base.name) {
+        warn!(
+            "Default embedding model '{}' is legacy or unavailable",
+            model
+        );
+    }
 }
 
 pub fn strip_model_from_finetune(model: &str) -> String {
@@ -1091,6 +1196,66 @@ mod tests {
 
         let result = resolve_model(&models, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn user_completion_default_resolves_provider_qualified_and_bare_models() {
+        let mut completion_models = IndexMap::new();
+        completion_models.insert(
+            "openai/starcoder".to_string(),
+            Arc::new(CompletionModelRecord {
+                base: BaseModelRecord {
+                    id: "openai/starcoder".to_string(),
+                    name: "starcoder".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+
+        let mut target = String::new();
+        apply_user_default_completion_model(&mut target, Some("starcoder"), &completion_models);
+        assert_eq!(target, "openai/starcoder");
+
+        apply_user_default_completion_model(
+            &mut target,
+            Some("openai/starcoder"),
+            &completion_models,
+        );
+        assert_eq!(target, "openai/starcoder");
+    }
+
+    #[test]
+    fn user_embedding_default_selects_matching_embedding_record() {
+        let embedding_models = vec![
+            EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    id: "openai/text-embedding-3-small".to_string(),
+                    name: "text-embedding-3-small".to_string(),
+                    ..Default::default()
+                },
+                embedding_size: 1536,
+                ..Default::default()
+            },
+            EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    id: "openai_2/text-embedding-3-small".to_string(),
+                    name: "text-embedding-3-small".to_string(),
+                    ..Default::default()
+                },
+                embedding_size: 3072,
+                ..Default::default()
+            },
+        ];
+        let mut target = EmbeddingModelRecord::default();
+
+        apply_user_default_embedding_model(
+            &mut target,
+            Some("openai_2/text-embedding-3-small"),
+            &embedding_models,
+        );
+        assert_eq!(target.base.id, "openai_2/text-embedding-3-small");
+        assert_eq!(target.embedding_size, 3072);
     }
 
     #[tokio::test]

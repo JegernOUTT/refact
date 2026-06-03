@@ -483,8 +483,9 @@ fn convert_to_anthropic(
     let mut result: Vec<Value> = Vec::new();
     let mut pending_tool_results: Vec<Value> = Vec::new();
     let mut pending_context_text: Vec<PendingText> = Vec::new();
+    let normalized_messages = normalize_tool_results_after_assistant(messages);
 
-    for msg in messages {
+    for msg in normalized_messages.iter() {
         match msg.role.as_str() {
             "system" => {
                 system_text = Some(msg.content.content_text_only());
@@ -536,7 +537,7 @@ fn convert_to_anthropic(
                         content.push(json!({"type": "text", "text": pending.text}));
                     }
                 } else if msg.role == "user" && !pending_tool_results.is_empty() {
-                    content.extend(pending_tool_results.drain(..));
+                    content.extend(drain_tool_results_ordered(&mut pending_tool_results));
                 } else {
                     // Flush any open tool-results group before an assistant turn.
                     if !pending_context_text.is_empty() && pending_tool_results.is_empty() {
@@ -831,14 +832,220 @@ fn convert_to_anthropic(
     (system, result)
 }
 
+fn is_client_tool_result_message(message: &refact_core::chat_types::ChatMessage) -> bool {
+    (message.role == "tool" || message.role == "diff")
+        && !message.tool_call_id.is_empty()
+        && !message.tool_call_id.starts_with("srvtoolu_")
+}
+
+fn is_tool_result_context_message(message: &refact_core::chat_types::ChatMessage) -> bool {
+    super::render_extra::is_context_role(&message.role)
+        || super::render_extra::is_event_role(&message.role)
+}
+
+fn has_stateful_anthropic_blocks(message: &refact_core::chat_types::ChatMessage) -> bool {
+    message
+        .thinking_blocks
+        .as_ref()
+        .is_some_and(|blocks| !blocks.is_empty())
+        || !message.server_content_blocks.is_empty()
+        || message
+            .extra
+            .get("_anthropic_text_blocks")
+            .and_then(|blocks| blocks.as_array())
+            .is_some_and(|blocks| !blocks.is_empty())
+}
+
+fn tool_result_bundle_indices(
+    messages: &[refact_core::chat_types::ChatMessage],
+    result_idx: usize,
+    consumed_result_indices: &std::collections::HashSet<usize>,
+) -> Vec<usize> {
+    let mut indices = vec![result_idx];
+    let mut next_idx = result_idx + 1;
+    while let Some(message) = messages.get(next_idx) {
+        if consumed_result_indices.contains(&next_idx) || !is_tool_result_context_message(message) {
+            break;
+        }
+        indices.push(next_idx);
+        next_idx += 1;
+    }
+    indices
+}
+
+fn next_client_tool_owner_index(
+    messages: &[refact_core::chat_types::ChatMessage],
+    start_idx: usize,
+    tool_call_id: &str,
+) -> Option<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .skip(start_idx + 1)
+        .find(|(_, candidate)| {
+            candidate.role == "assistant"
+                && candidate.tool_calls.as_ref().is_some_and(|tool_calls| {
+                    tool_calls.iter().any(|tool_call| {
+                        !tool_call.id.starts_with("srvtoolu_") && tool_call.id == tool_call_id
+                    })
+                })
+        })
+        .map(|(idx, _)| idx)
+}
+
+fn normalize_tool_results_after_assistant(
+    messages: &[refact_core::chat_types::ChatMessage],
+) -> std::borrow::Cow<'_, [refact_core::chat_types::ChatMessage]> {
+    use std::collections::HashSet;
+
+    let needs_normalization = messages.iter().any(|message| {
+        is_client_tool_result_message(message)
+            || (message.role == "assistant"
+                && message.tool_calls.as_ref().is_some_and(|tool_calls| {
+                    tool_calls
+                        .iter()
+                        .any(|tool_call| !tool_call.id.starts_with("srvtoolu_"))
+                }))
+    });
+    if !needs_normalization {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+
+    let mut consumed_result_indices: HashSet<usize> = HashSet::new();
+    let mut normalized = Vec::with_capacity(messages.len());
+
+    for (idx, msg) in messages.iter().enumerate() {
+        if consumed_result_indices.contains(&idx) {
+            continue;
+        }
+
+        if is_client_tool_result_message(msg) {
+            tracing::warn!(
+                "dropping unmatched Anthropic tool_result '{}' before request",
+                msg.tool_call_id
+            );
+            continue;
+        }
+
+        let Some(tool_calls) = msg.tool_calls.as_ref().filter(|calls| !calls.is_empty()) else {
+            normalized.push(msg.clone());
+            continue;
+        };
+
+        if msg.role != "assistant" {
+            normalized.push(msg.clone());
+            continue;
+        }
+
+        let mut matched_tool_call_indices: HashSet<usize> = HashSet::new();
+        let mut result_indices = Vec::new();
+        let mut seen_tool_call_ids: HashSet<&str> = HashSet::new();
+
+        for (tool_call_idx, tool_call) in tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, tool_call)| !tool_call.id.starts_with("srvtoolu_"))
+        {
+            if !seen_tool_call_ids.insert(tool_call.id.as_str()) {
+                tracing::warn!(
+                    "stripping duplicate Anthropic tool_use '{}' before request",
+                    tool_call.id
+                );
+                continue;
+            }
+
+            let next_owner_idx = next_client_tool_owner_index(messages, idx, &tool_call.id);
+            let Some((result_idx, _)) = messages
+                .iter()
+                .enumerate()
+                .skip(idx + 1)
+                .take_while(|(candidate_idx, _)| Some(*candidate_idx) != next_owner_idx)
+                .find(|(candidate_idx, candidate)| {
+                    !consumed_result_indices.contains(candidate_idx)
+                        && !result_indices.contains(candidate_idx)
+                        && is_client_tool_result_message(candidate)
+                        && candidate.tool_call_id == tool_call.id
+                })
+            else {
+                tracing::warn!(
+                    "stripping unanswered Anthropic tool_use '{}' before request",
+                    tool_call.id
+                );
+                continue;
+            };
+
+            matched_tool_call_indices.insert(tool_call_idx);
+            result_indices.push(result_idx);
+        }
+
+        let original_client_tool_calls = tool_calls
+            .iter()
+            .filter(|tool_call| !tool_call.id.starts_with("srvtoolu_"))
+            .count();
+
+        let mut assistant = msg.clone();
+        if matched_tool_call_indices.len() != original_client_tool_calls {
+            if has_stateful_anthropic_blocks(msg) {
+                tracing::warn!(
+                    "dropping Anthropic assistant message with stateful blocks and incomplete tool results before request"
+                );
+                for result_idx in result_indices {
+                    for bundle_idx in
+                        tool_result_bundle_indices(messages, result_idx, &consumed_result_indices)
+                    {
+                        consumed_result_indices.insert(bundle_idx);
+                    }
+                }
+                continue;
+            }
+
+            let filtered_tool_calls = tool_calls
+                .iter()
+                .enumerate()
+                .filter(|tool_call| {
+                    tool_call.1.id.starts_with("srvtoolu_")
+                        || matched_tool_call_indices.contains(&tool_call.0)
+                })
+                .map(|(_, tool_call)| tool_call)
+                .cloned()
+                .collect::<Vec<_>>();
+            assistant.tool_calls = if filtered_tool_calls.is_empty() {
+                None
+            } else {
+                Some(filtered_tool_calls)
+            };
+        }
+
+        normalized.push(assistant);
+        for result_idx in result_indices {
+            for bundle_idx in
+                tool_result_bundle_indices(messages, result_idx, &consumed_result_indices)
+            {
+                consumed_result_indices.insert(bundle_idx);
+                normalized.push(messages[bundle_idx].clone());
+            }
+        }
+    }
+
+    std::borrow::Cow::Owned(normalized)
+}
+
 fn flush_tool_results(result: &mut Vec<Value>, pending: &mut Vec<Value>) {
     if pending.is_empty() {
         return;
     }
+    let content = drain_tool_results_ordered(pending);
     result.push(json!({
         "role": "user",
-        "content": pending.drain(..).collect::<Vec<_>>()
+        "content": content
     }));
+}
+
+fn drain_tool_results_ordered(pending: &mut Vec<Value>) -> Vec<Value> {
+    let content = pending.drain(..).partition::<Vec<_>, _>(|block| {
+        block.get("type").and_then(Value::as_str) == Some("tool_result")
+    });
+    content.0.into_iter().chain(content.1).collect()
 }
 
 fn flush_pending_context_text(result: &mut Vec<Value>, pending: &mut Vec<PendingText>) {
@@ -1245,7 +1452,9 @@ mod tests {
     use super::*;
     use crate::canonical::ClaudeCodeIdentity;
     use crate::params::CacheControl;
-    use refact_core::chat_types::{ChatContent, ChatMessage};
+    use refact_core::chat_types::{
+        ChatContent, ChatMessage, ChatToolCall, ChatToolFunction, ContextFile,
+    };
 
     fn settings() -> AdapterSettings {
         AdapterSettings {
@@ -1298,6 +1507,96 @@ mod tests {
             content: ChatContent::SimpleText(content.to_string()),
             extra,
             ..Default::default()
+        }
+    }
+
+    fn tool_call(id: &str, name: &str) -> ChatToolCall {
+        ChatToolCall {
+            id: id.to_string(),
+            tool_type: "function".to_string(),
+            extra_content: None,
+            function: ChatToolFunction {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+            index: None,
+        }
+    }
+
+    fn assistant_with_tool_calls(calls: Vec<ChatToolCall>) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            tool_calls: Some(calls),
+            ..Default::default()
+        }
+    }
+
+    fn tool_result(id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            tool_call_id: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn plain_text_message(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "plain_text".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn context_file_message(tool_call_id: &str, path: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: path.to_string(),
+                file_content: content.to_string(),
+                line1: 1,
+                line2: 2,
+                ..Default::default()
+            }]),
+            tool_call_id: tool_call_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn assert_tool_results_follow_tool_uses(messages: &[Value]) {
+        for (idx, message) in messages.iter().enumerate() {
+            if message["role"] != "assistant" {
+                continue;
+            }
+            let tool_use_ids: Vec<_> = message["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == "tool_use")
+                .filter_map(|block| block["id"].as_str())
+                .collect();
+            if tool_use_ids.is_empty() {
+                continue;
+            }
+
+            let next = messages
+                .get(idx + 1)
+                .unwrap_or_else(|| panic!("assistant message {idx} has no following tool result"));
+            assert_eq!(next["role"], "user");
+            let result_ids: std::collections::HashSet<_> = next["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == "tool_result")
+                .filter_map(|block| block["tool_use_id"].as_str())
+                .collect();
+            for tool_use_id in tool_use_ids {
+                assert!(
+                    result_ids.contains(tool_use_id),
+                    "assistant tool_use {tool_use_id} has no immediately following tool_result"
+                );
+            }
         }
     }
 
@@ -1965,8 +2264,6 @@ mod tests {
 
     #[test]
     fn anthropic_cache_does_not_mark_thinking_blocks() {
-        use refact_core::chat_types::{ChatToolCall, ChatToolFunction};
-
         let adapter = AnthropicAdapter;
         let req = LlmRequest::new(
             "claude".to_string(),
@@ -1986,18 +2283,10 @@ mod tests {
                             "data": "encrypted"
                         }),
                     ]),
-                    tool_calls: Some(vec![ChatToolCall {
-                        id: "call_1".to_string(),
-                        tool_type: "function".to_string(),
-                        extra_content: None,
-                        function: ChatToolFunction {
-                            name: "lookup".to_string(),
-                            arguments: "{}".to_string(),
-                        },
-                        index: None,
-                    }]),
+                    tool_calls: Some(vec![tool_call("call_1", "lookup")]),
                     ..Default::default()
                 },
+                tool_result("call_1", "tool output"),
             ],
         )
         .with_cache_control(CacheControl::Ephemeral);
@@ -2012,7 +2301,11 @@ mod tests {
         assert_eq!(assistant_content[2]["type"], "tool_use");
         assert!(assistant_content[2].get("cache_control").is_none());
         assert_eq!(
-            http.body["messages"][0]["content"][0]["cache_control"]["type"],
+            http.body["messages"][2]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            http.body["messages"][2]["content"][0]["cache_control"]["type"],
             "ephemeral"
         );
     }
@@ -2559,6 +2852,209 @@ mod tests {
         let tool_result = &msgs[2]["content"][0];
         assert_eq!(tool_result["type"], "tool_result");
         assert_eq!(tool_result["tool_use_id"], "call_edit");
+    }
+
+    #[test]
+    fn tool_result_is_moved_immediately_after_assistant_tool_use() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant_with_tool_calls(vec![tool_call("call_1", "search")]),
+            event_message(
+                "system_notice",
+                "tool.search",
+                json!({"phase":"running"}),
+                "Searching...",
+            ),
+            ChatMessage::new("assistant".to_string(), "intervening answer".to_string()),
+            tool_result("call_1", "tool output"),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][0]["tool_use_id"], "call_1");
+        assert_eq!(msgs[2]["content"][1]["type"], "text");
+        assert!(msgs[2]["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Searching"));
+        assert_eq!(msgs[3]["role"], "assistant");
+    }
+
+    #[test]
+    fn unmatched_duplicate_tool_result_is_not_sent() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant_with_tool_calls(vec![tool_call("call_1", "search")]),
+            tool_result("call_1", "nearest output"),
+            ChatMessage::new("user".to_string(), "continue".to_string()),
+            tool_result("call_1", "later stale output"),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+        let serialized = serde_json::to_string(&msgs).unwrap();
+
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][0]["content"], "nearest output");
+        assert!(!serialized.contains("later stale output"));
+        assert_tool_results_follow_tool_uses(&msgs);
+    }
+
+    #[test]
+    fn moved_tool_result_keeps_adjacent_context() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant_with_tool_calls(vec![tool_call("call_1", "search")]),
+            ChatMessage::new("assistant".to_string(), "intervening answer".to_string()),
+            tool_result("call_1", "tool output"),
+            plain_text_message("adjacent tool context"),
+            context_file_message("call_1", "src/lib.rs", "fn searched() {}"),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][1]["type"], "text");
+        assert!(msgs[2]["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("adjacent tool context"));
+        assert_eq!(msgs[2]["content"][2]["type"], "text");
+        let context_text = msgs[2]["content"][2]["text"].as_str().unwrap();
+        assert!(context_text.contains("src/lib.rs:1-2"));
+        assert!(context_text.contains("fn searched() {}"));
+        assert_eq!(msgs[3]["role"], "assistant");
+        assert_tool_results_follow_tool_uses(&msgs);
+    }
+
+    #[test]
+    fn multiple_tool_results_stay_before_adjacent_context() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant_with_tool_calls(vec![
+                tool_call("call_1", "search"),
+                tool_call("call_2", "read"),
+            ]),
+            tool_result("call_1", "search output"),
+            context_file_message("call_1", "src/lib.rs", "fn searched() {}"),
+            tool_result("call_2", "read output"),
+            ChatMessage::new("user".to_string(), "continue".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+        let content = msgs[2]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "call_1");
+        assert_eq!(content[1]["type"], "tool_result");
+        assert_eq!(content[1]["tool_use_id"], "call_2");
+        assert_eq!(content[2]["type"], "text");
+        assert!(content[2]["text"]
+            .as_str()
+            .unwrap()
+            .contains("fn searched() {}"));
+        assert_eq!(content[3]["type"], "text");
+        assert_eq!(content[3]["text"], "continue");
+        assert_tool_results_follow_tool_uses(&msgs);
+    }
+
+    #[test]
+    fn incomplete_stateful_assistant_is_dropped_instead_of_rewritten() {
+        let mut assistant = assistant_with_tool_calls(vec![
+            tool_call("call_answered", "search"),
+            tool_call("call_missing", "search"),
+        ]);
+        assistant.thinking_blocks = Some(vec![json!({
+            "type": "thinking",
+            "thinking": "signed reasoning",
+            "signature": "sig_1"
+        })]);
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant,
+            tool_result("call_answered", "tool output"),
+            ChatMessage::new("user".to_string(), "continue".to_string()),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+        let serialized = serde_json::to_string(&msgs).unwrap();
+
+        assert!(!serialized.contains("tool_use"));
+        assert!(!serialized.contains("tool_result"));
+        assert!(!serialized.contains("signed reasoning"));
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_tool_results_follow_tool_uses(&msgs);
+    }
+
+    #[test]
+    fn duplicate_tool_use_ids_do_not_escape_without_results() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant_with_tool_calls(vec![
+                tool_call("call_1", "search"),
+                tool_call("call_1", "search"),
+            ]),
+            tool_result("call_1", "tool output"),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        let tool_uses = assistant_content
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .count();
+
+        assert_eq!(tool_uses, 1);
+        assert_tool_results_follow_tool_uses(&msgs);
+    }
+
+    #[test]
+    fn repeated_tool_use_id_across_turns_does_not_steal_later_result() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant_with_tool_calls(vec![tool_call("call_1", "search")]),
+            ChatMessage::new("user".to_string(), "new turn".to_string()),
+            assistant_with_tool_calls(vec![tool_call("call_1", "search")]),
+            tool_result("call_1", "later owner output"),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+        let serialized = serde_json::to_string(&msgs).unwrap();
+
+        assert_eq!(serialized.matches("\"type\":\"tool_use\"").count(), 1);
+        assert_eq!(serialized.matches("\"type\":\"tool_result\"").count(), 1);
+        assert_eq!(msgs[4]["content"][0]["content"], "later owner output");
+        assert_tool_results_follow_tool_uses(&msgs);
+    }
+
+    #[test]
+    fn unanswered_client_tool_use_is_stripped_before_anthropic_request() {
+        let messages = vec![
+            ChatMessage::new("user".to_string(), "start".to_string()),
+            assistant_with_tool_calls(vec![
+                tool_call("call_answered", "search"),
+                tool_call("call_missing", "search"),
+            ]),
+            tool_result("call_answered", "tool output"),
+        ];
+
+        let (_, msgs) = convert_to_anthropic(&messages, None);
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        let tool_uses: Vec<_> = assistant_content
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .collect();
+
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0]["id"], "call_answered");
+        assert_eq!(msgs[2]["content"][0]["tool_use_id"], "call_answered");
+        assert_tool_results_follow_tool_uses(&msgs);
     }
 
     #[test]

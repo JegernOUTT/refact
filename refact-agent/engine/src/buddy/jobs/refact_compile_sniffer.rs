@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -15,6 +15,7 @@ pub struct RefactCompileSnifferJob;
 const COOLDOWN_SECONDS: u64 = 60 * 60;
 const PRIORITY: u32 = 5;
 const MAX_LOG_LINES: usize = 5;
+const MAX_LOG_BYTES: u64 = 16 * 1024;
 
 fn modified_unix_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
@@ -35,15 +36,19 @@ fn newest_rustbinary_log(logs_dir: &Path) -> Option<PathBuf> {
 }
 
 fn first_log_lines(path: &Path) -> Option<Vec<String>> {
-    let file = File::open(path).ok()?;
+    let file = File::open(path).ok()?.take(MAX_LOG_BYTES);
     let reader = BufReader::new(file);
-    Some(
-        reader
-            .lines()
-            .take(MAX_LOG_LINES)
-            .filter_map(Result::ok)
-            .collect(),
-    )
+    let mut lines = Vec::new();
+    for line in reader.lines().take(MAX_LOG_LINES) {
+        match line {
+            Ok(line) => lines.push(line),
+            Err(err) => {
+                tracing::warn!("buddy compile sniffer failed to read log line: {err}");
+                return None;
+            }
+        }
+    }
+    Some(lines)
 }
 
 fn compile_error_evidence(logs_dir: &Path) -> Option<String> {
@@ -91,14 +96,20 @@ impl BuddyJob for RefactCompileSnifferJob {
         let logs_dir = gcx.paths.cache_dir.join("logs");
         tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir).is_some())
             .await
-            .unwrap_or(false)
+            .unwrap_or_else(|err| {
+                tracing::warn!("buddy compile sniffer should_run log scan task failed: {err}");
+                false
+            })
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let logs_dir = gcx.paths.cache_dir.join("logs");
         let evidence = tokio::task::spawn_blocking(move || compile_error_evidence(&logs_dir))
             .await
-            .unwrap_or(None);
+            .unwrap_or_else(|err| {
+                tracing::warn!("buddy compile sniffer log scan task failed: {err}");
+                None
+            });
         let Some(evidence) = evidence else {
             return BuddyJobResult::default();
         };
@@ -128,6 +139,7 @@ mod tests {
             settings: BuddySettings::default(),
             pulse: BuddyPulse::default(),
             facts: vec![],
+            recent_activities: vec![],
         }
     }
 
@@ -173,5 +185,30 @@ mod tests {
         let ctx = test_context(dir.path());
 
         assert!(!RefactCompileSnifferJob.should_run(gcx, &ctx).await);
+    }
+
+    #[test]
+    fn first_log_lines_caps_total_bytes_from_oversized_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rustbinary.2026-05-15");
+        std::fs::write(
+            &path,
+            format!("error[E0425]: {}", "x".repeat(MAX_LOG_BYTES as usize * 2)),
+        )
+        .unwrap();
+
+        let lines = first_log_lines(&path).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].len() <= MAX_LOG_BYTES as usize);
+    }
+
+    #[test]
+    fn first_log_lines_reports_invalid_utf8_as_scan_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rustbinary.2026-05-15");
+        std::fs::write(&path, [0xff, 0xfe, b'\n']).unwrap();
+
+        assert!(first_log_lines(&path).is_none());
     }
 }

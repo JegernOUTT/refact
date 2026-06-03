@@ -22,7 +22,7 @@ use crate::chat::stream_core::{
     run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
     LlmStreamError, clear_unbound_openai_codex_websocket_session,
 };
-use crate::chat::diagnostics::make_ui_only_error_message;
+use crate::chat::diagnostics::{make_ui_only_error_message, safe_provider_error_diagnostic};
 use crate::chat::retry_policy::{
     classify_llm_error_for_retry, retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
 };
@@ -41,6 +41,14 @@ const PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS: usize = 512;
 const PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED: &str = "\n...[truncated]";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
+
+fn partial_output_stream_error_message(original: &str) -> String {
+    format!(
+        "{} Original error: {}",
+        PARTIAL_OUTPUT_STREAM_ERROR,
+        safe_provider_error_diagnostic(original),
+    )
+}
 
 fn should_compact_context_limit_error(
     error: &str,
@@ -1818,14 +1826,9 @@ async fn subchat_stream(
                     && !abort_flag.load(Ordering::SeqCst)
                 {
                     let original = error.message.clone();
-                    warn!(
-                        "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, original
-                    );
-                    error.message = format!(
-                        "{} Original error: {}",
-                        PARTIAL_OUTPUT_STREAM_ERROR, original
-                    );
+                    let safe_error = partial_output_stream_error_message(&original);
+                    warn!("{}", safe_error);
+                    error.message = safe_error;
                     monitor_error = Some(error.message.clone());
                 }
                 let event = LlmCallEvent {
@@ -2085,14 +2088,18 @@ mod subchat_tests {
     use super::{
         apply_subchat_reactive_compaction, emit_parent_compaction_diagnostics,
         parent_compaction_diagnostic_status, parent_thread_worktree,
-        register_stateful_subchat_worktree, resolve_subchat_model, resolve_subchat_params,
-        resolve_subchat_worktree, safe_context_limit_error_for_log,
-        should_compact_context_limit_error, stateful_thread_from_config, SubchatConfig,
-        ToolsPolicy, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        partial_output_stream_error_message, register_stateful_subchat_worktree,
+        resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
+        safe_context_limit_error_for_log, should_compact_context_limit_error,
+        stateful_thread_from_config, SubchatConfig, ToolsPolicy,
+        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
-    use crate::chat::diagnostics::is_ui_only_message;
+    use crate::chat::diagnostics::{
+        is_ui_only_message, SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS,
+        SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED,
+    };
     use crate::chat::summarization::{safe_segment_summary_failure_for_log, SegmentSummaryFailure};
     use crate::chat::trajectories::save_trajectory_as;
     use crate::call_validation::{
@@ -2237,6 +2244,40 @@ mod subchat_tests {
             0,
             &Some(abort),
         ));
+    }
+
+    #[test]
+    fn partial_output_stream_error_message_redacts_provider_secret() {
+        let output = partial_output_stream_error_message(
+            "provider failed: Authorization: Bearer sk-test-secret",
+        );
+
+        assert!(output.contains(PARTIAL_OUTPUT_STREAM_ERROR));
+        assert!(!output.contains("sk-test-secret"));
+        assert!(!output.contains("Authorization: Bearer sk-test-secret"));
+        assert!(output.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn partial_output_stream_error_message_bounds_huge_provider_error() {
+        let far_tail = "FAR_TAIL_MARKER";
+        let input = format!(
+            "provider failed: Authorization: Bearer sk-test-secret {} {}",
+            "x".repeat(200_000),
+            far_tail,
+        );
+
+        let output = partial_output_stream_error_message(&input);
+        let max_len = PARTIAL_OUTPUT_STREAM_ERROR.len()
+            + " Original error: ".len()
+            + SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS;
+
+        assert!(output.len() <= max_len);
+        assert!(output.contains(SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED));
+        assert!(!output.contains("sk-test-secret"));
+        assert!(!output.contains("Authorization: Bearer sk-test-secret"));
+        assert!(output.contains("[REDACTED"));
+        assert!(!output.contains(far_tail));
     }
 
     #[tokio::test]

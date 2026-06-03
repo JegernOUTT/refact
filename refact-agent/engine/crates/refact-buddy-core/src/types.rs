@@ -249,6 +249,20 @@ pub struct BuddyActivity {
     pub failure_summary: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuddyChatPhrase {
+    pub kind: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuddyChatPhraseBank {
+    pub day: String,
+    pub generated_at: String,
+    pub evidence_summary: String,
+    pub lines: Vec<BuddyChatPhrase>,
+}
+
 fn default_quest_status() -> String {
     "active".to_string()
 }
@@ -308,6 +322,8 @@ pub struct BuddyState {
     pub semantic: BuddySemanticSnapshot,
     pub recent_activities: Vec<BuddyActivity>,
     pub suggestion_state: Vec<BuddySuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_phrase_bank: Option<BuddyChatPhraseBank>,
     #[serde(default)]
     pub pet: BuddyPetState,
     #[serde(default)]
@@ -562,6 +578,9 @@ pub enum BuddyAction {
 #[serde(rename_all = "snake_case")]
 pub enum DefaultsKind {
     ChatModel,
+    #[serde(rename = "chat_model_2")]
+    ChatModel2,
+    TaskPlannerAgentModel,
     ChatLightModel,
     ChatBuddyModel,
     ChatThinkingModel,

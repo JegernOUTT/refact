@@ -735,7 +735,7 @@ describe("BuddyHome_renders_all_sections", () => {
       const world = await screen.findByTestId("buddy-world");
       const dismissButton = within(world)
         .getAllByRole("button", { hidden: true })
-        .find((button) => button.textContent === "Dismiss");
+        .find((button) => button.textContent === "Shoo");
       expect(dismissButton).toBeDefined();
       if (!dismissButton) throw new Error("expected dismiss button");
       fireEvent.click(dismissButton);
@@ -762,6 +762,7 @@ describe("BuddyHome_renders_all_sections", () => {
   it("investigating a grouped recent error acknowledges every related runtime id", async () => {
     const dismissedIds: string[] = [];
     let conversationStarted = false;
+    let requestedInvestigationChatId: string | undefined;
     const nowMs = Date.now();
     const runtimeA = {
       id: "grouped-error-a",
@@ -771,16 +772,19 @@ describe("BuddyHome_renders_all_sections", () => {
       source: "provider",
       status: "failed",
       priority: "high",
+      chat_id: "newest-chat-id",
       created_at: new Date(nowMs - 1_000).toISOString(),
     } satisfies BuddyRuntimeEvent;
     const runtimeB = {
       ...runtimeA,
       id: "grouped-error-b",
+      chat_id: "older-chat-id",
       created_at: new Date(nowMs - 2_000).toISOString(),
     } satisfies BuddyRuntimeEvent;
     const runtimeC = {
       ...runtimeA,
       id: "grouped-error-c",
+      chat_id: "oldest-chat-id",
       created_at: new Date(nowMs - 3_000).toISOString(),
     } satisfies BuddyRuntimeEvent;
 
@@ -811,14 +815,16 @@ describe("BuddyHome_renders_all_sections", () => {
           message_count: 0,
         });
       }),
-      http.post("*/v1/buddy/investigation-context", () =>
-        HttpResponse.json({
+      http.post("*/v1/buddy/investigation-context", async ({ request }) => {
+        const body = (await request.json()) as { chat_id?: string };
+        requestedInvestigationChatId = body.chat_id;
+        return HttpResponse.json({
           logs: "logs",
           internal_context: "context",
           repo_owner: "smallcloudai",
           repo_name: "refact",
-        }),
-      ),
+        });
+      }),
       http.post("*/v1/chats/:id/commands", () =>
         HttpResponse.json({ ok: true }),
       ),
@@ -838,7 +844,7 @@ describe("BuddyHome_renders_all_sections", () => {
     expect(dismissedIds).toHaveLength(0);
 
     await user.click(
-      within(errorsPanel).getByRole("button", { name: "Investigate" }),
+      within(errorsPanel).getByRole("button", { name: "Sniff logs" }),
     );
 
     const buddyState = store.getState().buddy;
@@ -858,6 +864,7 @@ describe("BuddyHome_renders_all_sections", () => {
 
     await waitFor(() => {
       expect(conversationStarted).toBe(true);
+      expect(requestedInvestigationChatId).toBe(runtimeA.chat_id);
       expect(new Set(dismissedIds)).toEqual(
         new Set([runtimeA.id, runtimeB.id, runtimeC.id]),
       );
@@ -1061,7 +1068,7 @@ describe("BuddyHome_renders_all_sections", () => {
       const world = await screen.findByTestId("buddy-world");
       const dismissButton = within(world)
         .getAllByRole("button", { hidden: true })
-        .find((button) => button.textContent === "Dismiss");
+        .find((button) => button.textContent === "Shoo");
       expect(dismissButton).toBeDefined();
       if (!dismissButton) throw new Error("expected dismiss button");
       fireEvent.click(dismissButton);

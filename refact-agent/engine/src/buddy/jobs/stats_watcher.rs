@@ -54,8 +54,11 @@ impl BuddyJob for StatsWatcherJob {
                 suggestion: Some(BuddySuggestion {
                     id: format!("stats-errors-{}", chrono::Utc::now().timestamp()),
                     suggestion_type: "error_pattern".to_string(),
-                    title: format!("{} errors in the last hour", recent_error_count),
-                    description: "Several errors have been logged recently. Want me to create a GitHub/GitLab issue to track them?".to_string(),
+                    title: format!(
+                        "{} fresh error gremlins in the last hour",
+                        recent_error_count
+                    ),
+                    description: "The log closet is rattling again. Want me to collect clues and draft an issue-shaped net?".to_string(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     dismissed: false,
                     controls: vec![],
@@ -214,6 +217,7 @@ mod tests {
             settings: BuddySettings::default(),
             pulse: BuddyPulse::default(),
             facts: vec![],
+            recent_activities: vec![],
         }
     }
 

@@ -267,6 +267,8 @@ export type ModelTypeDefaults = {
 
 export type ProviderDefaults = {
   chat: ModelTypeDefaults;
+  chat_model_2: ModelTypeDefaults;
+  task_planner_agent_model: ModelTypeDefaults;
   chat_light: ModelTypeDefaults;
   chat_thinking: ModelTypeDefaults;
   chat_buddy?: ModelTypeDefaults;
@@ -1483,6 +1485,16 @@ function isProviderDefaults(data: unknown): data is ProviderDefaults {
   if (typeof data !== "object" || data === null) return false;
   const obj = data as Record<string, unknown>;
   if (hasProperty(obj, "chat") && !isModelTypeDefaults(obj.chat)) return false;
+  if (
+    hasProperty(obj, "chat_model_2") &&
+    !isModelTypeDefaults(obj.chat_model_2)
+  )
+    return false;
+  if (
+    hasProperty(obj, "task_planner_agent_model") &&
+    !isModelTypeDefaults(obj.task_planner_agent_model)
+  )
+    return false;
   if (hasProperty(obj, "chat_light") && !isModelTypeDefaults(obj.chat_light))
     return false;
   if (

@@ -280,12 +280,7 @@ impl Tool for ToolTaskRestartAgent {
             .unwrap_or_default();
 
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
-        let model = resolve_agent_model(
-            gcx.clone(),
-            task_meta.default_agent_model.as_deref(),
-            &current_model,
-        )
-        .await?;
+        let model = resolve_agent_model(gcx.clone(), &current_model).await?;
         crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model).await?;
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
@@ -969,21 +964,5 @@ mod tests {
         assert_eq!(card.agent_chat_id, newer.agent_chat_id);
         assert_eq!(card.assignee, newer.assignee);
         assert_eq!(card.column, "doing");
-    }
-
-    #[test]
-    fn restart_agent_uses_task_default_model_over_current() {
-        let task_default = Some("task-model-x");
-        let current = "current-model";
-        let result = if let Some(m) = task_default {
-            if !m.is_empty() {
-                m.to_string()
-            } else {
-                current.to_string()
-            }
-        } else {
-            current.to_string()
-        };
-        assert_eq!(result, "task-model-x");
     }
 }

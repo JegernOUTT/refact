@@ -40,9 +40,12 @@ impl BuddyJob for ErrorTriageJob {
             suggestion: Some(BuddySuggestion {
                 id: format!("triage-{}", chrono::Utc::now().timestamp()),
                 suggestion_type: "error_pattern".to_string(),
-                title: format!("Repeated {} errors detected ({}x)", error_type, count),
+                title: format!(
+                    "Gremlin error pile: repeated {} hiccups ({}x)",
+                    error_type, count
+                ),
                 description: format!(
-                    "I'm seeing {} repeated {} errors. Want me to analyze the logs?",
+                    "I found {} {} crumbs doing laps in the logs. Want me to put on the tiny detective hat?",
                     count, error_type
                 ),
                 created_at: chrono::Utc::now().to_rfc3339(),

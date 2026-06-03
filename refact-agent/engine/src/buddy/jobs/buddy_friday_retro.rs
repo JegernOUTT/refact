@@ -14,9 +14,8 @@ fn digest_hour(ctx: &BuddyJobContext) -> u32 {
     ctx.settings.daily_digest_hour.unwrap_or(18).min(23) as u32
 }
 
-fn should_run_now(ctx: &BuddyJobContext) -> bool {
-    let now = Utc::now();
-    now.weekday() == Weekday::Fri && now.hour() == digest_hour(ctx)
+fn should_run_at(ctx: &BuddyJobContext, now: chrono::DateTime<Utc>) -> bool {
+    now.weekday() == Weekday::Fri && now.hour() >= digest_hour(ctx)
 }
 
 fn build_friday_retro_spec(ctx: &BuddyJobContext) -> AutonomousBuddyChatSpec {
@@ -54,7 +53,7 @@ impl BuddyJob for BuddyFridayRetroJob {
     }
 
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
-        should_run_now(ctx)
+        should_run_at(ctx, Utc::now())
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
@@ -86,11 +85,12 @@ mod tests {
             settings: BuddySettings::default(),
             pulse: BuddyPulse::default(),
             facts: vec![],
+            recent_activities: vec![],
         }
     }
 
     #[tokio::test]
-    async fn buddy_friday_retro_should_run_only_on_friday() {
+    async fn buddy_friday_retro_should_run_on_friday_at_or_after_digest_hour() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let now = Utc::now();
@@ -103,8 +103,29 @@ mod tests {
             expected
         );
 
-        ctx.settings.daily_digest_hour = Some(((now.hour() + 1) % 24) as u8);
-        assert!(!BuddyFridayRetroJob.should_run(gcx, &ctx).await);
+        ctx.settings.daily_digest_hour = Some(now.hour().saturating_sub(1) as u8);
+        assert_eq!(
+            BuddyFridayRetroJob.should_run(gcx.clone(), &ctx).await,
+            expected
+        );
+
+        ctx.settings.daily_digest_hour = Some(now.hour().saturating_add(1).min(23) as u8);
+        assert_eq!(
+            BuddyFridayRetroJob.should_run(gcx, &ctx).await,
+            expected && now.hour() == 23
+        );
         assert_eq!(BuddyFridayRetroJob.cooldown_seconds(), COOLDOWN_SECONDS);
+    }
+
+    #[test]
+    fn buddy_friday_retro_runs_later_on_friday_after_digest_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(dir.path());
+        ctx.settings.daily_digest_hour = Some(18);
+        let friday_late = chrono::DateTime::parse_from_rfc3339("2026-06-05T23:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(should_run_at(&ctx, friday_late));
     }
 }

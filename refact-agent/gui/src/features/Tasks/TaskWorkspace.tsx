@@ -26,13 +26,11 @@ import {
   useGetTaskQuery,
   useGetBoardQuery,
   useListTaskTrajectoriesQuery,
-  useUpdateTaskMetaMutation,
   useCreatePlannerChatMutation,
   useDeletePlannerChatMutation,
   BoardCard,
   tasksApi,
 } from "../../services/refact/tasks";
-import { ModelPickerPopover } from "../../components/ChatForm/ModelPickerPopover";
 import { Markdown } from "../../components/Markdown";
 import { CollapsePanel } from "../../components/shared/CollapsePanel";
 import { ResizeDivider } from "../Dashboard/components/ResizeDivider/ResizeDivider";
@@ -335,16 +333,12 @@ interface AgentsPanelProps {
   cards: BoardCard[];
   activeChat: ActiveChat;
   onSelectAgent: (cardId: string, chatId: string) => void;
-  defaultAgentModel?: string;
-  onModelChange?: (model: string) => void;
 }
 
 const AgentsPanel: React.FC<AgentsPanelProps> = ({
   cards,
   activeChat,
   onSelectAgent,
-  defaultAgentModel,
-  onModelChange,
 }) => {
   const activeAgents = cards.filter(
     (c) => c.column === "doing" && c.agent_chat_id,
@@ -408,14 +402,6 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
           </ScrollArea>
         )}
       </Box>
-      {onModelChange && (
-        <Flex className={styles.modelPickerRow}>
-          <ModelPickerPopover
-            value={defaultAgentModel ?? ""}
-            onValueChange={onModelChange}
-          />
-        </Flex>
-      )}
     </Box>
   );
 };
@@ -702,7 +688,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     taskId,
     role: "planner",
   });
-  const [updateTaskMeta] = useUpdateTaskMetaMutation();
   const [createPlannerChat, { isLoading: isCreatingPlanner }] =
     useCreatePlannerChatMutation();
   const [deletePlannerChat] = useDeletePlannerChatMutation();
@@ -1080,7 +1065,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
             role: "agents",
             card_id: cardId,
           },
-          model: task?.default_agent_model,
         }),
       );
 
@@ -1091,7 +1075,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         }),
       );
     },
-    [board, taskId, dispatch, task?.default_agent_model],
+    [board, taskId, dispatch],
   );
 
   const handleCardAgentClick = useCallback(
@@ -1196,13 +1180,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       return next;
     });
   }, [taskId]);
-
-  const handleModelChange = useCallback(
-    (model: string) => {
-      void updateTaskMeta({ taskId, defaultAgentModel: model });
-    },
-    [taskId, updateTaskMeta],
-  );
 
   useEffect(() => {
     if (!board || !selectedCardId) return;
@@ -1377,7 +1354,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               role: "agents",
               card_id: mergeTarget.card.id,
             },
-            model: task?.default_agent_model,
             worktree: mergeTarget.worktree.meta ?? null,
           }),
         );
@@ -1421,7 +1397,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       dispatch,
       mergeTarget,
       showNotification,
-      task?.default_agent_model,
       taskId,
     ],
   );
@@ -1528,8 +1503,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                 cards={board.cards}
                 activeChat={activeChat}
                 onSelectAgent={handleSelectAgent}
-                defaultAgentModel={task.default_agent_model}
-                onModelChange={handleModelChange}
               />
             </Flex>
           </CollapsePanel>

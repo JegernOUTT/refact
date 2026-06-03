@@ -61,22 +61,20 @@ async fn get_task_id(
 
 pub(crate) async fn resolve_agent_model(
     gcx: Arc<GlobalContext>,
-    task_default_model: Option<&str>,
     current_model: &str,
 ) -> Result<String, String> {
-    if let Some(model) = task_default_model {
-        if !model.is_empty() {
-            return Ok(model.to_string());
-        }
+    let caps = try_load_caps_quickly_if_not_present(gcx, 0)
+        .await
+        .map_err(|e| format!("Failed to load caps for model resolution: {}", e))?;
+
+    let task_planner_model = caps.defaults.task_planner_agent_model.trim();
+    if !task_planner_model.is_empty() {
+        return Ok(task_planner_model.to_string());
     }
 
     if !current_model.is_empty() {
         return Ok(current_model.to_string());
     }
-
-    let caps = try_load_caps_quickly_if_not_present(gcx, 0)
-        .await
-        .map_err(|e| format!("Failed to load caps for model resolution: {}", e))?;
 
     let default_model = &caps.defaults.chat_default_model;
     if !default_model.is_empty() {
@@ -84,7 +82,7 @@ pub(crate) async fn resolve_agent_model(
     }
 
     Err(
-        "No model available: task default, current_model, and global default are all empty"
+        "No model available: task_planner_agent_model, current_model, and global default are all empty"
             .to_string(),
     )
 }
@@ -692,9 +690,8 @@ impl Tool for ToolTaskSpawnAgent {
         let current_model = ccx.lock().await.current_model.clone();
 
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
-        let task_default_model = task_meta.default_agent_model.as_deref();
 
-        let model = resolve_agent_model(gcx.clone(), task_default_model, &current_model).await?;
+        let model = resolve_agent_model(gcx.clone(), &current_model).await?;
         crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model).await?;
 
         validate_id(&task_id, "task_id")?;
@@ -1052,6 +1049,16 @@ mod tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
     }
 
+    async fn set_caps(gcx: &Arc<GlobalContext>, caps: crate::caps::CodeAssistantCaps) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut state = gcx.caps_state.write().await;
+        state.caps = Some(Arc::new(caps));
+        state.last_attempted_ts = now;
+    }
+
     async fn test_gcx_with_privacy(blocked: Vec<String>) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
@@ -1152,6 +1159,43 @@ mod tests {
     fn validate_id_rejects_empty_string() {
         let err = validate_id("", "task_id").unwrap_err();
         assert!(err.contains("must not be empty"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_model_uses_task_planner_agent_model_over_current() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.defaults.task_planner_agent_model = "provider/task-planner".to_string();
+        caps.defaults.chat_default_model = "provider/chat".to_string();
+        set_caps(&gcx, caps).await;
+
+        let model = resolve_agent_model(gcx, "provider/current").await.unwrap();
+
+        assert_eq!(model, "provider/task-planner");
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_model_falls_back_without_task_planner_agent_model() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.defaults.chat_default_model = "provider/chat".to_string();
+        set_caps(&gcx, caps).await;
+
+        let model = resolve_agent_model(gcx, "provider/current").await.unwrap();
+
+        assert_eq!(model, "provider/current");
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_model_uses_global_default_when_current_is_empty() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.defaults.chat_default_model = "provider/chat".to_string();
+        set_caps(&gcx, caps).await;
+
+        let model = resolve_agent_model(gcx, "").await.unwrap();
+
+        assert_eq!(model, "provider/chat");
     }
 
     #[tokio::test]

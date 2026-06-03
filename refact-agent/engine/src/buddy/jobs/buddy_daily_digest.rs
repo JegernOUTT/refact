@@ -16,7 +16,7 @@ fn digest_hour(settings: &BuddySettings) -> u32 {
 }
 
 fn should_run_at(ctx: &BuddyJobContext, now: DateTime<Utc>) -> bool {
-    now.hour() == digest_hour(&ctx.settings)
+    now.hour() >= digest_hour(&ctx.settings)
 }
 
 fn build_daily_digest_spec(ctx: &BuddyJobContext, now: DateTime<Utc>) -> AutonomousBuddyChatSpec {
@@ -97,11 +97,12 @@ mod tests {
             settings: BuddySettings::default(),
             pulse: BuddyPulse::default(),
             facts: vec![],
+            recent_activities: vec![],
         }
     }
 
     #[tokio::test]
-    async fn buddy_daily_digest_should_run_only_at_configured_hour() {
+    async fn buddy_daily_digest_should_run_at_or_after_configured_hour() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let hour = Utc::now().hour() as u8;
@@ -111,10 +112,27 @@ mod tests {
         ctx.settings.daily_digest_hour = Some(hour);
         assert!(job.should_run(gcx.clone(), &ctx).await);
 
-        ctx.settings.daily_digest_hour = Some((hour + 1) % 24);
-        assert!(!job.should_run(gcx, &ctx).await);
+        ctx.settings.daily_digest_hour = Some(hour.saturating_sub(1));
+        assert!(job.should_run(gcx.clone(), &ctx).await);
+
+        if hour < 23 {
+            ctx.settings.daily_digest_hour = Some(hour + 1);
+            assert!(!job.should_run(gcx, &ctx).await);
+        }
         assert_eq!(job.cooldown_seconds(), COOLDOWN_SECONDS);
         assert_eq!(BuddySettings::default().daily_digest_hour, Some(18));
+    }
+
+    #[test]
+    fn buddy_daily_digest_runs_later_same_day_after_digest_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(dir.path());
+        ctx.settings.daily_digest_hour = Some(18);
+        let late_same_day = chrono::DateTime::parse_from_rfc3339("2026-06-05T23:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(should_run_at(&ctx, late_same_day));
     }
 
     #[tokio::test]

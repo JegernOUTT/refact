@@ -1809,6 +1809,7 @@ fn make_job_context(
         settings: BuddySettings::default(),
         pulse: BuddyPulse::default(),
         facts: vec![],
+        recent_activities: vec![],
     }
 }
 
@@ -3758,6 +3759,11 @@ fn schema_contract_opportunity_status_variants() {
 fn schema_contract_defaults_kind_variants() {
     let cases = vec![
         (DefaultsKind::ChatModel, "chat_model"),
+        (DefaultsKind::ChatModel2, "chat_model_2"),
+        (
+            DefaultsKind::TaskPlannerAgentModel,
+            "task_planner_agent_model",
+        ),
         (DefaultsKind::ChatLightModel, "chat_light_model"),
         (DefaultsKind::ChatBuddyModel, "chat_buddy_model"),
         (DefaultsKind::ChatThinkingModel, "chat_thinking_model"),
@@ -4773,6 +4779,8 @@ fn provider_health_default_missing() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: String::new(),
         chat_light_model: String::new(),
@@ -4794,6 +4802,8 @@ fn provider_health_broken_ref() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: String::new(),
         chat_light_model: String::new(),
@@ -4809,7 +4819,7 @@ fn provider_health_broken_ref() {
 }
 
 #[test]
-fn provider_health_coalesces_same_missing_model_id() {
+fn provider_health_surfaces_same_missing_model_per_field() {
     use super::facts::FactStore;
     use super::observers::provider_health::detect_provider_health_facts;
     use super::opportunities::{OpportunityDetector, OpportunityQueue};
@@ -4817,6 +4827,8 @@ fn provider_health_coalesces_same_missing_model_id() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: String::new(),
         chat_light_model: "refact/gpt-4.1-nano".to_string(),
@@ -4827,12 +4839,13 @@ fn provider_health_coalesces_same_missing_model_id() {
         .iter()
         .filter(|f| f.kind == BuddyFactKind::BrokenModelReference)
         .collect();
-    assert_eq!(broken.len(), 1);
-    assert_eq!(broken[0].key, "provider:broken_ref:refact/gpt-4.1-nano");
-    assert_eq!(
-        broken[0].payload.get("model_id").and_then(|v| v.as_str()),
-        Some("refact/gpt-4.1-nano")
-    );
+    assert_eq!(broken.len(), 2);
+    assert!(broken
+        .iter()
+        .any(|f| f.key == "provider:broken_ref:chat_light_model:refact/gpt-4.1-nano"));
+    assert!(broken
+        .iter()
+        .any(|f| f.key == "provider:broken_ref:chat_buddy_model:refact/gpt-4.1-nano"));
 
     let mut store = FactStore::new();
     store.ingest_many(facts);
@@ -4845,15 +4858,13 @@ fn provider_health_coalesces_same_missing_model_id() {
                 && opp.summary.contains("not available")
         })
         .collect();
-    assert_eq!(unavailable_opps.len(), 1);
-    assert!(unavailable_opps[0]
-        .0
-        .summary
-        .contains("refact/gpt-4.1-nano"));
-    assert_eq!(
-        unavailable_opps[0].0.cooldown_key,
-        "provider:broken_ref:refact/gpt-4.1-nano"
-    );
+    assert_eq!(unavailable_opps.len(), 2);
+    assert!(unavailable_opps.iter().any(|(opp, _)| {
+        opp.cooldown_key == "provider:broken_ref:chat_light_model:refact/gpt-4.1-nano"
+    }));
+    assert!(unavailable_opps.iter().any(|(opp, _)| {
+        opp.cooldown_key == "provider:broken_ref:chat_buddy_model:refact/gpt-4.1-nano"
+    }));
 }
 
 #[test]
@@ -4863,6 +4874,8 @@ fn provider_health_no_emit_when_ok() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        chat_model_2: "openai/gpt-4o-mini".to_string(),
+        task_planner_agent_model: "openai/gpt-4o-mini".to_string(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: "openai/o1".to_string(),
         chat_light_model: "openai/gpt-4o-mini".to_string(),
@@ -4891,12 +4904,14 @@ fn provider_health_no_emit_when_ok() {
 }
 
 #[test]
-fn provider_health_ignores_completion_default() {
+fn provider_health_checks_completion_default() {
     use super::observers::provider_health::detect_provider_health_facts;
     use crate::caps::DefaultModels;
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "missing-completion".to_string(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: "openai/o1".to_string(),
         chat_light_model: "openai/gpt-4o-mini".to_string(),
@@ -4908,9 +4923,11 @@ fn provider_health_ignores_completion_default() {
         "openai/gpt-4o-mini".to_string(),
     ];
     let facts = detect_provider_health_facts(&defaults, &chat_models, &[], now);
-    assert!(!facts
-        .iter()
-        .any(|f| { f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model") }));
+    assert!(facts.iter().any(|f| {
+        f.kind == BuddyFactKind::BrokenModelReference
+            && f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model")
+            && f.payload.get("model_id").and_then(|v| v.as_str()) == Some("missing-completion")
+    }));
 }
 
 #[test]
@@ -4920,6 +4937,8 @@ fn provider_health_chat_default_uses_chat_namespace() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "shared/model".to_string(),
         chat_thinking_model: String::new(),
         chat_light_model: String::new(),
@@ -6722,13 +6741,15 @@ fn provider_health_payload_keys_match_detector() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: String::new(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: String::new(),
         chat_light_model: String::new(),
         chat_buddy_model: String::new(),
     };
     let available = vec!["openai/gpt-4o".to_string()];
-    let facts = detect_provider_health_facts(&defaults, &available, &available, now);
+    let facts = detect_provider_health_facts(&defaults, &available, &[], now);
     assert!(facts
         .iter()
         .any(|f| f.kind == BuddyFactKind::DefaultModelMissing));
@@ -6738,13 +6759,15 @@ fn provider_health_payload_keys_match_detector() {
     }
     let defaults2 = DefaultModels {
         completion_default_model: String::new(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: String::new(),
         chat_light_model: String::new(),
         chat_buddy_model: String::new(),
     };
     let available2 = vec![];
-    let facts2 = detect_provider_health_facts(&defaults2, &available2, &available2, now);
+    let facts2 = detect_provider_health_facts(&defaults2, &available2, &[], now);
     for f in facts2 {
         store.ingest(f);
     }
@@ -7238,6 +7261,8 @@ async fn pulse_populates_all_subpulse_counts() {
     {
         let mut caps = CodeAssistantCaps::default();
         caps.defaults.chat_default_model = "openai/gpt-4o".to_string();
+        caps.defaults.chat_model_2 = "openai/gpt-4o-mini".to_string();
+        caps.defaults.task_planner_agent_model = "openai/gpt-4o-mini".to_string();
         caps.defaults.chat_light_model = "openai/gpt-4o-mini".to_string();
         caps.defaults.chat_thinking_model = "openai/o1".to_string();
         caps.defaults.chat_buddy_model = "openai/gpt-4o-mini".to_string();
@@ -8247,6 +8272,12 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
 
     let cases: &[(&str, &str, &str)] = &[
         ("chat_model", "chat", "chat_model"),
+        ("chat_model_2", "chat_model_2", "chat_model_2"),
+        (
+            "task_planner_agent_model",
+            "task_planner_agent_model",
+            "task_planner_agent_model",
+        ),
         ("chat_light_model", "chat_light", "chat_light_model"),
         ("chat_buddy_model", "chat_buddy", "chat_buddy_model"),
         (
@@ -8296,7 +8327,7 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
             );
             assert_eq!(
                 patch
-                    .get(patch_key)
+                    .get(*patch_key)
                     .and_then(|v| v.get("model"))
                     .and_then(|v| v.as_str()),
                 Some("your-provider/model-name"),
@@ -8310,17 +8341,17 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
 }
 
 #[test]
-fn provider_tuning_ignores_unknown_and_completion_fields() {
+fn provider_tuning_ignores_unknown_fields_but_handles_broken_completion() {
     use super::facts::FactStore;
     use super::opportunities::{OpportunityDetector, OpportunityQueue};
     let now = chrono::Utc::now();
     let mut store = FactStore::new();
     for field in ["weird_field", "completion_model"] {
         store.ingest(BuddyFact {
-            kind: BuddyFactKind::DefaultModelMissing,
-            key: format!("provider:default_missing:{}", field),
+            kind: BuddyFactKind::BrokenModelReference,
+            key: format!("provider:broken_ref:{}:missing", field),
             source: "test",
-            payload: serde_json::json!({ "field": field, "model_id": serde_json::Value::Null }),
+            payload: serde_json::json!({ "field": field, "model_id": "missing" }),
             seen_at: now,
             confidence: 0.8,
         });
@@ -8329,9 +8360,26 @@ fn provider_tuning_ignores_unknown_and_completion_fields() {
     let queue = OpportunityQueue::new();
     let opps = OpportunityDetector::new().detect(&store, &pulse, &queue);
 
-    assert!(!opps
+    let provider_opps: Vec<_> = opps
         .iter()
-        .any(|(o, _)| o.kind == BuddyOpportunityKind::ProviderTuning));
+        .filter(|(o, _)| o.kind == BuddyOpportunityKind::ProviderTuning)
+        .collect();
+    assert_eq!(provider_opps.len(), 1);
+    let opp = &provider_opps[0].0;
+    assert_eq!(
+        opp.cooldown_key,
+        "provider:broken_ref:completion_model:missing"
+    );
+    assert!(opp.proposed_actions.iter().any(|a| matches!(
+        a,
+        BuddyAction::OpenPage {
+            page: BuddyPage::DefaultModels
+        }
+    )));
+    assert!(!opp
+        .proposed_actions
+        .iter()
+        .any(|a| matches!(a, BuddyAction::DraftDefaultsChange { .. })));
 }
 
 // =============================================================================
@@ -8341,9 +8389,9 @@ fn provider_tuning_ignores_unknown_and_completion_fields() {
 
 #[tokio::test]
 async fn task_abandoned_not_emitted_when_only_session_missing() {
-    use crate::tasks::storage::{create_task, load_board, load_task_meta, save_board, save_task_meta};
     use super::observers::task_health::TaskHealthObserver;
     use super::observers::{BuddyObserver, ObserverContext};
+    use crate::tasks::storage::{create_task, load_board, load_task_meta, save_board, save_task_meta};
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
@@ -10291,13 +10339,15 @@ async fn pulse_task_total_and_by_status_populated() {
 }
 
 #[test]
-fn provider_health_checks_chat_light_and_ignores_completion_models() {
+fn provider_health_checks_chat_light_and_completion_defaults() {
     use super::observers::provider_health::detect_provider_health_facts;
     use crate::caps::DefaultModels;
 
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "missing-completion".to_string(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "openai/gpt-4o".to_string(),
         chat_thinking_model: "openai/o1".to_string(),
         chat_light_model: String::new(),
@@ -10314,9 +10364,11 @@ fn provider_health_checks_chat_light_and_ignores_completion_models() {
         f.kind == BuddyFactKind::DefaultModelMissing
             && f.payload.get("field").and_then(|v| v.as_str()) == Some("chat_light_model")
     }));
-    assert!(!facts
-        .iter()
-        .any(|f| { f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model") }));
+    assert!(facts.iter().any(|f| {
+        f.kind == BuddyFactKind::BrokenModelReference
+            && f.payload.get("field").and_then(|v| v.as_str()) == Some("completion_model")
+            && f.payload.get("model_id").and_then(|v| v.as_str()) == Some("missing-completion")
+    }));
 }
 
 #[test]
@@ -10329,6 +10381,8 @@ fn broken_ref_per_field_distinct_opportunities() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: String::new(),
         chat_default_model: "missing-default".to_string(),
         chat_thinking_model: "missing-thinking".to_string(),
         chat_light_model: "openai/gpt-4o-mini".to_string(),
@@ -10351,10 +10405,50 @@ fn broken_ref_per_field_distinct_opportunities() {
     assert_eq!(broken.len(), 2);
     assert!(broken
         .iter()
-        .any(|(opp, _)| opp.cooldown_key == "provider:broken_ref:missing-default"));
+        .any(|(opp, _)| { opp.cooldown_key == "provider:broken_ref:chat_model:missing-default" }));
+    assert!(broken.iter().any(|(opp, _)| {
+        opp.cooldown_key == "provider:broken_ref:chat_thinking_model:missing-thinking"
+    }));
+}
+
+#[test]
+fn broken_ref_surfaces_each_field_when_slots_share_model() {
+    use super::facts::FactStore;
+    use super::observers::provider_health::detect_provider_health_facts;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    use crate::caps::DefaultModels;
+
+    let now = chrono::Utc::now();
+    let defaults = DefaultModels {
+        completion_default_model: "starcoder".to_string(),
+        chat_model_2: String::new(),
+        task_planner_agent_model: "missing-shared".to_string(),
+        chat_default_model: "missing-shared".to_string(),
+        chat_thinking_model: "openai/gpt-4o-mini".to_string(),
+        chat_light_model: "openai/gpt-4o-mini".to_string(),
+        chat_buddy_model: "openai/gpt-4o-mini".to_string(),
+    };
+    let chat_models = vec!["openai/gpt-4o-mini".to_string()];
+    let completion_models = vec!["starcoder".to_string()];
+    let mut store = FactStore::new();
+    for fact in detect_provider_health_facts(&defaults, &chat_models, &completion_models, now) {
+        store.ingest(fact);
+    }
+
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
+    let broken: Vec<_> = opps
+        .iter()
+        .filter(|(opp, _)| opp.cooldown_key.starts_with("provider:broken_ref:"))
+        .collect();
+
+    assert_eq!(broken.len(), 2);
     assert!(broken
         .iter()
-        .any(|(opp, _)| { opp.cooldown_key == "provider:broken_ref:missing-thinking" }));
+        .any(|(opp, _)| { opp.cooldown_key == "provider:broken_ref:chat_model:missing-shared" }));
+    assert!(broken.iter().any(|(opp, _)| {
+        opp.cooldown_key == "provider:broken_ref:task_planner_agent_model:missing-shared"
+    }));
 }
 
 #[test]
@@ -10367,6 +10461,8 @@ fn multiple_missing_defaults_surface_separately() {
     let now = chrono::Utc::now();
     let defaults = DefaultModels {
         completion_default_model: "starcoder".to_string(),
+        chat_model_2: "openai/gpt-4o-mini".to_string(),
+        task_planner_agent_model: "openai/gpt-4o-mini".to_string(),
         chat_default_model: String::new(),
         chat_thinking_model: String::new(),
         chat_light_model: "openai/gpt-4o-mini".to_string(),
@@ -10378,7 +10474,6 @@ fn multiple_missing_defaults_surface_separately() {
     for fact in detect_provider_health_facts(&defaults, &chat_models, &completion_models, now) {
         store.ingest(fact);
     }
-
     let opps =
         OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
     let missing: Vec<_> = opps

@@ -131,11 +131,13 @@ pub async fn _generate_commit_message_for_projects(
     let mut commit_messages = HashMap::new();
 
     for folder in project_folders {
-        let command = if let Some((_, vcs_type)) = detect_vcs_for_a_file_path(&folder).await {
+        let (command, command_args): (&str, &[&str]) = if let Some((_, vcs_type)) =
+            detect_vcs_for_a_file_path(&folder).await
+        {
             match vcs_type {
-                "git" => "git diff",
-                "svn" => "svn diff",
-                "hg" => "hg diff",
+                "git" => ("git", &["diff"]),
+                "svn" => ("svn", &["diff"]),
+                "hg" => ("hg", &["diff"]),
                 other => {
                     warn!("Unrecognizable version control detected for the folder {folder:?}: {other}");
                     continue;
@@ -147,6 +149,7 @@ pub async fn _generate_commit_message_for_projects(
         };
 
         let output = tokio::process::Command::new(command)
+            .args(command_args)
             .current_dir_simplified(&folder)
             .stdin(std::process::Stdio::null())
             .output()
