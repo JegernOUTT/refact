@@ -49,6 +49,11 @@ import {
   defaultBuddyPulse,
   defaultBuddySettings,
   updateBuddySettings,
+  upsertConductorGoal,
+  selectConductorGoals,
+  selectActiveConductorGoals,
+  selectGoalById,
+  selectGoalForChat,
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
 import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
@@ -85,6 +90,8 @@ import type {
   BuddyAction,
   BuddyPage,
   DraftKind,
+  ConductorGoal,
+  GoalStatus,
 } from "../features/Buddy/types";
 import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
 import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
@@ -377,6 +384,50 @@ function makeChatSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
     ttl_seconds: 30,
     created_at: new Date().toISOString(),
     controls: [],
+    ...overrides,
+  };
+}
+
+function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
+  const status: GoalStatus = overrides?.status ?? "running";
+  return {
+    id: "goal-1",
+    title: "Ship conductor",
+    plan_doc_slug: "master-plan",
+    plan_markdown: "# Ship conductor",
+    done_when: { summary: "Done", checklist: ["Tests pass"] },
+    status,
+    autonomy: "full_auto",
+    budget: {
+      wall_clock_secs: 3600,
+      no_progress_wakes: 3,
+      total_tokens: 10000,
+      usd: 2,
+    },
+    spent: {
+      elapsed_secs: 10,
+      prompt_tokens: 100,
+      completion_tokens: 40,
+      total_tokens: 140,
+      cache_read_tokens: 20,
+      usd: 0.1,
+      no_progress_wakes: 1,
+    },
+    ledger: {
+      status,
+      autonomy: "full_auto",
+      planner_task_id: "planner-task-1",
+      task_ids: ["task-1"],
+      chat_ids: ["chat-1"],
+      memos: [],
+      learning_records: [],
+      pending_questions: [],
+      no_progress_wakes: 1,
+      turn_failures: 0,
+    },
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T00:00:10Z",
+    completed_at: null,
     ...overrides,
   };
 }
@@ -1941,6 +1992,97 @@ describe("buddySlice reducers", () => {
     expect(observers?.git_pressure).toBe(true);
     expect(observers?.diagnostic_cluster).toBe(true);
     expect(observers?.provider_health).toBe(true);
+  });
+});
+
+describe("buddy conductor goal state", () => {
+  test("setBuddySnapshot hydrates conductor goals when present", () => {
+    const goal = makeConductorGoal({ id: "goal-snapshot" });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [goal] })),
+    );
+    const rootState = { buddy: state };
+
+    expect(selectConductorGoals(rootState)).toEqual([goal]);
+    expect(selectGoalById(rootState, "goal-snapshot")).toEqual(goal);
+  });
+
+  test("legacy snapshot without conductor goals remains compatible", () => {
+    const state = reducer(undefined, setBuddySnapshot(makeSnapshot()));
+    const rootState = { buddy: state };
+
+    expect(selectConductorGoals(rootState)).toEqual([]);
+    expect(selectActiveConductorGoals(rootState)).toEqual([]);
+    expect(selectGoalById(rootState, "missing-goal")).toBeUndefined();
+  });
+
+  test("conductor goal event inserts and updates by goal id", () => {
+    const initialGoal = makeConductorGoal({ id: "goal-event" });
+    const updatedGoal = makeConductorGoal({
+      id: "goal-event",
+      title: "Updated conductor",
+      status: "waiting_for_human",
+    });
+
+    const withInitial = reducer(undefined, upsertConductorGoal(initialGoal));
+    const state = reducer(withInitial, upsertConductorGoal(updatedGoal));
+    const rootState = { buddy: state };
+
+    expect(selectConductorGoals(rootState)).toHaveLength(1);
+    expect(selectGoalById(rootState, "goal-event")?.title).toBe(
+      "Updated conductor",
+    );
+    expect(selectGoalById(rootState, "goal-event")?.status).toBe(
+      "waiting_for_human",
+    );
+  });
+
+  test("active conductor goals exclude terminal statuses", () => {
+    const active = makeConductorGoal({ id: "goal-active", status: "running" });
+    const paused = makeConductorGoal({ id: "goal-paused", status: "paused" });
+    const done = makeConductorGoal({ id: "goal-done", status: "done" });
+    const failed = makeConductorGoal({ id: "goal-failed", status: "failed" });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(
+        makeSnapshot({ conductor_goals: [active, paused, done, failed] }),
+      ),
+    );
+
+    expect(
+      selectActiveConductorGoals({ buddy: state }).map((g) => g.id),
+    ).toEqual(["goal-active", "goal-paused"]);
+  });
+
+  test("selectGoalForChat resolves by chat and task ownership", () => {
+    const goal = makeConductorGoal({
+      id: "goal-owned",
+      ledger: {
+        ...makeConductorGoal().ledger,
+        planner_task_id: "planner-task-owned",
+        task_ids: ["task-owned"],
+        chat_ids: ["chat-owned"],
+      },
+    });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [goal] })),
+    );
+    const rootState = { buddy: state };
+
+    expect(selectGoalForChat(rootState, { chatId: "chat-owned" })?.id).toBe(
+      "goal-owned",
+    );
+    expect(selectGoalForChat(rootState, { taskId: "task-owned" })?.id).toBe(
+      "goal-owned",
+    );
+    expect(
+      selectGoalForChat(rootState, { taskId: "planner-task-owned" })?.id,
+    ).toBe("goal-owned");
+    expect(
+      selectGoalForChat(rootState, { chatId: "chat-missing" }),
+    ).toBeUndefined();
   });
 });
 

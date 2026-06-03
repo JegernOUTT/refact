@@ -14,6 +14,8 @@ import type {
   BuddyPulse,
   BuddyDraft,
   BuddyStorageMetadata,
+  ConductorGoal,
+  GoalStatus,
 } from "./types";
 
 const HOME_NOTIFICATION_SNOOZE_MS = 10 * 60 * 1000;
@@ -506,6 +508,7 @@ function normalizeBuddySnapshot(snapshot: BuddySnapshot): BuddySnapshot {
     pulse: snapshot.pulse ?? defaultBuddyPulse(),
     opportunities,
     active_drafts: snapshot.active_drafts ?? [],
+    conductor_goals: snapshot.conductor_goals ?? [],
   };
 }
 
@@ -521,6 +524,7 @@ export interface BuddySliceState {
   opportunities: BuddyOpportunity[];
   pulse: BuddyPulse | null;
   activeDrafts: BuddyDraft[];
+  conductorGoals: ConductorGoal[];
   homeSnoozedUntil: number | null;
   seenNotificationIds: Record<string, number>;
   chatBubbleSnoozedUntil: number | null;
@@ -530,6 +534,27 @@ export interface BuddySliceState {
 
 const EMPTY_BUDDY_ACTIVITIES: BuddyActivityEntry[] = [];
 const EMPTY_BUDDY_SUGGESTIONS: BuddySuggestion[] = [];
+const ACTIVE_CONDUCTOR_GOAL_STATUSES = new Set<GoalStatus>([
+  "planned",
+  "running",
+  "waiting_for_human",
+  "paused",
+]);
+
+function isConductorGoalActive(goal: ConductorGoal): boolean {
+  return ACTIVE_CONDUCTOR_GOAL_STATUSES.has(goal.status);
+}
+
+function upsertConductorGoalEntry(
+  goals: ConductorGoal[],
+  goal: ConductorGoal,
+): ConductorGoal[] {
+  const index = goals.findIndex((entry) => entry.id === goal.id);
+  if (index < 0) return [goal, ...goals];
+  const next = [...goals];
+  next[index] = goal;
+  return next;
+}
 
 function initialState(): BuddySliceState {
   const initialChatBubblePolicy = loadChatBubblePolicy();
@@ -544,6 +569,7 @@ function initialState(): BuddySliceState {
     opportunities: [],
     pulse: null,
     activeDrafts: [],
+    conductorGoals: [],
     homeSnoozedUntil: null,
     seenNotificationIds: pruneSeenNotificationIds(loadSeenNotificationIds()),
     chatBubbleSnoozedUntil: initialChatBubblePolicy.snoozedUntil,
@@ -606,6 +632,12 @@ function syncSnapshotDrafts(state: BuddySliceState) {
   }
 }
 
+function syncSnapshotConductorGoals(state: BuddySliceState) {
+  if (state.snapshot) {
+    state.snapshot.conductor_goals = state.conductorGoals;
+  }
+}
+
 const selectUnreadOpportunitiesFromSlice = createSelector(
   [(state: BuddySliceState) => state.opportunities],
   (opportunities) =>
@@ -629,6 +661,7 @@ export const buddySlice = createSlice({
       state.opportunities = snapshot.state.opportunities;
       state.pulse = snapshot.pulse ?? defaultBuddyPulse();
       state.activeDrafts = snapshot.active_drafts ?? [];
+      state.conductorGoals = snapshot.conductor_goals ?? [];
     },
     /** Called when SSE snapshot reports buddy as disabled/not-ready (no state). */
     setBuddyUnavailable: (state) => {
@@ -641,6 +674,7 @@ export const buddySlice = createSlice({
       state.opportunities = [];
       state.pulse = null;
       state.activeDrafts = [];
+      state.conductorGoals = [];
     },
     updateBuddyState: (state, action: PayloadAction<BuddyState>) => {
       state.loaded = true;
@@ -662,6 +696,7 @@ export const buddySlice = createSlice({
           pulse: state.pulse ?? defaultBuddyPulse(),
           opportunities: state.opportunities,
           active_drafts: state.activeDrafts,
+          conductor_goals: state.conductorGoals,
         };
       }
       syncSnapshotOpportunities(state);
@@ -919,6 +954,13 @@ export const buddySlice = createSlice({
       );
       syncSnapshotDrafts(state);
     },
+    upsertConductorGoal: (state, action: PayloadAction<ConductorGoal>) => {
+      state.conductorGoals = upsertConductorGoalEntry(
+        state.conductorGoals,
+        action.payload,
+      );
+      syncSnapshotConductorGoals(state);
+    },
     snoozeHomeNotifications: (
       state,
       action: PayloadAction<number | undefined>,
@@ -1016,6 +1058,9 @@ export const buddySlice = createSlice({
     selectUnreadOpportunities: selectUnreadOpportunitiesFromSlice,
     selectPulse: (state) => state.pulse,
     selectActiveDrafts: (state) => state.activeDrafts,
+    selectConductorGoals: (state) => state.conductorGoals,
+    selectActiveConductorGoals: (state) =>
+      state.conductorGoals.filter(isConductorGoalActive),
     selectHomeSnoozedUntil: (state) => state.homeSnoozedUntil,
     selectSeenNotificationIds: (state) => state.seenNotificationIds,
     selectChatBubbleSnoozedUntil: (state) => state.chatBubbleSnoozedUntil,
@@ -1051,6 +1096,7 @@ export const {
   addDraft,
   consumeDraft,
   removeDraft,
+  upsertConductorGoal,
   snoozeHomeNotifications,
   markBuddyNotificationSeen,
   recordChatBubbleImpression,
@@ -1081,6 +1127,8 @@ export const {
   selectUnreadOpportunities,
   selectPulse,
   selectActiveDrafts,
+  selectConductorGoals,
+  selectActiveConductorGoals,
   selectHomeSnoozedUntil,
   selectSeenNotificationIds,
   selectChatBubbleSnoozedUntil,
@@ -1096,6 +1144,28 @@ export const selectDraftById = (
   state: { buddy: BuddySliceState },
   id: string,
 ) => state.buddy.activeDrafts.find((d) => d.id === id);
+
+export const selectGoalById = (
+  state: { buddy: BuddySliceState },
+  goalId: string,
+) => state.buddy.conductorGoals.find((goal) => goal.id === goalId);
+
+export const selectGoalForChat = (
+  state: { buddy: BuddySliceState },
+  owner: { chatId?: string | null; taskId?: string | null },
+) => {
+  const chatId = owner.chatId?.trim();
+  const taskId = owner.taskId?.trim();
+  if (!chatId && !taskId) return undefined;
+  return state.buddy.conductorGoals.find((goal) => {
+    if (chatId && goal.ledger.chat_ids.includes(chatId)) return true;
+    if (!taskId) return false;
+    return (
+      goal.ledger.planner_task_id === taskId ||
+      goal.ledger.task_ids.includes(taskId)
+    );
+  });
+};
 
 export const selectChatReactionDebug = (state: { buddy: BuddySliceState }) =>
   state.buddy.snapshot?.chat_reaction_debug ?? null;

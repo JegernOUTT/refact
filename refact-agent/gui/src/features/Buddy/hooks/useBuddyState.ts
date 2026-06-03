@@ -8,10 +8,11 @@ import {
 import {
   selectBuddySnapshot,
   selectNowPlaying,
+  selectConductorGoals,
   clearNowPlaying,
 } from "../buddySlice";
 import { SIGNALS, STAGES, SKILLS } from "../constants";
-import type { BuddySemanticState, BuddyEvent } from "../types";
+import type { BuddySemanticState, BuddyEvent, ConductorGoal } from "../types";
 
 export interface BuddyStateHandle {
   state: BuddySemanticState;
@@ -23,6 +24,7 @@ export interface BuddyStateHandle {
   reset: () => void;
   handleCanvasEvent: (event: BuddyEvent) => void;
   onBuddyEvent?: (event: BuddyEvent) => void;
+  conductorGoals: ConductorGoal[];
 }
 
 export function useBuddyState(
@@ -36,6 +38,9 @@ export function useBuddyState(
 
   const reduxDispatch = useAppDispatch();
   const reduxSnapshot = useAppSelector(selectBuddySnapshot);
+
+  useAppSelector(selectConductorGoals);
+  const conductorGoals = useAppSelector(selectConductorGoals);
 
   const nowPlaying = useAppSelector(selectNowPlaying);
   const prevSnapshotStageRef = useRef<number | null>(null);
@@ -281,5 +286,6 @@ export function useBuddyState(
     reset,
     handleCanvasEvent,
     onBuddyEvent,
+    conductorGoals,
   };
 }

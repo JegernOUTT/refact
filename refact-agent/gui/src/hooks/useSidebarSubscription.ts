@@ -51,6 +51,7 @@ import {
   addDraft,
   consumeDraft,
   removeDraft,
+  upsertConductorGoal,
 } from "../features/Buddy/buddySlice";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 
@@ -600,7 +601,7 @@ export function useSidebarSubscription() {
       ) {
         processTrajectoriesSnapshot(
           snapshot.trajectories,
-          status === "error" ? error ?? "Failed to load chats" : undefined,
+          status === "error" ? (error ?? "Failed to load chats") : undefined,
           snapshot.pagination,
         );
       } else if (
@@ -759,6 +760,11 @@ export function useSidebarSubscription() {
           break;
         case "DraftRemoved":
           dispatch(removeDraft(event.draft_id));
+          break;
+        case "ConductorGoalUpdated":
+          dispatch(upsertConductorGoal(event.goal));
+          break;
+        case "ConductorGhostMessage":
           break;
       }
     },

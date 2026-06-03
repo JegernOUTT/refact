@@ -937,6 +937,160 @@ export interface BuddyStorageMetadata {
   settings_path: string;
 }
 
+export type GoalStatus =
+  | "planned"
+  | "running"
+  | "waiting_for_human"
+  | "paused"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export type GoalAutonomy = "read_only" | "governed" | "full_auto";
+
+export interface GoalBudget {
+  wall_clock_secs?: number | null;
+  no_progress_wakes?: number | null;
+  total_tokens?: number | null;
+  usd?: number | null;
+}
+
+export interface GoalBudgetSpent {
+  elapsed_secs: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_read_tokens: number;
+  usd?: number | null;
+  no_progress_wakes: number;
+}
+
+export interface DoneWhen {
+  summary: string;
+  checklist: string[];
+}
+
+export type MemoKind =
+  | "progress"
+  | "decision"
+  | "risk"
+  | "handoff"
+  | "human_steering"
+  | "surgery"
+  | "escalation";
+
+export type LearningOutcome = "done" | "escalated";
+
+export interface LearningBudgetSnapshot {
+  elapsed_secs: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_read_tokens: number;
+  usd?: string | null;
+}
+
+export interface ConductorMemo {
+  id: string;
+  kind: MemoKind;
+  content: string;
+  created_at: string;
+  source_chat_id?: string | null;
+  related_task_id?: string | null;
+}
+
+export interface ConductorLearningRecord {
+  id: string;
+  outcome: LearningOutcome;
+  goal_id: string;
+  goal_title: string;
+  summary: string;
+  what_worked: string[];
+  failures: string[];
+  budget_used: LearningBudgetSnapshot;
+  no_progress_wakes: number;
+  useful_tools_or_strategies: string[];
+  future_tunables: string[];
+  created_at: string;
+  source_chat_id?: string | null;
+  related_task_id?: string | null;
+}
+
+export interface PendingQuestion {
+  id: string;
+  question: string;
+  asked_at: string;
+  source_chat_id?: string | null;
+  blocking: boolean;
+  answer?: string | null;
+  answered_at?: string | null;
+}
+
+export type ConductorWakeReason =
+  | "manual"
+  | "goal_created"
+  | "task_board"
+  | "chat_lifecycle"
+  | "agent_stall"
+  | "human_steering"
+  | "ghost_answer"
+  | "budget"
+  | "heartbeat"
+  | "opportunity"
+  | "cron";
+
+export interface GoalLedger {
+  title?: string | null;
+  plan_doc_slug?: string | null;
+  plan_markdown?: string | null;
+  done_when?: DoneWhen | null;
+  budget?: GoalBudget | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+  status?: GoalStatus | null;
+  autonomy?: GoalAutonomy | null;
+  planner_task_id?: string | null;
+  task_ids: string[];
+  chat_ids: string[];
+  memos: ConductorMemo[];
+  learning_records: ConductorLearningRecord[];
+  pending_questions: PendingQuestion[];
+  no_progress_wakes: number;
+  turn_failures: number;
+  last_wake_at?: string | null;
+  last_progress_at?: string | null;
+  last_wake_reason?: ConductorWakeReason | null;
+}
+
+export interface ConductorGoal {
+  id: string;
+  title: string;
+  plan_doc_slug?: string | null;
+  plan_markdown: string;
+  done_when: DoneWhen;
+  status: GoalStatus;
+  autonomy: GoalAutonomy;
+  budget: GoalBudget;
+  spent: GoalBudgetSpent;
+  ledger: GoalLedger;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+}
+
+export type BuddyGhostMessageRole = "ask" | "answer" | "note";
+
+export interface BuddyGhostMessage {
+  id: string;
+  goal_id?: string | null;
+  role: BuddyGhostMessageRole;
+  content: string;
+  created_at: string;
+  source_chat_id?: string | null;
+  question_id?: string | null;
+}
+
 export interface ChatReactionAttempt {
   attempted_at: string;
   chat_id: string;
@@ -968,6 +1122,7 @@ export interface BuddySnapshot {
   pulse?: BuddyPulse | null;
   opportunities?: BuddyOpportunity[];
   active_drafts?: BuddyDraft[];
+  conductor_goals?: ConductorGoal[];
   chat_reaction_debug?: ChatReactionDebug | null;
 }
 
@@ -1078,4 +1233,6 @@ export type BuddySSEEvent =
   | { event_type: "PulseUpdated"; pulse: BuddyPulse }
   | { event_type: "DraftCreated"; draft: BuddyDraft }
   | { event_type: "DraftConsumed"; draft_id: string }
-  | { event_type: "DraftRemoved"; draft_id: string };
+  | { event_type: "DraftRemoved"; draft_id: string }
+  | { event_type: "ConductorGoalUpdated"; goal: ConductorGoal }
+  | { event_type: "ConductorGhostMessage"; ghost: BuddyGhostMessage };
