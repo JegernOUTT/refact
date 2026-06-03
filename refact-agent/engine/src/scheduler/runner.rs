@@ -16,7 +16,7 @@ use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::process_command_queue;
 use crate::chat::try_restore_session_if_trajectory_exists;
-use crate::chat::types::{ChatCommand, CommandRequest};
+use crate::chat::types::{ChatCommand, CommandRequest, EnqueueCommandOutcome, max_queue_size};
 use crate::files_correction::get_active_project_path;
 use crate::global_context::SharedGlobalContext;
 use crate::scheduler::scheduler_timezone;
@@ -365,17 +365,23 @@ impl CronRunner {
             if !session.is_idle() || session.command_queue.iter().any(|r| !r.priority) {
                 return Ok(false);
             }
-            session.add_message(event_message);
+            let queued_commands = 1 + usize::from(mode.is_some());
+            if session.command_queue.len().saturating_add(queued_commands) > max_queue_size() {
+                return Ok(false);
+            }
             if let Some(ref mode) = mode {
-                session.enqueue_priority_command(CommandRequest {
+                if session.enqueue_priority_command(CommandRequest {
                     client_request_id: format!("cron-set-mode-{}", Uuid::new_v4()),
                     priority: true,
                     command: ChatCommand::SetParams {
                         patch: json!({"mode": mode}),
                     },
-                });
+                }) != EnqueueCommandOutcome::Accepted
+                {
+                    return Ok(false);
+                }
             }
-            session.enqueue_priority_command(CommandRequest {
+            if session.enqueue_priority_command(CommandRequest {
                 client_request_id: format!("cron-fire-{}", Uuid::new_v4()),
                 priority: true,
                 command: ChatCommand::UserMessage {
@@ -384,7 +390,11 @@ impl CronRunner {
                     context_files: vec![],
                     suppress_auto_enrichment: false,
                 },
-            });
+            }) != EnqueueCommandOutcome::Accepted
+            {
+                return Ok(false);
+            }
+            session.add_message(event_message);
             session.queue_processor_running.clone()
         };
 

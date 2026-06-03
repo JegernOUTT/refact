@@ -34,6 +34,13 @@ pub fn stream_heartbeat() -> std::time::Duration {
     timeouts().stream_heartbeat
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueCommandOutcome {
+    Accepted,
+    Duplicate,
+    Full,
+}
+
 #[derive(Debug)]
 pub struct BurstGuard {
     inner: tokio::sync::Mutex<BurstGuardInner>,

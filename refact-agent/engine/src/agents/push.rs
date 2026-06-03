@@ -5,7 +5,7 @@ use crate::agents::types::{BackgroundAgent, BgAgentKind, BgAgentStatus};
 use crate::app_state::AppState;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::process_command_queue;
-use crate::chat::types::{BurstGuardDecision, ChatCommand, CommandRequest};
+use crate::chat::types::{BurstGuardDecision, ChatCommand, CommandRequest, EnqueueCommandOutcome};
 
 const SUMMARY_LIMIT: usize = 1500;
 const DEFERRED_RETRY_AFTER: TimeDelta = TimeDelta::seconds(10);
@@ -49,12 +49,20 @@ pub async fn push_completion_to_parent(
                 return Ok(());
             }
         }
-        session.add_message(notice);
-        session.enqueue_priority_command(CommandRequest {
+        match session.enqueue_priority_command(CommandRequest {
             client_request_id: format!("background-agent-finished-{message_id}"),
             priority: true,
             command: ChatCommand::Regenerate {},
-        });
+        }) {
+            EnqueueCommandOutcome::Accepted => session.add_message(notice),
+            EnqueueCommandOutcome::Duplicate => return Ok(()),
+            EnqueueCommandOutcome::Full => {
+                app.agents
+                    .set_completion_message_id(&record.agent_id, "deferred".to_string())
+                    .await?;
+                return Ok(());
+            }
+        }
         session.queue_processor_running.clone()
     };
 

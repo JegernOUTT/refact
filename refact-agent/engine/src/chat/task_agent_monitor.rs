@@ -24,7 +24,7 @@ use crate::chat::retry_policy::{
 };
 use crate::chat::types::{ChatSession, SessionState, TaskMeta};
 use crate::chat::{get_or_create_session_with_trajectory, process_command_queue};
-use crate::chat::types::{CommandRequest, ChatCommand};
+use crate::chat::types::{CommandRequest, ChatCommand, EnqueueCommandOutcome};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::git;
 use refact_buddy_core::types::BuddyRuntimeEvent;
@@ -278,9 +278,11 @@ async fn notify_planner_about_reasoning_token_limit(
 
     let processor_flag = {
         let mut session = planner_session.lock().await;
-        session.add_message(notice);
         let request = regenerate_request("task-agent-reasoning-token-limit");
-        session.enqueue_priority_command(request);
+        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
+            return Ok(false);
+        }
+        session.add_message(notice);
         session.queue_processor_running.clone()
     };
 
@@ -554,9 +556,11 @@ async fn notify_planner_about_stalled_agent(
 
     let processor_flag = {
         let mut session = planner_session.lock().await;
-        session.add_message(notice);
         let request = regenerate_request("task-agent-stall");
-        session.enqueue_priority_command(request);
+        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
+            return Ok(false);
+        }
+        session.add_message(notice);
         session.queue_processor_running.clone()
     };
 
@@ -1049,9 +1053,11 @@ pub(crate) async fn notify_planner_agents_finished(
 
     let processor_flag = {
         let mut session = planner_session.lock().await;
-        session.add_message(notice);
         let request = regenerate_request("task-agent-finished");
-        session.enqueue_priority_command(request);
+        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
+            return Ok(());
+        }
+        session.add_message(notice);
         session.queue_processor_running.clone()
     };
 
@@ -1537,9 +1543,11 @@ async fn sweep_planner_wake_ups(app: AppState) -> Result<(), String> {
 
             let processor_flag = {
                 let mut session = session_arc.lock().await;
-                session.add_message(notice);
                 let request = regenerate_request("planner-wake-up");
-                session.enqueue_priority_command(request);
+                if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
+                    continue;
+                }
+                session.add_message(notice);
                 session.queue_processor_running.clone()
             };
 

@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::types::{ChatCommand, ChatEvent, ChatSession, CommandRequest};
+use crate::chat::types::{ChatCommand, ChatEvent, ChatSession, CommandRequest, EnqueueCommandOutcome};
 use crate::exec::{ExecStatus, ProcessCompletionEvent};
 use crate::global_context::SharedGlobalContext;
 
@@ -99,12 +99,25 @@ async fn inject_as_priority(
         if session.closed {
             return false;
         }
-        inject_process_completion_message(&mut session, event.clone());
-        session.enqueue_priority_command(CommandRequest {
+        let outcome = session.enqueue_priority_command(CommandRequest {
             client_request_id: format!("process-completed-{}", event.process_id),
             priority: true,
             command: ChatCommand::Regenerate {},
         });
+        match outcome {
+            EnqueueCommandOutcome::Accepted => {
+                inject_process_completion_message(&mut session, event.clone());
+            }
+            EnqueueCommandOutcome::Duplicate => return true,
+            EnqueueCommandOutcome::Full => {
+                tracing::warn!(
+                    process_id = %event.process_id,
+                    chat_id = %event.chat_id,
+                    "process completion notification skipped because chat command queue is full"
+                );
+                return true;
+            }
+        }
         session.queue_processor_running.clone()
     };
     if !processor_running.swap(true, Ordering::SeqCst) {
@@ -477,6 +490,50 @@ mod tests {
                 .store(false, Ordering::SeqCst);
         }
         subscriber.abort();
+    }
+
+    #[tokio::test]
+    async fn duplicate_process_completion_priority_injection_is_idempotent() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let chat_id = "duplicate-process-completion-idempotent";
+        let session = test_session(&gcx, chat_id).await;
+        {
+            let session = session.lock().await;
+            session
+                .queue_processor_running
+                .store(true, Ordering::SeqCst);
+        }
+        let event = ProcessCompletionEvent {
+            process_id: ExecProcessId("exec_duplicate_completion".to_string()),
+            chat_id: chat_id.to_string(),
+            status: ExecStatus::Exited { exit_code: Some(0) },
+            exit_code: Some(0),
+            duration_ms: Some(5),
+            short_description: "duplicate process".to_string(),
+            mode: ExecMode::Background,
+        };
+
+        assert!(inject_as_priority(gcx.clone(), session.clone(), event.clone()).await);
+        assert!(inject_as_priority(gcx, session.clone(), event).await);
+
+        let session = session.lock().await;
+        let process_events = session
+            .messages
+            .iter()
+            .filter(|message| {
+                process_payload(message)["process_id"] == json!("exec_duplicate_completion")
+            })
+            .count();
+        let queued_regenerates = session
+            .command_queue
+            .iter()
+            .filter(|request| {
+                request.client_request_id == "process-completed-exec_duplicate_completion"
+                    && matches!(request.command, ChatCommand::Regenerate {})
+            })
+            .count();
+        assert_eq!(process_events, 1);
+        assert_eq!(queued_regenerates, 1);
     }
 
     #[tokio::test]

@@ -511,6 +511,21 @@ impl ChatSession {
         if self.recent_request_ids_set.contains(request_id) {
             return true;
         }
+        self.remember_request_id(request_id);
+        false
+    }
+
+    pub fn has_seen_request(&self, request_id: &str) -> bool {
+        self.recent_request_ids_set.contains(request_id)
+    }
+
+    pub fn remember_accepted_request(&mut self, request_id: &str) {
+        if !self.has_seen_request(request_id) {
+            self.remember_request_id(request_id);
+        }
+    }
+
+    fn remember_request_id(&mut self, request_id: &str) {
         if self.recent_request_ids.len() >= limits().recent_request_ids_capacity {
             if let Some(evicted) = self.recent_request_ids.pop_front() {
                 self.recent_request_ids_set.remove(&evicted);
@@ -518,7 +533,60 @@ impl ChatSession {
         }
         self.recent_request_ids.push_back(request_id.to_string());
         self.recent_request_ids_set.insert(request_id.to_string());
-        false
+    }
+
+    fn command_is_critical_for_queue(&self, command: &ChatCommand) -> bool {
+        matches!(command, ChatCommand::Abort {})
+            || (self.runtime.state == SessionState::Paused
+                && matches!(
+                    command,
+                    ChatCommand::ToolDecision { .. } | ChatCommand::ToolDecisions { .. }
+                ))
+            || (self.runtime.state == SessionState::WaitingIde
+                && matches!(command, ChatCommand::IdeToolResult { .. }))
+    }
+
+    fn command_interrupts_active_loop(command: &ChatCommand) -> bool {
+        matches!(
+            command,
+            ChatCommand::UserMessage { .. }
+                | ChatCommand::RetryFromIndex { .. }
+                | ChatCommand::Regenerate {}
+                | ChatCommand::Abort {}
+        )
+    }
+
+    pub fn enqueue_command(&mut self, request: CommandRequest) -> EnqueueCommandOutcome {
+        if self
+            .recent_request_ids_set
+            .contains(&request.client_request_id)
+        {
+            return EnqueueCommandOutcome::Duplicate;
+        }
+        let request_id = request.client_request_id.clone();
+        let outcome = self.enqueue_accepted_command(request);
+        if outcome == EnqueueCommandOutcome::Accepted {
+            self.remember_request_id(&request_id);
+        }
+        outcome
+    }
+
+    pub fn enqueue_accepted_command(&mut self, request: CommandRequest) -> EnqueueCommandOutcome {
+        if self.command_queue.len() >= max_queue_size()
+            && !self.command_is_critical_for_queue(&request.command)
+        {
+            return EnqueueCommandOutcome::Full;
+        }
+
+        if request.priority {
+            self.enqueue_accepted_priority_command(request)
+        } else {
+            self.command_queue.push_back(request);
+            self.touch();
+            self.emit_queue_update();
+            self.queue_notify.notify_one();
+            EnqueueCommandOutcome::Accepted
+        }
     }
 
     pub fn add_message(&mut self, mut message: ChatMessage) {
@@ -948,25 +1016,31 @@ impl ChatSession {
         });
     }
 
-    /// Insert a priority command at the head of the queue and interrupt the
-    /// currently advancing loop so the new command is picked up ASAP.
+    /// Try to insert a priority command before non-priority queued work.
     ///
-    /// Mirrors what HTTP priority user messages do: if generation or tool
-    /// execution is active, abort the current stream and drop any pending
-    /// tool_calls so the queue processor immediately moves to the next item.
-    /// Used by event-message injections (planner↔agent communication,
-    /// background-agent completion, task agent monitor stall/wake notices,
-    /// task broadcast, agent steer) so they perturb the advancing loop the
-    /// same way as priority user messages.
-    pub fn enqueue_priority_command(&mut self, mut request: CommandRequest) {
+    /// Accepted interrupting commands abort any active generation/tool loop before
+    /// insertion. Duplicate or full-queue rejections leave the active loop and
+    /// side effects untouched, so callers that add messages should do so only
+    /// after receiving `Accepted`.
+    pub fn enqueue_priority_command(
+        &mut self,
+        mut request: CommandRequest,
+    ) -> EnqueueCommandOutcome {
         request.priority = true;
-        let interrupts_active_loop = matches!(
-            &request.command,
-            ChatCommand::UserMessage { .. }
-                | ChatCommand::RetryFromIndex { .. }
-                | ChatCommand::Regenerate {}
-                | ChatCommand::Abort {}
-        );
+        self.enqueue_command(request)
+    }
+
+    pub fn enqueue_accepted_priority_command(
+        &mut self,
+        mut request: CommandRequest,
+    ) -> EnqueueCommandOutcome {
+        request.priority = true;
+        if self.command_queue.len() >= max_queue_size()
+            && !self.command_is_critical_for_queue(&request.command)
+        {
+            return EnqueueCommandOutcome::Full;
+        }
+        let interrupts_active_loop = Self::command_interrupts_active_loop(&request.command);
         let active = matches!(
             self.runtime.state,
             SessionState::Generating | SessionState::ExecutingTools
@@ -984,6 +1058,7 @@ impl ChatSession {
         self.touch();
         self.emit_queue_update();
         self.queue_notify.notify_one();
+        EnqueueCommandOutcome::Accepted
     }
 
     pub fn set_paused_with_reasons_and_auto_approved(
@@ -2411,6 +2486,93 @@ mod tests {
             session.command_queue[0].command,
             ChatCommand::Regenerate {}
         ));
+    }
+
+    #[test]
+    fn duplicate_priority_command_does_not_interrupt_active_generation() {
+        let mut session = make_session();
+        session.is_duplicate_request("priority-regenerate");
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+
+        let outcome = session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-regenerate".into(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+
+        assert_eq!(outcome, EnqueueCommandOutcome::Duplicate);
+        assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Generating);
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[test]
+    fn full_priority_command_does_not_interrupt_active_generation() {
+        let mut session = make_session();
+        for i in 0..max_queue_size() {
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: format!("queued-{i}"),
+                priority: true,
+                command: ChatCommand::SetParams {
+                    patch: json!({"temperature": i}),
+                },
+            });
+        }
+        session.emit_queue_update();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+
+        let outcome = session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-regenerate-full".into(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+
+        assert_eq!(outcome, EnqueueCommandOutcome::Full);
+        assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Generating);
+        assert_eq!(session.command_queue.len(), max_queue_size());
+        assert!(!session
+            .recent_request_ids_set
+            .contains("priority-regenerate-full"));
+    }
+
+    #[test]
+    fn full_queue_abort_still_interrupts_active_generation() {
+        let mut session = make_session();
+        for i in 0..max_queue_size() {
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: format!("queued-{i}"),
+                priority: true,
+                command: ChatCommand::SetParams {
+                    patch: json!({"temperature": i}),
+                },
+            });
+        }
+        session.emit_queue_update();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+
+        let outcome = session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-abort-full".into(),
+            priority: false,
+            command: ChatCommand::Abort {},
+        });
+
+        assert_eq!(outcome, EnqueueCommandOutcome::Accepted);
+        assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.command_queue.len(), max_queue_size() + 1);
+        assert!(session
+            .recent_request_ids_set
+            .contains("priority-abort-full"));
     }
 
     #[test]
