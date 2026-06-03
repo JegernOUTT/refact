@@ -77,7 +77,7 @@ async function getMermaid(theme: "dark" | "light") {
               titleColor: "#2a3a5a",
               edgeLabelBackground: "#f8fafe",
             },
-      flowchart: { curve: "basis", padding: 16 },
+      flowchart: { curve: "basis", padding: 16, htmlLabels: false },
     });
     mermaidInitialized = theme;
   }
