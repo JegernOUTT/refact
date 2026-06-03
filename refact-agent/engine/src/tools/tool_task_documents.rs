@@ -14,6 +14,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tasks::storage;
+use crate::tools::task_tool_helpers::resolve_readonly_task_id;
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -552,6 +553,20 @@ async fn task_context(
     Ok((gcx, task_id, author_role))
 }
 
+async fn readonly_task_context(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+    tool_name: &str,
+) -> Result<(Arc<GlobalContext>, String), String> {
+    if crate::tools::task_tool_helpers::optional_id_string(args, "task_id")?.is_some() {
+        let task_id = resolve_readonly_task_id(ccx, args, tool_name).await?;
+        let gcx = ccx.lock().await.app.gcx.clone();
+        return Ok((gcx, task_id));
+    }
+    let (gcx, task_id, _) = task_context(ccx, args).await?;
+    Ok((gcx, task_id))
+}
+
 pub(crate) async fn documents_dir_for_task(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -896,7 +911,7 @@ impl Tool for ToolDocList {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, task_id, _) = task_context(&ccx, args).await?;
+        let (gcx, task_id) = readonly_task_context(&ccx, args, "doc_list").await?;
         let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
         let documents = list_documents_at(&documents_dir).await?;
         Ok((
@@ -928,7 +943,7 @@ impl Tool for ToolDocGet {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, task_id, _) = task_context(&ccx, args).await?;
+        let (gcx, task_id) = readonly_task_context(&ccx, args, "doc_get").await?;
         let slug = string_arg(args, "slug")?;
         let version = optional_u64_arg(args, "version")?;
         let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
@@ -1218,7 +1233,7 @@ impl Tool for ToolDocHistory {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, task_id, _) = task_context(&ccx, args).await?;
+        let (gcx, task_id) = readonly_task_context(&ccx, args, "doc_history").await?;
         let slug = string_arg(args, "slug")?;
         let documents_dir = documents_dir_for_task(gcx, &task_id).await?;
         let items = history_document_at(&documents_dir, &slug).await?;
@@ -1249,6 +1264,8 @@ impl Tool for ToolDocHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
+    use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use tempfile::TempDir;
 
     async fn temp_documents_dir() -> (TempDir, PathBuf) {
@@ -1508,6 +1525,44 @@ mod tests {
         (temp, gcx)
     }
 
+    async fn tool_ccx(
+        gcx: Arc<GlobalContext>,
+        task_id: Option<&str>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        let task_meta = task_id.map(|task_id| ThreadTaskMeta {
+            task_id: task_id.to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: None,
+        });
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "doc-test-chat".to_string(),
+                None,
+                "model".to_string(),
+                task_meta,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
+        match result.1.into_iter().next().unwrap() {
+            ContextEnum::ChatMessage(message) => match message.content {
+                ChatContent::SimpleText(text) => text,
+                _ => panic!("expected text output"),
+            },
+            _ => panic!("expected chat message"),
+        }
+    }
+
     #[tokio::test]
     async fn list_task_documents_for_api_returns_summaries_in_creation_order() {
         let (_temp, gcx) = setup_task_gcx("task-docs-list").await;
@@ -1561,6 +1616,62 @@ mod tests {
         assert_eq!(result.documents.len(), 3);
         let slugs: Vec<&str> = result.documents.iter().map(|d| d.slug.as_str()).collect();
         assert_eq!(slugs, vec!["doc-a", "doc-b", "doc-c"]);
+    }
+
+    #[tokio::test]
+    async fn task_introspection_explicit_task_id_doc_list_and_get_read_unbound_task() {
+        let (_temp, gcx) = setup_task_gcx("task-docs-explicit").await;
+        create_task_document_for_api(
+            gcx.clone(),
+            "task-docs-explicit",
+            CreateDocumentRequest {
+                slug: "explicit-doc".to_string(),
+                name: "Explicit Doc".to_string(),
+                kind: "plan".to_string(),
+                content: "explicit content".to_string(),
+                pinned: None,
+                relevant_cards: None,
+            },
+        )
+        .await
+        .unwrap();
+        let ccx = tool_ccx(gcx, None).await;
+
+        let list_output = output_text(
+            ToolDocList::new()
+                .tool_execute(
+                    ccx.clone(),
+                    &"call".to_string(),
+                    &HashMap::from([(
+                        "task_id".to_string(),
+                        Value::String("task-docs-explicit".to_string()),
+                    )]),
+                )
+                .await
+                .unwrap(),
+        );
+        let get_output = output_text(
+            ToolDocGet::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &HashMap::from([
+                        (
+                            "task_id".to_string(),
+                            Value::String("task-docs-explicit".to_string()),
+                        ),
+                        (
+                            "slug".to_string(),
+                            Value::String("explicit-doc".to_string()),
+                        ),
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert!(list_output.contains("explicit-doc"));
+        assert!(get_output.contains("explicit content"));
     }
 
     #[tokio::test]

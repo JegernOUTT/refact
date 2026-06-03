@@ -22,6 +22,7 @@ use crate::global_context::GlobalContext;
 use crate::knowledge_index::{build_knowledge_index, KnowledgeSearchFilters, KnowledgeSearchHit};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tasks::storage::find_task_dir;
+use crate::tools::task_tool_helpers::resolve_readonly_task_id;
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
@@ -661,6 +662,26 @@ fn planner_task_id_from_meta(
         ));
     }
     Ok(meta.task_id.clone())
+}
+
+async fn memory_read_task_id(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+    tool_name: &str,
+) -> Result<String, String> {
+    if crate::tools::task_tool_helpers::optional_id_string(args, "task_id")?.is_some() {
+        return resolve_readonly_task_id(ccx, args, tool_name).await;
+    }
+    let cgcx = ccx.lock().await;
+    cgcx.task_meta
+        .as_ref()
+        .map(|meta| meta.task_id.clone())
+        .ok_or_else(|| {
+            format!(
+                "{} requires task context (task_id missing). This tool only works within task chats unless task_id is provided.",
+                tool_name
+            )
+        })
 }
 
 fn validate_memory_reference(reference: &str) -> Result<String, String> {
@@ -2274,7 +2295,7 @@ impl Tool for ToolTaskMemoriesGet {
             experimental: false,
             allow_parallel: true,
             description: "Retrieves all saved memories for the current task. Returns the content of all memory files from the task's memories folder.".to_string(),
-            input_schema: json_schema_from_params(&[("format", "string", "Output format: 'full' (default) returns all content, 'titles' returns only titles/filenames, 'paths' returns only file paths.")], &[]),
+            input_schema: json_schema_from_params(&[("format", "string", "Output format: 'full' (default) returns all content, 'titles' returns only titles/filenames, 'paths' returns only file paths."), ("task_id", "string", "Optional task id. Defaults to current task context when available.")], &[]),
             output_schema: None,
             annotations: None,
         }
@@ -2286,15 +2307,11 @@ impl Tool for ToolTaskMemoriesGet {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, task_meta) = {
+        let gcx = {
             let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.task_meta.clone())
+            cgcx.app.gcx.clone()
         };
-
-        let task_id = task_meta
-            .as_ref()
-            .map(|m| m.task_id.clone())
-            .ok_or("task_mem_get requires task context (task_id missing). This tool only works within task planner/agent chats.")?;
+        let task_id = memory_read_task_id(&ccx, args, "task_mem_get").await?;
 
         let format = args
             .get("format")
@@ -2537,9 +2554,15 @@ impl Tool for ToolTaskMemorySearch {
         if query.is_empty() {
             return Err("query cannot be empty".to_string());
         }
-        let task_id = optional_string_arg(args, "task_id")?
-            .or_else(|| task_meta.as_ref().map(|meta| meta.task_id.clone()))
-            .or_else(|| Some("*".to_string()));
+        let task_id =
+            if crate::tools::task_tool_helpers::optional_id_string(args, "task_id")?.is_some() {
+                Some(resolve_readonly_task_id(&ccx, args, "task_mem_search").await?)
+            } else {
+                task_meta
+                    .as_ref()
+                    .map(|meta| meta.task_id.clone())
+                    .or_else(|| Some("*".to_string()))
+            };
         let filters = task_search_filters_from_args(args, task_id)?;
         let top_k = optional_usize_arg(args, "top_k", 10)?.clamp(1, 50);
         let hits = search_task_memories_and_documents(gcx, &query, filters, top_k).await;
@@ -2670,6 +2693,34 @@ mod tests {
             )
             .await,
         ))
+    }
+
+    async fn make_unbound_ccx(gcx: Arc<GlobalContext>) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "unbound-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
+        match result.1.into_iter().next().unwrap() {
+            ContextEnum::ChatMessage(message) => match message.content {
+                ChatContent::SimpleText(text) => text,
+                _ => panic!("expected text output"),
+            },
+            _ => panic!("expected chat message"),
+        }
     }
 
     async fn make_task_with_memory(
@@ -3355,6 +3406,39 @@ mod tests {
             assert_eq!(hits.len(), 1, "query {query}");
             assert_eq!(hits[0].card.title, "Filename");
         }
+    }
+
+    #[tokio::test]
+    async fn task_introspection_explicit_task_id_memory_search_reads_unbound_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let memories_dir = temp.path().join(".refact/tasks/task-1/memories");
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+        tokio::fs::write(
+            memories_dir.join("explicit-memory.md"),
+            "---\ntitle: Explicit Memory\ntask_id: task-1\nkind: finding\n---\n\nexplicit needle",
+        )
+        .await
+        .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let ccx = make_unbound_ccx(gcx).await;
+
+        let output = output_text(
+            ToolTaskMemorySearch::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &args(&[
+                        ("task_id", json!("task-1")),
+                        ("query", json!("explicit needle")),
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("Explicit Memory"));
+        assert!(output.contains("explicit-memory.md"));
     }
 
     #[tokio::test]

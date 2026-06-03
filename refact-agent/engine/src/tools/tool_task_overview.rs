@@ -17,6 +17,7 @@ use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, TaskBoard};
 use crate::tools::tool_task_check_agents::{get_agent_statuses, AgentStatus};
+use crate::tools::task_tool_helpers::resolve_readonly_task_id;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_runtime_api::{ChatSessionFacade, SessionState};
 
@@ -80,22 +81,8 @@ async fn overview_context(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
 ) -> Result<OverviewContext, String> {
+    let task_id = resolve_readonly_task_id(ccx, args, "task_overview").await?;
     let ccx_lock = ccx.lock().await;
-    let is_planner = ccx_lock
-        .task_meta
-        .as_ref()
-        .map(|meta| meta.role == "planner")
-        .unwrap_or(false);
-    if !is_planner {
-        return Err("task_overview can only be called by the task planner. Switch to the planner chat for task situational awareness.".to_string());
-    }
-    let task_id = args
-        .get("task_id")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .or_else(|| ccx_lock.task_meta.as_ref().map(|meta| meta.task_id.clone()))
-        .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())?;
     Ok(OverviewContext {
         task_id,
         gcx: ccx_lock.app.gcx.clone(),
@@ -128,7 +115,7 @@ fn task_overview_description() -> ToolDesc {
         },
         experimental: false,
         allow_parallel: true,
-        description: "Planner-only one-shot situational awareness report combining board state, agent health, memory pulse, documents, recent activity, and context pressure.".to_string(),
+        description: "Read-only one-shot situational awareness report combining board state, agent health, memory pulse, documents, recent activity, and context pressure.".to_string(),
         input_schema: task_overview_schema(),
         output_schema: None,
         annotations: None,
@@ -859,6 +846,29 @@ mod tests {
         ))
     }
 
+    async fn unbound_ccx(
+        gcx: Arc<GlobalContext>,
+        messages: Vec<ChatMessage>,
+        n_ctx: usize,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        let app = AppState::from_gcx(gcx).await;
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app,
+                n_ctx,
+                20,
+                false,
+                messages,
+                "unbound-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
     fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
         match result.1.into_iter().next().unwrap() {
             ContextEnum::ChatMessage(message) => match message.content {
@@ -877,7 +887,7 @@ mod tests {
         assert_eq!(desc.display_name, "Task Overview");
         assert_eq!(desc.input_schema["required"], json!([]));
         assert!(desc.input_schema["properties"].get("task_id").is_some());
-        assert!(desc.description.contains("Planner-only"));
+        assert!(desc.description.contains("Read-only"));
     }
 
     fn status(id: &str, session_state: Option<SessionState>, minutes_ago: i64) -> AgentStatus {
@@ -940,6 +950,27 @@ mod tests {
         assert!(output.contains("_No cards yet._"));
         assert!(output.contains("No task documents found"));
         assert!(output.contains("No activity in the last hour"));
+    }
+
+    #[tokio::test]
+    async fn task_introspection_explicit_task_id_overview_reads_unbound_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_empty_task(temp.path()).await;
+        let ccx = unbound_ccx(gcx, vec![], 200_000).await;
+        let output = output_text(
+            ToolTaskOverview::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &HashMap::from([("task_id".to_string(), json!("task-1"))]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("# Task Overview: Empty Task"));
+        assert!(output.contains("## Board"));
+        assert!(output.contains("## Agent Health"));
     }
 
     #[tokio::test]

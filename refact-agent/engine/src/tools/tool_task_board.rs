@@ -14,6 +14,7 @@ use crate::tools::tools_description::{
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariants, BoardCard, ScopeGuardMode, TaskBoard};
 use crate::tasks::events::{TaskEvent, emit_task_event};
+use crate::tools::task_tool_helpers::{optional_id_string, resolve_readonly_task_id};
 
 fn make_source() -> ToolSource {
     ToolSource {
@@ -656,6 +657,22 @@ async fn get_task_id(
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 
+async fn get_readonly_task_id(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+    tool_name: &str,
+) -> Result<String, String> {
+    match optional_id_string(args, "task_id")? {
+        Some(_) => resolve_readonly_task_id(ccx, args, tool_name).await,
+        None if args.contains_key("task_id") => {
+            let mut fallback_args = args.clone();
+            fallback_args.remove("task_id");
+            get_task_id(ccx, &fallback_args).await
+        }
+        None => get_task_id(ccx, args).await,
+    }
+}
+
 pub struct ToolTaskBoardGet;
 pub struct ToolTaskBoardCreateCard;
 pub struct ToolTaskBoardUpdateCard;
@@ -677,7 +694,7 @@ impl Tool for ToolTaskBoardGet {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
+        let task_id = get_readonly_task_id(&ccx, args, "board_get").await?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let board = storage::load_board(gcx, &task_id).await?;
         let card_id = args
@@ -1214,7 +1231,7 @@ impl Tool for ToolTaskReadyCards {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task_id = get_task_id(&ccx, args).await?;
+        let task_id = get_readonly_task_id(&ccx, args, "ready_cards").await?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
         let board = storage::load_board(gcx, &task_id).await?;
@@ -1262,6 +1279,7 @@ impl Tool for ToolTaskReadyCards {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
 
     #[test]
     fn update_card_schema_includes_target_files() {
@@ -1328,6 +1346,68 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    async fn unbound_ccx(
+        gcx: Arc<crate::global_context::GlobalContext>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "unbound-chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
+        match result.1.into_iter().next().unwrap() {
+            ContextEnum::ChatMessage(message) => match message.content {
+                ChatContent::SimpleText(text) => text,
+                _ => panic!("expected text output"),
+            },
+            _ => panic!("expected chat message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_introspection_explicit_task_id_board_get_reads_unbound_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let task_id = "explicit-board-task";
+        tokio::fs::create_dir_all(temp.path().join(".refact/tasks").join(task_id))
+            .await
+            .unwrap();
+        storage::save_board(gcx.clone(), task_id, &sample_board())
+            .await
+            .unwrap();
+        let ccx = unbound_ccx(gcx).await;
+
+        let output = output_text(
+            ToolTaskBoardGet::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &HashMap::from([
+                        ("task_id".to_string(), serde_json::json!(task_id)),
+                        ("verbosity".to_string(), serde_json::json!("minimal")),
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert!(output.contains("id: T-23"));
+        assert!(output.contains("id: T-24"));
     }
 
     #[test]
