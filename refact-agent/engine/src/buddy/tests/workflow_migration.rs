@@ -1,7 +1,10 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::buddy::autonomous_workflows::{AUTONOMOUS_BUDDY_WORKFLOWS, ERROR_DETECTIVE_WORKFLOW_ID};
 use crate::yaml_configs::customization_types::SubagentConfig;
+
+const CONDUCTOR_WORKFLOW_ID: &str = "buddy_conductor";
 
 fn workflow_ids() -> Vec<&'static str> {
     AUTONOMOUS_BUDDY_WORKFLOWS
@@ -20,12 +23,31 @@ fn subagent_yaml_path(id: &str) -> PathBuf {
         .join(format!("{id}.yaml"))
 }
 
+fn read_workflow_yaml(id: &str) -> String {
+    let path = subagent_yaml_path(id);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+}
+
 fn load_workflow_yaml(id: &str) -> SubagentConfig {
     let path = subagent_yaml_path(id);
-    let yaml = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    let yaml = read_workflow_yaml(id);
     serde_yaml::from_str(&yaml)
         .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()))
+}
+
+fn assert_has_tools(config: &SubagentConfig, tools: &[&str]) {
+    let configured = config.tools.iter().map(String::as_str).collect::<HashSet<_>>();
+    for tool in tools {
+        assert!(configured.contains(tool), "missing required tool {tool}");
+    }
+}
+
+fn assert_lacks_tools(config: &SubagentConfig, tools: &[&str]) {
+    let configured = config.tools.iter().map(String::as_str).collect::<HashSet<_>>();
+    for tool in tools {
+        assert!(!configured.contains(tool), "denied tool {tool} is configured");
+    }
 }
 
 #[tokio::test]
@@ -38,6 +60,19 @@ async fn every_workflow_yaml_loadable_via_get_delegate_config() {
                 .await;
         assert!(config.is_some(), "missing subagent config for {id}");
     }
+}
+
+#[tokio::test]
+async fn buddy_conductor_yaml_loadable_via_get_delegate_config() {
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let config = crate::yaml_configs::customization_registry::get_subagent_config(
+        gcx,
+        CONDUCTOR_WORKFLOW_ID,
+        None,
+    )
+    .await;
+
+    assert!(config.is_some(), "missing subagent config for {CONDUCTOR_WORKFLOW_ID}");
 }
 
 #[test]
@@ -61,6 +96,102 @@ fn every_workflow_yaml_sets_autonomous_no_confirm_true() {
             "{id} does not set autonomous_no_confirm"
         );
     }
+}
+
+#[test]
+fn buddy_conductor_yaml_loads_and_uses_buddy_schema() {
+    let config = load_workflow_yaml(CONDUCTOR_WORKFLOW_ID);
+
+    assert_eq!(config.id, CONDUCTOR_WORKFLOW_ID);
+    assert_eq!(config.subchat.model_type.as_deref(), Some("buddy"));
+    assert_eq!(config.subchat.autonomous_no_confirm, Some(true));
+    assert_eq!(config.extra.get("mode").and_then(|value| value.as_str()), Some("buddy"));
+    let prompt = config.messages.system_prompt.as_deref().unwrap_or_default();
+    assert!(prompt.contains("pinned-plan goal"));
+    assert!(prompt.contains("pure conductor"));
+    assert!(prompt.contains("FullAuto"));
+    assert!(prompt.contains("free shell"));
+    assert!(prompt.contains("Human wins"));
+    assert!(prompt.contains("Ghost messaging"));
+    assert!(prompt.contains("Prefer steering over trajectory surgery"));
+    assert!(prompt.contains("paused-only"));
+    assert!(prompt.contains("Read summaries"));
+    assert!(prompt.contains("Escalate"));
+}
+
+#[test]
+fn buddy_conductor_tool_surface_includes_required_coordination_tools() {
+    let config = load_workflow_yaml(CONDUCTOR_WORKFLOW_ID);
+
+    assert_has_tools(
+        &config,
+        &[
+            "shell",
+            "web",
+            "web_search",
+            "knowledge",
+            "strategic_planning",
+            "code_review",
+            "get_plan",
+            "update_plan",
+            "task_overview",
+            "board_get",
+            "ready_cards",
+            "check_agents",
+            "wait_agents",
+            "spawn_agent",
+            "spawn_agents_batch",
+            "agent_pulse",
+            "agent_chat_summary",
+            "agent_diff",
+            "agent_steer",
+            "task_questions_list",
+            "planner_reply",
+            "card_comment_add",
+            "card_comment_list",
+            "task_broadcast",
+            "pause_agent",
+            "resume_agent",
+            "cancel_agent",
+            "merge_agent",
+            "merge_ready_in_order",
+            "restart_agent",
+            "task_verify_card",
+            "doc_list",
+            "doc_get",
+            "task_mem_search",
+            "task_mem_save",
+            "task_mem_inbox",
+            "task_mem_triage_done",
+            "buddy_runtime_event",
+        ],
+    );
+}
+
+#[test]
+fn buddy_conductor_tool_surface_denies_direct_read_and_edit_tools() {
+    let config = load_workflow_yaml(CONDUCTOR_WORKFLOW_ID);
+
+    assert_lacks_tools(
+        &config,
+        &[
+            "cat",
+            "regex_search",
+            "search_pattern",
+            "search_symbol_definition",
+            "search_semantic",
+            "tree",
+            "create_textdoc",
+            "update_textdoc",
+            "update_textdoc_by_lines",
+            "update_textdoc_regex",
+            "update_textdoc_anchored",
+            "apply_patch",
+            "undo_textdoc",
+            "rm",
+            "mv",
+        ],
+    );
 }
 
 #[test]

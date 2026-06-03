@@ -944,6 +944,8 @@ mod tests {
             },
             spent: GoalBudgetSpent {
                 elapsed_secs: 1200,
+                prompt_tokens: 1600,
+                completion_tokens: 900,
                 total_tokens: 2500,
                 cache_read_tokens: 400,
                 usd: Some(0.7),
