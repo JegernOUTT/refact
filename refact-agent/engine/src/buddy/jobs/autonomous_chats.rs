@@ -2588,19 +2588,48 @@ fn scan_security_findings_from_source(
         return Vec::new();
     }
 
-    secret_patterns()
-        .iter()
-        .flat_map(|(kind, regex)| {
-            regex.find_iter(content).map(move |m| SecurityFinding {
-                path: path.to_string(),
-                source: source.to_string(),
-                kind: (*kind).to_string(),
-                preview: security_preview(content, m.start(), m.end()),
-            })
-        })
-        .take(limit)
-        .collect()
+    // Collect (kind, start, end) for every match across all patterns.
+    // We then suppress `assigned_secret` matches that overlap with a more
+    // specific pattern (github_token, gitlab_token, openai_key, bearer_token,
+    // authorization_header) so generic catches don't duplicate or override
+    // precise detections.
+    let mut raw: Vec<(&'static str, usize, usize)> = Vec::new();
+    for (kind, regex) in secret_patterns().iter() {
+        for m in regex.find_iter(content) {
+            raw.push((*kind, m.start(), m.end()));
+        }
+    }
+
+    let mut suppressed_ranges: Vec<(usize, usize)> = Vec::new();
+    for (kind, start, end) in &raw {
+        if *kind != ASSIGNED_SECRET_KIND {
+            suppressed_ranges.push((*start, *end));
+        }
+    }
+
+    let mut findings = Vec::new();
+    for (kind, start, end) in raw {
+        if kind == ASSIGNED_SECRET_KIND
+            && suppressed_ranges
+                .iter()
+                .any(|(s, e)| start < *e && end > *s)
+        {
+            continue;
+        }
+        if findings.len() >= limit {
+            break;
+        }
+        findings.push(SecurityFinding {
+            path: path.to_string(),
+            source: source.to_string(),
+            kind: kind.to_string(),
+            preview: security_preview(content, start, end),
+        });
+    }
+    findings
 }
+
+const ASSIGNED_SECRET_KIND: &str = "assigned_secret";
 
 fn push_security_findings(
     findings: &mut Vec<SecurityFinding>,
@@ -2649,7 +2678,7 @@ fn secret_patterns() -> &'static [(&'static str, Regex)] {
             (
                 "assigned_secret",
                 Regex::new(
-                    r#"(?i)["']?\b(api[_-]?key|apikey|(?:access|refresh|id|client)[_-]?token|client[_-]?secret|private[_-]?key|password|secret|token)\b["']?\s*[:=]\s*["']?[^"'\s,;]+"#,
+                    r#"(?i)["']?\b(api[_-]?key|apikey|(?:access|refresh|id|client)[_-]?token|client[_-]?secret|private[_-]?key|password|secret|token)\b["']?\s*[:=]\s*["']?[^"'\s,;]{12,}"#,
                 )
                 .unwrap(),
             ),

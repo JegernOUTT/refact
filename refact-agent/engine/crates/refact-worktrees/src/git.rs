@@ -369,7 +369,13 @@ pub fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stderr.is_empty() {
+            Err(stdout.into_owned())
+        } else {
+            Err(stderr.into_owned())
+        }
     }
 }
 
