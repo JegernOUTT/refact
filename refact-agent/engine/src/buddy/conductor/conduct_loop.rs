@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, ConductorWakeReason, GoalBudgetSpent, GoalLedger, GoalStatus,
-    MemoKind,
+    LearningOutcome, MemoKind,
 };
 use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
 use uuid::Uuid;
@@ -17,6 +17,7 @@ use crate::global_context::GlobalContext;
 use crate::tasks::types::TaskBoard;
 
 use super::budget::aggregate_goal_spent;
+use super::learn::{load_prior_lessons, record_goal_learning};
 use super::packet::{
     build_conductor_packet, ConductorAgentSnapshot, ConductorPacketInput, ConductorTaskSnapshot,
 };
@@ -133,10 +134,16 @@ pub async fn conductor_wake_for_goal(
             goal.ledger.last_wake_reason = reasons.last().copied();
             goal.ledger.turn_failures = 0;
             push_memo(&mut goal.ledger, MemoKind::Escalation, &reason, None);
-            save_goal_ledger(&project_root, &goal.id, &goal.ledger)
-                .await
-                .map_err(|error| error.to_string())?;
             goal.status = GoalStatus::WaitingForHuman;
+            record_goal_learning(
+                gcx.clone(),
+                &project_root,
+                &mut goal,
+                LearningOutcome::Escalated,
+                Some(&reason),
+                None,
+            )
+            .await?;
             emit_goal_updated(gcx, &goal).await;
             return Ok(ConductWakeOutcome::Escalated { reason });
         }
@@ -158,6 +165,16 @@ pub async fn conductor_wake_for_goal(
         WakeAction::MarkDone => {
             goal.ledger.last_wake_at = Some(now.clone());
             goal.ledger.last_wake_reason = reasons.last().copied();
+            let source_chat_id = goal.ledger.chat_ids.last().cloned();
+            record_goal_learning(
+                gcx.clone(),
+                &project_root,
+                &mut goal,
+                LearningOutcome::Done,
+                None,
+                source_chat_id,
+            )
+            .await?;
             save_goal_ledger(&project_root, &goal.id, &goal.ledger)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -169,12 +186,16 @@ pub async fn conductor_wake_for_goal(
     }
 
     let agent_statuses = collect_agent_snapshots(gcx.clone(), &task_snapshots).await;
+    let prior_lessons = load_prior_lessons(&project_root, &goal)
+        .await
+        .unwrap_or_default();
     let built = build_conductor_packet(ConductorPacketInput {
         goal: goal.clone(),
         wake_reasons: reasons.clone(),
         task_boards: task_snapshots,
         agent_statuses,
         last_wake_at: goal.ledger.last_wake_at.clone(),
+        prior_lessons,
     });
     let request = ConductorSubchatRequest {
         goal_id: goal.id.clone(),
@@ -216,10 +237,16 @@ pub async fn conductor_wake_for_goal(
                     goal.ledger.turn_failures, error
                 );
                 push_memo(&mut goal.ledger, MemoKind::Escalation, &reason, None);
-                save_goal_ledger(&project_root, &goal.id, &goal.ledger)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 goal.status = GoalStatus::WaitingForHuman;
+                record_goal_learning(
+                    gcx.clone(),
+                    &project_root,
+                    &mut goal,
+                    LearningOutcome::Escalated,
+                    Some(&reason),
+                    None,
+                )
+                .await?;
                 emit_goal_updated(gcx, &goal).await;
                 Ok(ConductWakeOutcome::Escalated { reason })
             } else {

@@ -9,12 +9,15 @@ use refact_buddy_core::conductor::{
     PendingQuestion,
 };
 
+use super::learn::{lesson_text, PriorConductorLesson};
+
 pub const MAX_PACKET_JSON_CHARS: usize = 24_000;
 const MAX_PACKET_TEXT_CHARS: usize = 12_000;
 const MAX_TASKS: usize = 6;
 const MAX_CARDS_PER_TASK: usize = 8;
 const MAX_AGENT_STATUSES: usize = 16;
 const MAX_MEMOS: usize = 8;
+const MAX_PRIOR_LESSONS: usize = 5;
 const MAX_PENDING_QUESTIONS: usize = 8;
 const MAX_DONE_CHECKLIST: usize = 8;
 const TEXT_TINY: usize = 64;
@@ -29,6 +32,7 @@ pub struct ConductorPacketInput {
     pub task_boards: Vec<ConductorTaskSnapshot>,
     pub agent_statuses: Vec<ConductorAgentSnapshot>,
     pub last_wake_at: Option<String>,
+    pub prior_lessons: Vec<PriorConductorLesson>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +75,7 @@ pub struct ConductorDecisionPacket {
     pub planner: PacketPlannerSummary,
     pub agents: PacketAgentSummary,
     pub memos: PacketMemoDigest,
+    pub prior_lessons: PacketPriorLessons,
     pub pending_questions: PacketPendingQuestions,
     pub truncation_markers: Vec<String>,
 }
@@ -204,6 +209,21 @@ pub struct PacketMemoSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PacketPriorLessons {
+    pub total: usize,
+    pub shown: usize,
+    pub lessons: Vec<PacketPriorLesson>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PacketPriorLesson {
+    pub goal_id: String,
+    pub outcome: String,
+    pub created_at: String,
+    pub lesson: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PacketPendingQuestions {
     pub total_open: usize,
     pub blocking_open: usize,
@@ -233,6 +253,7 @@ pub fn build_conductor_packet(input: ConductorPacketInput) -> BuiltConductorPack
         planner: packet_planner_summary(&input, &mut markers),
         agents: packet_agent_summary(&input, &mut markers),
         memos: packet_memo_digest(&input.goal.ledger.memos, &mut markers),
+        prior_lessons: packet_prior_lessons(&input.prior_lessons, &mut markers),
         pending_questions: packet_pending_questions(
             &input.goal.ledger.pending_questions,
             &mut markers,
@@ -243,6 +264,48 @@ pub fn build_conductor_packet(input: ConductorPacketInput) -> BuiltConductorPack
     let json = render_json_capped(&mut packet);
     let text = render_text_capped(&packet);
     BuiltConductorPacket { packet, json, text }
+}
+
+fn packet_prior_lessons(
+    lessons: &[PriorConductorLesson],
+    markers: &mut BTreeSet<String>,
+) -> PacketPriorLessons {
+    let mut lessons = lessons.iter().collect::<Vec<_>>();
+    let total = lessons.len();
+    lessons.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.goal_id.cmp(&right.goal_id))
+    });
+    if lessons.len() > MAX_PRIOR_LESSONS {
+        markers.insert("prior_lessons".to_string());
+        lessons.truncate(MAX_PRIOR_LESSONS);
+    }
+    let items = lessons
+        .into_iter()
+        .map(|lesson| PacketPriorLesson {
+            goal_id: clean("prior_lessons.goal_id", &lesson.goal_id, TEXT_TINY, markers),
+            outcome: enum_name(&lesson.outcome),
+            created_at: clean(
+                "prior_lessons.created_at",
+                &lesson.created_at,
+                TEXT_TINY,
+                markers,
+            ),
+            lesson: clean(
+                "prior_lessons.lesson",
+                &lesson_text(lesson),
+                TEXT_LONG,
+                markers,
+            ),
+        })
+        .collect::<Vec<_>>();
+    PacketPriorLessons {
+        total,
+        shown: items.len(),
+        lessons: items,
+    }
 }
 
 fn packet_goal(goal: &ConductorGoal, markers: &mut BTreeSet<String>) -> PacketGoal {
@@ -663,6 +726,11 @@ fn render_json_capped(packet: &mut ConductorDecisionPacket) -> String {
             json = serde_json::to_string(packet).unwrap_or_else(|_| "{}".to_string());
             continue;
         }
+        if packet.prior_lessons.lessons.pop().is_some() {
+            packet.prior_lessons.shown = packet.prior_lessons.lessons.len();
+            json = serde_json::to_string(packet).unwrap_or_else(|_| "{}".to_string());
+            continue;
+        }
         if packet.pending_questions.questions.pop().is_some() {
             packet.pending_questions.shown = packet.pending_questions.questions.len();
             json = serde_json::to_string(packet).unwrap_or_else(|_| "{}".to_string());
@@ -677,6 +745,8 @@ fn render_json_capped(packet: &mut ConductorDecisionPacket) -> String {
         packet.agents.shown = 0;
         packet.memos.recent.clear();
         packet.memos.shown = 0;
+        packet.prior_lessons.lessons.clear();
+        packet.prior_lessons.shown = 0;
         packet.pending_questions.questions.clear();
         packet.pending_questions.shown = 0;
         json = serde_json::to_string(packet).unwrap_or_else(|_| "{}".to_string());
@@ -729,6 +799,12 @@ fn render_text_capped(packet: &ConductorDecisionPacket) -> String {
                 "- {} {}: {}",
                 memo.created_at, memo.kind, memo.content
             ));
+        }
+    }
+    if !packet.prior_lessons.lessons.is_empty() {
+        lines.push("Prior lessons:".to_string());
+        for lesson in &packet.prior_lessons.lessons {
+            lines.push(format!("- {}", lesson.lesson));
         }
     }
     if !packet.pending_questions.questions.is_empty() {
@@ -978,6 +1054,7 @@ mod tests {
                         related_task_id: Some("task-1".to_string()),
                     },
                 ],
+                learning_records: Vec::new(),
                 pending_questions: vec![PendingQuestion {
                     id: "question-1".to_string(),
                     question: "Should conductor continue automatically?".to_string(),
@@ -1083,6 +1160,7 @@ mod tests {
                 last_tool_name: Some("cat".to_string()),
             }],
             last_wake_at: Some("2026-06-03T00:06:00Z".to_string()),
+            prior_lessons: Vec::new(),
         }
     }
 

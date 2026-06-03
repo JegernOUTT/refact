@@ -106,6 +106,31 @@ pub struct GoalBudgetSpent {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct LearningBudgetSnapshot {
+    pub elapsed_secs: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub cache_read_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd: Option<String>,
+}
+
+impl From<&GoalBudgetSpent> for LearningBudgetSnapshot {
+    fn from(spent: &GoalBudgetSpent) -> Self {
+        Self {
+            elapsed_secs: spent.elapsed_secs,
+            prompt_tokens: spent.prompt_tokens,
+            completion_tokens: spent.completion_tokens,
+            total_tokens: spent.total_tokens,
+            cache_read_tokens: spent.cache_read_tokens,
+            usd: spent.usd.map(|usd| format!("{usd:.6}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct DoneWhen {
     pub summary: String,
     pub checklist: Vec<String>,
@@ -122,6 +147,61 @@ pub struct ConductorMemo {
     pub source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConductorLearningRecord {
+    pub id: String,
+    pub outcome: LearningOutcome,
+    pub goal_id: String,
+    pub goal_title: String,
+    pub summary: String,
+    pub what_worked: Vec<String>,
+    pub failures: Vec<String>,
+    pub budget_used: LearningBudgetSnapshot,
+    pub no_progress_wakes: u32,
+    pub useful_tools_or_strategies: Vec<String>,
+    pub future_tunables: Vec<String>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_task_id: Option<String>,
+}
+
+impl Default for ConductorLearningRecord {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            outcome: LearningOutcome::default(),
+            goal_id: String::new(),
+            goal_title: String::new(),
+            summary: String::new(),
+            what_worked: Vec::new(),
+            failures: Vec::new(),
+            budget_used: LearningBudgetSnapshot::default(),
+            no_progress_wakes: 0,
+            useful_tools_or_strategies: Vec::new(),
+            future_tunables: Vec::new(),
+            created_at: String::new(),
+            source_chat_id: None,
+            related_task_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningOutcome {
+    Done,
+    Escalated,
+}
+
+impl Default for LearningOutcome {
+    fn default() -> Self {
+        Self::Done
+    }
 }
 
 impl Default for ConductorMemo {
@@ -167,6 +247,7 @@ pub struct GoalLedger {
     pub task_ids: Vec<String>,
     pub chat_ids: Vec<String>,
     pub memos: Vec<ConductorMemo>,
+    pub learning_records: Vec<ConductorLearningRecord>,
     pub pending_questions: Vec<PendingQuestion>,
     #[serde(default)]
     pub no_progress_wakes: u32,
@@ -407,6 +488,7 @@ mod tests {
                     source_chat_id: Some("chat-1".to_string()),
                     related_task_id: Some("task-1".to_string()),
                 }],
+                learning_records: Vec::new(),
                 pending_questions: vec![PendingQuestion {
                     id: "question-1".to_string(),
                     question: "Continue?".to_string(),

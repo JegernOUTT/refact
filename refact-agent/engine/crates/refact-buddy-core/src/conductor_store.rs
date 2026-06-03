@@ -221,6 +221,7 @@ mod tests {
                 source_chat_id: Some("chat-a".to_string()),
                 related_task_id: Some("task-a".to_string()),
             }],
+            learning_records: Vec::new(),
             pending_questions: vec![PendingQuestion {
                 id: "question-a".to_string(),
                 question: "Proceed?".to_string(),
