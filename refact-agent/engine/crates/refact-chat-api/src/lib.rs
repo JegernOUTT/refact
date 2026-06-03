@@ -535,6 +535,11 @@ where
 pub enum ChatCommand {
     UserMessage {
         content: serde_json::Value,
+        #[serde(
+            default = "default_message_origin",
+            skip_serializing_if = "is_default_message_origin"
+        )]
+        origin: Option<MessageOrigin>,
         #[serde(default)]
         attachments: Vec<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -609,6 +614,27 @@ pub enum ChatCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_n_network: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    Human,
+    Conductor,
+}
+
+impl Default for MessageOrigin {
+    fn default() -> Self {
+        Self::Human
+    }
+}
+
+fn default_message_origin() -> Option<MessageOrigin> {
+    Some(MessageOrigin::Human)
+}
+
+fn is_default_message_origin(origin: &Option<MessageOrigin>) -> bool {
+    matches!(origin, None | Some(MessageOrigin::Human))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -987,16 +1013,59 @@ mod tests {
         match cmd {
             ChatCommand::UserMessage {
                 content,
+                origin,
                 attachments,
                 context_files,
                 suppress_auto_enrichment: _,
             } => {
                 assert_eq!(content, json!("hello"));
+                assert_eq!(origin, Some(MessageOrigin::Human));
                 assert!(attachments.is_empty());
                 assert!(context_files.is_empty());
             }
             _ => panic!("Wrong variant"),
         }
+    }
+
+    #[test]
+    fn chat_command_origin_defaults_to_human() {
+        let cmd: ChatCommand = serde_json::from_str(
+            r#"{
+                "type": "user_message",
+                "content": "hello"
+            }"#,
+        )
+        .unwrap();
+
+        match cmd {
+            ChatCommand::UserMessage { origin, .. } => {
+                assert_eq!(origin, Some(MessageOrigin::Human));
+            }
+            other => panic!("expected user_message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_command_origin_conductor_round_trips() {
+        let cmd: ChatCommand = serde_json::from_str(
+            r#"{
+                "type": "user_message",
+                "content": "hello from conductor",
+                "origin": "conductor"
+            }"#,
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&cmd).unwrap();
+        let decoded: ChatCommand = serde_json::from_str(&encoded).unwrap();
+
+        match decoded {
+            ChatCommand::UserMessage { content, origin, .. } => {
+                assert_eq!(content, json!("hello from conductor"));
+                assert_eq!(origin, Some(MessageOrigin::Conductor));
+            }
+            other => panic!("expected user_message, got {other:?}"),
+        }
+        assert!(encoded.contains("\"origin\":\"conductor\""));
     }
 
     #[test]

@@ -29,6 +29,20 @@ pub struct TaskMeta {
     pub last_agents_summary_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planner_session_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductor: Option<TaskConductorLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskConductorLink {
+    pub goal_id: String,
+    pub role: TaskConductorRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskConductorRole {
+    Planner,
 }
 
 fn default_schema_version() -> u32 {
@@ -562,9 +576,49 @@ mod tests {
         assert_eq!(meta.cards_failed, 0);
         assert_eq!(meta.agents_active, 0);
         assert!(!meta.is_name_generated);
+        assert!(meta.conductor.is_none());
         assert_eq!(board.schema_version, 1);
         assert_eq!(board.rev, 0);
         assert_eq!(board.columns.len(), 5);
+    }
+
+    #[test]
+    fn task_meta_conductor_link_round_trips_json() {
+        let meta: TaskMeta = serde_json::from_str(
+            r#"{
+                "schema_version": 1,
+                "id": "task-1",
+                "name": "Task One",
+                "status": "active",
+                "created_at": "created",
+                "updated_at": "updated",
+                "conductor": {
+                    "goal_id": "goal-1",
+                    "role": "planner"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            meta.conductor,
+            Some(TaskConductorLink {
+                goal_id: "goal-1".to_string(),
+                role: TaskConductorRole::Planner,
+            })
+        );
+
+        let encoded = serde_json::to_string(&meta).unwrap();
+        let decoded: TaskMeta = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            decoded.conductor.as_ref().map(|link| link.role),
+            Some(TaskConductorRole::Planner)
+        );
+        assert_eq!(
+            decoded.conductor.as_ref().map(|link| link.goal_id.as_str()),
+            Some("goal-1")
+        );
     }
 
     #[test]

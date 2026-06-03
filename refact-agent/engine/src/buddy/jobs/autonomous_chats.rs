@@ -1901,6 +1901,7 @@ pub async fn run_autonomous_buddy_chat(
         is_buddy_chat: true,
         buddy_chat_kind: "system".to_string(),
         workflow_id: Some(spec.workflow_id.clone()),
+        goal_id: None,
     });
 
     let result = crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await?;

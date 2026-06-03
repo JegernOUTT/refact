@@ -369,6 +369,7 @@ pub async fn create_task(gcx: Arc<GlobalContext>, name: &str) -> Result<TaskMeta
         is_name_generated: has_user_provided_name,
         last_agents_summary_at: None,
         planner_session_state: None,
+        conductor: None,
     };
 
     save_task_meta(gcx.clone(), &task_id, &meta).await?;
@@ -640,6 +641,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         save_task_meta(gcx.clone(), task_id, &meta).await.unwrap();
         save_board(

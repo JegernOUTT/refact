@@ -838,6 +838,7 @@ pub async fn handle_v1_buddy_conversations_create(
             is_buddy_chat: true,
             buddy_chat_kind: "conversation".to_string(),
             workflow_id: None,
+            goal_id: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,

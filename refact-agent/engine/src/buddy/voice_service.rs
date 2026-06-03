@@ -596,6 +596,7 @@ async fn render_via_subchat(gcx: AppState, request: VoiceRenderRequest) -> Optio
         is_buddy_chat: true,
         buddy_chat_kind: "system".to_string(),
         workflow_id: Some("buddy_voice".to_string()),
+        goal_id: None,
     });
 
     let messages = vec![

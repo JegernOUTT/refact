@@ -310,6 +310,7 @@ impl Tool for ToolAgentSteer {
                     content: Value::String(steer_message.clone()),
                     attachments: vec![],
                     context_files: vec![],
+                    origin: None,
                     suppress_auto_enrichment: false,
                 },
             )
@@ -504,6 +505,7 @@ mod tests {
             is_name_generated: false,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         }
     }
 
@@ -698,6 +700,7 @@ mod tests {
                 content,
                 attachments,
                 context_files,
+                origin,
                 suppress_auto_enrichment,
             } => {
                 assert_eq!(
@@ -708,6 +711,7 @@ mod tests {
                 );
                 assert!(attachments.is_empty());
                 assert!(context_files.is_empty());
+                assert_eq!(*origin, None);
                 assert!(!suppress_auto_enrichment);
             }
             _ => panic!("expected user message"),

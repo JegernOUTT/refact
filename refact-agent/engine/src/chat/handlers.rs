@@ -407,6 +407,7 @@ pub async fn handle_v1_chat_command(
             content,
             attachments,
             context_files,
+            origin: _,
             suppress_auto_enrichment: _,
         } => validate_content_with_attachments(content, attachments)
             .err()

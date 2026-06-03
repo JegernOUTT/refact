@@ -3435,6 +3435,10 @@ fn buddy_action_round_trip() {
             market_kind: MarketKind::Mcp,
             item_id: "github-mcp".to_string(),
         },
+        BuddyAction::StartConductorGoal {
+            plan_doc_slug: "master-plan".to_string(),
+            title: "Buddy Conductor".to_string(),
+        },
         BuddyAction::CreatePulseReport {
             scope: PulseScope::All,
         },
@@ -3469,6 +3473,7 @@ fn buddy_page_round_trip() {
         },
         BuddyPage::KnowledgeGraph,
         BuddyPage::Worktrees,
+        BuddyPage::Conductor,
         BuddyPage::SetupMode {
             mode: "setup_mcp".to_string(),
         },
@@ -3531,6 +3536,7 @@ fn schema_contract_buddy_page_variants() {
         ),
         (BuddyPage::KnowledgeGraph, "knowledge_graph"),
         (BuddyPage::Worktrees, "worktrees"),
+        (BuddyPage::Conductor, "conductor"),
         (
             BuddyPage::SetupMode {
                 mode: "setup_mcp".to_string(),
@@ -3635,6 +3641,13 @@ fn schema_contract_buddy_action_variants() {
                 item_id: "item-1".to_string(),
             },
             "offer_marketplace_install",
+        ),
+        (
+            BuddyAction::StartConductorGoal {
+                plan_doc_slug: "master-plan".to_string(),
+                title: "Buddy Conductor".to_string(),
+            },
+            "start_conductor_goal",
         ),
         (
             BuddyAction::CreatePulseReport {
@@ -3884,6 +3897,7 @@ fn should_observe_thread_skips_buddy_task_setup_and_subchats() {
         is_buddy_chat: true,
         buddy_chat_kind: "investigation".to_string(),
         workflow_id: None,
+        goal_id: None,
     });
     assert!(!super::chat_reactions::should_observe_thread(&thread));
 
@@ -4409,6 +4423,7 @@ fn make_task_meta(id: &str, name: &str, status: TaskStatus, created_at: &str) ->
         is_name_generated: false,
         last_agents_summary_at: None,
         planner_session_state: None,
+        conductor: None,
     }
 }
 
@@ -6014,6 +6029,7 @@ async fn tool_buddy_launch_investigation_creates_chat() {
             is_buddy_chat: true,
             buddy_chat_kind: "investigation".to_string(),
             workflow_id: None,
+            goal_id: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,

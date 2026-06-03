@@ -433,6 +433,17 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
+        BuddyAction::StartConductorGoal {
+            plan_doc_slug,
+            title,
+        } => Ok(ActionOutcome {
+            result: serde_json::json!({
+                "kind": "start_conductor_goal",
+                "plan_doc_slug": plan_doc_slug,
+                "title": title
+            }),
+            status: OpportunityStatus::Accepted,
+        }),
         BuddyAction::Dismiss => Ok(ActionOutcome {
             result: serde_json::json!({ "kind": "dismiss" }),
             status: OpportunityStatus::Dismissed,
@@ -1043,6 +1054,7 @@ async fn create_investigation_chat(
             is_buddy_chat: true,
             buddy_chat_kind: "investigation".to_string(),
             workflow_id: None,
+            goal_id: None,
         }),
         auto_compact_enabled: None,
         frozen_request_prefix: None,

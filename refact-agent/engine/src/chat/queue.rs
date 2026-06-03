@@ -150,6 +150,7 @@ pub async fn inject_priority_messages_if_any(
             content,
             attachments,
             context_files,
+            origin: _,
             suppress_auto_enrichment: _,
         } = request.command
         {
@@ -870,6 +871,7 @@ pub async fn process_command_queue(
                 mut content,
                 attachments,
                 context_files,
+                origin: _,
                 suppress_auto_enrichment,
             } => {
                 let mut skill_activation_info = None;
@@ -1186,6 +1188,7 @@ pub async fn process_command_queue(
                             content: add_content,
                             attachments: add_attachments,
                             context_files: add_ctx_files,
+                            origin: _,
                             suppress_auto_enrichment: _,
                         } = additional.command
                         {
@@ -2261,6 +2264,7 @@ mod tests {
             content: json!("hi"),
             attachments: vec![],
             context_files: vec![],
+            origin: None,
             suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::SetParams {
@@ -2276,6 +2280,7 @@ mod tests {
             content: json!("hi"),
             attachments: vec![],
             context_files: vec![],
+            origin: None,
             suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::ToolDecision {
@@ -2304,12 +2309,14 @@ mod tests {
             content: json!("hi"),
             attachments: vec![],
             context_files: vec![],
+            origin: None,
             suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("another"),
             attachments: vec![],
             context_files: vec![],
+            origin: None,
             suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::Abort {}));
@@ -2698,6 +2705,7 @@ mod tests {
             content: json!("hi"),
             attachments: vec![],
             context_files: vec![],
+            origin: None,
             suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::ToolDecision {
@@ -2714,6 +2722,7 @@ mod tests {
             content: json!("hi"),
             attachments: vec![],
             context_files: vec![],
+            origin: None,
             suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::IdeToolResult {
@@ -2731,6 +2740,7 @@ mod tests {
             content: json!("hi"),
             attachments: vec![],
             context_files: vec![],
+            origin: None,
             suppress_auto_enrichment: false,
         }));
         queue.push_back(make_request(ChatCommand::Abort {}));
@@ -2759,6 +2769,7 @@ mod tests {
                 content: json!("first"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2769,6 +2780,7 @@ mod tests {
                 content: json!("second"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2779,6 +2791,7 @@ mod tests {
                 content: json!("priority"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         };
@@ -2802,6 +2815,7 @@ mod tests {
                 content: json!("p1"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2812,6 +2826,7 @@ mod tests {
                 content: json!("normal"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2822,6 +2837,7 @@ mod tests {
                 content: json!("p2"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         };
@@ -2884,6 +2900,7 @@ mod tests {
                 content: json!("priority 1"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2894,6 +2911,7 @@ mod tests {
                 content: json!("normal"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2904,6 +2922,7 @@ mod tests {
                 content: json!("priority 2"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2932,6 +2951,7 @@ mod tests {
                 content: json!("first"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2942,6 +2962,7 @@ mod tests {
                 content: json!("priority"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2952,6 +2973,7 @@ mod tests {
                 content: json!("second"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -2962,6 +2984,7 @@ mod tests {
                 content: json!("third"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });

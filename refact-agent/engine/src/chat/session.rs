@@ -2463,6 +2463,7 @@ mod tests {
                 content: json!("interrupt"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -3462,6 +3463,7 @@ mod tests {
                 content: json!("hello"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });
@@ -3516,6 +3518,7 @@ mod tests {
                 content: json!("test"),
                 attachments: vec![],
                 context_files: vec![],
+                origin: None,
                 suppress_auto_enrichment: false,
             },
         });

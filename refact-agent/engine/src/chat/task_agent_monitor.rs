@@ -1915,6 +1915,7 @@ mod tests {
             is_name_generated: true,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         crate::tasks::storage::save_task_meta(gcx.clone(), &task.id, &meta)
             .await
@@ -2516,6 +2517,7 @@ mod tests {
             is_name_generated: true,
             last_agents_summary_at: None,
             planner_session_state: None,
+            conductor: None,
         };
         crate::tasks::storage::save_task_meta(gcx.clone(), &task.id, &meta)
             .await

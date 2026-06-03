@@ -59,6 +59,7 @@ mod tests {
             is_name_generated: true,
             last_agents_summary_at: Some("summary".into()),
             planner_session_state: Some("idle".into()),
+            conductor: None,
         }
     }
 
