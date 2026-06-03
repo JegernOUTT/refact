@@ -47,16 +47,19 @@ pub async fn compress_trajectory(
 
             let result = run_subchat_once(gcx2, SUBAGENT_ID, messages_compress)
                 .await
-                .map_err(|e| format!("Error: {}", e))?;
+                .map_err(|e| format!("compress_trajectory subchat failed: {}", e))?;
 
             let content = result
                 .messages
-                .last()
-                .and_then(|last_m| match &last_m.content {
-                    ChatContent::SimpleText(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .ok_or("No traj message was generated".to_string())?;
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+                .map(|m| m.content.content_text_only())
+                .unwrap_or_default();
+            let content = content.trim().to_string();
+            if content.is_empty() {
+                return Err("Trajectory compression produced empty result".to_string());
+            }
 
             Ok(content)
         },

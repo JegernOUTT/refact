@@ -244,6 +244,7 @@ impl Tool for ToolTaskRestartAgent {
             .as_ref()
             .and_then(|m| m.planner_chat_id.clone())
             .unwrap_or_else(|| ccx_lock.chat_id.clone());
+        let current_chat_id = ccx_lock.chat_id.clone();
         let current_model = ccx_lock.current_model.clone();
         let gcx = ccx_lock.app.gcx.clone();
         drop(ccx_lock);
@@ -333,6 +334,7 @@ impl Tool for ToolTaskRestartAgent {
                 gcx.clone(),
                 &task_id,
                 &planner_chat_id,
+                &current_chat_id,
                 card_id,
                 &card_title,
                 &card_instructions,
@@ -439,6 +441,16 @@ impl ToolTaskRestartAgent {
                 let card = board
                     .get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found", card_id_owned))?;
+                if card.column == "doing" {
+                    if let Some(agent_chat_id) = card.agent_chat_id.as_deref() {
+                        if !agent_chat_id.is_empty() {
+                            return Err(format!(
+                                "Card {} is already being worked on by agent_chat_id={}",
+                                card_id_owned, agent_chat_id
+                            ));
+                        }
+                    }
+                }
                 mark_card_restarted_fresh(
                     card,
                     &agent_id_clone,
@@ -506,6 +518,7 @@ impl ToolTaskRestartAgent {
         gcx: Arc<GlobalContext>,
         task_id: &str,
         planner_chat_id: &str,
+        resume_chat_id: &str,
         card_id: &str,
         card_title: &str,
         card_instructions: &str,
@@ -536,11 +549,22 @@ impl ToolTaskRestartAgent {
         let card_id_owned = card_id.to_string();
         let agent_id_clone = agent_id.clone();
         let agent_chat_id_clone = agent_chat_id.clone();
+        let resume_chat_id = resume_chat_id.to_string();
 
         storage::update_board_atomic(gcx.clone(), task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_owned)
                 .ok_or(format!("Card {} not found", card_id_owned))?;
+            if card.column == "doing" {
+                if let Some(agent_chat_id) = card.agent_chat_id.as_deref() {
+                    if !agent_chat_id.is_empty() && agent_chat_id != resume_chat_id {
+                        return Err(format!(
+                            "Card {} is already being worked on by agent_chat_id={}",
+                            card_id_owned, agent_chat_id
+                        ));
+                    }
+                }
+            }
             mark_card_restarted_resume(card, &agent_id_clone, &agent_chat_id_clone);
             Ok(())
         })

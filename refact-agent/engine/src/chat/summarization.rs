@@ -169,7 +169,7 @@ fn is_excluded_from_segment(message: &ChatMessage) -> bool {
     }
     if matches!(
         message.role.as_str(),
-        "system" | "user" | "cd_instruction" | COMPRESSION_REPORT_ROLE
+        "system" | "user" | "cd_instruction" | "summarization" | COMPRESSION_REPORT_ROLE
     ) || is_ui_only_message(message)
     {
         return true;
@@ -2127,6 +2127,42 @@ mod tests {
             closed_non_user_segments(&messages),
             vec![SummarySegment { start: 1, end: 4 }]
         );
+    }
+
+    #[test]
+    fn event_inside_segment_is_included_not_split() {
+        let messages = vec![
+            user("q1"),
+            assistant("a1"),
+            event("anchor event"),
+            assistant("a2"),
+            user("q2"),
+        ];
+        let segments = closed_non_user_segments(&messages);
+        // Events are included in segments for LLM summarization (content is preserved
+        // in the summary). PreserveAnchor protection applies in linearize.rs instead.
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], SummarySegment { start: 1, end: 3 });
+    }
+
+    #[test]
+    fn legacy_summarization_role_excluded_from_segment() {
+        let legacy = ChatMessage {
+            role: "summarization".to_string(),
+            content: ChatContent::SimpleText("old summary".to_string()),
+            ..Default::default()
+        };
+        let messages = vec![
+            user("q1"),
+            assistant("a1"),
+            legacy,
+            assistant("a2"),
+            user("q2"),
+        ];
+        let segments = closed_non_user_segments(&messages);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0], SummarySegment { start: 1, end: 1 });
+        assert_eq!(segments[1], SummarySegment { start: 3, end: 3 });
     }
 
     #[test]

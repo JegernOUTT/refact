@@ -65,7 +65,11 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
         for i in *start..=*end {
             if messages
                 .get(i)
-                .map(|msg| msg.role == "user" || exemption_for(msg) == CompressionExemption::Never)
+                .map(|msg| {
+                    msg.role == "user"
+                        || msg.role == "event"
+                        || exemption_for(msg) == CompressionExemption::Never
+                })
                 .unwrap_or(false)
             {
                 continue;
@@ -428,5 +432,26 @@ mod tests {
 
         assert_eq!(roles, vec!["user", "assistant", "user"]);
         assert_eq!(text, vec!["first", "legacy summary", "second"]);
+    }
+
+    #[test]
+    fn linearize_preserves_anchor_event_within_summarized_range() {
+        let messages = vec![
+            user("old"),
+            assistant("old response"),
+            event("preserve-anchor event"),
+            user("new"),
+            summarization("sum of old", Some((1, 2))),
+        ];
+        let result = apply_summarization_linearize(messages);
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        // event has PreserveAnchor exemption and must survive the summarized range
+        assert_eq!(roles, vec!["user", "assistant", "event", "user"]);
+        assert_eq!(result[1].content.content_text_only(), "sum of old");
+        assert_eq!(
+            result[2].content.content_text_only(),
+            "preserve-anchor event"
+        );
     }
 }

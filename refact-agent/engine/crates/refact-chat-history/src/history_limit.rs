@@ -70,7 +70,10 @@ pub enum CompressionStrength {
 pub fn remove_invalid_tool_calls_and_tool_calls_results(messages: &mut Vec<ChatMessage>) {
     let tool_call_ids: HashSet<_> = messages
         .iter()
-        .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
+        .filter(|m| {
+            (m.role == "tool" || m.role == "diff" || m.role == "context_file")
+                && !m.tool_call_id.is_empty()
+        })
         .map(|m| &m.tool_call_id)
         .cloned()
         .collect();
@@ -444,7 +447,9 @@ fn validate_chat_history_slice(messages: &[ChatMessage]) -> Result<(), String> {
                     for tc in tool_calls {
                         let mut found = false;
                         for later_msg in messages.iter().skip(idx + 1) {
-                            if (later_msg.role == "tool" || later_msg.role == "diff")
+                            if (later_msg.role == "tool"
+                                || later_msg.role == "diff"
+                                || later_msg.role == "context_file")
                                 && later_msg.tool_call_id == tc.id
                             {
                                 found = true;
@@ -733,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn test_context_file_with_matching_id_does_not_satisfy_tool_call() {
+    fn test_context_file_with_matching_id_satisfies_tool_call() {
         let mut messages = vec![
             ChatMessage {
                 role: "assistant".to_string(),
@@ -757,11 +762,49 @@ mod tests {
             },
         ];
         remove_invalid_tool_calls_and_tool_calls_results(&mut messages);
-        assert!(
-            messages.iter().all(|m| m.role != "assistant"),
-            "assistant with unanswered tool call should have been removed, got: {:?}",
+        assert_eq!(
+            messages.len(),
+            2,
+            "assistant with context_file response should be kept, got roles: {:?}",
             messages.iter().map(|m| &m.role).collect::<Vec<_>>()
         );
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[1].role, "context_file");
+    }
+
+    #[test]
+    fn test_validate_accepts_context_file_as_tool_call_response() {
+        let messages = vec![
+            make_user_msg_basic("question"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call_read".to_string(),
+                    index: Some(0),
+                    function: ChatToolFunction {
+                        name: "cat".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    tool_type: "function".to_string(),
+                    extra_content: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "context_file".to_string(),
+                tool_call_id: "call_read".to_string(),
+                content: ChatContent::SimpleText("file content".to_string()),
+                ..Default::default()
+            },
+        ];
+        let mut sampling = SamplingParameters::default();
+        let result = fix_and_limit_messages_history(&messages, &mut sampling);
+        assert!(
+            result.is_ok(),
+            "context_file should satisfy tool call: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().len(), 3);
     }
 
     #[test]
