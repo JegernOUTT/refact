@@ -235,9 +235,25 @@ impl Default for MemoKind {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GoalLedger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_doc_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_markdown: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_when: Option<DoneWhen>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<GoalBudget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<GoalStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +275,47 @@ pub struct GoalLedger {
     pub last_progress_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_reason: Option<ConductorWakeReason>,
+}
+
+impl GoalLedger {
+    pub fn apply_goal_metadata(&mut self, goal: &ConductorGoal) {
+        self.title = Some(goal.title.clone()).filter(|value| !value.trim().is_empty());
+        self.plan_doc_slug = goal
+            .plan_doc_slug
+            .clone()
+            .filter(|value| !value.trim().is_empty());
+        self.plan_markdown = Some(goal.plan_markdown.clone()).filter(|value| !value.trim().is_empty());
+        self.done_when = Some(goal.done_when.clone());
+        self.budget = Some(goal.budget.clone());
+        self.status = Some(goal.status);
+        self.autonomy = Some(goal.autonomy);
+        self.created_at = goal.created_at.clone();
+        self.updated_at = goal.updated_at.clone();
+        self.completed_at = goal.completed_at.clone();
+    }
+}
+
+impl ConductorGoal {
+    pub fn from_ledger(goal_id: String, ledger: GoalLedger) -> Self {
+        Self {
+            id: goal_id.clone(),
+            title: ledger.title.clone().unwrap_or(goal_id),
+            plan_doc_slug: ledger.plan_doc_slug.clone(),
+            plan_markdown: ledger.plan_markdown.clone().unwrap_or_default(),
+            done_when: ledger.done_when.clone().unwrap_or_default(),
+            status: ledger.status.unwrap_or_default(),
+            autonomy: ledger.autonomy.unwrap_or_default(),
+            budget: ledger.budget.clone().unwrap_or_default(),
+            spent: GoalBudgetSpent {
+                no_progress_wakes: ledger.no_progress_wakes,
+                ..GoalBudgetSpent::default()
+            },
+            created_at: ledger.created_at.clone(),
+            updated_at: ledger.updated_at.clone(),
+            completed_at: ledger.completed_at.clone(),
+            ledger,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

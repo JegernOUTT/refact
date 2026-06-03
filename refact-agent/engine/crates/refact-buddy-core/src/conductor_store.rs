@@ -47,7 +47,7 @@ impl std::error::Error for ConductorStoreError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredGoalLedger {
     pub goal_id: String,
     pub ledger: GoalLedger,

@@ -33,6 +33,14 @@ impl ConductorWakeTargets {
     }
 
     pub fn register_goal_ledger(&mut self, goal_id: impl Into<String>, ledger: &GoalLedger) {
+        if matches!(
+            ledger.status.unwrap_or_default(),
+            refact_buddy_core::conductor::GoalStatus::Done
+                | refact_buddy_core::conductor::GoalStatus::Failed
+                | refact_buddy_core::conductor::GoalStatus::Cancelled
+        ) {
+            return;
+        }
         let goal_id = normalized_goal_id(goal_id.into());
         if goal_id.is_empty() {
             return;

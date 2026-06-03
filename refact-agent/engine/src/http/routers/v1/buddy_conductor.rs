@@ -1,0 +1,559 @@
+use axum::extract::{Path, State};
+use axum::response::Result;
+use chrono::Utc;
+use hyper::StatusCode;
+use refact_buddy_core::conductor::{
+    ConductorGoal, ConductorWakeReason, GoalAutonomy, GoalStatus, validate_goal_for_create,
+};
+use refact_buddy_core::conductor_store::{
+    ConductorStoreError, list_goal_ledgers, load_goal_ledger, save_goal_ledger,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::app_state::AppState;
+use crate::buddy::events::BuddyEvent;
+use crate::custom_error::ScratchError;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConductorGoalsResponse {
+    pub goals: Vec<ConductorGoal>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateConductorGoalRequest {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub plan_doc_slug: Option<String>,
+    #[serde(default)]
+    pub plan_markdown: String,
+    #[serde(default)]
+    pub done_when: refact_buddy_core::conductor::DoneWhen,
+    #[serde(default)]
+    pub autonomy: GoalAutonomy,
+    pub budget: refact_buddy_core::conductor::GoalBudget,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PatchConductorGoalRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub plan_doc_slug: Option<Option<String>>,
+    #[serde(default)]
+    pub plan_markdown: Option<String>,
+    #[serde(default)]
+    pub done_when: Option<refact_buddy_core::conductor::DoneWhen>,
+    #[serde(default)]
+    pub autonomy: Option<GoalAutonomy>,
+    #[serde(default)]
+    pub status: Option<GoalStatus>,
+    #[serde(default)]
+    pub budget: Option<refact_buddy_core::conductor::GoalBudget>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutonomyRequest {
+    pub autonomy: GoalAutonomy,
+}
+
+pub async fn handle_v1_buddy_conductor_goals_list(
+    State(app): State<AppState>,
+) -> Result<axum::Json<ConductorGoalsResponse>, ScratchError> {
+    let project_root = project_root(&app).await?;
+    let goals = list_goal_ledgers(&project_root)
+        .await
+        .map_err(store_error)?
+        .into_iter()
+        .map(|stored| ConductorGoal::from_ledger(stored.goal_id, stored.ledger))
+        .collect();
+    Ok(axum::Json(ConductorGoalsResponse { goals }))
+}
+
+pub async fn handle_v1_buddy_conductor_goal_create(
+    State(app): State<AppState>,
+    axum::Json(req): axum::Json<CreateConductorGoalRequest>,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    let project_root = project_root(&app).await?;
+    let now = Utc::now().to_rfc3339();
+    let id = normalized_goal_id(req.id).unwrap_or_else(|| Uuid::new_v4().to_string());
+    let title = req.title.trim().to_string();
+    if title.is_empty() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "title is required".to_string(),
+        ));
+    }
+    if load_goal_ledger(&project_root, &id)
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            format!("conductor goal already exists: {id}"),
+        ));
+    }
+    let mut goal = ConductorGoal {
+        id,
+        title,
+        plan_doc_slug: req.plan_doc_slug.and_then(non_empty),
+        plan_markdown: req.plan_markdown,
+        done_when: req.done_when,
+        status: GoalStatus::Running,
+        autonomy: req.autonomy,
+        budget: req.budget,
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        ..ConductorGoal::default()
+    };
+    validate_goal_for_create(&goal).map_err(|error| {
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid conductor goal: {error}"),
+        )
+    })?;
+    let metadata = goal.clone();
+    goal.ledger.apply_goal_metadata(&metadata);
+    save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+        .await
+        .map_err(store_error)?;
+    refresh_targets_and_emit(app, &goal, Some(ConductorWakeReason::GoalCreated)).await;
+    Ok(axum::Json(goal))
+}
+
+pub async fn handle_v1_buddy_conductor_goal_get(
+    State(app): State<AppState>,
+    Path(goal_id): Path<String>,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    Ok(axum::Json(load_goal(&app, &goal_id).await?))
+}
+
+pub async fn handle_v1_buddy_conductor_goal_patch(
+    State(app): State<AppState>,
+    Path(goal_id): Path<String>,
+    axum::Json(req): axum::Json<PatchConductorGoalRequest>,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    let project_root = project_root(&app).await?;
+    let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
+    if let Some(title) = req.title {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Err(ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                "title cannot be empty".to_string(),
+            ));
+        }
+        goal.title = title;
+    }
+    if let Some(plan_doc_slug) = req.plan_doc_slug {
+        goal.plan_doc_slug = plan_doc_slug.and_then(non_empty);
+    }
+    if let Some(plan_markdown) = req.plan_markdown {
+        goal.plan_markdown = plan_markdown;
+    }
+    if let Some(done_when) = req.done_when {
+        goal.done_when = done_when;
+    }
+    if let Some(autonomy) = req.autonomy {
+        goal.autonomy = autonomy;
+    }
+    if let Some(status) = req.status {
+        apply_goal_status(&mut goal, status);
+    }
+    if let Some(budget) = req.budget {
+        goal.budget = budget;
+        validate_goal_for_create(&goal).map_err(|error| {
+            ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                format!("invalid conductor goal: {error}"),
+            )
+        })?;
+    }
+    persist_goal(&project_root, &mut goal).await?;
+    refresh_targets_and_emit(app, &goal, None).await;
+    Ok(axum::Json(goal))
+}
+
+pub async fn handle_v1_buddy_conductor_goal_pause(
+    State(app): State<AppState>,
+    Path(goal_id): Path<String>,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    set_goal_status(app, goal_id, GoalStatus::Paused).await
+}
+
+pub async fn handle_v1_buddy_conductor_goal_resume(
+    State(app): State<AppState>,
+    Path(goal_id): Path<String>,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    set_goal_status(app, goal_id, GoalStatus::Running).await
+}
+
+pub async fn handle_v1_buddy_conductor_goal_stop(
+    State(app): State<AppState>,
+    Path(goal_id): Path<String>,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    set_goal_status(app, goal_id, GoalStatus::Cancelled).await
+}
+
+pub async fn handle_v1_buddy_conductor_goal_autonomy(
+    State(app): State<AppState>,
+    Path(goal_id): Path<String>,
+    axum::Json(req): axum::Json<AutonomyRequest>,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    let project_root = project_root(&app).await?;
+    let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
+    goal.autonomy = req.autonomy;
+    persist_goal(&project_root, &mut goal).await?;
+    refresh_targets_and_emit(app, &goal, None).await;
+    Ok(axum::Json(goal))
+}
+
+pub async fn handle_v1_buddy_conductor_goal_manual_wake(
+    State(app): State<AppState>,
+    Path(goal_id): Path<String>,
+) -> Result<axum::Json<serde_json::Value>, ScratchError> {
+    let goal = load_goal(&app, &goal_id).await?;
+    let enqueued = {
+        let mut bus = app.buddy.conductor_wake_bus.lock().await;
+        bus.enqueue_goal(&goal.id, ConductorWakeReason::Manual, Utc::now())
+    };
+    Ok(axum::Json(
+        json!({ "enqueued": enqueued, "goal_id": goal.id }),
+    ))
+}
+
+async fn set_goal_status(
+    app: AppState,
+    goal_id: String,
+    status: GoalStatus,
+) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+    let project_root = project_root(&app).await?;
+    let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
+    apply_goal_status(&mut goal, status);
+    persist_goal(&project_root, &mut goal).await?;
+    refresh_targets_and_emit(app, &goal, None).await;
+    Ok(axum::Json(goal))
+}
+
+async fn load_goal(app: &AppState, goal_id: &str) -> Result<ConductorGoal, ScratchError> {
+    let project_root = project_root(app).await?;
+    load_goal_from_root(&project_root, goal_id).await
+}
+
+async fn load_goal_from_root(
+    project_root: &std::path::Path,
+    goal_id: &str,
+) -> Result<ConductorGoal, ScratchError> {
+    let ledger = load_goal_ledger(project_root, goal_id)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(|| {
+            ScratchError::new(StatusCode::NOT_FOUND, format!("goal not found: {goal_id}"))
+        })?;
+    Ok(ConductorGoal::from_ledger(goal_id.to_string(), ledger))
+}
+
+async fn persist_goal(
+    project_root: &std::path::Path,
+    goal: &mut ConductorGoal,
+) -> Result<(), ScratchError> {
+    goal.updated_at = Some(Utc::now().to_rfc3339());
+    let metadata = goal.clone();
+    goal.ledger.apply_goal_metadata(&metadata);
+    save_goal_ledger(project_root, &goal.id, &goal.ledger)
+        .await
+        .map_err(store_error)
+}
+
+fn apply_goal_status(goal: &mut ConductorGoal, status: GoalStatus) {
+    goal.status = status;
+    goal.completed_at = match status {
+        GoalStatus::Done | GoalStatus::Failed | GoalStatus::Cancelled => goal
+            .completed_at
+            .clone()
+            .or_else(|| Some(Utc::now().to_rfc3339())),
+        _ => None,
+    };
+}
+
+async fn refresh_targets_and_emit(
+    app: AppState,
+    goal: &ConductorGoal,
+    wake_reason: Option<ConductorWakeReason>,
+) {
+    crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
+    if let Some(reason) = wake_reason {
+        let _ = crate::buddy::conductor::wake::enqueue_all_wake(app.gcx.clone(), reason).await;
+    }
+    let _ = app
+        .buddy
+        .buddy_events_tx
+        .send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
+}
+
+async fn project_root(app: &AppState) -> Result<std::path::PathBuf, ScratchError> {
+    crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no project root".to_string(),
+            )
+        })
+}
+
+fn store_error(error: ConductorStoreError) -> ScratchError {
+    let status = match error {
+        ConductorStoreError::InvalidGoalId(_) => StatusCode::BAD_REQUEST,
+        ConductorStoreError::Io { .. } | ConductorStoreError::Json { .. } => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    ScratchError::new(status, error.to_string())
+}
+
+fn normalized_goal_id(value: Option<String>) -> Option<String> {
+    value.and_then(non_empty)
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use refact_buddy_core::conductor::{DoneWhen, GoalBudget};
+    use refact_buddy_core::conductor_store::load_goal_ledger;
+    use tokio::time::timeout;
+
+    async fn test_app() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        (AppState::from_gcx(gcx).await, dir)
+    }
+
+    fn create_req(id: &str) -> CreateConductorGoalRequest {
+        CreateConductorGoalRequest {
+            id: Some(id.to_string()),
+            title: "Ship conductor routes".to_string(),
+            plan_doc_slug: Some("master-plan".to_string()),
+            plan_markdown: "# Ship conductor routes".to_string(),
+            done_when: DoneWhen {
+                summary: "Routes work".to_string(),
+                checklist: vec!["tests pass".to_string()],
+            },
+            autonomy: GoalAutonomy::FullAuto,
+            budget: GoalBudget {
+                wall_clock_secs: Some(3600),
+                no_progress_wakes: Some(3),
+                total_tokens: Some(100_000),
+                usd: None,
+            },
+        }
+    }
+
+    async fn create_goal(app: AppState, id: &str) -> ConductorGoal {
+        handle_v1_buddy_conductor_goal_create(State(app), axum::Json(create_req(id)))
+            .await
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_crud_goal() {
+        let (app, _dir) = test_app().await;
+
+        let created = create_goal(app.clone(), "goal-crud").await;
+        assert_eq!(created.id, "goal-crud");
+        assert_eq!(created.title, "Ship conductor routes");
+
+        let listed = handle_v1_buddy_conductor_goals_list(State(app.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(listed.goals.len(), 1);
+        assert_eq!(listed.goals[0].id, "goal-crud");
+
+        let fetched =
+            handle_v1_buddy_conductor_goal_get(State(app.clone()), Path("goal-crud".to_string()))
+                .await
+                .unwrap()
+                .0;
+        assert_eq!(fetched.done_when.summary, "Routes work");
+
+        let patched = handle_v1_buddy_conductor_goal_patch(
+            State(app),
+            Path("goal-crud".to_string()),
+            axum::Json(PatchConductorGoalRequest {
+                title: Some("Updated conductor routes".to_string()),
+                autonomy: Some(GoalAutonomy::Governed),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(patched.title, "Updated conductor routes");
+        assert_eq!(patched.autonomy, GoalAutonomy::Governed);
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_reject_missing_required_budgets() {
+        let (app, _dir) = test_app().await;
+        let mut req = create_req("goal-bad-budget");
+        req.budget.wall_clock_secs = None;
+
+        let error = handle_v1_buddy_conductor_goal_create(State(app), axum::Json(req))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("wall_clock_secs"));
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_pause_resume_persist_status() {
+        let (app, dir) = test_app().await;
+        create_goal(app.clone(), "goal-pause").await;
+
+        let paused = handle_v1_buddy_conductor_goal_pause(
+            State(app.clone()),
+            Path("goal-pause".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(paused.status, GoalStatus::Paused);
+        let ledger = load_goal_ledger(dir.path(), "goal-pause")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.status, Some(GoalStatus::Paused));
+
+        let resumed =
+            handle_v1_buddy_conductor_goal_resume(State(app), Path("goal-pause".to_string()))
+                .await
+                .unwrap()
+                .0;
+        assert_eq!(resumed.status, GoalStatus::Running);
+        let ledger = load_goal_ledger(dir.path(), "goal-pause")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.status, Some(GoalStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_manual_wake_enqueues_via_wake_bus() {
+        let (app, _dir) = test_app().await;
+        create_goal(app.clone(), "goal-wake").await;
+
+        let response = handle_v1_buddy_conductor_goal_manual_wake(
+            State(app.clone()),
+            Path("goal-wake".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(response["enqueued"], true);
+        let bus = app.buddy.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-wake").unwrap();
+        assert!(mailbox.reasons.contains(&ConductorWakeReason::Manual));
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_startup_reattach_refreshes_targets() {
+        let (app, dir) = test_app().await;
+        let mut goal = create_req("goal-reattach");
+        goal.title = "Reattach me".to_string();
+        let mut created = ConductorGoal {
+            id: "goal-reattach".to_string(),
+            title: goal.title,
+            status: GoalStatus::Paused,
+            autonomy: GoalAutonomy::FullAuto,
+            budget: goal.budget,
+            ..ConductorGoal::default()
+        };
+        created.ledger.task_ids = vec!["task-1".to_string()];
+        let metadata = created.clone();
+        created.ledger.apply_goal_metadata(&metadata);
+        save_goal_ledger(dir.path(), "goal-reattach", &created.ledger)
+            .await
+            .unwrap();
+
+        let targets =
+            crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
+
+        assert_eq!(targets.goal_ids(), vec!["goal-reattach".to_string()]);
+        assert_eq!(
+            targets.goals_for_task("task-1"),
+            vec!["goal-reattach".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_emit_goal_updated_event() {
+        let (app, _dir) = test_app().await;
+        let mut rx = app.buddy.buddy_events_tx.subscribe();
+
+        create_goal(app, "goal-event").await;
+
+        let event = timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            BuddyEvent::ConductorGoalUpdated { goal } => {
+                assert_eq!(goal.id, "goal-event");
+            }
+            other => panic!("expected ConductorGoalUpdated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_control_stop_and_autonomy() {
+        let (app, dir) = test_app().await;
+        create_goal(app.clone(), "goal-control").await;
+
+        let changed = handle_v1_buddy_conductor_goal_autonomy(
+            State(app.clone()),
+            Path("goal-control".to_string()),
+            axum::Json(AutonomyRequest {
+                autonomy: GoalAutonomy::ReadOnly,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(changed.autonomy, GoalAutonomy::ReadOnly);
+
+        let stopped =
+            handle_v1_buddy_conductor_goal_stop(State(app), Path("goal-control".to_string()))
+                .await
+                .unwrap()
+                .0;
+        assert_eq!(stopped.status, GoalStatus::Cancelled);
+        assert!(stopped.completed_at.is_some());
+        let ledger = load_goal_ledger(dir.path(), "goal-control")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.autonomy, Some(GoalAutonomy::ReadOnly));
+        assert_eq!(ledger.status, Some(GoalStatus::Cancelled));
+    }
+}

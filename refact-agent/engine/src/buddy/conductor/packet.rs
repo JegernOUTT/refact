@@ -1028,6 +1028,22 @@ mod tests {
                 no_progress_wakes: 1,
             },
             ledger: GoalLedger {
+                title: Some("Ship Buddy Conductor".to_string()),
+                plan_doc_slug: Some("master-plan".to_string()),
+                plan_markdown: Some("# Ship Buddy Conductor".to_string()),
+                done_when: Some(DoneWhen {
+                    summary: "All conductor cards are complete".to_string(),
+                    checklist: vec!["routes".to_string(), "scheduler".to_string()],
+                }),
+                budget: Some(GoalBudget {
+                    wall_clock_secs: Some(7200),
+                    no_progress_wakes: Some(3),
+                    total_tokens: Some(10_000),
+                    usd: Some(3.0),
+                }),
+                created_at: Some("2026-06-03T00:00:00Z".to_string()),
+                updated_at: Some("2026-06-03T00:04:00Z".to_string()),
+                completed_at: None,
                 status: Some(GoalStatus::Running),
                 autonomy: Some(GoalAutonomy::FullAuto),
                 planner_task_id: Some("task-1".to_string()),

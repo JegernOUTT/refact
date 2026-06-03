@@ -17,7 +17,7 @@ use crate::tasks::events::{emit_task_event, TaskEvent};
 use crate::tasks::storage;
 use crate::tasks::types::{TaskConductorLink, TaskConductorRole, TaskMeta};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConductorPlannerSpawn {
     pub goal_id: String,
     pub task_id: String,

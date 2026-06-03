@@ -93,14 +93,7 @@ pub async fn conductor_wake(
         .await
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
-    let goal = ConductorGoal {
-        id: goal_id.to_string(),
-        title: goal_id.to_string(),
-        status: ledger.status.unwrap_or_default(),
-        autonomy: ledger.autonomy.unwrap_or_default(),
-        ledger,
-        ..ConductorGoal::default()
-    };
+    let goal = ConductorGoal::from_ledger(goal_id.to_string(), ledger);
     conductor_wake_for_goal(gcx, goal, reasons).await
 }
 
