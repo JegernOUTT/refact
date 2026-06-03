@@ -28,6 +28,7 @@ pub mod tool_cmdline;
 mod tool_code_review;
 mod tool_compress_chat;
 mod tool_conductor;
+mod tool_conductor_trajectory;
 pub mod tool_config_subagent;
 pub(crate) mod tool_cron_create;
 mod tool_cron_delete;

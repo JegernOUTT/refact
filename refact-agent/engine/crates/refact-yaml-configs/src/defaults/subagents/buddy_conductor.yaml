@@ -98,4 +98,9 @@ tools:
   - conductor_goal_status
   - conductor_say
   - conductor_ask
+  - conductor_trajectory_list
+  - conductor_trajectory_digest
+  - conductor_trajectory_edit
+  - conductor_trajectory_remove
+  - conductor_trajectory_insert
   - buddy_runtime_event

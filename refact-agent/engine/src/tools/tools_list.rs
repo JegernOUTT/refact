@@ -457,6 +457,11 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_conductor::ToolConductorGoalStatus::new()),
         Box::new(crate::tools::tool_conductor::ToolConductorSay::new()),
         Box::new(crate::tools::tool_conductor::ToolConductorAsk::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryList::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryDigest::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryEdit::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryRemove::new()),
+        Box::new(crate::tools::tool_conductor_trajectory::ToolConductorTrajectoryInsert::new()),
     ];
 
     let task_tools: Vec<Box<dyn Tool + Send>> = vec![
