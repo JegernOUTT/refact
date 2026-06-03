@@ -1,12 +1,93 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
-use refact_buddy_core::conductor::ConductorWakeReason;
+use refact_buddy_core::conductor::{ConductorWakeReason, GoalLedger};
 use refact_chat_api::MessageOrigin;
 
 pub const DEFAULT_WAKE_DEBOUNCE_SECS: i64 = 5;
 pub const DEFAULT_HUMAN_YIELD_GRACE_SECS: i64 = 30;
 pub const DEFAULT_GLOBAL_IN_FLIGHT_LIMIT: usize = 2;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConductorWakeTargets {
+    goal_ids: Vec<String>,
+    task_to_goals: HashMap<String, Vec<String>>,
+    chat_to_goals: HashMap<String, Vec<String>>,
+}
+
+impl ConductorWakeTargets {
+    pub fn from_goal_ledgers<I, S>(ledgers: I) -> Self
+    where
+        I: IntoIterator<Item = (S, GoalLedger)>,
+        S: Into<String>,
+    {
+        let mut targets = Self::default();
+        for (goal_id, ledger) in ledgers {
+            targets.register_goal_ledger(goal_id, &ledger);
+        }
+        targets
+    }
+
+    pub fn register_goal_ledger(&mut self, goal_id: impl Into<String>, ledger: &GoalLedger) {
+        let goal_id = normalized_goal_id(goal_id.into());
+        if goal_id.is_empty() {
+            return;
+        }
+        push_unique(&mut self.goal_ids, goal_id.clone());
+        if let Some(task_id) = ledger.planner_task_id.as_deref() {
+            self.register_task_goal(task_id, &goal_id);
+        }
+        for task_id in &ledger.task_ids {
+            self.register_task_goal(task_id, &goal_id);
+        }
+        for chat_id in &ledger.chat_ids {
+            self.register_chat_goal(chat_id, &goal_id);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.goal_ids.is_empty()
+    }
+
+    pub fn contains_goal(&self, goal_id: &str) -> bool {
+        let goal_id = normalized_goal_id(goal_id.to_string());
+        !goal_id.is_empty() && self.goal_ids.contains(&goal_id)
+    }
+
+    pub fn goal_ids(&self) -> Vec<String> {
+        self.goal_ids.clone()
+    }
+
+    pub fn goals_for_task(&self, task_id: &str) -> Vec<String> {
+        normalized_lookup(&self.task_to_goals, task_id)
+    }
+
+    pub fn goals_for_chat(&self, chat_id: &str) -> Vec<String> {
+        normalized_lookup(&self.chat_to_goals, chat_id)
+    }
+
+    fn register_task_goal(&mut self, task_id: &str, goal_id: &str) {
+        let task_id = normalized_goal_id(task_id.to_string());
+        if task_id.is_empty() {
+            return;
+        }
+        push_unique(
+            self.task_to_goals.entry(task_id).or_default(),
+            goal_id.to_string(),
+        );
+    }
+
+    fn register_chat_goal(&mut self, chat_id: &str, goal_id: &str) {
+        let chat_id = normalized_goal_id(chat_id.to_string());
+        if chat_id.is_empty() {
+            return;
+        }
+        push_unique(
+            self.chat_to_goals.entry(chat_id).or_default(),
+            goal_id.to_string(),
+        );
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakeMailbox {
@@ -115,6 +196,15 @@ impl ConductorWakeBus {
 
     pub fn mailbox(&self, goal_id: &str) -> Option<&WakeMailbox> {
         self.mailboxes.get(goal_id)
+    }
+
+    pub fn has_mailboxes(&self) -> bool {
+        !self.mailboxes.is_empty()
+    }
+
+    pub fn reconcile_targets(&mut self, targets: &ConductorWakeTargets) {
+        self.mailboxes
+            .retain(|goal_id, _| targets.contains_goal(goal_id));
     }
 
     pub fn enqueue_goal(
@@ -226,6 +316,20 @@ pub fn message_origin_sets_human_yield(origin: Option<MessageOrigin>) -> bool {
     !matches!(origin, Some(MessageOrigin::Conductor))
 }
 
+fn normalized_lookup(map: &HashMap<String, Vec<String>>, key: &str) -> Vec<String> {
+    let key = normalized_goal_id(key.to_string());
+    if key.is_empty() {
+        return Vec::new();
+    }
+    map.get(&key).cloned().unwrap_or_default()
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
 fn normalized_goal_id(goal_id: String) -> String {
     goal_id.trim().to_string()
 }
@@ -241,6 +345,52 @@ mod tests {
 
     fn test_bus() -> ConductorWakeBus {
         ConductorWakeBus::with_limits(Duration::seconds(5), Duration::seconds(30), 2)
+    }
+
+    #[test]
+    fn wake_targets_map_goal_ledgers_to_task_and_chat_goals() {
+        let targets = ConductorWakeTargets::from_goal_ledgers(vec![
+            (
+                "goal-1",
+                GoalLedger {
+                    planner_task_id: Some("task-1".to_string()),
+                    task_ids: vec!["task-1".to_string(), "task-2".to_string()],
+                    chat_ids: vec!["chat-1".to_string()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "goal-2",
+                GoalLedger {
+                    task_ids: vec!["task-2".to_string()],
+                    chat_ids: vec!["chat-1".to_string(), "chat-2".to_string()],
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        assert_eq!(targets.goal_ids(), vec!["goal-1", "goal-2"]);
+        assert_eq!(targets.goals_for_task("task-1"), vec!["goal-1"]);
+        assert_eq!(targets.goals_for_task("task-2"), vec!["goal-1", "goal-2"]);
+        assert_eq!(targets.goals_for_chat("chat-1"), vec!["goal-1", "goal-2"]);
+        assert_eq!(targets.goals_for_chat("chat-2"), vec!["goal-2"]);
+        assert!(targets.goals_for_task("missing").is_empty());
+    }
+
+    #[test]
+    fn wake_bus_reconcile_targets_drops_stale_mailboxes() {
+        let mut bus = test_bus();
+        let now = ts(50);
+        bus.enqueue_goal("goal-1", ConductorWakeReason::Manual, now);
+        bus.enqueue_goal("stale-goal", ConductorWakeReason::Manual, now);
+        let targets = ConductorWakeTargets::from_goal_ledgers(vec![
+            ("goal-1", GoalLedger::default()),
+        ]);
+
+        bus.reconcile_targets(&targets);
+
+        assert!(bus.mailbox("goal-1").is_some());
+        assert!(bus.mailbox("stale-goal").is_none());
     }
 
     #[test]
