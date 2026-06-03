@@ -78,6 +78,7 @@ pub async fn conductor_spawn_planner_for_goal(
     save_goal_ledger(&project_root, goal_id, &ledger)
         .await
         .map_err(|error| error.to_string())?;
+    super::wake::refresh_conductor_wake_targets(gcx.clone()).await;
 
     Ok(ConductorPlannerSpawn {
         goal_id: goal_id.to_string(),

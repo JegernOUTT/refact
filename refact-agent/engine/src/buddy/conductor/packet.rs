@@ -952,6 +952,8 @@ mod tests {
                 no_progress_wakes: 1,
             },
             ledger: GoalLedger {
+                status: Some(GoalStatus::Running),
+                autonomy: Some(GoalAutonomy::FullAuto),
                 planner_task_id: Some("task-1".to_string()),
                 task_ids: vec!["task-1".to_string()],
                 chat_ids: vec!["planner-chat".to_string()],

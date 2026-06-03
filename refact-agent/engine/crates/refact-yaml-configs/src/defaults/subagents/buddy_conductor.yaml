@@ -90,4 +90,12 @@ tools:
   - task_mem_save
   - task_mem_inbox
   - task_mem_triage_done
+  - conductor_steer_chat
+  - conductor_spawn_planner
+  - conductor_memo
+  - conductor_set_autonomy
+  - conductor_escalate
+  - conductor_goal_status
+  - conductor_say
+  - conductor_ask
   - buddy_runtime_event

@@ -208,6 +208,8 @@ mod tests {
 
     fn sample_ledger() -> GoalLedger {
         GoalLedger {
+            status: Some(crate::conductor::GoalStatus::Running),
+            autonomy: Some(crate::conductor::GoalAutonomy::FullAuto),
             planner_task_id: Some("planner-task".to_string()),
             task_ids: vec!["task-a".to_string(), "task-b".to_string()],
             chat_ids: vec!["chat-a".to_string(), "chat-b".to_string()],

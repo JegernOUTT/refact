@@ -159,6 +159,10 @@ impl Default for MemoKind {
 #[serde(default)]
 pub struct GoalLedger {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<GoalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<GoalAutonomy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planner_task_id: Option<String>,
     pub task_ids: Vec<String>,
     pub chat_ids: Vec<String>,
@@ -390,6 +394,8 @@ mod tests {
                 no_progress_wakes: 1,
             },
             ledger: GoalLedger {
+                status: Some(GoalStatus::Running),
+                autonomy: Some(GoalAutonomy::FullAuto),
                 planner_task_id: Some("task-1".to_string()),
                 task_ids: vec!["task-1".to_string()],
                 chat_ids: vec!["chat-1".to_string()],
