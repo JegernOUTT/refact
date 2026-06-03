@@ -7,6 +7,7 @@ pub mod buddy_pr_issue_matchmaker;
 pub mod buddy_refactor_hunter;
 pub mod buddy_skill_author;
 pub mod buddy_test_coverage_watcher;
+pub mod chat_phrase_bank;
 pub mod config_watcher;
 pub mod error_triage;
 pub mod greeting;

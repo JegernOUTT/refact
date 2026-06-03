@@ -44,7 +44,7 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
           ? "✅"
           : e.priority === "critical"
             ? "🚨"
-            : "❌";
+            : "🪲";
         const subtitle = [
           e.source,
           e.chat_id ? `chat ${e.chat_id.slice(0, 8)}` : null,
@@ -79,23 +79,23 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
               {detail && <span className={styles.listSubtitle}>{detail}</span>}
             </div>
             <div className={styles.errorActions}>
-              <Tooltip content="Open your companion's chat to investigate this error">
+              <Tooltip content="Open a companion investigation and sniff the log crumbs">
                 <button
                   type="button"
                   className={classNames(styles.chip, styles.chipPrimary)}
                   onClick={() => void onInvestigate(e)}
                 >
-                  Investigate
+                  Sniff logs
                 </button>
               </Tooltip>
               {!acknowledged && (
-                <Tooltip content="Mark as acknowledged">
+                <Tooltip content="Mark this gremlin as handled">
                   <button
                     type="button"
                     className={classNames(styles.chip, styles.chipGhost)}
                     onClick={() => void onDismiss(e)}
                   >
-                    Dismiss
+                    Shoo
                   </button>
                 </Tooltip>
               )}

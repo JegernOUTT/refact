@@ -9,7 +9,7 @@ use crate::chat::types::ThreadParams;
 
 use super::settings::{BuddySettings, HumorLevel};
 use super::snapshot::{ChatReactionAttempt, ChatReactionDebug};
-use super::types::{BuddyBubblePolicy, BuddyPersonalityProfile, BuddyRuntimeEvent};
+use super::types::{BuddyBubblePolicy, BuddyChatPhraseBank, BuddyPersonalityProfile, BuddyRuntimeEvent};
 use super::voice_service::{voice_service, ChatReactionSpeechIntent, VoiceCtx};
 
 pub const ANALYSIS_TEXT_MIN_CHARS: usize = 20;
@@ -145,40 +145,40 @@ const INSIGHT_KEYWORDS: &[&str] = &[
 ];
 
 pub const HUMOR_LINES: &[&str] = &[
-    "Pixel gremlin status: tiny chaos goblin approves this breadcrumb pile.",
-    "Chaos ping: I put a sticker on this thread. It wiggled. Suspiciously cute.",
-    "Tiny gremlin note: the idea has snack-sized boots and is doing parkour.",
-    "Pixel detective mode engaged. Snacks hidden in the margins, naturally.",
-    "Mild scheming intensifies. I will behave. Mostly. Probably. Eep.",
-    "Gremlin confetti deployed: small sparkle, zero structural warranty.",
-    "This thread just made a tiny clown honk in my circuits. Respectfully.",
-    "Goblin radar says: interesting trail. I am sniffing it with science mittens.",
+    "Pixel gremlin status: breadcrumb pile wearing a party hat. I approve suspiciously.",
+    "Chaos ping: I stickered this thread and the sticker winked first. Normal, probably.",
+    "Tiny gremlin note: this idea has snack-sized boots and illegal parkour energy.",
+    "Pixel detective mode: monocle on, snacks hidden, dignity lightly optional.",
+    "Mild scheming intensifies. I will behave. Mostly. Put that in tiny legal font.",
+    "Gremlin confetti deployed: adorable sparkle cloud, zero structural warranty.",
+    "This thread honked a tiny clown horn in my circuits. Respectfully obsessed.",
+    "Goblin radar says: tasty trail. I am sniffing it with science mittens.",
 ];
 
 pub const INSIGHT_LINES: &[&str] = &[
-    "Tiny signal: this might want one assumption check before charging in.",
-    "Heads up — worth poking the edges before committing.",
-    "Quick read: looks reasonable; one small risk worth sanity-checking.",
-    "I see an iteration loop forming; one small checkpoint could keep it tidy.",
-    "Looks like exploration mode; compare the options before locking the path.",
-    "This feels like a simplifying pass; keep the before/after behavior pinned.",
-    "Planning energy detected; naming the next step may save a retry later.",
-    "Debugging trail spotted; isolate one signal before chasing every footprint.",
+    "Tiny signal flare: one assumption check before we launch the code raccoon.",
+    "Heads up — poke the edges first; gremlins adore unpoked corners.",
+    "Quick read: reasonable vibes, plus one tiny risk doing jazz hands.",
+    "Iteration loop forming; pin one checkpoint so the breadcrumbs stop breakdancing.",
+    "Exploration mode detected; compare paths before naming a favorite goblin tunnel.",
+    "Simplifying pass energy: keep before/after behavior on a tiny leash.",
+    "Planning sparkles detected; naming the next step may save a retry goblin later.",
+    "Debug trail spotted; isolate one signal before chasing every tiny footprint.",
 ];
 
 pub const BUG_LINES: &[&str] = &[
-    "This smells bug-shaped. Want me to help isolate it?",
-    "Tiny alarm: this looks like a bug trail. I can dig deeper if you want.",
-    "Hmm, that pattern usually means something failed quietly. Want a closer look?",
+    "This smells bug-shaped and wearing a fake mustache. Want me to isolate it?",
+    "Tiny alarm: bug trail with crumbs. I can bring the detective shovel.",
+    "Hmm, quiet failure vibes. Want me to poke it with a very official stick?",
 ];
 
 pub const AMBIENT_LINES: &[&str] = &[
-    "Pixel ping: I saw that. Tiny helpful goblin wave deployed.",
-    "Small gremlin check-in: I am here, wearing supervision socks.",
-    "Ambient Pixel sparkle: noted, no alarms, just tiny assistant energy.",
-    "I am quietly orbiting this chat with one cute chaos sticker.",
-    "Tiny companion blip: message received, gremlin ears perked.",
-    "Soft chaos nod: I am watching the trail without eating the breadcrumbs.",
+    "Pixel ping: witnessed. Tiny helpful goblin wave deployed at legally cute speed.",
+    "Small gremlin check-in: present, caffeinated, wearing supervision socks.",
+    "Ambient Pixel sparkle: noted, no alarms, just assistant confetti on standby.",
+    "I am orbiting this chat with one cute chaos sticker and excellent posture.",
+    "Tiny companion blip: gremlin ears perked, snacks emotionally prepared.",
+    "Soft chaos nod: watching the trail, resisting the breadcrumbs heroically.",
 ];
 
 fn stable_hash(text: &str) -> u64 {
@@ -467,6 +467,15 @@ pub enum ChatReactionKind {
     Insight,
     BugCandidate,
     Ambient,
+}
+
+fn chat_reaction_kind_token(kind: ChatReactionKind) -> &'static str {
+    match kind {
+        ChatReactionKind::Humor => "humor",
+        ChatReactionKind::Insight => "insight",
+        ChatReactionKind::BugCandidate => "bug",
+        ChatReactionKind::Ambient => "ambient",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -771,12 +780,7 @@ pub fn build_reaction_event(
             BuddyBubblePolicy::Ambient,
         ),
     };
-    let kind_str = match reaction.kind {
-        ChatReactionKind::Humor => "humor",
-        ChatReactionKind::Insight => "insight",
-        ChatReactionKind::BugCandidate => "bug",
-        ChatReactionKind::Ambient => "ambient",
-    };
+    let kind_str = chat_reaction_kind_token(reaction.kind.clone());
     let dedupe_key = format!(
         "chat_reaction:{chat_id}:{kind_str}:{}",
         message_hash(analysis_text)
@@ -811,12 +815,40 @@ pub fn build_reaction_event(
     }
 }
 
+fn phrase_bank_line(
+    bank: &BuddyChatPhraseBank,
+    kind: ChatReactionKind,
+    seed: &str,
+) -> Option<String> {
+    let kind = chat_reaction_kind_token(kind);
+    let matching = bank
+        .lines
+        .iter()
+        .filter(|line| line.kind == kind)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return None;
+    }
+    let line = matching[(stable_hash(seed) as usize) % matching.len()]
+        .text
+        .clone();
+    sanitize_chat_reaction_speech_text(&line, seed)
+}
+
 async fn render_chat_reaction_text(
     app: &AppState,
     kind: &ChatReactionKind,
     analysis_text: &str,
     voice_inputs: &ChatReactionVoiceInputs,
+    phrase_bank: Option<BuddyChatPhraseBank>,
 ) -> String {
+    if let Some(bank) = phrase_bank.as_ref() {
+        if super::actor::chat_phrase_bank_is_fresh(bank, Utc::now()) {
+            if let Some(line) = phrase_bank_line(bank, kind.clone(), analysis_text) {
+                return line;
+            }
+        }
+    }
     let fallback = fallback_chat_reaction_text(kind.clone(), analysis_text);
     let intent = match kind {
         ChatReactionKind::Humor => ChatReactionSpeechIntent::Humor,
@@ -893,18 +925,20 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
                 svc.pulse.memory.pending_ops, svc.pulse.tasks.stuck
             ),
         };
-        (candidate, reservation, voice_inputs)
+        let phrase_bank = svc.state.chat_phrase_bank.clone();
+        (candidate, reservation, voice_inputs, phrase_bank)
     };
 
     let app2 = app.clone();
     let chat_id = accepted.chat_id.clone();
     tokio::spawn(async move {
-        let (candidate, reservation, voice_inputs) = plan;
+        let (candidate, reservation, voice_inputs, phrase_bank) = plan;
         let speech = render_chat_reaction_text(
             &app2,
             &candidate.kind,
             &candidate.analysis_text,
             &voice_inputs,
+            phrase_bank,
         )
         .await;
         let event = build_reaction_event(
@@ -1041,11 +1075,16 @@ pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatA
                 return;
             }
         };
-        (reservation, analysis_text)
+        let phrase_bank = svc.state.chat_phrase_bank.clone();
+        (reservation, analysis_text, phrase_bank)
     };
 
-    let (reservation, analysis_text) = plan;
-    let speech = fallback_chat_reaction_text(ChatReactionKind::Ambient, &analysis_text);
+    let (reservation, analysis_text, phrase_bank) = plan;
+    let speech = phrase_bank
+        .as_ref()
+        .filter(|bank| super::actor::chat_phrase_bank_is_fresh(bank, Utc::now()))
+        .and_then(|bank| phrase_bank_line(bank, ChatReactionKind::Ambient, &analysis_text))
+        .unwrap_or_else(|| fallback_chat_reaction_text(ChatReactionKind::Ambient, &analysis_text));
     let event = build_reaction_event(
         &activity.chat_id,
         &analysis_text,
@@ -1688,6 +1727,51 @@ mod tests {
             !text.contains(input),
             "fallback must not echo the user message"
         );
+    }
+
+    #[test]
+    fn phrase_bank_line_prefers_generated_daily_copy() {
+        let bank = BuddyChatPhraseBank {
+            day: Utc::now().date_naive().to_string(),
+            generated_at: Utc::now().to_rfc3339(),
+            evidence_summary: "recent project signals".to_string(),
+            lines: vec![super::super::types::BuddyChatPhrase {
+                kind: "humor".to_string(),
+                text: "Today's diff goblin is juggling tidy breadcrumbs.".to_string(),
+            }],
+        };
+
+        let line = phrase_bank_line(
+            &bank,
+            ChatReactionKind::Humor,
+            "please make this helper nicer without echoing secrets",
+        );
+
+        assert_eq!(
+            line.as_deref(),
+            Some("Today's diff goblin is juggling tidy breadcrumbs.")
+        );
+    }
+
+    #[test]
+    fn phrase_bank_line_rejects_echoing_private_input() {
+        let bank = BuddyChatPhraseBank {
+            day: Utc::now().date_naive().to_string(),
+            generated_at: Utc::now().to_rfc3339(),
+            evidence_summary: "recent project signals".to_string(),
+            lines: vec![super::super::types::BuddyChatPhrase {
+                kind: "insight".to_string(),
+                text: "Private customer import pipeline needs tiny socks.".to_string(),
+            }],
+        };
+
+        let line = phrase_bank_line(
+            &bank,
+            ChatReactionKind::Insight,
+            "please refactor the private customer import pipeline",
+        );
+
+        assert!(line.is_none(), "unsafe generated bank line must be ignored");
     }
 
     #[test]

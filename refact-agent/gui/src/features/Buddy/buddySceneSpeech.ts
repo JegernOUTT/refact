@@ -97,13 +97,13 @@ function defaultRuntimeControls(event: BuddyRuntimeEvent): BuddyControl[] {
   return [
     {
       id: `investigate-${event.id}`,
-      label: event.source === "frontend" ? "Report this" : "Investigate",
+      label: event.source === "frontend" ? "Bag bug" : "Sniff logs",
       action: "investigate_error",
       style: "primary",
     },
     {
       id: `dismiss-${event.id}`,
-      label: "Dismiss",
+      label: "Shoo",
       action: "dismiss_runtime_event",
       action_param: event.id,
       style: "secondary",

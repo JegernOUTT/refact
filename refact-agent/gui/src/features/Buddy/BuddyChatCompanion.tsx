@@ -28,7 +28,6 @@ import {
   clearExpiredChatBubbleSnooze,
   type BuddyChatBubbleClass,
 } from "./buddySlice";
-import { selectChatErrorById } from "../Chat/Thread";
 import { startBuddyInvestigation } from "../Chat/Thread";
 import { push } from "../Pages/pagesSlice";
 import {
@@ -335,6 +334,38 @@ function speechMatchesChat(
   return !activeSpeech?.chat_id || activeSpeech.chat_id === chatId;
 }
 
+function hasChatErrorControl(controls?: BuddyControl[]): boolean {
+  return (
+    controls?.some(
+      (control) =>
+        control.action === "investigate_error" ||
+        control.action === "dismiss_runtime_event",
+    ) ?? false
+  );
+}
+
+function isErrorAlertSpeech(
+  activeSpeech: {
+    speech_intent?: string;
+    dedupe_key?: string;
+    controls?: BuddyControl[];
+  } | null,
+): boolean {
+  return (
+    normalizedPolicyToken(activeSpeech?.speech_intent) === "error_alert" ||
+    normalizedPolicyToken(activeSpeech?.dedupe_key) === "error_alert" ||
+    hasChatErrorControl(activeSpeech?.controls)
+  );
+}
+
+function isChatCompanionSuggestion(suggestion: BuddySuggestion): boolean {
+  return suggestion.suggestion_type !== "error_pattern";
+}
+
+function isChatCompanionOpportunity(opportunity: BuddyOpportunity): boolean {
+  return opportunity.kind !== "diagnostic_investigation";
+}
+
 function speechExpiryDelayMs(
   activeSpeech: {
     created_at: string;
@@ -368,6 +399,7 @@ function runtimeCandidates(
       (event): event is BuddyRuntimeEvent =>
         event?.chat_id === chatId &&
         isBuddyRuntimeEventVisible(event) &&
+        !isErrorRuntimeEvent(event) &&
         !isBuddyOverlaySuppressedIssue(
           formatBuddyRuntimeEventText(event),
           chatDiagnostic,
@@ -507,10 +539,6 @@ function runtimeEventRank(event: BuddyRuntimeEvent, index: number): number {
   return 60 + index;
 }
 
-function threadErrorKey(chatId: string, error: string): string {
-  return `${chatId}:${error}`;
-}
-
 export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const dispatch = useAppDispatch();
   const snapshot = useAppSelector(selectBuddySnapshot);
@@ -523,9 +551,6 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const seenNotificationIds = useAppSelector(selectSeenNotificationIds);
   const chatBubbleSnoozedUntil = useAppSelector(selectChatBubbleSnoozedUntil);
   const chatBubbleImpressions = useAppSelector(selectChatBubbleImpressions);
-  const threadError = useAppSelector((state) =>
-    selectChatErrorById(state, chatId),
-  );
 
   const buddy = useBuddyState();
   const triggerBuddySignal = buddy.signal;
@@ -550,7 +575,6 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const pendingRef = useRef(false);
   const prevChatIdRef = useRef(chatId);
   const recordedNotificationIdsRef = useRef<Set<string>>(new Set());
-  const threadErrorFirstSeenRef = useRef<Map<string, string>>(new Map());
   const signaledNotificationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -576,13 +600,13 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     () => [
       {
         id: "ask",
-        label: "Investigate",
+        label: "Poke trail",
         action: "investigate_error",
         style: "primary",
       },
       {
         id: "dismiss",
-        label: "Dismiss",
+        label: "Nope goblin",
         action: "dismiss",
         style: "ghost",
       },
@@ -594,13 +618,13 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     () => [
       {
         id: "fix",
-        label: "Investigate",
+        label: "Poke trail",
         action: "investigate_error",
         style: "primary",
       },
       {
         id: "ignore",
-        label: "Ignore",
+        label: "Nope goblin",
         action: "dismiss",
         style: "ghost",
       },
@@ -642,7 +666,8 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     if (
       activeSpeech &&
       !isBuddySpeechExpired(activeSpeech) &&
-      speechMatchesChat(activeSpeech, chatId)
+      speechMatchesChat(activeSpeech, chatId) &&
+      !isErrorAlertSpeech(activeSpeech)
     ) {
       const id = notificationIdentity("speech", activeSpeech.id);
       if (isEligible(id)) {
@@ -702,67 +727,15 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       });
     }
 
-    const normalizedThreadError = threadError?.trim() ?? null;
-    const threadId = notificationIdentity("thread-error", chatId);
-    if (
-      normalizedThreadError &&
-      isEligible(threadId) &&
-      !isBuddyOverlaySuppressedIssue(normalizedThreadError, chatDiagnostic)
-    ) {
-      const firstSeenKey = threadErrorKey(chatId, normalizedThreadError);
-      const existingCreatedAt =
-        threadErrorFirstSeenRef.current.get(firstSeenKey);
-      const createdAt = existingCreatedAt ?? new Date().toISOString();
-      if (!existingCreatedAt) {
-        threadErrorFirstSeenRef.current.set(firstSeenKey, createdAt);
-      }
-      candidates.push({
-        kind: "actionable",
-        rank: 40,
-        notification: {
-          id: threadId,
-          sourceId: chatId,
-          text: normalizedThreadError.slice(0, 160),
-          createdAt,
-          source: "thread",
-          controls: errorControls,
-          diagnostic: chatDiagnostic,
-        },
-      });
-    }
-
-    if (chatDiagnostic?.error_message.trim()) {
-      const id = notificationIdentity(
-        "diagnostic",
-        `${chatId}:${chatDiagnostic.collected_at}`,
-      );
-      if (
-        isEligible(id) &&
-        !isBuddyOverlaySuppressedIssue(
-          chatDiagnostic.error_message,
-          chatDiagnostic,
-        )
-      ) {
-        candidates.push({
-          kind: "actionable",
-          rank: 50,
-          notification: {
-            id,
-            sourceId:
-              chatDiagnostic.diagnostic_id ?? chatDiagnostic.collected_at,
-            text: chatDiagnostic.error_message.slice(0, 120),
-            createdAt: chatDiagnostic.collected_at,
-            source: "diagnostic",
-            controls: errorControls,
-            diagnostic: chatDiagnostic,
-          },
-        });
-      }
-    }
-
     suggestions.forEach((suggestion: BuddySuggestion, index) => {
       const id = notificationIdentity("suggestion", suggestion.id);
-      if (suggestion.dismissed || !isEligible(id)) return;
+      if (
+        suggestion.dismissed ||
+        !isChatCompanionSuggestion(suggestion) ||
+        !isEligible(id)
+      ) {
+        return;
+      }
       candidates.push({
         kind: "actionable",
         rank: 60 + index,
@@ -781,8 +754,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     });
 
     [...unread]
-      .filter((opportunity) =>
-        isEligible(notificationIdentity("opportunity", opportunity.id)),
+      .filter(
+        (opportunity) =>
+          isChatCompanionOpportunity(opportunity) &&
+          isEligible(notificationIdentity("opportunity", opportunity.id)),
       )
       .sort(
         (left, right) =>
@@ -818,7 +793,6 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     seenNotificationIds,
     suggestionControls,
     suggestions,
-    threadError,
     unread,
   ]);
 

@@ -126,11 +126,23 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
   const { data: draft, isLoading, isError } = useGetDraftQuery(draftId);
   const [deleteDraft, { isLoading: isDeleting }] = useDeleteDraftMutation();
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
   const handleCopy = useCallback(async () => {
     if (!draft) return;
-    await navigator.clipboard.writeText(draft.yaml_or_json);
-    setCopied(true);
+    setCopyError(null);
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(draft.yaml_or_json);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+      setCopyError(
+        "Clipboard unavailable — select the draft text and copy it manually.",
+      );
+    }
   }, [draft]);
 
   const handleDismiss = useCallback(async () => {
@@ -203,6 +215,11 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
           Dismiss draft
         </button>
       </div>
+      {copyError && (
+        <Text size="1" color="orange">
+          {copyError}
+        </Text>
+      )}
     </div>
   );
 };
@@ -560,6 +577,11 @@ export const BuddyHome: React.FC = () => {
       }|${e.failure_category ?? ""}|${e.failure_summary ?? ""}`;
       const existing = sigMap.get(sig);
       if (existing) {
+        const existingCreatedAt = Date.parse(existing.created_at);
+        const incomingIsNewer =
+          Number.isFinite(createdAt) &&
+          (!Number.isFinite(existingCreatedAt) ||
+            createdAt > existingCreatedAt);
         existing.occurrences = (existing.occurrences ?? 1) + 1;
         existing.dismissedAny =
           Boolean(existing.dismissedAny) || Boolean(e.dismissed);
@@ -572,9 +594,11 @@ export const BuddyHome: React.FC = () => {
           e.failure_category ?? existing.failure_category;
         existing.failure_summary =
           e.failure_summary ?? existing.failure_summary;
-        existing.description = e.description ?? existing.description;
-        existing.chat_id = e.chat_id ?? existing.chat_id;
-        existing.created_at = e.created_at;
+        if (incomingIsNewer) {
+          existing.description = e.description ?? existing.description;
+          existing.chat_id = e.chat_id ?? existing.chat_id;
+          existing.created_at = e.created_at;
+        }
         existing.dismissed =
           Boolean(existing.dismissed) || Boolean(e.dismissed);
       } else {
@@ -696,7 +720,7 @@ export const BuddyHome: React.FC = () => {
             className={styles.disabledState}
           >
             <Text size="2" color="gray" align="center">
-              {name} is disabled. Pixel is still here, just politely lurking.
+              {name} is disabled. Still here, just politely lurking.
             </Text>
             <Button size="2" onClick={handleEnable} disabled={isSavingSettings}>
               Enable {name}

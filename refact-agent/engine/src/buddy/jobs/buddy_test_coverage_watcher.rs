@@ -7,7 +7,8 @@ use crate::buddy::autonomous_workflows::{
     autonomous_workflow_meta, BUDDY_TEST_COVERAGE_WATCHER_WORKFLOW_ID,
 };
 use crate::buddy::jobs::autonomous_chats::{
-    execute_autonomous_spec, same_signal, AutonomousBuddyChatSpec,
+    execute_autonomous_spec, parse_last_autonomous_result, AutonomousBuddyChatSpec,
+    AutonomousLastResult,
 };
 use crate::buddy::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
 use crate::app_state::AppState;
@@ -34,6 +35,14 @@ struct CoverageScanCache {
     scanned_at: i64,
     signal_hash: String,
     scan: CoverageScanResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    autonomous: Option<CoverageAutonomousResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CoverageAutonomousResult {
+    chat_id: String,
+    completed_at: String,
 }
 
 fn serialize_scan(signal_hash: &str, scan: &CoverageScanResult) -> String {
@@ -41,6 +50,24 @@ fn serialize_scan(signal_hash: &str, scan: &CoverageScanResult) -> String {
         scanned_at: Utc::now().timestamp(),
         signal_hash: signal_hash.to_string(),
         scan: scan.clone(),
+        autonomous: None,
+    })
+    .unwrap_or_default()
+}
+
+fn serialize_scan_with_autonomous(
+    signal_hash: &str,
+    scan: &CoverageScanResult,
+    last: &AutonomousLastResult,
+) -> String {
+    serde_json::to_string(&CoverageScanCache {
+        scanned_at: Utc::now().timestamp(),
+        signal_hash: signal_hash.to_string(),
+        scan: scan.clone(),
+        autonomous: Some(CoverageAutonomousResult {
+            chat_id: last.chat_id.clone(),
+            completed_at: last.completed_at.clone(),
+        }),
     })
     .unwrap_or_default()
 }
@@ -63,7 +90,11 @@ fn parse_git_status_line(line: &str) -> Option<String> {
     if line.len() < 4 {
         return None;
     }
-    let path = if line.starts_with("R ") || line.starts_with("C ") {
+    let status = line.get(..2)?;
+    if status.as_bytes().iter().any(|status| *status == b'D') {
+        return None;
+    }
+    let path = if matches!(status.as_bytes().first(), Some(b'R' | b'C')) {
         line.get(3..)?
             .rsplit_once(" -> ")
             .map(|(_, to)| to)
@@ -83,13 +114,21 @@ fn modified_rust_files(project_root: &Path) -> Vec<String> {
     let mut paths = output
         .lines()
         .filter_map(parse_git_status_line)
-        .filter(|path| path.ends_with(".rs"))
-        .filter(|path| !path.contains("/tests/"))
+        .filter(|path| coverage_source_candidate(path))
         .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
-    paths.truncate(MAX_CANDIDATES);
     paths
+}
+
+fn coverage_source_candidate(path: &str) -> bool {
+    if !path.ends_with(".rs") {
+        return false;
+    }
+    !path
+        .replace('\\', "/")
+        .split('/')
+        .any(|part| matches!(part, "tests" | "benches" | "examples"))
 }
 
 fn has_tests_dir(path: &Path) -> bool {
@@ -106,6 +145,10 @@ fn has_cfg_test(path: &Path) -> bool {
 
 fn missing_test_candidate(project_root: &Path, rel: &str) -> Option<CoverageCandidate> {
     let path = project_root.join(rel);
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
     if has_cfg_test(&path) || has_tests_dir(&path) {
         return None;
     }
@@ -116,10 +159,11 @@ fn missing_test_candidate(project_root: &Path, rel: &str) -> Option<CoverageCand
 }
 
 fn scan_test_coverage(project_root: &Path) -> CoverageScanResult {
-    let candidates = modified_rust_files(project_root)
+    let mut candidates = modified_rust_files(project_root)
         .into_iter()
         .filter_map(|rel| missing_test_candidate(project_root, &rel))
-        .collect();
+        .collect::<Vec<_>>();
+    candidates.truncate(MAX_CANDIDATES);
     CoverageScanResult { candidates }
 }
 
@@ -150,14 +194,14 @@ fn build_test_coverage_spec(
     .with_project_root(project_root)
 }
 
-async fn current_scan(ctx: &BuddyJobContext) -> CoverageScanResult {
+async fn current_scan(ctx: &BuddyJobContext) -> Result<CoverageScanResult, String> {
     if let Some((scan, _)) = scan_cache_result(ctx) {
-        return scan;
+        return Ok(scan);
     }
     let project_root = ctx.project_root.clone();
     tokio::task::spawn_blocking(move || scan_test_coverage(&project_root))
         .await
-        .unwrap_or(CoverageScanResult { candidates: vec![] })
+        .map_err(|err| format!("buddy test coverage scan task failed: {err}"))
 }
 
 #[async_trait::async_trait]
@@ -174,6 +218,10 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
         PRIORITY
     }
 
+    fn records_empty_result(&self) -> bool {
+        false
+    }
+
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         let Some(cache) = cached_scan(ctx) else {
             return true;
@@ -181,16 +229,24 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
         if !cache_is_fresh(cache.scanned_at) {
             return true;
         }
-        let (scan, cached_hash) = (cache.scan, cache.signal_hash);
+        let scan = cache.scan;
         if scan.candidates.is_empty() {
             return false;
         }
         let spec = build_test_coverage_spec(ctx, &scan);
-        cached_hash == spec.signal_hash && !same_signal(ctx, &spec.signal_hash)
+        !cache
+            .autonomous
+            .is_some_and(|_| cache.signal_hash == spec.signal_hash)
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        let scan = current_scan(&ctx).await;
+        let scan = match current_scan(&ctx).await {
+            Ok(scan) => scan,
+            Err(err) => {
+                tracing::warn!("{err}");
+                return BuddyJobResult::default();
+            }
+        };
         if scan.candidates.is_empty() {
             return BuddyJobResult {
                 last_result: Some(serialize_scan("", &scan)),
@@ -198,11 +254,33 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
             };
         }
         let spec = build_test_coverage_spec(&ctx, &scan);
-        if same_signal(&ctx, &spec.signal_hash) {
-            return BuddyJobResult::default();
+        if let Some(last) = cached_scan(&ctx).and_then(|cache| {
+            if cache.signal_hash != spec.signal_hash {
+                return None;
+            }
+            cache.autonomous.map(|autonomous| AutonomousLastResult {
+                signal_hash: spec.signal_hash.clone(),
+                chat_id: autonomous.chat_id,
+                completed_at: autonomous.completed_at,
+            })
+        }) {
+            return BuddyJobResult {
+                last_result: Some(serialize_scan_with_autonomous(
+                    &spec.signal_hash,
+                    &scan,
+                    &last,
+                )),
+                ..Default::default()
+            };
         }
         let mut result = execute_autonomous_spec(gcx, &ctx, spec.clone()).await;
-        if result.last_result.is_none() {
+        if let Some(last) = parse_last_autonomous_result(result.last_result.as_deref()) {
+            result.last_result = Some(serialize_scan_with_autonomous(
+                &spec.signal_hash,
+                &scan,
+                &last,
+            ));
+        } else if result.last_result.is_none() {
             result.last_result = Some(serialize_scan(&spec.signal_hash, &scan));
         }
         result
@@ -235,6 +313,7 @@ mod tests {
             settings: BuddySettings::default(),
             pulse: BuddyPulse::default(),
             facts: vec![],
+            recent_activities: vec![],
         }
     }
 
@@ -266,6 +345,181 @@ mod tests {
         assert!(BuddyTestCoverageWatcherJob.should_run(gcx, &ctx).await);
         assert_eq!(scan.candidates.len(), 1);
         assert_eq!(scan.candidates[0].path, "src/feature.rs");
+    }
+
+    #[tokio::test]
+    async fn buddy_test_coverage_watcher_keeps_success_cache_shape() {
+        let (dir, _repo) = init_temp_git_repo();
+        let scan = CoverageScanResult {
+            candidates: vec![CoverageCandidate {
+                path: "src/feature.rs".to_string(),
+                status: "missing_cfg_test_or_tests_dir".to_string(),
+            }],
+        };
+        let spec = build_test_coverage_spec(&test_context(dir.path(), None), &scan);
+        let last = AutonomousLastResult {
+            signal_hash: spec.signal_hash.clone(),
+            chat_id: "chat-a".to_string(),
+            completed_at: Utc::now().to_rfc3339(),
+        };
+        let ctx = test_context(
+            dir.path(),
+            Some(serialize_scan_with_autonomous(
+                &spec.signal_hash,
+                &scan,
+                &last,
+            )),
+        );
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+
+        assert!(!BuddyTestCoverageWatcherJob.should_run(gcx, &ctx).await);
+        let cache = cached_scan(&ctx).expect("coverage cache parses after success");
+        assert_eq!(cache.signal_hash, spec.signal_hash);
+        assert_eq!(
+            cache.autonomous.as_ref().map(|a| a.chat_id.as_str()),
+            Some("chat-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn buddy_test_coverage_watcher_runs_when_fresh_cache_hash_changed_without_success() {
+        let (dir, _repo) = init_temp_git_repo();
+        let scan = CoverageScanResult {
+            candidates: vec![CoverageCandidate {
+                path: "src/feature.rs".to_string(),
+                status: "missing_cfg_test_or_tests_dir".to_string(),
+            }],
+        };
+        let ctx = test_context(dir.path(), Some(serialize_scan("old-hash", &scan)));
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+
+        assert!(BuddyTestCoverageWatcherJob.should_run(gcx, &ctx).await);
+    }
+
+    #[tokio::test]
+    async fn buddy_test_coverage_watcher_refreshes_stale_success_cache() {
+        let (dir, _repo) = init_temp_git_repo();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("feature.rs"), "pub fn feature() {}\n").unwrap();
+        let scan = scan_test_coverage(dir.path());
+        let spec = build_test_coverage_spec(&test_context(dir.path(), None), &scan);
+        let old_scanned_at = Utc::now().timestamp() - (COOLDOWN_SECONDS as i64 * 2);
+        let last = AutonomousLastResult {
+            signal_hash: spec.signal_hash.clone(),
+            chat_id: "chat-a".to_string(),
+            completed_at: Utc::now().to_rfc3339(),
+        };
+        let stale_cache = CoverageScanCache {
+            scanned_at: old_scanned_at,
+            signal_hash: spec.signal_hash.clone(),
+            scan: scan.clone(),
+            autonomous: Some(CoverageAutonomousResult {
+                chat_id: last.chat_id.clone(),
+                completed_at: last.completed_at.clone(),
+            }),
+        };
+        let ctx = test_context(
+            dir.path(),
+            Some(serde_json::to_string(&stale_cache).unwrap()),
+        );
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+
+        let result = BuddyTestCoverageWatcherJob.execute(gcx, ctx).await;
+        let refreshed = serde_json::from_str::<CoverageScanCache>(
+            result.last_result.as_deref().expect("refreshed cache"),
+        )
+        .unwrap();
+
+        assert!(refreshed.scanned_at > old_scanned_at);
+        assert_eq!(refreshed.signal_hash, spec.signal_hash);
+        assert_eq!(
+            refreshed.autonomous.as_ref().map(|a| a.chat_id.as_str()),
+            Some("chat-a")
+        );
+    }
+
+    #[test]
+    fn buddy_test_coverage_watcher_skips_test_bench_and_example_files() {
+        let (dir, _repo) = init_temp_git_repo();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/tests")).unwrap();
+        std::fs::create_dir_all(dir.path().join("benches")).unwrap();
+        std::fs::create_dir_all(dir.path().join("examples")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("tests/integration.rs"),
+            "#[test] fn it_works() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/tests/helper.rs"),
+            "pub fn helper() {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("benches/bench.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("examples/demo.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("src/feature.rs"), "pub fn feature() {}\n").unwrap();
+
+        let paths = modified_rust_files(dir.path());
+
+        assert_eq!(paths, vec!["src/feature.rs".to_string()]);
+    }
+
+    #[test]
+    fn buddy_test_coverage_watcher_skips_deleted_rust_files() {
+        let (dir, repo) = init_temp_git_repo();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("old.rs"), "pub fn old() {}\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("src/old.rs")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let sig = git2::Signature::now("test", "test@test.com").unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "add old", &tree, &[&parent])
+                .unwrap();
+        }
+        std::fs::remove_file(src.join("old.rs")).unwrap();
+
+        let scan = scan_test_coverage(dir.path());
+
+        assert!(scan.candidates.is_empty());
+    }
+
+    #[test]
+    fn buddy_test_coverage_watcher_parses_renamed_and_copied_modified_paths() {
+        assert_eq!(
+            parse_git_status_line("RM src/old.rs -> src/new.rs").as_deref(),
+            Some("src/new.rs")
+        );
+        assert_eq!(
+            parse_git_status_line("CM src/original.rs -> src/copied.rs").as_deref(),
+            Some("src/copied.rs")
+        );
+    }
+
+    #[test]
+    fn buddy_test_coverage_watcher_caps_after_filtering_covered_files() {
+        let (dir, _repo) = init_temp_git_repo();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for idx in 0..MAX_CANDIDATES {
+            std::fs::write(
+                src.join(format!("covered_{idx}.rs")),
+                "#[cfg(test)] mod tests { #[test] fn covered() {} }\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(src.join("uncovered.rs"), "pub fn uncovered() {}\n").unwrap();
+
+        let scan = scan_test_coverage(dir.path());
+
+        assert_eq!(scan.candidates.len(), 1);
+        assert_eq!(scan.candidates[0].path, "src/uncovered.rs");
     }
 
     #[test]

@@ -189,6 +189,7 @@ pub fn default_buddy_state() -> BuddyState {
         },
         recent_activities: vec![],
         suggestion_state: vec![],
+        chat_phrase_bank: None,
         pet: BuddyPetState::default(),
         personality,
         onboarding: BuddyOnboarding {

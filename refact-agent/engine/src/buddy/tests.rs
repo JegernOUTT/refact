@@ -1809,6 +1809,7 @@ fn make_job_context(
         settings: BuddySettings::default(),
         pulse: BuddyPulse::default(),
         facts: vec![],
+        recent_activities: vec![],
     }
 }
 

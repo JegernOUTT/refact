@@ -8,7 +8,7 @@ use super::settings::BuddySettings;
 use super::types::{
     BuddyActivity, BuddyBubblePolicy, BuddyFact, BuddyJobState, BuddyOnboarding,
     BuddyPersonalityProfile, BuddyPetState, BuddyPulse, BuddyRuntimeEvent, BuddySpeechItem,
-    BuddySuggestion, BuddyWorkflowSummary,
+    BuddySuggestion, BuddyWorkflowSummary, BuddyChatPhraseBank,
 };
 use super::voice_service::SpeechIntent;
 use crate::buddy::autonomous_workflows::is_autonomous_workflow_id;
@@ -31,6 +31,7 @@ pub struct BuddyJobContext {
     pub settings: BuddySettings,
     pub pulse: BuddyPulse,
     pub facts: Vec<BuddyFact>,
+    pub recent_activities: Vec<BuddyActivity>,
 }
 
 pub struct BuddyJobResult {
@@ -39,6 +40,7 @@ pub struct BuddyJobResult {
     pub suggestion: Option<BuddySuggestion>,
     pub activity: Option<BuddyActivity>,
     pub runtime_event: Option<BuddyRuntimeEvent>,
+    pub chat_phrase_bank: Option<BuddyChatPhraseBank>,
     pub workflow_failure: Option<super::workflows::WorkflowFailureReport>,
     pub last_result: Option<String>,
     pub xp: u64,
@@ -52,6 +54,7 @@ impl Default for BuddyJobResult {
             suggestion: None,
             activity: None,
             runtime_event: None,
+            chat_phrase_bank: None,
             workflow_failure: None,
             last_result: None,
             xp: 0,
@@ -65,6 +68,7 @@ impl BuddyJobResult {
             || self.suggestion.is_some()
             || self.activity.is_some()
             || self.runtime_event.is_some()
+            || self.chat_phrase_bank.is_some()
             || self.workflow_failure.is_some()
             || self.xp > 0
     }
@@ -75,7 +79,7 @@ fn next_last_result(existing: Option<&str>, result: Option<&str>) -> Option<Stri
 }
 
 fn should_record_job_result(result: &BuddyJobResult, records_empty_result: bool) -> bool {
-    records_empty_result || result.has_visible_output()
+    records_empty_result || result.has_visible_output() || result.last_result.is_some()
 }
 
 pub(crate) fn speech_runtime_event(
@@ -253,6 +257,8 @@ impl BuddyScheduler {
         s.jobs.push(Box::new(
             super::jobs::buddy_friday_retro::BuddyFridayRetroJob,
         ));
+        s.jobs
+            .push(Box::new(super::jobs::chat_phrase_bank::ChatPhraseBankJob));
         s.jobs.push(Box::new(
             super::jobs::buddy_idle_suggester::BuddyIdleSuggesterJob,
         ));
@@ -374,6 +380,7 @@ impl BuddyScheduler {
                 settings: settings.clone(),
                 pulse: pulse.clone(),
                 facts: facts.clone(),
+                recent_activities: state.recent_activities.clone(),
             };
             if !job.should_run(gcx.clone(), &ctx).await {
                 continue;
@@ -465,6 +472,10 @@ impl BuddyScheduler {
                     if let Some(event) = result.runtime_event {
                         svc.enqueue_runtime_event(event);
                     }
+                    if let Some(phrase_bank) = result.chat_phrase_bank {
+                        svc.state.chat_phrase_bank = Some(phrase_bank);
+                        svc.dirty = true;
+                    }
                     if let Some(report) = result.workflow_failure {
                         workflow_failure_write = svc.record_workflow_failure_report(report);
                     }
@@ -486,7 +497,13 @@ mod tests {
     use super::*;
     use crate::buddy::autonomous_workflows::AUTONOMOUS_BUDDY_WORKFLOWS;
 
-    struct NoOutputUnrecordedJob;
+    struct NoOutputUnrecordedJob {
+        last_result: Option<String>,
+    }
+
+    struct NoOutputRecordedJob {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
 
     struct ReadyAutonomousJob {
         id: String,
@@ -515,6 +532,37 @@ mod tests {
         }
 
         async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
+            BuddyJobResult {
+                last_result: self.last_result.clone(),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BuddyJob for NoOutputRecordedJob {
+        fn id(&self) -> &str {
+            "no_output_recorded"
+        }
+
+        fn cooldown_seconds(&self) -> u64 {
+            60 * 60
+        }
+
+        fn priority(&self) -> u32 {
+            0
+        }
+
+        fn records_empty_result(&self) -> bool {
+            true
+        }
+
+        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
+            true
+        }
+
+        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             BuddyJobResult::default()
         }
     }
@@ -1003,7 +1051,7 @@ mod tests {
             None,
         );
         let scheduler = BuddyScheduler {
-            jobs: vec![Box::new(NoOutputUnrecordedJob)],
+            jobs: vec![Box::new(NoOutputUnrecordedJob { last_result: None })],
         };
         let buddy_arc = Arc::new(AMutex::new(Some(service)));
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
@@ -1021,6 +1069,124 @@ mod tests {
         assert!(job_state.last_run.is_none());
         assert_eq!(job_state.run_count, 7);
         assert_eq!(job_state.last_result.as_deref(), Some("existing-json"));
+    }
+
+    #[tokio::test]
+    async fn no_output_last_result_advances_job_state_for_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let job_id = "no_output_unrecorded".to_string();
+        let mut state = crate::buddy::state::default_buddy_state();
+        state.job_cooldowns.insert(
+            job_id.clone(),
+            BuddyJobState {
+                last_run: None,
+                last_result: Some("existing-json".to_string()),
+                run_count: 7,
+                snoozed_until: None,
+                dismissed: false,
+            },
+        );
+        let scheduler = BuddyScheduler {
+            jobs: vec![Box::new(NoOutputUnrecordedJob {
+                last_result: Some("failed:today".to_string()),
+            })],
+        };
+        let buddy_arc = test_service(&dir, state).await;
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+
+        scheduler.tick(gcx, buddy_arc.clone(), dir.path()).await;
+
+        let buddy = buddy_arc.lock().await;
+        let job_state = buddy
+            .as_ref()
+            .unwrap()
+            .state
+            .job_cooldowns
+            .get(&job_id)
+            .unwrap();
+        assert!(job_state.last_run.is_some());
+        assert_eq!(job_state.run_count, 8);
+        assert_eq!(job_state.last_result.as_deref(), Some("failed:today"));
+    }
+
+    #[tokio::test]
+    async fn recorded_no_output_result_advances_cooldown_and_blocks_next_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::buddy::state::default_buddy_state();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scheduler = BuddyScheduler {
+            jobs: vec![Box::new(NoOutputRecordedJob {
+                calls: calls.clone(),
+            })],
+        };
+        let buddy_arc = test_service(&dir, state).await;
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+
+        scheduler
+            .tick(gcx.clone(), buddy_arc.clone(), dir.path())
+            .await;
+        scheduler.tick(gcx, buddy_arc.clone(), dir.path()).await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let buddy = buddy_arc.lock().await;
+        let job_state = buddy
+            .as_ref()
+            .unwrap()
+            .state
+            .job_cooldowns
+            .get("no_output_recorded")
+            .unwrap();
+        assert!(job_state.last_run.is_some());
+        assert_eq!(job_state.run_count, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_phrase_bank_generation_records_scheduler_backoff() {
+        let (service, renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+            vec![Some("humor: only one usable kind".to_string())],
+        );
+        let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = BuddySettings::default();
+        settings.daily_digest_hour = Some(0);
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let service = BuddyService::new(
+            dir.path().to_path_buf(),
+            crate::buddy::state::default_buddy_state(),
+            settings,
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        let scheduler = BuddyScheduler {
+            jobs: vec![Box::new(
+                crate::buddy::jobs::chat_phrase_bank::ChatPhraseBankJob,
+            )],
+        };
+        let buddy_arc = Arc::new(AMutex::new(Some(service)));
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+
+        scheduler
+            .tick(gcx.clone(), buddy_arc.clone(), dir.path())
+            .await;
+        scheduler.tick(gcx, buddy_arc.clone(), dir.path()).await;
+
+        assert_eq!(renderer.calls(), 1);
+        let buddy = buddy_arc.lock().await;
+        let job_state = buddy
+            .as_ref()
+            .unwrap()
+            .state
+            .job_cooldowns
+            .get("chat_phrase_bank")
+            .unwrap();
+        assert!(job_state.last_run.is_some());
+        assert_eq!(job_state.run_count, 1);
+        assert!(job_state
+            .last_result
+            .as_deref()
+            .is_some_and(|result| result.starts_with("failed:")));
     }
 
     #[tokio::test]
