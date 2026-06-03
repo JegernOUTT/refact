@@ -2,12 +2,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
+use refact_buddy_core::conductor::ConductorWakeReason;
 use tokio::sync::{Mutex as AMutex};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::buddy::chat_reactions::{maybe_enqueue_chat_reaction, AcceptedUserMessage};
+use crate::buddy::conductor::wake;
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 use refact_buddy_core::user_action::UserAction;
 use crate::files_correction::get_project_dirs;
@@ -150,7 +152,7 @@ pub async fn inject_priority_messages_if_any(
             content,
             attachments,
             context_files,
-            origin: _,
+            origin,
             suppress_auto_enrichment: _,
         } = request.command
         {
@@ -206,7 +208,7 @@ pub async fn inject_priority_messages_if_any(
                 Vec::new()
             };
 
-            let accepted_user_message = {
+            let (accepted_user_message, wake_chat_id, wake_task_id) = {
                 let mut session = session_arc.lock().await;
                 if !context_files.is_empty() {
                     apply_manual_context_files(&mut session, &context_files);
@@ -225,8 +227,23 @@ pub async fn inject_priority_messages_if_any(
                     ..Default::default()
                 };
                 session.add_message(user_message);
-                accepted
+                (
+                    accepted,
+                    session.chat_id.clone(),
+                    session
+                        .thread
+                        .task_meta
+                        .as_ref()
+                        .map(|meta| meta.task_id.clone()),
+                )
             };
+            wake::record_owned_chat_or_task_message(
+                app.gcx.clone(),
+                &wake_chat_id,
+                wake_task_id.as_deref(),
+                origin,
+            )
+            .await;
             let _ = maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
         }
     }
@@ -871,7 +888,7 @@ pub async fn process_command_queue(
                 mut content,
                 attachments,
                 context_files,
-                origin: _,
+                origin,
                 suppress_auto_enrichment,
             } => {
                 let mut skill_activation_info = None;
@@ -1090,6 +1107,7 @@ pub async fn process_command_queue(
                             session.pending_browser_message = Some(PendingBrowserMessage {
                                 pending_message_id: pending_message_id.clone(),
                                 content: content.clone(),
+                                origin,
                                 attachments: attachments.clone(),
                                 checkpoints: checkpoints.clone(),
                                 context_files: context_files.clone(),
@@ -1118,6 +1136,7 @@ pub async fn process_command_queue(
                 }
 
                 let mut accepted_user_messages = Vec::new();
+                let mut conductor_chat_messages = Vec::new();
                 {
                     let mut session = session_arc.lock().await;
 
@@ -1155,6 +1174,15 @@ pub async fn process_command_queue(
                         ..Default::default()
                     };
                     session.add_message(user_message);
+                    conductor_chat_messages.push((
+                        session.chat_id.clone(),
+                        session
+                            .thread
+                            .task_meta
+                            .as_ref()
+                            .map(|meta| meta.task_id.clone()),
+                        origin,
+                    ));
                     if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
                         let chat_id = session.chat_id.clone();
                         let first_user_text_preview = parsed_content
@@ -1188,7 +1216,7 @@ pub async fn process_command_queue(
                             content: add_content,
                             attachments: add_attachments,
                             context_files: add_ctx_files,
-                            origin: _,
+                            origin: add_origin,
                             suppress_auto_enrichment: _,
                         } = additional.command
                         {
@@ -1209,8 +1237,27 @@ pub async fn process_command_queue(
                                 ..Default::default()
                             };
                             session.add_message(add_message);
+                            conductor_chat_messages.push((
+                                session.chat_id.clone(),
+                                session
+                                    .thread
+                                    .task_meta
+                                    .as_ref()
+                                    .map(|meta| meta.task_id.clone()),
+                                add_origin,
+                            ));
                         }
                     }
+                }
+
+                for (chat_id, task_id, origin) in conductor_chat_messages {
+                    wake::record_owned_chat_or_task_message(
+                        app.gcx.clone(),
+                        &chat_id,
+                        task_id.as_deref(),
+                        origin,
+                    )
+                    .await;
                 }
 
                 for accepted_user_message in accepted_user_messages {
@@ -1600,6 +1647,7 @@ pub async fn process_command_queue(
                     &browser_chat_id,
                 )
                 .await;
+                let conductor_message;
 
                 {
                     let mut session = session_arc.lock().await;
@@ -1646,10 +1694,29 @@ pub async fn process_command_queue(
                         ..Default::default()
                     };
                     session.add_message(user_message);
+                    conductor_message = Some((
+                        session.chat_id.clone(),
+                        session
+                            .thread
+                            .task_meta
+                            .as_ref()
+                            .map(|meta| meta.task_id.clone()),
+                        pending.origin,
+                    ));
 
                     if let Some(ref skill_name) = pending.skill_activation_name {
                         session.set_active_skill(skill_name.clone());
                     }
+                }
+
+                if let Some((chat_id, task_id, origin)) = conductor_message {
+                    wake::record_owned_chat_or_task_message(
+                        app.gcx.clone(),
+                        &chat_id,
+                        task_id.as_deref(),
+                        origin,
+                    )
+                    .await;
                 }
 
                 browser_context::commit_browser_cursors(app.gcx.clone(), &browser_chat_id).await;
@@ -1755,9 +1822,21 @@ async fn handle_tool_decisions(
             .iter()
             .any(crate::chat::cache_guard::is_cache_guard_pause_reason)
     };
+    let (conductor_chat_id, conductor_task_id) = {
+        let session = session_arc.lock().await;
+        (
+            session.chat_id.clone(),
+            session
+                .thread
+                .task_meta
+                .as_ref()
+                .map(|meta| meta.task_id.clone()),
+        )
+    };
 
     if is_cache_guard_pause {
         let accepted_any = decisions.iter().any(|d| d.accepted);
+        let rejected_any = decisions.iter().any(|d| !d.accepted);
 
         {
             let mut session = session_arc.lock().await;
@@ -1782,6 +1861,16 @@ async fn handle_tool_decisions(
             session.runtime.auto_approved_tool_ids.clear();
             session.runtime.paused_message_index = None;
             session.set_runtime_state(SessionState::Idle, None);
+        }
+
+        if accepted_any || rejected_any {
+            wake::enqueue_chat_or_task_wake(
+                app.gcx.clone(),
+                &conductor_chat_id,
+                conductor_task_id.as_deref(),
+                ConductorWakeReason::ChatLifecycle,
+            )
+            .await;
         }
 
         if accepted_any {
@@ -1861,6 +1950,14 @@ async fn handle_tool_decisions(
     if has_remaining_pauses {
         return;
     }
+
+    wake::enqueue_chat_or_task_wake(
+        app.gcx.clone(),
+        &conductor_chat_id,
+        conductor_task_id.as_deref(),
+        ConductorWakeReason::ChatLifecycle,
+    )
+    .await;
 
     {
         let mut session = session_arc.lock().await;

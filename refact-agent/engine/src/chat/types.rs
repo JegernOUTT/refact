@@ -288,6 +288,7 @@ pub struct ChatSession {
 pub struct PendingBrowserMessage {
     pub pending_message_id: String,
     pub content: serde_json::Value,
+    pub origin: Option<MessageOrigin>,
     pub attachments: Vec<serde_json::Value>,
     pub checkpoints: Vec<Checkpoint>,
     pub context_files: Vec<serde_json::Value>,

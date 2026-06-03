@@ -3,6 +3,7 @@ use std::path::Path;
 use tokio::sync::Mutex as AMutex;
 
 use super::actor::BuddyService;
+use refact_buddy_core::conductor::ConductorWakeReason;
 use super::diagnostics::DiagnosticContext;
 use super::settings::BuddySettings;
 use super::types::{
@@ -307,6 +308,9 @@ impl BuddyScheduler {
         buddy_arc: Arc<AMutex<Option<BuddyService>>>,
         project_root: &Path,
     ) {
+        super::conductor::wake::enqueue_all_wake(gcx.gcx.clone(), ConductorWakeReason::Heartbeat)
+            .await;
+
         let ctx_opt = {
             let buddy = buddy_arc.lock().await;
             buddy.as_ref().map(|svc| {

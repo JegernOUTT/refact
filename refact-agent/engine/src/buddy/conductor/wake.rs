@@ -1,8 +1,12 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
 use refact_buddy_core::conductor::{ConductorWakeReason, GoalLedger};
+use refact_buddy_core::conductor_store::list_goal_ledgers;
 use refact_chat_api::MessageOrigin;
+
+use crate::global_context::SharedGlobalContext;
 
 pub const DEFAULT_WAKE_DEBOUNCE_SECS: i64 = 5;
 pub const DEFAULT_HUMAN_YIELD_GRACE_SECS: i64 = 30;
@@ -316,6 +320,174 @@ pub fn message_origin_sets_human_yield(origin: Option<MessageOrigin>) -> bool {
     !matches!(origin, Some(MessageOrigin::Conductor))
 }
 
+pub async fn refresh_conductor_wake_targets(gcx: SharedGlobalContext) -> ConductorWakeTargets {
+    let Some(project_root) = conductor_project_root(gcx.clone()).await else {
+        return install_conductor_wake_targets(gcx, ConductorWakeTargets::default()).await;
+    };
+    refresh_conductor_wake_targets_for_project(gcx, &project_root).await
+}
+
+pub async fn refresh_conductor_wake_targets_for_project(
+    gcx: SharedGlobalContext,
+    project_root: &Path,
+) -> ConductorWakeTargets {
+    let ledgers = match list_goal_ledgers(project_root).await {
+        Ok(ledgers) => ledgers,
+        Err(error) => {
+            tracing::warn!(
+                "conductor wake target refresh failed for {}: {}",
+                project_root.display(),
+                error
+            );
+            Vec::new()
+        }
+    };
+    let targets = ConductorWakeTargets::from_goal_ledgers(
+        ledgers
+            .into_iter()
+            .map(|stored| (stored.goal_id, stored.ledger)),
+    );
+    install_conductor_wake_targets(gcx, targets).await
+}
+
+pub async fn enqueue_task_wake(
+    gcx: SharedGlobalContext,
+    task_id: &str,
+    reason: ConductorWakeReason,
+) -> bool {
+    let targets = active_or_refreshed_targets(gcx.clone()).await;
+    enqueue_target_goals(gcx, targets.goals_for_task(task_id), reason).await
+}
+
+pub async fn enqueue_chat_wake(
+    gcx: SharedGlobalContext,
+    chat_id: &str,
+    reason: ConductorWakeReason,
+) -> bool {
+    enqueue_chat_or_task_wake(gcx, chat_id, None, reason).await
+}
+
+pub async fn enqueue_chat_or_task_wake(
+    gcx: SharedGlobalContext,
+    chat_id: &str,
+    task_id: Option<&str>,
+    reason: ConductorWakeReason,
+) -> bool {
+    let targets = active_or_refreshed_targets(gcx.clone()).await;
+    let mut goal_ids = targets.goals_for_chat(chat_id);
+    if let Some(task_id) = task_id {
+        for goal_id in targets.goals_for_task(task_id) {
+            push_unique(&mut goal_ids, goal_id);
+        }
+    }
+    enqueue_target_goals(gcx, goal_ids, reason).await
+}
+
+pub async fn enqueue_all_wake(gcx: SharedGlobalContext, reason: ConductorWakeReason) -> bool {
+    let targets = active_or_refreshed_targets(gcx.clone()).await;
+    enqueue_target_goals(gcx, targets.goal_ids(), reason).await
+}
+
+pub async fn record_owned_chat_message(
+    gcx: SharedGlobalContext,
+    chat_id: &str,
+    origin: Option<MessageOrigin>,
+) -> bool {
+    record_owned_chat_or_task_message(gcx, chat_id, None, origin).await
+}
+
+pub async fn record_owned_chat_or_task_message(
+    gcx: SharedGlobalContext,
+    chat_id: &str,
+    task_id: Option<&str>,
+    origin: Option<MessageOrigin>,
+) -> bool {
+    if !message_origin_sets_human_yield(origin) {
+        return false;
+    }
+    let targets = active_or_refreshed_targets(gcx.clone()).await;
+    let mut goal_ids = targets.goals_for_chat(chat_id);
+    if let Some(task_id) = task_id {
+        for goal_id in targets.goals_for_task(task_id) {
+            push_unique(&mut goal_ids, goal_id);
+        }
+    }
+    if goal_ids.is_empty() {
+        return false;
+    }
+    let now = Utc::now();
+    let mut bus = gcx.conductor_wake_bus.lock().await;
+    let mut recorded = false;
+    for goal_id in goal_ids {
+        recorded |= bus.record_owned_chat_message(goal_id, origin, now);
+    }
+    recorded
+}
+
+pub fn try_drain_due_conductor_wakes(
+    gcx: &SharedGlobalContext,
+    now: DateTime<Utc>,
+) -> Vec<DueConductorWake> {
+    let Ok(mut bus) = gcx.conductor_wake_bus.try_lock() else {
+        return Vec::new();
+    };
+    bus.drain_due(now)
+}
+
+pub fn try_complete_conductor_wake(gcx: &SharedGlobalContext, goal_id: &str) -> bool {
+    let Ok(mut bus) = gcx.conductor_wake_bus.try_lock() else {
+        return false;
+    };
+    bus.complete_goal(goal_id)
+}
+
+async fn conductor_project_root(gcx: SharedGlobalContext) -> Option<PathBuf> {
+    crate::files_correction::get_project_dirs(gcx)
+        .await
+        .into_iter()
+        .next()
+}
+
+async fn active_or_refreshed_targets(gcx: SharedGlobalContext) -> ConductorWakeTargets {
+    let targets = gcx.conductor_wake_targets.lock().await.clone();
+    if !targets.is_empty() {
+        return targets;
+    }
+    refresh_conductor_wake_targets(gcx).await
+}
+
+async fn install_conductor_wake_targets(
+    gcx: SharedGlobalContext,
+    targets: ConductorWakeTargets,
+) -> ConductorWakeTargets {
+    {
+        let mut target_guard = gcx.conductor_wake_targets.lock().await;
+        *target_guard = targets.clone();
+    }
+    {
+        let mut bus = gcx.conductor_wake_bus.lock().await;
+        bus.reconcile_targets(&targets);
+    }
+    targets
+}
+
+async fn enqueue_target_goals(
+    gcx: SharedGlobalContext,
+    goal_ids: Vec<String>,
+    reason: ConductorWakeReason,
+) -> bool {
+    if goal_ids.is_empty() {
+        return false;
+    }
+    let now = Utc::now();
+    let mut bus = gcx.conductor_wake_bus.lock().await;
+    let mut enqueued = false;
+    for goal_id in goal_ids {
+        enqueued |= bus.enqueue_goal(goal_id, reason, now);
+    }
+    enqueued
+}
+
 fn normalized_lookup(map: &HashMap<String, Vec<String>>, key: &str) -> Vec<String> {
     let key = normalized_goal_id(key.to_string());
     if key.is_empty() {
@@ -383,9 +555,8 @@ mod tests {
         let now = ts(50);
         bus.enqueue_goal("goal-1", ConductorWakeReason::Manual, now);
         bus.enqueue_goal("stale-goal", ConductorWakeReason::Manual, now);
-        let targets = ConductorWakeTargets::from_goal_ledgers(vec![
-            ("goal-1", GoalLedger::default()),
-        ]);
+        let targets =
+            ConductorWakeTargets::from_goal_ledgers(vec![("goal-1", GoalLedger::default())]);
 
         bus.reconcile_targets(&targets);
 
@@ -522,5 +693,127 @@ mod tests {
         let mailbox = bus.mailbox("goal-1").unwrap();
         assert_eq!(mailbox.reasons, vec![ConductorWakeReason::HumanSteering]);
         assert_eq!(mailbox.yield_until, Some(now + Duration::seconds(30)));
+    }
+
+    #[tokio::test]
+    async fn runtime_target_refresh_loads_ledgers_and_task_hook_enqueues() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-1",
+            &GoalLedger {
+                task_ids: vec!["task-1".to_string()],
+                chat_ids: vec!["chat-1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let targets = refresh_conductor_wake_targets(gcx.clone()).await;
+        assert_eq!(targets.goals_for_task("task-1"), vec!["goal-1"]);
+        assert!(enqueue_task_wake(gcx.clone(), "task-1", ConductorWakeReason::TaskBoard).await);
+
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-1").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::TaskBoard]);
+    }
+
+    #[tokio::test]
+    async fn chat_lifecycle_hook_falls_back_to_task_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-1",
+            &GoalLedger {
+                task_ids: vec!["task-1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        refresh_conductor_wake_targets(gcx.clone()).await;
+        assert!(
+            enqueue_chat_or_task_wake(
+                gcx.clone(),
+                "unregistered-chat",
+                Some("task-1"),
+                ConductorWakeReason::ChatLifecycle,
+            )
+            .await
+        );
+
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-1").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::ChatLifecycle]);
+    }
+
+    #[tokio::test]
+    async fn human_chat_hook_yields_owned_task_goal_but_conductor_origin_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-1",
+            &GoalLedger {
+                task_ids: vec!["task-1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        refresh_conductor_wake_targets(gcx.clone()).await;
+        assert!(
+            record_owned_chat_or_task_message(
+                gcx.clone(),
+                "agent-chat-1",
+                Some("task-1"),
+                Some(MessageOrigin::Human),
+            )
+            .await
+        );
+        assert!(
+            !record_owned_chat_or_task_message(
+                gcx.clone(),
+                "agent-chat-1",
+                Some("task-1"),
+                Some(MessageOrigin::Conductor),
+            )
+            .await
+        );
+
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-1").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::HumanSteering]);
+        assert!(mailbox.yield_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn try_drain_due_returns_empty_when_bus_is_locked() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let _guard = gcx.conductor_wake_bus.try_lock().unwrap();
+
+        let due = try_drain_due_conductor_wakes(&gcx, ts(800));
+
+        assert!(due.is_empty());
     }
 }

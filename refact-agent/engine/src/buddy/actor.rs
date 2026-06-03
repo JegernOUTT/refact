@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::app_state::AppState;
+use refact_buddy_core::conductor::ConductorWakeReason;
 use refact_buddy_core::user_action::UserAction;
 use super::drafts::{
     validate_draft_payload, DraftCreateError, DraftStore, DraftTarget, DraftValidationError,
@@ -1892,6 +1893,7 @@ pub async fn buddy_background_task(gcx: AppState) {
 
     let buddy_arc = gcx.buddy.buddy.clone();
     *buddy_arc.lock().await = Some(service);
+    super::conductor::wake::refresh_conductor_wake_targets(gcx.gcx.clone()).await;
     let initial_pulse =
         super::pulse::build_pulse(gcx.clone(), &project_root, &FactStore::new()).await;
     {
@@ -1997,6 +1999,11 @@ pub async fn buddy_background_task(gcx: AppState) {
                 }
                 let new_pulse =
                     super::pulse::build_pulse(gcx.clone(), &project_root, &tmp_store).await;
+                super::conductor::wake::enqueue_all_wake(
+                    gcx.gcx.clone(),
+                    ConductorWakeReason::Budget,
+                )
+                .await;
                 let mut buddy = buddy_arc.lock().await;
                 if let Some(svc) = buddy.as_mut() {
                     svc.set_pulse(new_pulse);

@@ -19,6 +19,7 @@ use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 use crate::ast::ast_indexer_thread::AstIndexService;
 use crate::agents::registry::BackgroundAgentRegistry;
 use crate::buddy::actor::BuddyService;
+use crate::buddy::conductor::wake::{ConductorWakeBus, ConductorWakeTargets};
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::user_activity::UserActivityRing;
 use crate::caps::CodeAssistantCaps;
@@ -114,6 +115,8 @@ pub struct BuddyServices {
     pub buddy: Arc<AMutex<Option<BuddyService>>>,
     pub buddy_events_tx: tokio::sync::broadcast::Sender<BuddyEvent>,
     pub user_activity: Arc<AMutex<UserActivityRing>>,
+    pub conductor_wake_bus: Arc<AMutex<ConductorWakeBus>>,
+    pub conductor_wake_targets: Arc<AMutex<ConductorWakeTargets>>,
 }
 
 #[derive(Clone)]
