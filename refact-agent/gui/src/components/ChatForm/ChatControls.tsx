@@ -60,8 +60,11 @@ export const CapsSelect: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
               nCtx={model.nCtx}
               capabilities={model.capabilities}
               isDefault={model.isDefault}
+              isChat2={model.isChat2}
+              isTaskPlannerAgent={model.isTaskPlannerAgent}
               isThinking={model.isThinking}
               isLight={model.isLight}
+              isBuddy={model.isBuddy}
             />
           ),
         });

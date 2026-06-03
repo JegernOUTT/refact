@@ -30,6 +30,8 @@ export const STUB_CAPS_RESPONSE: CapsResponse = {
     },
   },
   completion_default_model: "qwen2.5/coder/1.5b/base",
+  chat_model_2: "",
+  task_planner_agent_model: "",
   completion_models: {
     "qwen2.5/coder/1.5b/base": {
       default_scratchpad: "FIM-SPM",

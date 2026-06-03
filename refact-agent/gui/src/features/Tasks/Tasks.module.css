@@ -158,11 +158,6 @@
   flex-direction: column;
 }
 
-.modelPickerRow {
-  padding-top: var(--space-1);
-  border-top: 1px solid var(--gray-a4);
-}
-
 .chatSection {
   flex: 1;
   min-height: 0;

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use indexmap::IndexMap;
@@ -66,6 +66,10 @@ pub struct CapsProvider {
     #[serde(default, alias = "code_chat_default_model", alias = "chat_model")]
     pub chat_default_model: String,
     #[serde(default)]
+    pub chat_model_2: String,
+    #[serde(default)]
+    pub task_planner_agent_model: String,
+    #[serde(default)]
     pub chat_thinking_model: String,
     #[serde(default)]
     pub chat_light_model: String,
@@ -81,6 +85,8 @@ impl CapsProvider {
         DefaultModels {
             completion_default_model: self.completion_default_model.clone(),
             chat_default_model: self.chat_default_model.clone(),
+            chat_model_2: self.chat_model_2.clone(),
+            task_planner_agent_model: self.task_planner_agent_model.clone(),
             chat_thinking_model: self.chat_thinking_model.clone(),
             chat_light_model: self.chat_light_model.clone(),
             chat_buddy_model: self.chat_buddy_model.clone(),
@@ -157,6 +163,12 @@ impl CapsProvider {
                 if !dm.chat_default_model.is_empty() {
                     self.chat_default_model = dm.chat_default_model;
                 }
+                if !dm.chat_model_2.is_empty() {
+                    self.chat_model_2 = dm.chat_model_2;
+                }
+                if !dm.task_planner_agent_model.is_empty() {
+                    self.task_planner_agent_model = dm.task_planner_agent_model;
+                }
                 if !dm.chat_thinking_model.is_empty() {
                     self.chat_thinking_model = dm.chat_thinking_model;
                 }
@@ -197,6 +209,8 @@ impl Default for CapsProvider {
             models_dict_patch: IndexMap::new(),
             completion_default_model: String::new(),
             chat_default_model: String::new(),
+            chat_model_2: String::new(),
+            task_planner_agent_model: String::new(),
             chat_thinking_model: String::new(),
             chat_light_model: String::new(),
             chat_buddy_model: String::new(),
@@ -223,7 +237,10 @@ impl fmt::Debug for CapsProvider {
                 "tokenizer_api_key",
                 &redacted_secret(&self.tokenizer_api_key),
             )
-            .field("extra_headers", &self.extra_headers)
+            .field(
+                "extra_headers",
+                &redacted_extra_headers(&self.extra_headers),
+            )
             .field("code_completion_n_ctx", &self.code_completion_n_ctx)
             .field("completion_models", &self.completion_models)
             .field("chat_models", &self.chat_models)
@@ -231,6 +248,8 @@ impl fmt::Debug for CapsProvider {
             .field("models_dict_patch", &self.models_dict_patch)
             .field("completion_default_model", &self.completion_default_model)
             .field("chat_default_model", &self.chat_default_model)
+            .field("chat_model_2", &self.chat_model_2)
+            .field("task_planner_agent_model", &self.task_planner_agent_model)
             .field("chat_thinking_model", &self.chat_thinking_model)
             .field("chat_light_model", &self.chat_light_model)
             .field("chat_buddy_model", &self.chat_buddy_model)
@@ -245,6 +264,13 @@ fn redacted_secret(value: &str) -> &str {
     } else {
         "<redacted>"
     }
+}
+
+fn redacted_extra_headers(headers: &HashMap<String, String>) -> BTreeMap<&str, &str> {
+    headers
+        .iter()
+        .map(|(key, value)| (key.as_str(), redacted_secret(value)))
+        .collect()
 }
 
 pub fn set_field_if_exists<T: for<'de> serde::Deserialize<'de>>(
@@ -318,6 +344,8 @@ mod tests {
         let provider = CapsProvider {
             completion_default_model: "coder".to_string(),
             chat_default_model: "chat".to_string(),
+            chat_model_2: "chat-2".to_string(),
+            task_planner_agent_model: "task-agent".to_string(),
             chat_thinking_model: "think".to_string(),
             chat_light_model: "light".to_string(),
             chat_buddy_model: "buddy".to_string(),
@@ -328,6 +356,8 @@ mod tests {
 
         assert_eq!(defaults.completion_default_model, "coder");
         assert_eq!(defaults.chat_default_model, "chat");
+        assert_eq!(defaults.chat_model_2, "chat-2");
+        assert_eq!(defaults.task_planner_agent_model, "task-agent");
         assert_eq!(defaults.chat_thinking_model, "think");
         assert_eq!(defaults.chat_light_model, "light");
         assert_eq!(defaults.chat_buddy_model, "buddy");
@@ -394,6 +424,8 @@ models_dict_patch:
     supports_tools: true
 completion_model: completion-default
 chat_model: chat-default
+chat_model_2: chat-2-default
+task_planner_agent_model: task-agent-default
 chat_thinking_model: thinking-default
 chat_light_model: light-default
 chat_buddy_model: buddy-default
@@ -435,6 +467,8 @@ chat_buddy_model: buddy-default
         );
         assert_eq!(provider.completion_default_model, "completion-default");
         assert_eq!(provider.chat_default_model, "chat-default");
+        assert_eq!(provider.chat_model_2, "chat-2-default");
+        assert_eq!(provider.task_planner_agent_model, "task-agent-default");
         assert_eq!(provider.chat_thinking_model, "thinking-default");
         assert_eq!(provider.chat_light_model, "light-default");
         assert_eq!(provider.chat_buddy_model, "buddy-default");
@@ -465,6 +499,10 @@ chat_buddy_model: buddy-default
         let provider = CapsProvider {
             api_key: "secret-api".to_string(),
             tokenizer_api_key: "secret-tokenizer".to_string(),
+            extra_headers: HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer secret-header".to_string(),
+            )]),
             ..Default::default()
         };
 
@@ -473,6 +511,8 @@ chat_buddy_model: buddy-default
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-api"));
         assert!(!debug.contains("secret-tokenizer"));
+        assert!(debug.contains("Authorization"));
+        assert!(!debug.contains("secret-header"));
     }
 
     #[test]

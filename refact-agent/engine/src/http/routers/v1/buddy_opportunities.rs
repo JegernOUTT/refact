@@ -219,6 +219,12 @@ fn provider_defaults_patch(defaults_kind: DefaultsKind) -> serde_json::Value {
         DefaultsKind::ChatModel => {
             serde_json::json!({ "chat": { "model": "your-provider/model-name" } })
         }
+        DefaultsKind::ChatModel2 => {
+            serde_json::json!({ "chat_model_2": { "model": "your-provider/model-name" } })
+        }
+        DefaultsKind::TaskPlannerAgentModel => {
+            serde_json::json!({ "task_planner_agent_model": { "model": "your-provider/model-name" } })
+        }
         DefaultsKind::ChatLightModel => {
             serde_json::json!({ "chat_light": { "model": "your-provider/model-name" } })
         }

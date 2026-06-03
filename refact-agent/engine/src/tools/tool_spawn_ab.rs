@@ -493,25 +493,11 @@ impl Tool for ToolSpawnAb {
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
         let model_a = match variant_a.model.as_deref() {
             Some(model) => model.to_string(),
-            None => {
-                resolve_agent_model(
-                    gcx.clone(),
-                    task_meta.default_agent_model.as_deref(),
-                    &current_model,
-                )
-                .await?
-            }
+            None => resolve_agent_model(gcx.clone(), &current_model).await?,
         };
         let model_b = match variant_b.model.as_deref() {
             Some(model) => model.to_string(),
-            None => {
-                resolve_agent_model(
-                    gcx.clone(),
-                    task_meta.default_agent_model.as_deref(),
-                    &current_model,
-                )
-                .await?
-            }
+            None => resolve_agent_model(gcx.clone(), &current_model).await?,
         };
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;

@@ -4,13 +4,13 @@ use std::sync::{Arc, OnceLock};
 use indexmap::IndexMap;
 
 use crate::caps::{
-    BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord, HasBaseModelRecord,
-    strip_model_from_finetune,
+    BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord,
+    EmbeddingModelRecord, HasBaseModelRecord, strip_model_from_finetune,
 };
 use crate::custom_error::YamlError;
 
 #[cfg(test)]
-use refact_core::llm_types::{EmbeddingModelRecord, WireFormat};
+use refact_core::llm_types::WireFormat;
 use refact_providers::identity::provider_identity_from_yaml;
 
 pub use refact_caps_core::provider_config::{
@@ -293,6 +293,8 @@ pub async fn read_providers_d(
 fn add_running_models(provider: &mut CapsProvider) {
     let models_to_add = vec![
         &provider.chat_default_model,
+        &provider.chat_model_2,
+        &provider.task_planner_agent_model,
         &provider.chat_light_model,
         &provider.chat_thinking_model,
         &provider.chat_buddy_model,
@@ -340,7 +342,12 @@ pub async fn get_latest_provider_mtime(config_dir: &Path) -> Option<u64> {
     })
 }
 
-pub fn add_models_to_caps(caps: &mut CodeAssistantCaps, providers: Vec<CapsProvider>) {
+pub fn add_models_to_caps(
+    caps: &mut CodeAssistantCaps,
+    providers: Vec<CapsProvider>,
+) -> Vec<EmbeddingModelRecord> {
+    let mut embedding_models = Vec::new();
+
     fn add_provider_details_to_model(
         base_model_rec: &mut BaseModelRecord,
         provider: &CapsProvider,
@@ -414,12 +421,15 @@ pub fn add_models_to_caps(caps: &mut CodeAssistantCaps, providers: Vec<CapsProvi
                     &provider.embedding_endpoint,
                 );
             }
+            embedding_models.push(embedding_model.clone());
             caps.embedding_model = embedding_model;
         }
 
         caps.defaults
             .apply_override(&provider.defaults(), Some(&provider.name));
     }
+
+    embedding_models
 }
 
 fn add_name_and_id_to_model_records(provider: &mut CapsProvider) {

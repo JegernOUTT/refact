@@ -108,6 +108,10 @@ pub struct ProviderDefaults {
     #[serde(default)]
     pub chat: ModelTypeDefaults,
     #[serde(default)]
+    pub chat_model_2: ModelTypeDefaults,
+    #[serde(default)]
+    pub task_planner_agent_model: ModelTypeDefaults,
+    #[serde(default)]
     pub chat_light: ModelTypeDefaults,
     #[serde(default)]
     pub chat_thinking: ModelTypeDefaults,
@@ -123,6 +127,8 @@ impl ProviderDefaults {
     pub fn clear_legacy_refact_models(&mut self) -> bool {
         let mut changed = false;
         changed |= clear_legacy_refact_model_field(&mut self.chat.model);
+        changed |= clear_legacy_refact_model_field(&mut self.chat_model_2.model);
+        changed |= clear_legacy_refact_model_field(&mut self.task_planner_agent_model.model);
         changed |= clear_legacy_refact_model_field(&mut self.chat_light.model);
         changed |= clear_legacy_refact_model_field(&mut self.chat_thinking.model);
         changed |= clear_legacy_refact_model_field(&mut self.chat_buddy.model);
@@ -134,12 +140,17 @@ impl ProviderDefaults {
     pub fn defaults_for_model(
         &self,
         model_id: &str,
-        _chat_default_model: &str,
+        chat_default_model: &str,
+        chat_model_2: &str,
         chat_light_model: &str,
         chat_thinking_model: &str,
         chat_buddy_model: &str,
     ) -> &ModelTypeDefaults {
-        if !chat_thinking_model.is_empty() && model_id == chat_thinking_model {
+        if !chat_default_model.is_empty() && model_id == chat_default_model {
+            &self.chat
+        } else if !chat_model_2.is_empty() && model_id == chat_model_2 {
+            &self.chat_model_2
+        } else if !chat_thinking_model.is_empty() && model_id == chat_thinking_model {
             &self.chat_thinking
         } else if !chat_buddy_model.is_empty() && model_id == chat_buddy_model {
             &self.chat_buddy
@@ -147,6 +158,30 @@ impl ProviderDefaults {
             &self.chat_light
         } else {
             &self.chat
+        }
+    }
+
+    pub fn defaults_for_task_planner_agent_model(
+        &self,
+        model_id: &str,
+        task_planner_agent_model: &str,
+        chat_default_model: &str,
+        chat_model_2: &str,
+        chat_light_model: &str,
+        chat_thinking_model: &str,
+        chat_buddy_model: &str,
+    ) -> &ModelTypeDefaults {
+        if !task_planner_agent_model.is_empty() && model_id == task_planner_agent_model {
+            &self.task_planner_agent_model
+        } else {
+            self.defaults_for_model(
+                model_id,
+                chat_default_model,
+                chat_model_2,
+                chat_light_model,
+                chat_thinking_model,
+                chat_buddy_model,
+            )
         }
     }
 
@@ -655,6 +690,14 @@ mod tests {
                 model: Some("openai/gpt-5".to_string()),
                 ..Default::default()
             },
+            chat_model_2: ModelTypeDefaults {
+                model: Some("refact/secondary".to_string()),
+                ..Default::default()
+            },
+            task_planner_agent_model: ModelTypeDefaults {
+                model: Some("  refact/planner-agent  ".to_string()),
+                ..Default::default()
+            },
             chat_light: ModelTypeDefaults {
                 model: Some("refact/grok-4-fast-non-reasoning".to_string()),
                 ..Default::default()
@@ -670,8 +713,65 @@ mod tests {
         assert!(defaults.clear_legacy_refact_models());
 
         assert_eq!(defaults.chat.model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(defaults.chat_model_2.model.as_deref(), Some(""));
+        assert_eq!(defaults.task_planner_agent_model.model.as_deref(), Some(""));
         assert_eq!(defaults.chat_light.model.as_deref(), Some(""));
         assert_eq!(defaults.chat_thinking.model.as_deref(), Some(""));
         assert_eq!(defaults.completion_model.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn defaults_for_model_prefers_chat_when_default_slots_share_model() {
+        let defaults = ProviderDefaults {
+            chat: ModelTypeDefaults {
+                temperature: Some(0.1),
+                ..Default::default()
+            },
+            chat_model_2: ModelTypeDefaults {
+                temperature: Some(0.2),
+                ..Default::default()
+            },
+            task_planner_agent_model: ModelTypeDefaults {
+                temperature: Some(0.3),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let selected =
+            defaults.defaults_for_model("shared/model", "shared/model", "shared/model", "", "", "");
+
+        assert_eq!(selected.temperature, Some(0.1));
+    }
+
+    #[test]
+    fn defaults_for_task_planner_agent_model_prefers_task_slot_when_model_is_shared() {
+        let defaults = ProviderDefaults {
+            chat: ModelTypeDefaults {
+                temperature: Some(0.1),
+                ..Default::default()
+            },
+            chat_model_2: ModelTypeDefaults {
+                temperature: Some(0.2),
+                ..Default::default()
+            },
+            task_planner_agent_model: ModelTypeDefaults {
+                temperature: Some(0.3),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let selected = defaults.defaults_for_task_planner_agent_model(
+            "shared/model",
+            "shared/model",
+            "shared/model",
+            "shared/model",
+            "",
+            "",
+            "",
+        );
+
+        assert_eq!(selected.temperature, Some(0.3));
     }
 }

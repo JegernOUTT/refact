@@ -226,6 +226,10 @@ pub struct DefaultModels {
     #[serde(default, alias = "code_chat_default_model", alias = "chat_model")]
     pub chat_default_model: String,
     #[serde(default)]
+    pub chat_model_2: String,
+    #[serde(default)]
+    pub task_planner_agent_model: String,
+    #[serde(default)]
     pub chat_thinking_model: String,
     #[serde(default)]
     pub chat_light_model: String,
@@ -255,6 +259,13 @@ impl DefaultModels {
         }
         if !other.chat_default_model.is_empty() {
             self.chat_default_model = Self::qualify_model(&other.chat_default_model, provider_name);
+        }
+        if !other.chat_model_2.is_empty() {
+            self.chat_model_2 = Self::qualify_model(&other.chat_model_2, provider_name);
+        }
+        if !other.task_planner_agent_model.is_empty() {
+            self.task_planner_agent_model =
+                Self::qualify_model(&other.task_planner_agent_model, provider_name);
         }
         if !other.chat_thinking_model.is_empty() {
             self.chat_thinking_model =
@@ -416,11 +427,15 @@ mod tests {
         let decoded: DefaultModels = serde_json::from_value(serde_json::json!({
             "completion_model": "starcoder",
             "chat_model": "gpt-4.1",
+            "chat_model_2": "gpt-4.1-pro",
+            "task_planner_agent_model": "gpt-4.1-agent",
             "chat_light_model": "gpt-4.1-mini"
         }))
         .unwrap();
         assert_eq!(decoded.completion_default_model, "starcoder");
         assert_eq!(decoded.chat_default_model, "gpt-4.1");
+        assert_eq!(decoded.chat_model_2, "gpt-4.1-pro");
+        assert_eq!(decoded.task_planner_agent_model, "gpt-4.1-agent");
         assert_eq!(decoded.chat_thinking_model, "");
         assert_eq!(decoded.chat_light_model, "gpt-4.1-mini");
         assert_eq!(decoded.chat_buddy_model, "");
@@ -429,6 +444,8 @@ mod tests {
         target.apply_override(&decoded, Some("openai"));
         assert_eq!(target.completion_default_model, "openai/starcoder");
         assert_eq!(target.chat_default_model, "openai/gpt-4.1");
+        assert_eq!(target.chat_model_2, "openai/gpt-4.1-pro");
+        assert_eq!(target.task_planner_agent_model, "openai/gpt-4.1-agent");
         assert_eq!(target.chat_light_model, "openai/gpt-4.1-mini");
         assert_eq!(target.chat_thinking_model, "");
         assert_eq!(target.chat_buddy_model, "");

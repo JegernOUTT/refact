@@ -102,6 +102,8 @@ async fn build_providers_pulse(gcx: AppState) -> ProviderPulse {
     if let Some(caps) = &caps_state.caps {
         let d = &caps.defaults;
         pulse.defaults_ok = !d.chat_default_model.is_empty()
+            && !d.chat_model_2.is_empty()
+            && !d.task_planner_agent_model.is_empty()
             && !d.chat_light_model.is_empty()
             && !d.chat_thinking_model.is_empty()
             && !d.chat_buddy_model.is_empty();
@@ -109,6 +111,8 @@ async fn build_providers_pulse(gcx: AppState) -> ProviderPulse {
             caps.chat_models.keys().map(|s| s.as_str()).collect();
         let to_check = [
             d.chat_default_model.as_str(),
+            d.chat_model_2.as_str(),
+            d.task_planner_agent_model.as_str(),
             d.chat_light_model.as_str(),
             d.chat_buddy_model.as_str(),
             d.chat_thinking_model.as_str(),

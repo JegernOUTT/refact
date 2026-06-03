@@ -129,9 +129,26 @@ export const ModelsSection: React.FC<ModelsSectionProps> = ({
             <ModelRow
               label="Chat"
               model={caps.chat_default_model}
-              explanation="Primary model for chat conversations and agent tasks. Used for most interactions."
+              explanation="Primary model for chat conversations. Used for most interactions."
             />
           )}
+          {caps.chat_model_2 &&
+            caps.chat_model_2 !== caps.chat_default_model && (
+              <ModelRow
+                label="Chat 2"
+                model={caps.chat_model_2}
+                explanation="Secondary chat model slot for future chat workflows."
+              />
+            )}
+          {caps.task_planner_agent_model &&
+            caps.task_planner_agent_model !== caps.chat_default_model &&
+            caps.task_planner_agent_model !== caps.chat_model_2 && (
+              <ModelRow
+                label="Task Agent"
+                model={caps.task_planner_agent_model}
+                explanation="Model used by task management when spawning task agents."
+              />
+            )}
           {caps.chat_thinking_model &&
             caps.chat_thinking_model !== caps.chat_default_model && (
               <ModelRow

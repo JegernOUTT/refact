@@ -574,6 +574,9 @@ pub enum BuddyAction {
 #[serde(rename_all = "snake_case")]
 pub enum DefaultsKind {
     ChatModel,
+    #[serde(rename = "chat_model_2")]
+    ChatModel2,
+    TaskPlannerAgentModel,
     ChatLightModel,
     ChatBuddyModel,
     ChatThinkingModel,

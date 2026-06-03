@@ -21,6 +21,7 @@ import {
   extractProvider,
   getProviderDisplayName,
 } from "../../utils/modelProviders";
+import { pricingForModel } from "../../utils/enrichModels";
 
 export type EnhancedModelSelectorProps = {
   disabled?: boolean;
@@ -35,6 +36,8 @@ type EnrichedModel = {
   nCtx?: number;
   capabilities?: ModelCapabilities;
   isDefault?: boolean;
+  isChat2?: boolean;
+  isTaskPlannerAgent?: boolean;
   isThinking?: boolean;
   isLight?: boolean;
   isBuddy?: boolean;
@@ -68,23 +71,11 @@ function extractCapabilitiesFromCaps(
  * Get pricing for a model from caps
  */
 function getPricing(
-  modelName: string,
+  modelKey: string,
+  displayName: string,
   caps: ReturnType<typeof useCapsForToolUse>["data"],
 ): CapCost | undefined {
-  if (!caps?.metadata?.pricing) return undefined;
-
-  const pricing = caps.metadata.pricing;
-
-  // Try exact match
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  if (pricing[modelName]) return pricing[modelName];
-
-  // Try without "refact/" prefix
-  const nameWithoutProvider = modelName.replace(/^refact\//, "");
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  if (pricing[nameWithoutProvider]) return pricing[nameWithoutProvider];
-
-  return undefined;
+  return pricingForModel(caps?.metadata?.pricing, modelKey, displayName);
 }
 
 export const EnhancedModelSelector: React.FC<EnhancedModelSelectorProps> = ({
@@ -113,10 +104,12 @@ export const EnhancedModelSelector: React.FC<EnhancedModelSelectorProps> = ({
           displayName,
           value: model.value,
           disabled: model.disabled,
-          pricing: getPricing(displayName, caps),
+          pricing: getPricing(modelKey, displayName, caps),
           nCtx,
           capabilities: extractCapabilitiesFromCaps(modelKey, caps),
           isDefault: caps.chat_default_model === modelKey,
+          isChat2: caps.chat_model_2 === modelKey,
+          isTaskPlannerAgent: caps.task_planner_agent_model === modelKey,
           isThinking: caps.chat_thinking_model === modelKey,
           isLight: caps.chat_light_model === modelKey,
           isBuddy: caps.chat_buddy_model === modelKey,
@@ -146,6 +139,12 @@ export const EnhancedModelSelector: React.FC<EnhancedModelSelectorProps> = ({
           // Default first
           if (a.isDefault) return -1;
           if (b.isDefault) return 1;
+          // Task agent default second
+          if (a.isTaskPlannerAgent) return -1;
+          if (b.isTaskPlannerAgent) return 1;
+          // Secondary chat default third
+          if (a.isChat2) return -1;
+          if (b.isChat2) return 1;
           // Thinking second
           if (a.isThinking) return -1;
           if (b.isThinking) return 1;
@@ -307,6 +306,16 @@ const ModelCard: React.FC<ModelCardProps> = ({
             {model.isDefault && (
               <Badge size="1" color="blue">
                 Default
+              </Badge>
+            )}
+            {model.isTaskPlannerAgent && (
+              <Badge size="1" color="indigo">
+                Task Agent
+              </Badge>
+            )}
+            {model.isChat2 && (
+              <Badge size="1" color="cyan">
+                Chat 2
               </Badge>
             )}
             {model.isThinking && (

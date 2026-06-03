@@ -328,6 +328,14 @@ mod rules {
                 DefaultsKind::ChatModel,
                 serde_json::json!({ "chat": { "model": "your-provider/model-name" } }),
             )),
+            "chat_model_2" => Some((
+                DefaultsKind::ChatModel2,
+                serde_json::json!({ "chat_model_2": { "model": "your-provider/model-name" } }),
+            )),
+            "task_planner_agent_model" => Some((
+                DefaultsKind::TaskPlannerAgentModel,
+                serde_json::json!({ "task_planner_agent_model": { "model": "your-provider/model-name" } }),
+            )),
             "chat_light_model" => Some((
                 DefaultsKind::ChatLightModel,
                 serde_json::json!({ "chat_light": { "model": "your-provider/model-name" } }),
@@ -347,8 +355,17 @@ mod rules {
     fn is_chat_default_field(field: &str) -> bool {
         matches!(
             field,
-            "chat_model" | "chat_light_model" | "chat_thinking_model" | "chat_buddy_model"
+            "chat_model"
+                | "chat_model_2"
+                | "task_planner_agent_model"
+                | "chat_light_model"
+                | "chat_thinking_model"
+                | "chat_buddy_model"
         )
+    }
+
+    fn is_checked_default_field(field: &str) -> bool {
+        is_chat_default_field(field) || field == "completion_model"
     }
 
     pub fn provider_tuning_missing(
@@ -409,7 +426,7 @@ mod rules {
                     .get("field")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if !is_chat_default_field(field) {
+                if !is_checked_default_field(field) {
                     return None;
                 }
                 let model = fact
@@ -424,7 +441,7 @@ mod rules {
                     BuddyPriority::High,
                     fact.confidence,
                     vec![fact.key.clone()],
-                    format!("provider:broken_ref:{}", model),
+                    format!("provider:broken_ref:{}:{}", field, model),
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::DefaultModels,

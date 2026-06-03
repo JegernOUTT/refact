@@ -138,7 +138,7 @@ pub(crate) async fn preflight_agent_model(
     Err(format!(
         "Cannot spawn agent: model '{model_name}' is not configured for chat. \
         Available chat models: {alternatives}. \
-        Set task default with `update_task_meta(default_agent_model=\"...\")` or pass a different model."
+        Configure `task_planner_agent_model` in default models or pass a different model."
     ))
 }
 
