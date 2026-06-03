@@ -28,6 +28,25 @@ pub(crate) fn optional_string(args: &HashMap<String, Value>, key: &str) -> Optio
         .map(str::to_string)
 }
 
+#[allow(dead_code)]
+pub(crate) fn optional_id_string(
+    args: &HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match args.get(key) {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value.to_string()))
+            }
+        }
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(format!("{} must be a string", key)),
+    }
+}
+
 pub(crate) fn parse_bool_arg_strict(
     args: &HashMap<String, Value>,
     arg_name: &str,
@@ -124,6 +143,21 @@ pub(crate) async fn require_bound_planner_task(
         (None, Some(inferred)) => Ok(inferred),
         (None, None) => Err("Missing 'task_id' (and chat is not bound to a task)".to_string()),
     }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn resolve_readonly_task_id(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+    _tool_name: &str,
+) -> Result<String, String> {
+    if let Some(task_id) = optional_id_string(args, "task_id")? {
+        return Ok(task_id);
+    }
+
+    let mut fallback_args = args.clone();
+    fallback_args.remove("task_id");
+    require_bound_planner_task(ccx, &fallback_args).await
 }
 
 #[allow(dead_code)]
@@ -363,6 +397,40 @@ mod tests {
     }
 
     #[test]
+    fn task_tool_helpers_parse_optional_id_strings_strictly() {
+        let args = args(&[
+            ("task_id", json!("  task-1  ")),
+            ("empty", json!("   ")),
+            ("null", Value::Null),
+        ]);
+
+        assert_eq!(
+            optional_id_string(&args, "task_id").unwrap(),
+            Some("task-1".to_string())
+        );
+        assert_eq!(optional_id_string(&args, "empty").unwrap(), None);
+        assert_eq!(optional_id_string(&args, "null").unwrap(), None);
+        assert_eq!(optional_id_string(&args, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn task_tool_helpers_optional_id_string_rejects_non_string_values() {
+        let args = args(&[
+            ("num", json!(1)),
+            ("arr", json!([])),
+            ("obj", json!({})),
+            ("bool", json!(true)),
+        ]);
+
+        for key in ["num", "arr", "obj", "bool"] {
+            assert_eq!(
+                optional_id_string(&args, key).unwrap_err(),
+                format!("{} must be a string", key)
+            );
+        }
+    }
+
+    #[test]
     fn task_tool_helpers_truncate_chars_is_unicode_safe() {
         assert_eq!(truncate_chars("abc", 5), "abc");
         assert_eq!(truncate_chars("ab😀cd", 4), "ab😀…");
@@ -430,6 +498,85 @@ mod tests {
         let ccx = ccx_with_meta(Some(task_meta("agents")), "agent-chat").await;
 
         let err = require_bound_planner_task(&ccx, &HashMap::new())
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("task planner"));
+    }
+
+    #[tokio::test]
+    async fn task_tool_helpers_resolve_readonly_task_id_accepts_explicit_unbound_task() {
+        let ccx = ccx_with_meta(None, "chat-without-task").await;
+
+        let task_id = resolve_readonly_task_id(
+            &ccx,
+            &args(&[("task_id", json!(" task-explicit "))]),
+            "task_overview",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(task_id, "task-explicit");
+    }
+
+    #[tokio::test]
+    async fn task_tool_helpers_resolve_readonly_task_id_accepts_explicit_planner_override() {
+        let ccx = ccx_with_meta(Some(task_meta("planner")), "planner-chat").await;
+
+        let task_id = resolve_readonly_task_id(
+            &ccx,
+            &args(&[("task_id", json!("task-2"))]),
+            "task_overview",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(task_id, "task-2");
+    }
+
+    #[tokio::test]
+    async fn task_tool_helpers_resolve_readonly_task_id_rejects_non_string_task_id() {
+        let ccx = ccx_with_meta(None, "chat-without-task").await;
+
+        let err = resolve_readonly_task_id(
+            &ccx,
+            &args(&[("task_id", json!(["task-1"]))]),
+            "task_overview",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "task_id must be a string");
+    }
+
+    #[tokio::test]
+    async fn task_tool_helpers_resolve_readonly_task_id_treats_empty_as_missing() {
+        let ccx = ccx_with_meta(Some(task_meta("planner")), "planner-chat").await;
+
+        let task_id =
+            resolve_readonly_task_id(&ccx, &args(&[("task_id", json!("   "))]), "task_overview")
+                .await
+                .unwrap();
+
+        assert_eq!(task_id, "task-1");
+    }
+
+    #[tokio::test]
+    async fn task_tool_helpers_resolve_readonly_task_id_falls_back_to_planner_context() {
+        let ccx = ccx_with_meta(Some(task_meta("planner")), "planner-chat").await;
+
+        let task_id = resolve_readonly_task_id(&ccx, &HashMap::new(), "task_overview")
+            .await
+            .unwrap();
+
+        assert_eq!(task_id, "task-1");
+    }
+
+    #[tokio::test]
+    async fn task_tool_helpers_resolve_readonly_task_id_preserves_fallback_planner_role_gate() {
+        let ccx = ccx_with_meta(Some(task_meta("agents")), "agent-chat").await;
+
+        let err = resolve_readonly_task_id(&ccx, &HashMap::new(), "task_overview")
             .await
             .unwrap_err();
 
