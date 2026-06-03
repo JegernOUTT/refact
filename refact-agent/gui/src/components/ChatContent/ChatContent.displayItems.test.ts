@@ -408,8 +408,8 @@ describe("ChatContent display items", () => {
       "user",
     ]);
     expect(summarizationItems).toHaveLength(1);
-    expect(reportItem?.messageIndex).toBe(1);
-    expect(reportItem?.message.content).toContain("Chat compression report");
+    expect(reportItem.messageIndex).toBe(1);
+    expect(reportItem.message.content).toContain("Chat compression report");
   });
 
   it("matching_llm_report_after_summary_does_not_hide_legacy_summary", () => {

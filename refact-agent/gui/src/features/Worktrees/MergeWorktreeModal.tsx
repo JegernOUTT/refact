@@ -81,7 +81,9 @@ function didCleanupNoop(response: MergeWorktreeResponse): boolean {
   return (
     response.status === "nothing_to_merge" &&
     cleanup != null &&
-    (cleanup.worktree_deleted || cleanup.branch_deleted || cleanup.registry_deleted)
+    (cleanup.worktree_deleted ||
+      cleanup.branch_deleted ||
+      cleanup.registry_deleted)
   );
 }
 
@@ -128,7 +130,10 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     () => (result ? mergeConflictFiles(result) : []),
     [result],
   );
-  const warnings = useMemo(() => (result ? responseWarnings(result) : []), [result]);
+  const warnings = useMemo(
+    () => (result ? responseWarnings(result) : []),
+    [result],
+  );
   const resolvedTaskId = taskId ?? record?.meta.task_id ?? worktree?.task_id;
 
   useEffect(() => {

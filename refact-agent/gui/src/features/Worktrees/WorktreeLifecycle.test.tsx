@@ -339,7 +339,9 @@ describe("Worktree lifecycle GUI", () => {
     await user.click(screen.getByRole("button", { name: "Merge" }));
 
     expect(await screen.findByText("Merge completed.")).toBeInTheDocument();
-    expect(await screen.findByText("branch deletion failed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("branch deletion failed"),
+    ).toBeInTheDocument();
     expect(mergeCalls[0]).toMatchObject({
       strategy: "squash",
       target_branch: "main",
@@ -548,7 +550,10 @@ describe("Worktree lifecycle GUI", () => {
           });
         }
         return HttpResponse.json(
-          { code: "conflict", error: "Target workspace has uncommitted changes." },
+          {
+            code: "conflict",
+            error: "Target workspace has uncommitted changes.",
+          },
           { status: 409 },
         );
       }),
