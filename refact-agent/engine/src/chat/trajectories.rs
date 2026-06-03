@@ -93,6 +93,10 @@ use super::config::timeouts;
 use super::SessionsMap;
 
 const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
+#[cfg(test)]
+const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+#[cfg(not(test))]
+const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const TRAJECTORY_META_TITLE_MAX_CHARS: usize = 120;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3614,7 +3618,18 @@ fn spawn_title_generation_task(
 ) {
     tokio::spawn(async move {
         let app = AppState::from_gcx(gcx.clone()).await;
-        let generated_title = generate_title_llm(gcx.clone(), &messages).await;
+        let generated_title = match tokio::time::timeout(
+            TITLE_GENERATION_LLM_TIMEOUT,
+            generate_title_llm(gcx.clone(), &messages),
+        )
+        .await
+        {
+            Ok(title) => title,
+            Err(_) => {
+                warn!("Title generation timed out for {}", id);
+                None
+            }
+        };
         let title = match generated_title {
             Some(t) => t,
             None => match extract_first_user_message(&messages) {

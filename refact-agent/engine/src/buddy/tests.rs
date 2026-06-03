@@ -7245,6 +7245,8 @@ async fn pulse_populates_all_subpulse_counts() {
     {
         let mut caps = CodeAssistantCaps::default();
         caps.defaults.chat_default_model = "openai/gpt-4o".to_string();
+        caps.defaults.chat_model_2 = "openai/gpt-4o-mini".to_string();
+        caps.defaults.task_planner_agent_model = "openai/gpt-4o-mini".to_string();
         caps.defaults.chat_light_model = "openai/gpt-4o-mini".to_string();
         caps.defaults.chat_thinking_model = "openai/o1".to_string();
         caps.defaults.chat_buddy_model = "openai/gpt-4o-mini".to_string();
