@@ -93,6 +93,10 @@ pub struct GoalBudget {
 #[serde(default)]
 pub struct GoalBudgetSpent {
     pub elapsed_secs: u64,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
     pub total_tokens: u64,
     pub cache_read_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -372,6 +376,8 @@ mod tests {
             },
             spent: GoalBudgetSpent {
                 elapsed_secs: 30,
+                prompt_tokens: 800,
+                completion_tokens: 400,
                 total_tokens: 1200,
                 cache_read_tokens: 400,
                 usd: Some(0.12),
