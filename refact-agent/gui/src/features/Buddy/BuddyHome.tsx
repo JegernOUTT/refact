@@ -11,6 +11,7 @@ import { BuddyWorkshop } from "./BuddyWorkshop";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
 import { BuddyWorld } from "./BuddyWorld";
 import { BuddySummaryStrip } from "./BuddySummaryStrip";
+import { BuddyConductorGoalsPanel } from "./BuddyConductorGoalsPanel";
 import { BuddyPersonalityPanel, type NeedRow } from "./BuddyPersonalityPanel";
 import { BuddyActivityPanel } from "./BuddyActivityPanel";
 import {
@@ -831,6 +832,7 @@ export const BuddyHome: React.FC = () => {
         <div className={styles.row} data-testid="buddy-home-new-sections">
           <BuddyPulseCard />
           <BuddyOpportunitiesFeed />
+          <BuddyConductorGoalsPanel compact />
         </div>
 
         <BuddyPersonalityPanel

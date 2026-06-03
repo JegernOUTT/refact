@@ -4058,6 +4058,7 @@ describe("buddy opportunities, pulse, and drafts", () => {
       { type: "task_workspace", task_id: "task-123" },
       { type: "knowledge_graph" },
       { type: "worktrees" },
+      { type: "conductor" },
       { type: "setup_mode", mode: "setup_mcp" },
     ];
     const types = pages.map((p) => p.type);
@@ -4095,6 +4096,7 @@ describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
       [{ type: "tasks_list" }, "tasks list"],
       [{ type: "knowledge_graph" }, "knowledge graph"],
       [{ type: "worktrees" }, "tasks list"],
+      [{ type: "conductor" }, "conductor"],
     ];
 
     for (const [page, expectedName] of cases) {

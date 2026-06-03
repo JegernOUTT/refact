@@ -122,6 +122,11 @@ export async function executeBuddyAction(
       dispatch(clearActiveSpeech());
       break;
 
+    case "open_conductor":
+      navigateFromBuddyPage({ type: "conductor" }, dispatch);
+      dispatch(clearActiveSpeech());
+      break;
+
     case "investigate_error": {
       dispatch(clearActiveSpeech());
       if (!investigation) break;
@@ -300,6 +305,10 @@ export function executeBuddyNavigation(
 
     case "worktrees":
       dispatch(push({ name: "tasks list" }));
+      break;
+
+    case "conductor":
+      dispatch(push({ name: "conductor" }));
       break;
 
     case "setup_mode":

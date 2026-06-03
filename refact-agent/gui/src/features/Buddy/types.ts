@@ -719,6 +719,7 @@ export type BuddyPage =
   | { type: "task_workspace"; task_id: string }
   | { type: "knowledge_graph" }
   | { type: "worktrees" }
+  | { type: "conductor" }
   | { type: "setup_mode"; mode: string };
 
 export interface InvestigationContext {

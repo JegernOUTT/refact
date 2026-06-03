@@ -103,6 +103,10 @@ export interface BuddyPage {
   draftId?: string;
 }
 
+export interface ConductorPage {
+  name: "conductor";
+}
+
 export interface IntegrationsSetupPage {
   name: "integrations page";
   projectPath?: string;
@@ -135,7 +139,8 @@ export type Page =
   | CommandsMarketplacePage
   | SubagentsMarketplacePage
   | MarketplaceHubPage
-  | BuddyPage;
+  | BuddyPage
+  | ConductorPage;
 
 export function isIntegrationSetupPage(
   page: Page,

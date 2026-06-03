@@ -65,6 +65,7 @@ import { MarketplaceHub } from "./MarketplaceHub";
 import { StatsDashboard } from "./StatsDashboard";
 import { Dashboard } from "./Dashboard";
 import { BuddyHome } from "./Buddy/BuddyHome";
+import { BuddyConductorGoalsPanel } from "./Buddy/BuddyConductorGoalsPanel";
 import { BuddyErrorBoundary } from "./Buddy/BuddyErrorBoundary";
 import { SchedulerPanel } from "./Scheduler";
 import { ChatLoading } from "../components/ChatContent/ChatLoading";
@@ -592,6 +593,9 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
               />
             )}
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
+            {!pageSwitching && renderedPage.name === "conductor" && (
+              <BuddyConductorGoalsPanel />
+            )}
             {!pageSwitching && renderedPage.name === "scheduler" && (
               <SchedulerPanel onBack={goBack} />
             )}

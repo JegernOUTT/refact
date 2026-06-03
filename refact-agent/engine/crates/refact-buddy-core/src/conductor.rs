@@ -533,6 +533,22 @@ mod tests {
                 no_progress_wakes: 1,
             },
             ledger: GoalLedger {
+                title: Some("Ship conductor".to_string()),
+                plan_doc_slug: Some("master-plan".to_string()),
+                plan_markdown: Some("# Ship conductor\nImplement the plan.".to_string()),
+                done_when: Some(DoneWhen {
+                    summary: "All conductor cards are done".to_string(),
+                    checklist: vec!["tests pass".to_string()],
+                }),
+                budget: Some(GoalBudget {
+                    wall_clock_secs: Some(7200),
+                    no_progress_wakes: Some(4),
+                    total_tokens: Some(100_000),
+                    usd: Some(5.5),
+                }),
+                created_at: Some("2026-06-03T00:00:00Z".to_string()),
+                updated_at: Some("2026-06-03T00:00:03Z".to_string()),
+                completed_at: None,
                 status: Some(GoalStatus::Running),
                 autonomy: Some(GoalAutonomy::FullAuto),
                 planner_task_id: Some("task-1".to_string()),

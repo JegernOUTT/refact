@@ -208,6 +208,22 @@ mod tests {
 
     fn sample_ledger() -> GoalLedger {
         GoalLedger {
+            title: Some("Stored goal".to_string()),
+            plan_doc_slug: Some("plan-doc".to_string()),
+            plan_markdown: Some("# Stored goal".to_string()),
+            done_when: Some(crate::conductor::DoneWhen {
+                summary: "Done".to_string(),
+                checklist: vec!["stored".to_string()],
+            }),
+            budget: Some(crate::conductor::GoalBudget {
+                wall_clock_secs: Some(60),
+                no_progress_wakes: Some(2),
+                total_tokens: Some(1000),
+                usd: Some(1.0),
+            }),
+            created_at: Some("2026-06-03T00:00:00Z".to_string()),
+            updated_at: Some("2026-06-03T00:00:03Z".to_string()),
+            completed_at: None,
             status: Some(crate::conductor::GoalStatus::Running),
             autonomy: Some(crate::conductor::GoalAutonomy::FullAuto),
             planner_task_id: Some("planner-task".to_string()),

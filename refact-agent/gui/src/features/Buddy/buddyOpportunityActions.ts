@@ -178,6 +178,8 @@ function humanizePage(page: BuddyPage): string {
       return "Knowledge Graph";
     case "worktrees":
       return "Worktrees";
+    case "conductor":
+      return "Conductor";
     case "setup_mode":
       return "Setup";
   }
