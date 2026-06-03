@@ -57,10 +57,16 @@ tools:
   - web
   - web_search
   - knowledge
+  - search_trajectories
+  - get_trajectory_context
   - strategic_planning
   - code_review
+  - swarm_investigate
   - get_plan
+  - set_plan
   - update_plan
+  - compress_chat_probe
+  - compress_chat_apply
   - task_overview
   - board_get
   - ready_cards
