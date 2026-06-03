@@ -60,6 +60,20 @@ pub struct AutonomyRequest {
     pub autonomy: GoalAutonomy,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConductorAnswerRequest {
+    pub goal_id: String,
+    pub question_id: String,
+    pub answer: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConductorAnswerResponse {
+    pub goal_id: String,
+    pub question_id: String,
+    pub answered: bool,
+}
+
 pub async fn handle_v1_buddy_conductor_goals_list(
     State(app): State<AppState>,
 ) -> Result<axum::Json<ConductorGoalsResponse>, ScratchError> {
@@ -226,6 +240,35 @@ pub async fn handle_v1_buddy_conductor_goal_manual_wake(
     ))
 }
 
+pub async fn handle_v1_buddy_conductor_answer(
+    State(app): State<AppState>,
+    axum::Json(req): axum::Json<ConductorAnswerRequest>,
+) -> Result<axum::Json<ConductorAnswerResponse>, ScratchError> {
+    let goal_id = req.goal_id.trim().to_string();
+    let question_id = req.question_id.trim().to_string();
+    let answer = req.answer.trim().to_string();
+    if goal_id.is_empty() || question_id.is_empty() || answer.is_empty() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "goal_id, question_id, and answer are required".to_string(),
+        ));
+    }
+    let project_root = project_root(&app).await?;
+    let result = crate::buddy::conductor::ghost::conductor_ghost_answer(
+        app,
+        &project_root,
+        &goal_id,
+        &question_id,
+        &answer,
+    )
+    .await?;
+    Ok(axum::Json(ConductorAnswerResponse {
+        goal_id: result.goal_id,
+        question_id: result.question_id,
+        answered: result.answered,
+    }))
+}
+
 async fn set_goal_status(
     app: AppState,
     goal_id: String,
@@ -333,6 +376,13 @@ mod tests {
     use crate::app_state::AppState;
     use refact_buddy_core::conductor::{DoneWhen, GoalBudget};
     use refact_buddy_core::conductor_store::load_goal_ledger;
+    use async_trait::async_trait;
+    use refact_chat_api::ChatCommand;
+    use refact_runtime_api::{
+        ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest,
+        RuntimeTrajectorySnapshot, SessionState,
+    };
+    use std::sync::{Arc, Mutex as StdMutex};
     use tokio::time::timeout;
 
     async fn test_app() -> (AppState, tempfile::TempDir) {
@@ -344,6 +394,76 @@ mod tests {
         .await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         (AppState::from_gcx(gcx).await, dir)
+    }
+
+    struct MockChatFacade {
+        pushed: StdMutex<Vec<(String, ChatCommand)>>,
+        updates: StdMutex<usize>,
+    }
+
+    impl MockChatFacade {
+        fn new() -> Self {
+            Self {
+                pushed: StdMutex::new(Vec::new()),
+                updates: StdMutex::new(0),
+            }
+        }
+
+        fn pushed_commands(&self) -> Vec<(String, ChatCommand)> {
+            self.pushed.lock().unwrap().clone()
+        }
+
+        fn update_count(&self) -> usize {
+            *self.updates.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl ChatSessionFacade for MockChatFacade {
+        async fn session_snapshot(&self, _chat_id: &str) -> Result<ChatSessionSnapshot, String> {
+            Ok(ChatSessionSnapshot {
+                messages: vec![],
+                thread: refact_chat_api::ThreadParams::default(),
+                session_state: SessionState::Idle,
+                pause_reasons: vec![],
+            })
+        }
+
+        async fn update_session(
+            &self,
+            _chat_id: &str,
+            _update: ChatSessionUpdate,
+        ) -> Result<(), String> {
+            *self.updates.lock().unwrap() += 1;
+            Ok(())
+        }
+
+        async fn create_session(&self, _request: CreateSessionRequest) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn push_command(&self, chat_id: &str, command: ChatCommand) -> Result<(), String> {
+            self.pushed
+                .lock()
+                .unwrap()
+                .push((chat_id.to_string(), command));
+            Ok(())
+        }
+
+        async fn session_state(&self, _chat_id: &str) -> Result<Option<SessionState>, String> {
+            Ok(Some(SessionState::Idle))
+        }
+
+        async fn maybe_save_session(&self, _chat_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn save_trajectory_snapshot(
+            &self,
+            _snapshot: RuntimeTrajectorySnapshot,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn create_req(id: &str) -> CreateConductorGoalRequest {
@@ -523,6 +643,54 @@ mod tests {
             }
             other => panic!("expected ConductorGoalUpdated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_answer_persists_and_enqueues_ghost_answer_only() {
+        let (app, dir) = test_app().await;
+        create_goal(app.clone(), "goal-answer").await;
+        let mock = Arc::new(MockChatFacade::new());
+        let mut app = app;
+        app.chat.facade = mock.clone();
+        let ask = crate::buddy::conductor::ghost::conductor_ghost_ask(
+            app.gcx.clone(),
+            dir.path(),
+            "goal-answer",
+            "Can I proceed?",
+            true,
+            Some("target-chat".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let response = handle_v1_buddy_conductor_answer(
+            State(app.clone()),
+            axum::Json(ConductorAnswerRequest {
+                goal_id: "goal-answer".to_string(),
+                question_id: ask.question.id.clone(),
+                answer: "Yes, tiny gremlin".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert!(response.answered);
+        assert_eq!(response.question_id, ask.question.id);
+        let ledger = load_goal_ledger(dir.path(), "goal-answer")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ledger.pending_questions[0].answer.as_deref(),
+            Some("Yes, tiny gremlin")
+        );
+        assert!(ledger.pending_questions[0].answered_at.is_some());
+        assert!(mock.pushed_commands().is_empty());
+        assert_eq!(mock.update_count(), 0);
+        let bus = app.buddy.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-answer").unwrap();
+        assert!(mailbox.reasons.contains(&ConductorWakeReason::GhostAnswer));
     }
 
     #[tokio::test]

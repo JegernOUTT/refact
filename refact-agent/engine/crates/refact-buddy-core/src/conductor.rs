@@ -264,6 +264,7 @@ pub struct GoalLedger {
     pub chat_ids: Vec<String>,
     pub memos: Vec<ConductorMemo>,
     pub learning_records: Vec<ConductorLearningRecord>,
+    pub ghost_messages: Vec<crate::types::BuddyGhostMessage>,
     pub pending_questions: Vec<PendingQuestion>,
     #[serde(default)]
     pub no_progress_wakes: u32,
@@ -546,6 +547,7 @@ mod tests {
                     related_task_id: Some("task-1".to_string()),
                 }],
                 learning_records: Vec::new(),
+                ghost_messages: Vec::new(),
                 pending_questions: vec![PendingQuestion {
                     id: "question-1".to_string(),
                     question: "Continue?".to_string(),

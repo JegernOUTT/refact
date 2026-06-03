@@ -1071,6 +1071,7 @@ mod tests {
                     },
                 ],
                 learning_records: Vec::new(),
+                ghost_messages: Vec::new(),
                 pending_questions: vec![PendingQuestion {
                     id: "question-1".to_string(),
                     question: "Should conductor continue automatically?".to_string(),

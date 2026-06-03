@@ -4,10 +4,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use refact_buddy_core::conductor::{
-    ConductorGoal, ConductorMemo, GoalAutonomy, GoalLedger, GoalStatus, MemoKind, PendingQuestion,
+    ConductorGoal, ConductorMemo, GoalAutonomy, GoalLedger, GoalStatus, MemoKind,
 };
 use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
-use refact_buddy_core::types::{BuddyGhostMessage, BuddyGhostMessageRole};
 use refact_chat_api::{ChatCommand, MessageOrigin};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
@@ -577,14 +576,17 @@ impl Tool for ToolConductorSay {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, goal_id, _ledger) = goal_context(&ccx, args).await?;
         let message = cap(&required_string(args, "message")?, MAX_CONTENT_CHARS);
-        emit_ghost_message(
+        let source_chat_id = ccx.lock().await.chat_id.clone();
+        let project_root = conductor_project_root(gcx.clone()).await?;
+        crate::buddy::conductor::ghost::conductor_ghost_say(
             gcx,
+            &project_root,
             &goal_id,
-            BuddyGhostMessageRole::Say,
-            message.clone(),
-            None,
+            &message,
+            Some(source_chat_id),
         )
-        .await;
+        .await
+        .map_err(|error| error.message)?;
         tool_message(tool_call_id, format!("✅ Conductor said: {message}"))
     }
 
@@ -610,61 +612,38 @@ impl Tool for ToolConductorAsk {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
+        let (gcx, goal_id, ledger) = goal_context(&ccx, args).await?;
         ensure_can_mutate(&ledger, "ask questions")?;
         let question = cap(&required_string(args, "question")?, MAX_CONTENT_CHARS);
         let blocking = args
             .get("blocking")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let question_id = Uuid::new_v4().to_string();
         let source_chat_id = ccx.lock().await.chat_id.clone();
-        ledger.pending_questions.push(PendingQuestion {
-            id: question_id.clone(),
-            question: question.clone(),
-            asked_at: Utc::now().to_rfc3339(),
-            source_chat_id: Some(source_chat_id.clone()),
-            blocking,
-            answer: None,
-            answered_at: None,
-        });
-        persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
-        emit_ghost_message(
+        let project_root = conductor_project_root(gcx.clone()).await?;
+        let result = crate::buddy::conductor::ghost::conductor_ghost_ask(
             gcx.clone(),
+            &project_root,
             &goal_id,
-            BuddyGhostMessageRole::Ask,
-            question.clone(),
-            Some(question_id),
+            &question,
+            blocking,
+            Some(source_chat_id),
         )
-        .await;
+        .await
+        .map_err(|error| error.message)?;
+        let ledger = load_goal_ledger(&project_root, &goal_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
         emit_goal_updated(gcx, &goal_id, &ledger).await;
-        tool_message(tool_call_id, format!("✅ Conductor asked: {question}"))
+        tool_message(
+            tool_call_id,
+            format!("✅ Conductor asked [{}]: {question}", result.question.id),
+        )
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
-    }
-}
-
-async fn emit_ghost_message(
-    gcx: Arc<GlobalContext>,
-    goal_id: &str,
-    role: BuddyGhostMessageRole,
-    content: String,
-    question_id: Option<String>,
-) {
-    if let Some(tx) = gcx.buddy_events_tx.as_ref() {
-        let _ = tx.send(BuddyEvent::ConductorGhostMessage {
-            ghost: BuddyGhostMessage {
-                id: Uuid::new_v4().to_string(),
-                goal_id: Some(goal_id.to_string()),
-                role,
-                content,
-                created_at: Utc::now().to_rfc3339(),
-                source_chat_id: None,
-                question_id,
-            },
-        });
     }
 }
 
@@ -681,6 +660,7 @@ mod tests {
 
     struct MockChatFacade {
         pushed: StdMutex<Vec<(String, ChatCommand)>>,
+        updates: StdMutex<usize>,
         thread: StdMutex<refact_chat_api::ThreadParams>,
     }
 
@@ -688,12 +668,17 @@ mod tests {
         fn new(thread: refact_chat_api::ThreadParams) -> Self {
             Self {
                 pushed: StdMutex::new(Vec::new()),
+                updates: StdMutex::new(0),
                 thread: StdMutex::new(thread),
             }
         }
 
         fn pushed_commands(&self) -> Vec<(String, ChatCommand)> {
             self.pushed.lock().unwrap().clone()
+        }
+
+        fn update_count(&self) -> usize {
+            *self.updates.lock().unwrap()
         }
     }
 
@@ -713,6 +698,7 @@ mod tests {
             _chat_id: &str,
             _update: ChatSessionUpdate,
         ) -> Result<(), String> {
+            *self.updates.lock().unwrap() += 1;
             Ok(())
         }
 
@@ -982,6 +968,46 @@ mod tests {
             .unwrap();
         assert!(ledger.planner_task_id.is_some());
         assert_eq!(ledger.autonomy, Some(GoalAutonomy::FullAuto));
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_tools_do_not_mutate_target_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-ghost-tools", &GoalLedger::default())
+            .await
+            .unwrap();
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-ghost-tools")));
+        let mut say = ToolConductorSay::new();
+        let mut ask = ToolConductorAsk::new();
+
+        say.tool_execute(
+            ccx(gcx.clone(), mock.clone()).await,
+            &"say".to_string(),
+            &args(&[("message", json!("Status without transcript poking"))]),
+        )
+        .await
+        .unwrap();
+        ask.tool_execute(
+            ccx(gcx.clone(), mock.clone()).await,
+            &"ask".to_string(),
+            &args(&[
+                ("question", json!("Answer outside provider transcript?")),
+                ("blocking", json!(false)),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert!(mock.pushed_commands().is_empty());
+        assert_eq!(mock.update_count(), 0);
+        let ledger = load_goal_ledger(dir.path(), "goal-ghost-tools")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.ghost_messages.len(), 2);
+        assert_eq!(ledger.pending_questions.len(), 1);
+        assert!(!ledger.pending_questions[0].blocking);
     }
 
     #[tokio::test]

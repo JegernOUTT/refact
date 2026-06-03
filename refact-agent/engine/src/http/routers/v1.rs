@@ -834,6 +834,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             post(buddy_conductor::handle_v1_buddy_conductor_goal_manual_wake),
         )
         .route(
+            "/buddy/conductor/answer",
+            post(buddy_conductor::handle_v1_buddy_conductor_answer),
+        )
+        .route(
             "/buddy/user_action",
             post(buddy::handle_v1_buddy_user_action),
         )
