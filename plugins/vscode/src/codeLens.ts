@@ -147,7 +147,7 @@ const postMessageToWebview = ({messages, value, send_immediately}: {messages?: C
         value,
         send_immediately
     });
-    global.side_panel._view.webview.postMessage(eventMessage);
+    global.side_panel.postMessageToChat(eventMessage);
 };
 
 const replaceVariablesInText = (

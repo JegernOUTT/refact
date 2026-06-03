@@ -31,9 +31,8 @@ import {
 import { useGetPing } from "../hooks/useGetPing";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
 import { FIMDebug } from "./FIM";
-import { store, persistor } from "../app/store";
+import { store } from "../app/store";
 import { Provider } from "react-redux";
-import { PersistGate } from "redux-persist/integration/react";
 import { Theme } from "../components/Theme";
 import { useEventBusForWeb } from "../hooks/useEventBusForWeb";
 import {
@@ -83,12 +82,16 @@ import classNames from "classnames";
 import { usePatchesAndDiffsEventsForIDE } from "../hooks/usePatchesAndDiffEventsForIDE";
 import { hasAnyUsableActiveProvider } from "./Login/providerAccess";
 import {
+  isProjectStorageNamespaceTrusted,
   loadPersistedActiveTab,
   savePersistedActiveTab,
 } from "../utils/chatUiPersistence";
 import { InternalLinkProvider } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
 import { ProcessCompletedToasts } from "./Notifications";
+import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
+
+const STARTUP_SPLASH_DEADLINE_MS = 12_000;
 
 export interface AppProps {
   style?: React.CSSProperties;
@@ -100,6 +103,9 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const sawZeroHeightRef = useRef(false);
   const crashSessionStartedRef = useRef(false);
   const restoredActiveTabRef = useRef(false);
+  const persistedActiveTabRef = useRef<ReturnType<
+    typeof loadPersistedActiveTab
+  > | null>(null);
 
   const pages = useAppSelector(selectPages);
   const isStreaming = useAppSelector(selectIsStreaming);
@@ -139,7 +145,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const config = useConfig();
 
-  useEffect(() => {
+  useEffectOnce(() => {
     if (crashSessionStartedRef.current) return;
     crashSessionStartedRef.current = true;
 
@@ -171,7 +177,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       window.removeEventListener("beforeunload", onPageHide);
       closeBuddyCrashSession("unmount");
     };
-  }, [chatId, config.host, isStreaming, pages]);
+  });
 
   useEffect(() => {
     touchBuddyCrashSession({
@@ -282,6 +288,22 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const canAccessApp = hasAnyActiveProvider;
   const canResolveProviderAccess = providersQuery.isSuccess;
   const [startupResolved, setStartupResolved] = useState(false);
+  const [startupDeadlineReached, setStartupDeadlineReached] = useState(false);
+  const hasEndpoint = hasUsableEngineEndpoint(config);
+
+  useEffect(() => {
+    setStartupDeadlineReached(false);
+    const timeoutId = setTimeout(() => {
+      setStartupDeadlineReached(true);
+    }, STARTUP_SPLASH_DEADLINE_MS);
+    return () => clearTimeout(timeoutId);
+  }, [
+    config.dev,
+    config.engineServed,
+    config.host,
+    config.lspPort,
+    config.lspUrl,
+  ]);
 
   useEffect(() => {
     if (backendStatus !== "online") {
@@ -295,6 +317,8 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   }, [backendStatus, providersQuery.isError, providersQuery.isSuccess]);
 
   const showStartupSplash =
+    !startupDeadlineReached &&
+    hasEndpoint &&
     !startupResolved &&
     backendLastOkAt === null &&
     (backendStatus !== "online" ||
@@ -411,18 +435,25 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useEffect(() => {
     if (restoredActiveTabRef.current) return;
     if (!canAccessApp || !isLoggedIn) return;
+    if (!isProjectStorageNamespaceTrusted()) return;
 
-    restoredActiveTabRef.current = true;
-    const persistedActiveTab = loadPersistedActiveTab();
-    if (!persistedActiveTab) return;
+    const persistedActiveTab =
+      persistedActiveTabRef.current ?? loadPersistedActiveTab();
+    persistedActiveTabRef.current = persistedActiveTab;
+    if (!persistedActiveTab) {
+      restoredActiveTabRef.current = true;
+      return;
+    }
 
     if (persistedActiveTab.type === "dashboard") {
+      restoredActiveTabRef.current = true;
       dispatch(popBackTo({ name: "history" }));
       return;
     }
 
     if (persistedActiveTab.type === "chat") {
       if (!allThreads[persistedActiveTab.id]) return;
+      restoredActiveTabRef.current = true;
       dispatch(switchToThread({ id: persistedActiveTab.id }));
       dispatch(popBackTo({ name: "history" }));
       dispatch(push({ name: "chat" }));
@@ -430,6 +461,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     }
 
     if (openTasks.some((task) => task.id === persistedActiveTab.taskId)) {
+      restoredActiveTabRef.current = true;
       dispatch(popBackTo({ name: "history" }));
       dispatch(
         push({ name: "task workspace", taskId: persistedActiveTab.taskId }),
@@ -608,24 +640,13 @@ export const App = () => {
   return (
     <BuddyErrorBoundary>
       <Provider store={store}>
-        <PersistGate
-          persistor={persistor}
-          loading={
-            <AbortControllerProvider>
-              <Theme>
-                <SplashScreen />
-              </Theme>
-            </AbortControllerProvider>
-          }
-        >
-          <Theme>
-            <AbortControllerProvider>
-              <BuddyErrorBoundary>
-                <InnerApp />
-              </BuddyErrorBoundary>
-            </AbortControllerProvider>
-          </Theme>
-        </PersistGate>
+        <Theme>
+          <AbortControllerProvider>
+            <BuddyErrorBoundary>
+              <InnerApp />
+            </BuddyErrorBoundary>
+          </AbortControllerProvider>
+        </Theme>
       </Provider>
     </BuddyErrorBoundary>
   );

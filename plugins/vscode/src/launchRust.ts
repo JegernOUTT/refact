@@ -23,6 +23,8 @@ export class RustBinaryBlob {
     public lsp_socket: net.Socket | undefined = undefined;
     public lsp_client_options: lspClient.LanguageClientOptions;
     public ping_response: string = "";
+    private lifecycleQueue: Promise<void> = Promise.resolve();
+    private lifecycleGeneration: number = 0;
 
     constructor(asset_path: string) {
         this.asset_path = asset_path;
@@ -109,8 +111,22 @@ export class RustBinaryBlob {
     }
 
     public async settings_changed() {
+        return this.enqueueLifecycle(async (generation) => this.settings_changed_serialized(generation));
+    }
+
+    private enqueueLifecycle(operation: (generation: number) => Promise<void>): Promise<void> {
+        const generation = ++this.lifecycleGeneration;
+        const run = this.lifecycleQueue.catch(() => undefined).then(() => operation(generation));
+        this.lifecycleQueue = run.catch(() => undefined);
+        return run;
+    }
+
+    private async settings_changed_serialized(generation: number) {
         try {
             for (let i = 0; i < 5; i++) {
+                if (generation !== this.lifecycleGeneration) {
+                    return;
+                }
                 console.log(`RUST settings changed, attempt to restart ${i + 1}`);
                 let xdebug = this.x_debug();
                 let port: number;
@@ -129,12 +145,15 @@ export class RustBinaryBlob {
                     console.log(`RUST debug is set, don't start the rust binary. Will attempt HTTP port ${DEBUG_HTTP_PORT}, LSP port ${DEBUG_LSP_PORT}`);
                     console.log("Also, will try to read caps. If that fails, things like lists of available models will be empty.");
                     this.cmdline = [];
-                    await this.terminate();  // terminate our own
+                    await this.terminate_serialized(generation);  // terminate our own
+                    if (generation !== this.lifecycleGeneration) {
+                        return;
+                    }
                     await this.read_caps();  // debugging rust already running, can read here
 
                     await this.fetch_toolbox_config();
                     // await register_commands();
-                    await this.start_lsp_socket();
+                    await this.start_lsp_socket(generation);
                     return;
                 }
                 const httpHost = vscode.workspace.getConfiguration().get<string>("refactai.httpHost")?.trim() || "0.0.0.0";
@@ -173,7 +192,7 @@ export class RustBinaryBlob {
                     this.cmdline = new_cmdline;
                     this.port = port;
                     this.ping_response = ping_response;
-                    await this.launch();
+                    await this.launch_serialized(generation);
                 }
                 if (this.lsp_disposable !== undefined) {
                     break;
@@ -185,32 +204,42 @@ export class RustBinaryBlob {
     }
 
     public async launch() {
-        await this.terminate();
+        return this.enqueueLifecycle(async (generation) => this.launch_serialized(generation));
+    }
+
+    private async launch_serialized(generation: number) {
+        await this.terminate_serialized(generation);
+        if (generation !== this.lifecycleGeneration) {
+            return;
+        }
         let xdebug = this.x_debug();
         if (xdebug) {
-            await this.start_lsp_socket();
+            await this.start_lsp_socket(generation);
         } else {
-            await this.start_lsp_stdin_stdout();
+            await this.start_lsp_stdin_stdout(generation);
         }
     }
 
-    public stop_lsp() {
+    public async stop_lsp(generation: number = this.lifecycleGeneration) {
         let my_lsp_client_copy = this.lsp_client;
         if (my_lsp_client_copy) {
             console.log("RUST STOP");
             let ts = Date.now();
-            my_lsp_client_copy.stop()   // will complete in the background, otherwise it might die inside stop() such that execution never reaches even finally() and we don't know how to restart the process :/
-                .then(() => {
-                    console.log(`RUST /STOP completed in ${Date.now() - ts}ms`);
-                })
-                .catch((e) => {
-                    console.log(`RUST STOP ERROR e=${e}`);
-                })
-                .finally(() => {
-                    console.log("RUST STOP FINALLY");
-                });
+            try {
+                await Promise.race([
+                    my_lsp_client_copy.stop(),
+                    new Promise<void>(resolve => setTimeout(resolve, 5000)),
+                ]);
+                console.log(`RUST /STOP completed in ${Date.now() - ts}ms`);
+            } catch (e) {
+                console.log(`RUST STOP ERROR e=${e}`);
+            } finally {
+                console.log("RUST STOP FINALLY");
+            }
         }
-        this.lsp_dispose();
+        if (generation === this.lifecycleGeneration) {
+            this.lsp_dispose();
+        }
     }
 
     public lsp_dispose() {
@@ -223,7 +252,14 @@ export class RustBinaryBlob {
     }
 
     public async terminate() {
-        this.stop_lsp();
+        return this.enqueueLifecycle(async (generation) => this.terminate_serialized(generation));
+    }
+
+    private async terminate_serialized(generation: number) {
+        await this.stop_lsp(generation);
+        if (generation !== this.lifecycleGeneration) {
+            return;
+        }
         await fetchH2.disconnectAll();
         global.have_caps = false;
         global.status_bar.choose_color();
@@ -300,7 +336,7 @@ export class RustBinaryBlob {
         return false;
     }
 
-    public async start_lsp_stdin_stdout() {
+    public async start_lsp_stdin_stdout(generation: number = this.lifecycleGeneration) {
         console.log("RUST start_lsp_stdint_stdout");
         let path = this.cmdline[0];
         let serverOptions: lspClient.ServerOptions;
@@ -336,6 +372,9 @@ export class RustBinaryBlob {
 
         try {
             while (true) {
+                if (generation !== this.lifecycleGeneration) {
+                    return;
+                }
                 const elapsedTime = Date.now() - startTime;
                 if (started_okay) {
                     console.log(`${logts()} RUST /START after ${elapsedTime}ms`);
@@ -352,11 +391,17 @@ export class RustBinaryBlob {
             this.lsp_dispose();
             return;
         }
+        if (generation !== this.lifecycleGeneration) {
+            return;
+        }
 
         let success = await this.ping();
         if (!success) {
             console.log("RUST ping failed");
             this.lsp_dispose();
+            return;
+        }
+        if (generation !== this.lifecycleGeneration) {
             return;
         }
         // At this point we had successful client_info and workspace_folders server to client calls,
@@ -366,7 +411,7 @@ export class RustBinaryBlob {
         await this.fetch_toolbox_config();
     }
 
-    public async start_lsp_socket() {
+    public async start_lsp_socket(generation: number = this.lifecycleGeneration) {
         console.log("RUST start_lsp_socket");
         this.lsp_socket = new net.Socket();
         this.lsp_socket.on('error', (error) => {
@@ -380,6 +425,9 @@ export class RustBinaryBlob {
             this.lsp_dispose();
         });
         this.lsp_socket.on('connect', async () => {
+            if (generation !== this.lifecycleGeneration) {
+                return;
+            }
             console.log("RUST LSP socket connected");
             this.lsp_client = new lspClient.LanguageClient(
                 'Custom rust LSP server',
@@ -399,6 +447,9 @@ export class RustBinaryBlob {
             console.log(`RUST DEBUG START`);
             try {
                 await this.lsp_client.onReady();
+                if (generation !== this.lifecycleGeneration) {
+                    return;
+                }
                 console.log(`RUST DEBUG /START`);
             } catch (e) {
                 console.log(`RUST DEBUG START PROBLEM e=${e}`);

@@ -122,7 +122,12 @@ export function hasUsableEngineEndpoint(config: EngineApiConfig): boolean {
   const host = config.host ?? "web";
   const baseUrl = resolveEngineBaseUrl(config);
 
-  if (baseUrl === "") return host === "web";
+  if (baseUrl === "") {
+    return (
+      host === "web" &&
+      ((config.dev ?? false) || (config.engineServed ?? false))
+    );
+  }
   if (sanitizeEngineBaseUrl(config.lspUrl) !== null) return true;
   return host !== "web" && isValidLspPort(config.lspPort);
 }

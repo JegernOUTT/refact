@@ -109,6 +109,7 @@ export type SidebarSubscriptionCallbacks = {
 };
 
 const IDLE_TIMEOUT_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 10_000;
 const MAX_SSE_BLOCK_BYTES = 4 * 1024 * 1024;
 
 function hasArrayProperty(obj: Record<string, unknown>, key: string): boolean {
@@ -403,6 +404,14 @@ export function subscribeToSidebarEvents(
   const url = buildApiUrl(config, "/v1/sidebar/subscribe");
   const abortController = new AbortController();
   const state = { connected: false, lastSeq: -1, aborted: false };
+  let reportedStreamError = false;
+  let connectTimedOut = false;
+  let connectTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    if (!state.connected && !state.aborted) {
+      connectTimedOut = true;
+      abortController.abort();
+    }
+  }, CONNECT_TIMEOUT_MS);
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const headers: Record<string, string> = {};
@@ -424,7 +433,16 @@ export function subscribeToSidebarEvents(
     state.lastSeq = seq;
   };
 
+  const reportStreamError = (error: Error) => {
+    reportedStreamError = true;
+    callbacks.onError(error);
+  };
+
   const cleanup = () => {
+    if (connectTimer) {
+      clearTimeout(connectTimer);
+      connectTimer = null;
+    }
     if (idleTimer) {
       clearTimeout(idleTimer);
       idleTimer = null;
@@ -453,6 +471,10 @@ export function subscribeToSidebarEvents(
       }
 
       state.connected = true;
+      if (connectTimer) {
+        clearTimeout(connectTimer);
+        connectTimer = null;
+      }
       callbacks.onConnected?.();
       resetIdleTimer();
       callbacks.onLiveness?.();
@@ -479,7 +501,7 @@ export function subscribeToSidebarEvents(
             if (block.length > MAX_SSE_BLOCK_BYTES) {
               errorSidebarBlockTooLarge();
               const blockTooLarge = new Error("sse_block_too_large");
-              callbacks.onError(blockTooLarge);
+              reportStreamError(blockTooLarge);
               throw blockTooLarge;
             }
             buffer = buffer.slice(idx + 2);
@@ -488,8 +510,12 @@ export function subscribeToSidebarEvents(
               const parsed = tryParseSidebarEvent(dataStr);
               if (!parsed) {
                 const skippedSeq = tryReadSidebarEnvelopeSeq(dataStr);
-                if (skippedSeq !== null) advanceSeq(skippedSeq);
                 warnSkippedSidebarEvent(dataStr);
+                if (skippedSeq !== null) {
+                  const malformedEvent = new Error("malformed_sidebar_event");
+                  reportStreamError(malformedEvent);
+                  throw malformedEvent;
+                }
               } else {
                 advanceSeq(parsed.seq);
                 if (isDispatchedSidebarEvent(parsed.event)) {
@@ -510,7 +536,7 @@ export function subscribeToSidebarEvents(
           if (buffer.length > MAX_SSE_BLOCK_BYTES) {
             errorSidebarBlockTooLarge();
             const blockTooLarge = new Error("sse_block_too_large");
-            callbacks.onError(blockTooLarge);
+            reportStreamError(blockTooLarge);
             throw blockTooLarge;
           }
         }
@@ -522,10 +548,9 @@ export function subscribeToSidebarEvents(
     })
     .catch((err: unknown) => {
       const error = err as Error;
-      if (
-        error.name !== "AbortError" &&
-        error.message !== "sse_block_too_large"
-      ) {
+      if (error.name === "AbortError" && connectTimedOut) {
+        callbacks.onError(new Error("sse_connect_timeout"));
+      } else if (error.name !== "AbortError" && !reportedStreamError) {
         callbacks.onError(error);
       }
       cleanup();

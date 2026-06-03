@@ -609,9 +609,9 @@ pub async fn handle_patch_board(
                         let is_active = {
                             let card = &board.cards[idx];
                             card.column == "doing"
-                                && (card.agent_chat_id.is_some()
-                                    || card.agent_worktree.is_some()
-                                    || card.agent_branch.is_some())
+                                || card.agent_chat_id.is_some()
+                                || card.agent_worktree.is_some()
+                                || card.agent_branch.is_some()
                         };
                         if is_active && !force.unwrap_or(false) {
                             return Err(format!("active agent card: {}", card_id));
@@ -1168,9 +1168,9 @@ pub async fn handle_tasks_subscribe(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let (rx, seq_counter, tasks) = {
-        let rx = match &gcx.task_events_tx {
-            Some(tx) => tx.subscribe(),
+    let (tx, rx, seq_counter, snapshot_seq, tasks) = {
+        let tx = match &gcx.task_events_tx {
+            Some(tx) => tx.clone(),
             None => {
                 return Err(ScratchError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1184,15 +1184,16 @@ pub async fn handle_tasks_subscribe(
                 "Task events seq not available".to_string(),
             )
         })?;
+        let snapshot_seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+        let rx = tx.subscribe();
         let tasks = list_tasks_with_session_state(gcx.clone())
             .await
-            .unwrap_or_default();
-        (rx, seq_counter, tasks)
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        (tx, rx, seq_counter, snapshot_seq, tasks)
     };
 
     let stream = async_stream::stream! {
-        let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-        let envelope = TaskEventEnvelope { seq, event: TaskEvent::Snapshot { tasks } };
+        let envelope = TaskEventEnvelope { seq: snapshot_seq, event: TaskEvent::Snapshot { tasks } };
         let json = serde_json::to_string(&envelope).unwrap_or_default();
         yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
 
@@ -1212,11 +1213,23 @@ pub async fn handle_tasks_subscribe(
                             yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            let tasks = list_tasks_with_session_state(gcx.clone()).await.unwrap_or_default();
                             let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                            let envelope = TaskEventEnvelope { seq, event: TaskEvent::Snapshot { tasks } };
-                            let json = serde_json::to_string(&envelope).unwrap_or_default();
-                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                            rx = tx.subscribe();
+                            match list_tasks_with_session_state(gcx.clone()).await {
+                                Ok(tasks) => {
+                                    let envelope = TaskEventEnvelope { seq, event: TaskEvent::Snapshot { tasks } };
+                                    let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                                }
+                                Err(error) => {
+                                    let payload = serde_json::json!({
+                                        "type": "error",
+                                        "retryable": true,
+                                        "error": error,
+                                    });
+                                    yield Ok::<_, std::convert::Infallible>(format!("event: error\ndata: {}\n\n", payload));
+                                }
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }

@@ -6,6 +6,25 @@ use std::sync::Arc;
 
 const SUBAGENT_ID: &str = "compress_trajectory";
 
+fn assistant_text_after_prompt(messages: &[ChatMessage], prompt_idx: usize) -> Option<String> {
+    messages
+        .iter()
+        .skip(prompt_idx.saturating_add(1))
+        .rev()
+        .find_map(|message| {
+            if message.role != "assistant" {
+                return None;
+            }
+
+            let content = message.content.content_text_only().trim().to_string();
+            if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            }
+        })
+}
+
 pub async fn compress_trajectory(
     gcx: Arc<GlobalContext>,
     messages: &Vec<ChatMessage>,
@@ -44,25 +63,68 @@ pub async fn compress_trajectory(
                 content: ChatContent::SimpleText(compression_prompt.clone()),
                 ..Default::default()
             });
+            let compression_prompt_idx = messages_compress.len() - 1;
 
             let result = run_subchat_once(gcx2, SUBAGENT_ID, messages_compress)
                 .await
                 .map_err(|e| format!("compress_trajectory subchat failed: {}", e))?;
 
-            let content = result
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "assistant")
-                .map(|m| m.content.content_text_only())
-                .unwrap_or_default();
-            let content = content.trim().to_string();
-            if content.is_empty() {
-                return Err("Trajectory compression produced empty result".to_string());
-            }
+            let content = assistant_text_after_prompt(&result.messages, compression_prompt_idx)
+                .ok_or_else(|| "Trajectory compression produced empty result".to_string())?;
 
             Ok(content)
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(role: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn assistant_text_after_prompt_ignores_source_assistant() {
+        let messages = vec![
+            message("user", "source user"),
+            message("assistant", "old assistant"),
+            message("user", "compression prompt"),
+        ];
+
+        assert_eq!(assistant_text_after_prompt(&messages, 2), None);
+    }
+
+    #[test]
+    fn assistant_text_after_prompt_selects_new_assistant() {
+        let messages = vec![
+            message("user", "source user"),
+            message("assistant", "old assistant"),
+            message("user", "compression prompt"),
+            message("assistant", " compressed trajectory\n"),
+        ];
+
+        assert_eq!(
+            assistant_text_after_prompt(&messages, 2),
+            Some("compressed trajectory".to_string())
+        );
+    }
+
+    #[test]
+    fn assistant_text_after_prompt_ignores_blank_new_assistant() {
+        let messages = vec![
+            message("user", "source user"),
+            message("assistant", "old assistant"),
+            message("user", "compression prompt"),
+            message("assistant", "   \n"),
+        ];
+
+        assert_eq!(assistant_text_after_prompt(&messages, 2), None);
+    }
 }

@@ -101,7 +101,7 @@ export class QuickActionProvider implements vscode.CodeActionProvider {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             send_immediately: true
         });
-        global.side_panel._view.webview.postMessage(message);
+        global.side_panel.postMessageToChat(message);
     }
 
     public static async handleAction(actionId: string, command: ToolboxCommand, context?: { range: vscode.Range, diagnostics: vscode.Diagnostic[] }) {

@@ -55,6 +55,12 @@ export type CurrentProjectInfoPayload = {
     workspaceRoots?: string[];
 };
 
+type QueuedWebviewMessage = {
+    generation: number;
+    message: unknown;
+    durable: boolean;
+};
+
 export function normalizeWindowsExtendedPath(fileName: string): string {
     const uncPrefix = "\\\\?\\UNC\\";
     const localPrefix = "\\\\?\\";
@@ -140,6 +146,9 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     public statistic: statisticTab.StatisticTab | null = null;
     public tool_edit_in_progress: null | {chatId: string, toolCallId?: string} = null;
     private pendingNotifications: number = 0;
+    private chatReadyGeneration: number = 0;
+    private isChatReady: boolean = false;
+    private queuedWebviewMessages: QueuedWebviewMessage[] = [];
     // public fim_debug: fimDebug.FimDebug | null = null;
     // public chatHistoryProvider: ChatHistoryProvider|undefined;
 
@@ -197,6 +206,75 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         // TODO: theme changes.
     }
 
+    private nextWebviewGeneration() {
+        const nextGeneration = this.chatReadyGeneration + 1;
+        this.chatReadyGeneration = nextGeneration;
+        this.isChatReady = false;
+        this.queuedWebviewMessages = this.queuedWebviewMessages
+            .filter(item => item.generation === 0 || item.durable)
+            .map(item => ({ ...item, generation: nextGeneration }));
+    }
+
+    private async flushQueuedWebviewMessages() {
+        if (!this._view || !this.isChatReady) {
+            return;
+        }
+        const generation = this.chatReadyGeneration;
+        const readyMessages = this.queuedWebviewMessages.filter(item => item.generation === generation);
+        this.queuedWebviewMessages = this.queuedWebviewMessages.filter(item => item.generation !== generation);
+        for (const item of readyMessages) {
+            if (!this._view || !this.isChatReady || this.chatReadyGeneration !== generation) {
+                this.queuedWebviewMessages.unshift(item);
+                continue;
+            }
+            try {
+                const delivered = await this._view.webview.postMessage(item.message);
+                if (!delivered && item.durable) {
+                    this.queuedWebviewMessages.unshift(item);
+                }
+            } catch (error) {
+                console.warn("Failed to post queued message to chat webview", error);
+                if (item.durable) {
+                    this.queuedWebviewMessages.unshift(item);
+                }
+            }
+        }
+    }
+
+    private isDurableWebviewMessage(message: unknown): boolean {
+        if (!message || typeof message !== "object" || !("type" in message)) {
+            return false;
+        }
+        const type = (message as { type?: unknown }).type;
+        return type === updateConfig.type ||
+            type === setFileInfo.type ||
+            type === setSelectedSnippet.type ||
+            type === setCurrentProjectInfo.type ||
+            type === fim.receive.type ||
+            type === fim.error.type;
+    }
+
+    public postMessageToChat(message: unknown, requireReady: boolean = true, durable: boolean = this.isDurableWebviewMessage(message)) {
+        if (!this._view) {
+            this.queuedWebviewMessages.push({ generation: 0, message, durable });
+            return;
+        }
+        if (!requireReady || this.isChatReady) {
+            this._view.webview.postMessage(message).then((delivered) => {
+                if (!delivered && durable) {
+                    this.queuedWebviewMessages.push({ generation: this.chatReadyGeneration, message, durable });
+                }
+            }, (error) => {
+                console.warn("Failed to post message to chat webview", error);
+                if (durable) {
+                    this.queuedWebviewMessages.push({ generation: this.chatReadyGeneration, message, durable });
+                }
+            });
+            return;
+        }
+        this.queuedWebviewMessages.push({ generation: this.chatReadyGeneration, message, durable });
+    }
+
     // handleEvents(data: any) {
     //     if(!this._view) { return; }
     //     return composeHandlers(this.chat?.handleEvents, this.js2ts_message)(data);
@@ -212,7 +290,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const snippet = this.getSnippetFromEditor();
         if(!snippet) { return; }
         const message = setSelectedSnippet(snippet);
-        this._view?.webview.postMessage(message);
+        this.postMessageToChat(message);
     }
 
     trimIndent(code: string) {
@@ -257,10 +335,10 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 path: "",
                 cursor: null
             });
-            this._view?.webview.postMessage(message);
+            this.postMessageToChat(message);
         } else {
             const message = setFileInfo(file);
-            this._view?.webview.postMessage(message);
+            this.postMessageToChat(message);
         }
     }
 
@@ -346,12 +424,12 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             browserUrl: global.rust_binary_blob?.browser_url?.() || undefined,
         });
 
-        this._view?.webview.postMessage(message);
+        this.postMessageToChat(message);
     }
 
     public attachFile(path: string) {
         const action = ideAttachFileToChat(path);
-        this._view?.webview.postMessage(action);
+        this.postMessageToChat(action);
     }
 
 
@@ -369,6 +447,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     ) {
         this._view = webviewView;
         this.cancel_token = cancel_token;
+        this.nextWebviewGeneration();
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -395,6 +474,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         if (!this._view) {
             return;
         }
+        this.nextWebviewGeneration();
         this._view.webview.html = await this.html_main_screen(this._view.webview);
     }
 
@@ -412,6 +492,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         // );
 
         // Could throw?
+        this.nextWebviewGeneration();
         const html = await this.html_main_screen(this._view.webview, chat_thread);
         this._view.webview.html = html;
         // this.update_webview();
@@ -420,7 +501,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     public async newChat()
     {
         const message = newChatAction();
-        this._view?.webview.postMessage(message);
+        this.postMessageToChat(message);
     }
 
     public async js2ts_message(data: any)
@@ -544,10 +625,10 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         if(fim.ready.match(e)|| fim.request.match(e)) {
             if(global.fim_data_cache) {
                 const event = fim.receive(global.fim_data_cache);
-                this._view?.webview.postMessage(event);
+                this.postMessageToChat(event);
             } else {
                 const event = fim.error("No FIM data found, please make a completion");
-                this._view?.webview.postMessage(event);
+                this.postMessageToChat(event);
             }
         }
 
@@ -747,7 +828,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 toolCallId: this.tool_edit_in_progress.toolCallId ?? "",
                 accepted
             });
-            this._view?.webview.postMessage(action);
+            this.postMessageToChat(action);
             this.tool_edit_in_progress = null;
         }
     }
@@ -809,9 +890,11 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     }
 
     handleChatReady(state: boolean) {
+        this.isChatReady = state;
         if (!state) {
             return;
         }
+        this.flushQueuedWebviewMessages();
         this.handleSettingsChange();
         this.sendCurrentProjectInfo();
         this.postActiveFileInfo();
@@ -845,7 +928,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     private switchToChat(chatId: string) {
         vscode.commands.executeCommand('workbench.view.extension.refact-toolbox-pane');
         const action = ideSwitchToThread({ chatId });
-        this._view?.webview.postMessage(action);
+        this.postMessageToChat(action);
     }
 
     async handleTaskDone(payload: {
@@ -988,7 +1071,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
 
     sendCurrentProjectInfo() {
         const action = setCurrentProjectInfo(this.getCurrentProjectInfo());
-        this._view?.webview.postMessage(action);
+        this.postMessageToChat(action);
     }
 
 

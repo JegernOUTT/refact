@@ -86,16 +86,12 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
     )
 
     private val selectionDebouncer = EventDebouncer<Unit>(150L, this) {
-        if (isPanelVisible) {
-            doSendActiveFileInfo()
-            doSendSelectedSnippet()
-        }
+        doSendActiveFileInfo()
+        doSendSelectedSnippet()
     }
 
     private val configDebouncer = EventDebouncer<Unit>(100L, this) {
-        if (isPanelVisible) {
-            doSendUserConfig()
-        }
+        doSendUserConfig()
     }
 
     init {
@@ -104,7 +100,7 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
             browserLazy.isInitialized() && !browser.isBrowserHealthy()
         }
         messageQueue.setFlushCallback { messages ->
-            messages.forEach { browser.postMessage(it) }
+            messages.filter { !browser.postMessage(it) }
         }
         this.addEventListeners()
         this.setupDropdownStateTracking()
@@ -200,6 +196,7 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
             browser.refreshAfterVisibilityChange()
             selectionDebouncer.flush()
             configDebouncer.flush()
+            sendCurrentProjectInfo()
             messageQueue.flushNow()
 
             paneScope.launch {
@@ -982,6 +979,16 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
             is Events.Animation.Stop -> this.handleAnimationStop(event.fileName)
             is Events.ChatPageChange -> {
                 currentPage = event.payload.toString()
+            }
+
+            is Events.IsChatReady -> {
+                if (event.isReady && browserLazy.isInitialized()) {
+                    browser.notifyReactReadyFromApp()
+                    configDebouncer.flush()
+                    selectionDebouncer.flush()
+                    sendCurrentProjectInfo()
+                    messageQueue.flushNow()
+                }
             }
 
             is Events.IdeAction.ToolCall -> {

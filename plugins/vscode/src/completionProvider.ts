@@ -172,7 +172,7 @@ export class MyInlineCompletionProvider implements vscode.InlineCompletionItemPr
     maybeSendFIMData(data: FimDebugData | null) {
         if(data === null) { return; }
         global.fim_data_cache = data;
-        global.side_panel?._view?.webview.postMessage(fim.receive(data));
+        global.side_panel?.postMessageToChat(fim.receive(data));
     }
 }
 

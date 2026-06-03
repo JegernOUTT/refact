@@ -111,10 +111,12 @@ const startListening = listenerMiddleware.startListening.withTypes<
 
 function syncProjectStorageNamespace(state: RootState): boolean {
   const previous = getProjectStorageNamespace();
+  const workspaceRoots = state.current_project.workspaceRoots;
   setProjectStorageNamespaceFromProjectInfo({
-    workspaceRoots: state.current_project.workspaceRoots,
-    projectName: state.current_project.name,
-    workspaceName: state.config.currentWorkspaceName,
+    workspaceRoots,
+    projectName: workspaceRoots?.length
+      ? state.current_project.name
+      : undefined,
   });
   return getProjectStorageNamespace() !== previous;
 }

@@ -24,11 +24,11 @@ class SmartMessageQueue(
     private val flushAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, parentDisposable)
     private var flushPending = false
     private var disposed = false
-    private var flushCallback: ((List<Events.ToChat<*>>) -> Unit)? = null
+    private var flushCallback: ((List<Events.ToChat<*>>) -> List<Events.ToChat<*>>)? = null
     private var readyCheck: (() -> Boolean)? = null
     private var suspendFlushCheck: (() -> Boolean)? = null
 
-    fun setFlushCallback(callback: (List<Events.ToChat<*>>) -> Unit) {
+    fun setFlushCallback(callback: (List<Events.ToChat<*>>) -> List<Events.ToChat<*>>) {
         flushCallback = callback
     }
 
@@ -88,7 +88,15 @@ class SmartMessageQueue(
         }
         val messages = drain()
         if (messages.isNotEmpty()) {
-            flushCallback?.invoke(messages)
+            val failed = try {
+                flushCallback?.invoke(messages) ?: emptyList()
+            } catch (e: Exception) {
+                logger.warn("Message queue flush failed, will retry", e)
+                messages
+            }
+            if (failed.isNotEmpty()) {
+                requeueFront(failed)
+            }
         }
     }
 
@@ -112,6 +120,26 @@ class SmartMessageQueue(
             latestProject = null
             commands.clear()
             return result
+        }
+    }
+
+    private fun requeueFront(messages: List<Events.ToChat<*>>) {
+        synchronized(lock) {
+            if (disposed) return
+            for (message in messages.asReversed()) {
+                when (message) {
+                    is Events.Config.Update -> latestConfig = message
+                    is Events.ActiveFile.ActiveFileToChat -> latestActiveFile = message
+                    is Events.Editor.SetSnippetToChat -> latestSnippet = message
+                    is Events.CurrentProject.SetCurrentProject -> latestProject = message
+                    else -> commands.addFirst(message)
+                }
+            }
+            while (commands.size > maxCommands) {
+                commands.removeLast()
+                logger.debug("Command queue full, dropped newest during requeue")
+            }
+            scheduleFlush()
         }
     }
 

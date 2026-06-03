@@ -1,7 +1,6 @@
 import { StrictMode } from "react";
 import { type Config, updateConfig } from "../../features/Config/configSlice";
 import { App } from "../../features/App";
-import { setProjectStorageNamespaceFromProjectInfo } from "../../utils/chatUiPersistence";
 import { reportBuddyFrontendError } from "../../features/Buddy/reportBuddyFrontendError";
 import { withBuddyErrorReport } from "../../features/Buddy/BuddyErrorBoundary";
 import ReactDOM from "react-dom/client";
@@ -10,9 +9,6 @@ import "./web.css";
 
 export function renderApp(element: HTMLElement, config?: Partial<Config>) {
   if (config) {
-    setProjectStorageNamespaceFromProjectInfo({
-      workspaceName: config.currentWorkspaceName,
-    });
     store.dispatch(updateConfig(config));
   }
 

@@ -22,7 +22,7 @@ describe("chatUiPersistence", () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
-    setProjectStorageNamespace(undefined);
+    setProjectStorageNamespace("/workspace/default");
   });
 
   it("scopes chat UI state by project namespace", () => {
@@ -52,12 +52,13 @@ describe("chatUiPersistence", () => {
     setProjectStorageNamespace(undefined);
   });
 
-  it("keeps the project namespace in session storage for refresh hydration", () => {
+  it("does not hydrate chat tabs from a stale session namespace before project verification", () => {
     setProjectStorageNamespaceFromProjectInfo({
       workspaceRoots: ["/workspace/project-a"],
       projectName: "project-a",
       workspaceName: "fallback-a",
     });
+    const projectANamespace = getProjectStorageNamespace();
     savePersistedChatTabs({
       openThreadIds: ["chat-a"],
       currentThreadId: "chat-a",
@@ -78,11 +79,34 @@ describe("chatUiPersistence", () => {
     setProjectStorageNamespace(undefined);
     sessionStorage.setItem(
       "refact:chat-ui:project-storage-namespace:v1",
-      "/workspace/project-a",
+      projectANamespace ?? "",
     );
 
-    expect(getProjectStorageNamespace()).toBe("/workspace/project-a");
+    expect(getProjectStorageNamespace()).toBe(projectANamespace);
+    expect(loadPersistedChatTabs().openThreadIds).toEqual([]);
+
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/workspace/project-a"],
+      projectName: "project-a",
+      workspaceName: "fallback-a",
+    });
     expect(loadPersistedChatTabs().openThreadIds).toEqual(["chat-a"]);
+  });
+
+  it("uses a stable hashed namespace for equivalent multi-root identities", () => {
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/workspace/b/", "/workspace/a", "/workspace/a/"],
+      projectName: "fallback",
+    });
+    const first = getProjectStorageNamespace();
+
+    setProjectStorageNamespaceFromProjectInfo({
+      workspaceRoots: ["/workspace/a", "/workspace/b"],
+      projectName: "other-fallback",
+    });
+
+    expect(first?.startsWith("v2:")).toBe(true);
+    expect(getProjectStorageNamespace()).toBe(first);
   });
 
   it("persists opened chat tabs and the latest active chat", () => {

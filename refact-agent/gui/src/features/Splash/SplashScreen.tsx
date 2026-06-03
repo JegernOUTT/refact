@@ -14,14 +14,37 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
   const [reducedMotion, setReducedMotion] = useState(false);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    try {
+      if (typeof window === "undefined") return;
+      if (typeof window.matchMedia !== "function") return;
 
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReducedMotion(media.matches);
+      const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+      setReducedMotion(media.matches);
 
-    const onChange = () => setReducedMotion(media.matches);
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
+      const onChange = () => setReducedMotion(media.matches);
+      if (typeof media.addEventListener === "function") {
+        media.addEventListener("change", onChange);
+        return () => {
+          try {
+            media.removeEventListener("change", onChange);
+          } catch {
+            // Ignore media-query cleanup failures.
+          }
+        };
+      }
+      if (typeof media.addListener === "function") {
+        media.addListener(onChange);
+        return () => {
+          try {
+            media.removeListener(onChange);
+          } catch {
+            // Ignore legacy media-query cleanup failures.
+          }
+        };
+      }
+    } catch {
+      return;
+    }
   }, []);
 
   return (

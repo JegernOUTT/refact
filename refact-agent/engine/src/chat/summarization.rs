@@ -4392,6 +4392,7 @@ mod tests {
         );
         let mut saw_runtime_false = false;
         let mut saw_snapshot_with_summary = false;
+        let mut saw_snapshot_before_runtime_terminal = false;
         while let Ok(json) = rx.try_recv() {
             let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
             match envelope.event {
@@ -4408,6 +4409,9 @@ mod tests {
                 ChatEvent::Snapshot {
                     runtime, messages, ..
                 } => {
+                    if !saw_runtime_false {
+                        saw_snapshot_before_runtime_terminal = true;
+                    }
                     saw_snapshot_with_summary = !runtime.is_compressing
                         && runtime.compression_phase == Some(CompressionPhase::Applied)
                         && runtime.compression_reason.is_none()
@@ -4419,6 +4423,7 @@ mod tests {
                 _ => {}
             }
         }
+        assert!(!saw_snapshot_before_runtime_terminal);
         assert!(saw_runtime_false);
         assert!(saw_snapshot_with_summary);
     }

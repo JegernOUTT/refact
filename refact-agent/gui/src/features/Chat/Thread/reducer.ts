@@ -1443,8 +1443,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
           waiting_for_response: snapshotWaiting,
           prevent_send: false,
           error: event.runtime.error ?? null,
-          queued_items: event.runtime
-            .queued_items as ChatThreadRuntime["queued_items"],
+          queued_items: Array.isArray(event.runtime.queued_items)
+            ? (event.runtime.queued_items as ChatThreadRuntime["queued_items"])
+            : [],
           send_immediately: existingRuntime?.send_immediately ?? false,
           attached_images: existingRuntime?.attached_images ?? [],
           attached_text_files: existingRuntime?.attached_text_files ?? [],
@@ -1827,6 +1828,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           rt.session_state = "idle";
         } else {
           // tool_calls or other finish reasons: tools about to execute
+          rt.waiting_for_response = true;
           rt.session_state = "executing_tools";
         }
         const msgIdx = findMessageIndexById(rt, event.message_id);

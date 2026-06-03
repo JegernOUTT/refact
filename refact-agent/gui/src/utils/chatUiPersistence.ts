@@ -10,6 +10,7 @@ const PROJECT_STORAGE_NAMESPACE_SESSION_KEY =
   "refact:chat-ui:project-storage-namespace:v1";
 
 let projectStorageNamespace: string | null = null;
+let projectStorageNamespaceTrusted = false;
 
 const MAX_OPEN_CHAT_TABS = 50;
 const MAX_OPEN_TASKS = 25;
@@ -98,14 +99,29 @@ function normalizeProjectStorageNamespace(value: string | undefined): string {
   return value?.trim() ?? "";
 }
 
+function normalizeWorkspaceIdentityPart(value: string): string {
+  const normalized = value.trim().replace(/\\/g, "/").replace(/\/+$/u, "");
+  return normalized || value.trim();
+}
+
+function hashStorageIdentity(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 function readSessionProjectStorageNamespace(): string | null {
   const storage = getSessionStorage();
   if (!storage) return null;
 
   try {
-    return normalizeProjectStorageNamespace(
+    const namespace = normalizeProjectStorageNamespace(
       storage.getItem(PROJECT_STORAGE_NAMESPACE_SESSION_KEY) ?? undefined,
     );
+    return namespace || null;
   } catch {
     return null;
   }
@@ -126,19 +142,23 @@ function writeSessionProjectStorageNamespace(value: string | null): void {
   }
 }
 
-function projectScopedStorageKey(baseKey: string): string {
-  const namespace =
-    projectStorageNamespace ?? readSessionProjectStorageNamespace();
-  return namespace ? `refact:project:${namespace}:${baseKey}` : baseKey;
+function trustedProjectScopedStorageKey(baseKey: string): string | null {
+  if (!projectStorageNamespaceTrusted || !projectStorageNamespace) return null;
+  return `refact:project:${projectStorageNamespace}:${baseKey}`;
 }
 
 export function getProjectStorageNamespace(): string | null {
   return projectStorageNamespace ?? readSessionProjectStorageNamespace();
 }
 
+export function isProjectStorageNamespaceTrusted(): boolean {
+  return projectStorageNamespaceTrusted;
+}
+
 export function setProjectStorageNamespace(value: string | undefined): void {
   const next = normalizeProjectStorageNamespace(value);
   projectStorageNamespace = next ? next : null;
+  projectStorageNamespaceTrusted = Boolean(projectStorageNamespace);
   writeSessionProjectStorageNamespace(projectStorageNamespace);
 }
 
@@ -151,12 +171,14 @@ export function setProjectStorageNamespaceFromProjectInfo(input: {
   projectName?: string;
   workspaceName?: string;
 }): void {
+  const roots = dedupeStrings(
+    (input.workspaceRoots ?? []).map(normalizeWorkspaceIdentityPart),
+  ).sort();
+  const fallback = firstNonEmpty([input.projectName, input.workspaceName]);
+  const identityParts = roots.length > 0 ? roots : fallback ? [fallback] : [];
+  const identity = identityParts.join("\n");
   setProjectStorageNamespace(
-    firstNonEmpty([
-      ...(input.workspaceRoots ?? []),
-      input.projectName,
-      input.workspaceName,
-    ]),
+    identity ? `v2:${hashStorageIdentity(identity)}` : undefined,
   );
 }
 
@@ -261,7 +283,8 @@ function normalizeChatTab(
 }
 
 export function loadPersistedChatTabs(): PersistedChatTabsState {
-  const record = readRecord(projectScopedStorageKey(CHAT_TABS_STORAGE_KEY));
+  const trustedKey = trustedProjectScopedStorageKey(CHAT_TABS_STORAGE_KEY);
+  const record = trustedKey ? readRecord(trustedKey) : null;
   const rawOpenThreadIds = dedupeStrings(
     stringArrayOrEmpty(record?.openThreadIds).slice(-MAX_OPEN_CHAT_TABS),
   );
@@ -286,6 +309,9 @@ export function loadPersistedChatTabs(): PersistedChatTabsState {
 }
 
 export function savePersistedChatTabs(input: PersistedChatTabsState): void {
+  const storageKey = trustedProjectScopedStorageKey(CHAT_TABS_STORAGE_KEY);
+  if (!storageKey) return;
+
   const existing = loadPersistedChatTabs();
   const tabsById = new Map<string, PersistedChatTab>();
 
@@ -304,7 +330,7 @@ export function savePersistedChatTabs(input: PersistedChatTabsState): void {
       ? existing.currentThreadId
       : openThreadIds[openThreadIds.length - 1] ?? "";
 
-  writeRecord(projectScopedStorageKey(CHAT_TABS_STORAGE_KEY), {
+  writeRecord(storageKey, {
     version: 1,
     openThreadIds,
     currentThreadId,
@@ -331,12 +357,16 @@ function normalizeActiveTab(value: unknown): PersistedActiveTab | null {
 }
 
 export function loadPersistedActiveTab(): PersistedActiveTab | null {
-  const record = readRecord(projectScopedStorageKey(ACTIVE_TAB_STORAGE_KEY));
+  const trustedKey = trustedProjectScopedStorageKey(ACTIVE_TAB_STORAGE_KEY);
+  const record = trustedKey ? readRecord(trustedKey) : null;
   return normalizeActiveTab(record?.activeTab);
 }
 
 export function savePersistedActiveTab(activeTab: PersistedActiveTab): void {
-  writeRecord(projectScopedStorageKey(ACTIVE_TAB_STORAGE_KEY), {
+  const storageKey = trustedProjectScopedStorageKey(ACTIVE_TAB_STORAGE_KEY);
+  if (!storageKey) return;
+
+  writeRecord(storageKey, {
     version: 1,
     activeTab,
     updatedAt: Date.now(),
@@ -405,7 +435,8 @@ function normalizeOpenTask(value: unknown): PersistedOpenTask | null {
 }
 
 export function loadPersistedTasksUIState(): PersistedTasksUIState {
-  const record = readRecord(projectScopedStorageKey(TASKS_UI_STORAGE_KEY));
+  const trustedKey = trustedProjectScopedStorageKey(TASKS_UI_STORAGE_KEY);
+  const record = trustedKey ? readRecord(trustedKey) : null;
   const rawOpenTasks = Array.isArray(record?.openTasks) ? record.openTasks : [];
   const openTasks = rawOpenTasks
     .map(normalizeOpenTask)
@@ -416,7 +447,10 @@ export function loadPersistedTasksUIState(): PersistedTasksUIState {
 }
 
 export function savePersistedTasksUIState(state: PersistedTasksUIState): void {
-  writeRecord(projectScopedStorageKey(TASKS_UI_STORAGE_KEY), {
+  const storageKey = trustedProjectScopedStorageKey(TASKS_UI_STORAGE_KEY);
+  if (!storageKey) return;
+
+  writeRecord(storageKey, {
     version: 1,
     openTasks: state.openTasks.slice(-MAX_OPEN_TASKS),
     updatedAt: Date.now(),
@@ -525,9 +559,10 @@ export function clearAskQuestionsDraft(toolCallId: string | undefined): void {
 }
 
 function loadTaskWorkspaceLayouts(): Record<string, TaskWorkspaceLayout> {
-  const record = readRecord(
-    projectScopedStorageKey(TASK_WORKSPACE_LAYOUT_STORAGE_KEY),
+  const trustedKey = trustedProjectScopedStorageKey(
+    TASK_WORKSPACE_LAYOUT_STORAGE_KEY,
   );
+  const record = trustedKey ? readRecord(trustedKey) : null;
   const layoutsRecord = isRecord(record?.layouts) ? record.layouts : {};
   const result: Record<string, TaskWorkspaceLayout> = {};
 
@@ -562,9 +597,14 @@ export function saveTaskWorkspaceLayout(
   layout: TaskWorkspaceLayout,
 ): void {
   if (!taskId.trim()) return;
+  const storageKey = trustedProjectScopedStorageKey(
+    TASK_WORKSPACE_LAYOUT_STORAGE_KEY,
+  );
+  if (!storageKey) return;
+
   const layouts = loadTaskWorkspaceLayouts();
   layouts[taskId] = layout;
-  writeRecord(projectScopedStorageKey(TASK_WORKSPACE_LAYOUT_STORAGE_KEY), {
+  writeRecord(storageKey, {
     version: 1,
     layouts,
     updatedAt: Date.now(),
