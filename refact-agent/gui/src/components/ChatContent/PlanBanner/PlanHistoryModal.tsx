@@ -4,6 +4,7 @@ import type { PlanHistoryItem } from "../../../features/Chat/Thread/selectors";
 import { getPlanMetadata, isPlanMessage } from "../../../services/refact/types";
 import { Markdown } from "../../Markdown";
 import styles from "./PlanBanner.module.css";
+import { normalizePlanContent } from "./planContent";
 
 type PlanHistoryModalProps = {
   open: boolean;
@@ -50,7 +51,7 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
                 {itemTitle(item, index)}
               </Text>
               <Box className={styles.historyBody}>
-                <Markdown>{item.content}</Markdown>
+                <Markdown>{normalizePlanContent(item.content)}</Markdown>
               </Box>
             </Box>
           ))}

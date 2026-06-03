@@ -4,7 +4,7 @@
   z-index: 5;
   width: 100%;
   box-sizing: border-box;
-  background: var(--color-background);
+  background: transparent;
   padding-bottom: var(--space-1);
 }
 
@@ -58,6 +58,14 @@
   padding: var(--space-2) 0 var(--space-1);
   max-height: 400px;
   overflow: auto;
+}
+
+.body pre {
+  background-color: transparent !important;
+}
+
+.body code {
+  background-color: transparent !important;
 }
 
 .actions {
