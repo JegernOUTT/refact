@@ -363,7 +363,14 @@ function isChatCompanionSuggestion(suggestion: BuddySuggestion): boolean {
 }
 
 function isChatCompanionOpportunity(opportunity: BuddyOpportunity): boolean {
-  return opportunity.kind !== "diagnostic_investigation";
+  // Diagnostic investigations are surfaced through the BuddyPanel/BuddyHome
+  // hero flow rather than the chat-companion bubble. We still include any
+  // opportunity that carries user-facing actions so the chat companion can
+  // render accept/dismiss/investigate affordances for diagnostic kinds too.
+  if (opportunity.kind === "diagnostic_investigation") {
+    return opportunity.proposed_actions.length > 0;
+  }
+  return true;
 }
 
 function speechExpiryDelayMs(
@@ -399,7 +406,12 @@ function runtimeCandidates(
       (event): event is BuddyRuntimeEvent =>
         event?.chat_id === chatId &&
         isBuddyRuntimeEventVisible(event) &&
-        !isErrorRuntimeEvent(event) &&
+        // Keep bare error events out of the bubble (no controls = no action
+        // affordance) but allow error events that ship explicit user actions
+        // (Investigate / Dismiss) through. `isBuddyRuntimeEventVisible`
+        // already gates on freshness, persistence, and the tool-failed noise
+        // rule, so we don't need to duplicate that here.
+        (!isErrorRuntimeEvent(event) || (event.controls?.length ?? 0) > 0) &&
         !isBuddyOverlaySuppressedIssue(
           formatBuddyRuntimeEventText(event),
           chatDiagnostic,
