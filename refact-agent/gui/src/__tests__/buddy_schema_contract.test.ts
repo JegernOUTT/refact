@@ -57,6 +57,8 @@ function assertBuddyAction(action: BuddyAction): string {
       return action.customization_kind + action.id;
     case "offer_marketplace_install":
       return action.market_kind + action.item_id;
+    case "start_conductor_goal":
+      return action.plan_doc_slug + action.title;
     case "create_pulse_report":
       return action.scope;
     case "dismiss":
@@ -135,6 +137,11 @@ describe("Buddy schema contract", () => {
         kind: "offer_marketplace_install",
         market_kind: "delegate",
         item_id: "item-1",
+      },
+      {
+        kind: "start_conductor_goal",
+        plan_doc_slug: "master-plan",
+        title: "Buddy Conductor",
       },
       { kind: "create_pulse_report", scope: "all" },
       { kind: "dismiss" },

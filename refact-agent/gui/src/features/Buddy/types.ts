@@ -753,6 +753,11 @@ export type BuddyAction =
       market_kind: MarketKind;
       item_id: string;
     }
+  | {
+      kind: "start_conductor_goal";
+      plan_doc_slug: string;
+      title: string;
+    }
   | { kind: "create_pulse_report"; scope: PulseScope }
   | { kind: "dismiss" };
 
@@ -800,7 +805,8 @@ export type BuddyActionResult =
       item_id: string;
       success?: boolean;
       error?: string | null;
-    };
+    }
+  | { kind: "start_conductor_goal"; goal: ConductorGoal };
 
 export interface BuddyOpportunityAcceptResponse {
   snapshot: BuddySnapshot;

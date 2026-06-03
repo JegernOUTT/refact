@@ -219,12 +219,19 @@ mod rules {
                     .to_string();
                 let mut o = opp(
                     BuddyOpportunityKind::TaskHealth,
-                    "Abandoned task needs review",
+                    format!(
+                        "Abandoned task {} can become a conductor goal with guardrails",
+                        task_id
+                    ),
                     BuddyPriority::Normal,
                     fact.confidence,
                     vec![fact.key.clone()],
                     format!("task_health:abandoned:{}", task_id),
                     vec![
+                        BuddyAction::StartConductorGoal {
+                            plan_doc_slug: format!("task-{}-recovery", task_id),
+                            title: format!("Recover abandoned task {}", task_id),
+                        },
                         BuddyAction::OpenPage {
                             page: BuddyPage::TasksList,
                         },
@@ -1041,6 +1048,7 @@ pub fn primary_fact_kind_for_opportunity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buddy::types::BuddyFact;
     use crate::buddy::facts::FactStore;
 
     #[test]
@@ -1055,5 +1063,42 @@ mod tests {
         assert_eq!(opps.len(), 1);
         assert!(opps[0].summary.contains("3 lifecycle candidate"));
         assert_eq!(opps[0].kind, BuddyOpportunityKind::MemoryGarden);
+    }
+
+    #[test]
+    fn buddy_opportunities_propose_conductor_goal_for_abandoned_task() {
+        let now = Utc::now();
+        let mut store = FactStore::new();
+        store.ingest(BuddyFact {
+            kind: BuddyFactKind::TaskAbandoned,
+            key: "task-abandoned:T-42".to_string(),
+            source: "test",
+            payload: serde_json::json!({ "task_id": "T-42" }),
+            seen_at: now,
+            confidence: 0.91,
+        });
+        let queue = OpportunityQueue::new();
+
+        let opps = rules::task_abandoned(&store, &BuddyPulse::default(), &queue, now);
+
+        assert_eq!(opps.len(), 1);
+        let opp = &opps[0];
+        assert!(opp.summary.contains("conductor goal"));
+        assert_eq!(opp.related.task_ids, vec!["T-42".to_string()]);
+        match &opp.proposed_actions[0] {
+            BuddyAction::StartConductorGoal {
+                plan_doc_slug,
+                title,
+            } => {
+                assert_eq!(plan_doc_slug, "task-T-42-recovery");
+                assert_eq!(title, "Recover abandoned task T-42");
+            }
+            other => panic!("expected StartConductorGoal, got {other:?}"),
+        }
+        assert!(matches!(
+            opp.proposed_actions[1],
+            BuddyAction::OpenPage { .. }
+        ));
+        assert!(matches!(opp.proposed_actions[2], BuddyAction::Dismiss));
     }
 }

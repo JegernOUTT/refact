@@ -108,6 +108,9 @@ export function useExecuteBuddyAction() {
           }
           dispatch(push({ name: "marketplace hub" }));
           break;
+        case "start_conductor_goal":
+          dispatch(push({ name: "buddy" }));
+          break;
       }
     },
     [dispatch, acceptOpportunity, dismissOpportunity],
