@@ -3495,7 +3495,7 @@ mod tests {
             session.messages[1].content.content_text_only(),
             "The user accepted the changes."
         );
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.runtime.state, SessionState::WaitingIde);
 
         let mut event_roles = Vec::new();
         while let Ok(json) = rx.try_recv() {
