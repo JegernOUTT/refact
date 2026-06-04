@@ -155,3 +155,86 @@ async fn run_cleanup(
 
     Ok(report)
 }
+/// One-shot removal of every memory whose status is not active (i.e. archived or
+/// deprecated). Unlike [`run_cleanup`], this does not touch stale-by-age docs,
+/// trajectories, or past-review docs — it only purges non-active memories.
+///
+/// Intended to run on engine startup so deprecated/archived memories don't linger
+/// until the next weekly cleanup pass. Returns the number of memories removed.
+pub async fn remove_inactive_memories(
+    build_graph: &KgGraphBuilder,
+    delete_file: &KgFileDeleter,
+) -> Result<usize, String> {
+    let kg = build_graph().await;
+    let staleness = kg.check_staleness(STALE_DOC_AGE_DAYS, TRAJECTORY_MAX_AGE_DAYS);
+    let mut deleted = 0;
+    for path in staleness.inactive_docs {
+        match delete_file(path.clone()).await {
+            Ok(_) => deleted += 1,
+            Err(e) => warn!("Failed to delete inactive memory {}: {}", path.display(), e),
+        }
+    }
+    Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::super::kg_structs::{KnowledgeDoc, KnowledgeFrontmatter, KnowledgeGraph};
+    use super::*;
+
+    fn doc(path: &str, status: &str) -> KnowledgeDoc {
+        KnowledgeDoc {
+            path: PathBuf::from(path),
+            frontmatter: KnowledgeFrontmatter {
+                id: Some(path.to_string()),
+                status: Some(status.to_string()),
+                ..Default::default()
+            },
+            content: String::new(),
+            entities: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_inactive_memories_deletes_only_non_active() {
+        let docs = vec![
+            doc("/tmp/active.md", "active"),
+            doc("/tmp/deprecated.md", "deprecated"),
+            doc("/tmp/archived.md", "archived"),
+        ];
+        let build_graph: KgGraphBuilder = Arc::new(move || {
+            let docs = docs.clone();
+            Box::pin(async move {
+                let mut graph = KnowledgeGraph::new();
+                for d in docs {
+                    graph.add_doc(d);
+                }
+                graph
+            })
+        });
+
+        let deleted_paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let delete_file: KgFileDeleter = {
+            let deleted_paths = deleted_paths.clone();
+            Arc::new(move |path: PathBuf| {
+                let deleted_paths = deleted_paths.clone();
+                Box::pin(async move {
+                    deleted_paths.lock().unwrap().push(path);
+                    Ok(())
+                })
+            })
+        };
+
+        let deleted = remove_inactive_memories(&build_graph, &delete_file)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 2);
+        let paths = deleted_paths.lock().unwrap();
+        assert!(paths.contains(&PathBuf::from("/tmp/deprecated.md")));
+        assert!(paths.contains(&PathBuf::from("/tmp/archived.md")));
+        assert!(!paths.contains(&PathBuf::from("/tmp/active.md")));
+    }
+}
