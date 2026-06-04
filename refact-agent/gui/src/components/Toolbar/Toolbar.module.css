@@ -16,17 +16,15 @@
 }
 
 .engineUrl {
+  display: inline-block;
   max-width: 180px;
   overflow: hidden;
-  padding: 0;
-  border: none;
-  background: transparent;
   color: var(--gray-10);
   cursor: pointer;
-  font: inherit;
   font-size: 11px;
   line-height: 1;
   text-align: left;
+  text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

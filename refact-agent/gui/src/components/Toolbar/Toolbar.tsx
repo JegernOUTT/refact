@@ -601,15 +601,18 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       <div className={styles.toolbarSection}>
         <ConnectionStatusIndicator />
-        <button
-          type="button"
+        <a
           className={styles.engineUrl}
+          href={engineUrl}
           title={engineUrl}
           aria-label={`Engine URL ${engineUrl}`}
-          onClick={onOpenChatInBrowser}
+          onClick={(event) => {
+            event.preventDefault();
+            onOpenChatInBrowser();
+          }}
         >
           {engineUrl}
-        </button>
+        </a>
       </div>
 
       <div className={styles.toolbarDivider} />

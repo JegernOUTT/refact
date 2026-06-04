@@ -61,13 +61,15 @@ describe("Toolbar", () => {
       },
     });
 
+    const engineLink = screen.getByRole("link", {
+      name: `Engine URL ${window.location.origin}`,
+    });
+    expect(engineLink).toBeInTheDocument();
     expect(
-      screen.getByLabelText(`Engine URL ${window.location.origin}`),
-    ).toBeInTheDocument();
+      screen.queryByLabelText("Open Chat in Browser"),
+    ).not.toBeInTheDocument();
 
-    await userEvent.click(
-      screen.getByLabelText(`Engine URL ${window.location.origin}`),
-    );
+    await userEvent.click(engineLink);
 
     expect(open).toHaveBeenCalledWith(
       window.location.origin,
