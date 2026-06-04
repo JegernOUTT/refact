@@ -501,7 +501,9 @@ describe("ChatContent display items", () => {
       throw new Error("Expected report summarization item");
     }
     expect(reportItem.messageIndex).toBe(1);
-    expect(reportItem.message.content).toContain("Original messages remain visible");
+    expect(reportItem.message.content).toContain(
+      "Original messages remain visible",
+    );
   });
 
   it("forward_llm_report_hides_legacy_summary_using_source_message_ids", () => {
@@ -536,7 +538,9 @@ describe("ChatContent display items", () => {
     ]);
     expect(summarizationItems).toHaveLength(1);
     expect(reportItem.messageIndex).toBe(1);
-    expect(reportItem.message.content).toContain("Original messages remain visible");
+    expect(reportItem.message.content).toContain(
+      "Original messages remain visible",
+    );
   });
 
   it("matching_llm_report_after_summary_does_not_hide_legacy_summary", () => {

@@ -409,7 +409,9 @@ describe("SummarizationMessage", () => {
       />,
     );
 
-    expect(screen.getByText(/Original messages remain visible/u)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Original messages remain visible/u),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
       "Messages summarized",
     );
@@ -434,7 +436,9 @@ describe("SummarizationMessage", () => {
     expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
       "1",
     );
-    expect(screen.queryByText(/This markdown should stay collapsed/u)).toBeNull();
+    expect(
+      screen.queryByText(/This markdown should stay collapsed/u),
+    ).toBeNull();
     expect(screen.queryByText(/replaced/iu)).toBeNull();
   });
 
