@@ -479,7 +479,7 @@ export type SummarizationTier =
   | "tier1_merged"
   | "tier2_reactive";
 
-export type CompressionInsertMode = "source_preserving" | string;
+export type CompressionInsertMode = string;
 
 export type LlmSegmentSummaryCompressionMetadata = Record<string, unknown> & {
   kind: "llm_segment_summary";

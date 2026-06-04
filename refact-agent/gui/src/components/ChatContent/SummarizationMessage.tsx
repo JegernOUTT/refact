@@ -347,7 +347,7 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
                 : LLM_SEGMENT_SUMMARY_DESCRIPTION}
             </p>
           )}
-          {reportSummaryStats && <StatsGrid stats={reportSummaryStats} />}
+          <StatsGrid stats={reportSummaryStats} />
         </Box>
       )}
       {open && (
