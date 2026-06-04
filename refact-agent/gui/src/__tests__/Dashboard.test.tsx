@@ -14,6 +14,7 @@ const CONFIG_STATE = {
     lspPort: 8001,
     themeProps: {},
     host: "web" as const,
+    engineServed: true,
   },
   connection: {
     browserOnline: true,

@@ -46,6 +46,7 @@ describe("task delete middleware", () => {
     const TASK_ID = "abc";
 
     const store = setUpStore({
+      config: { host: "vscode", lspPort: 8001, themeProps: {} },
       chat: {
         current_thread_id: THREAD_ID,
         open_thread_ids: [THREAD_ID],
@@ -86,6 +87,7 @@ describe("context limit middleware", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = setUpStore({
+      config: { host: "vscode", lspPort: 8001, themeProps: {} },
       chat: {
         current_thread_id: THREAD_ID,
         open_thread_ids: [THREAD_ID],
@@ -124,6 +126,7 @@ describe("context limit middleware", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = setUpStore({
+      config: { host: "vscode", lspPort: 8001, themeProps: {} },
       chat: {
         current_thread_id: THREAD_ID,
         open_thread_ids: [THREAD_ID],
@@ -170,6 +173,7 @@ describe("context limit middleware", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = setUpStore({
+      config: { host: "vscode", lspPort: 8001, themeProps: {} },
       chat: {
         current_thread_id: THREAD_ID,
         open_thread_ids: [THREAD_ID],
