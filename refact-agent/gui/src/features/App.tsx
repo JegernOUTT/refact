@@ -495,6 +495,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
           <PageWrapper
             host={config.host}
             style={{
+              padding: renderedPage.name === "history" ? 0 : undefined,
               paddingRight:
                 renderedPage.name === "integrations page" ? 0 : undefined,
             }}
