@@ -7,6 +7,7 @@ import React, {
   useState,
 } from "react";
 import { Button, Text } from "@radix-ui/themes";
+import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectBuddySnapshot,
@@ -20,6 +21,7 @@ import {
   selectChatBubbleSnoozedUntil,
   selectChatBubbleImpressions,
   selectConductorGhostMessages,
+  selectGoalForChat,
   dismissBuddySuggestion,
   dismissRuntimeEvent,
   clearActiveSpeech,
@@ -29,13 +31,19 @@ import {
   clearExpiredChatBubbleSnooze,
   type BuddyChatBubbleClass,
 } from "./buddySlice";
-import { startBuddyInvestigation } from "../Chat/Thread";
+import { openBuddyChat, startBuddyInvestigation } from "../Chat/Thread";
+import { selectApiKey, selectConfig } from "../Config/configSlice";
+import { sendUserMessage } from "../../services/refact/chatCommands";
 import { push } from "../Pages/pagesSlice";
 import {
   useDismissBuddySuggestionMutation,
   useDismissBuddyRuntimeEventMutation,
   useUpdateBuddySettingsMutation,
   useAnswerConductorGhostMutation,
+  usePauseConductorGoalMutation,
+  useResumeConductorGoalMutation,
+  useSetConductorGoalAutonomyMutation,
+  useManualWakeConductorGoalMutation,
 } from "../../services/refact/buddy";
 import { useBuddyState } from "./hooks/useBuddyState";
 import { BuddyCanvas } from "./BuddyCanvas";
@@ -51,9 +59,12 @@ import type {
   BuddySuggestion,
   DiagnosticContext,
   BuddyGhostMessage,
+  ConductorGoal,
+  GoalAutonomy,
 } from "./types";
 import { isBuddyOverlaySuppressedIssue } from "./investigation";
 import { executeBuddyAction } from "./executeBuddyAction";
+import { conductorGoalCounts } from "./conductor";
 import {
   getOpportunityActionFromControl,
   getOpportunityActionIndexFromControl,
@@ -581,6 +592,69 @@ function ghostControls(ghost: BuddyGhostMessage): BuddyControl[] {
   ];
 }
 
+const AUTONOMY_OPTIONS: { value: GoalAutonomy; label: string }[] = [
+  { value: "read_only", label: "Read-only" },
+  { value: "governed", label: "Governed" },
+  { value: "full_auto", label: "Full auto" },
+];
+
+function formatStatusToken(value: string): string {
+  return value.replace(/_/g, " ");
+}
+
+function formatShortNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds >= 3600) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m`;
+  return `${seconds}s`;
+}
+
+function budgetRatio(spent: number, limit?: number | null): number | null {
+  if (!limit || limit <= 0) return null;
+  return Math.max(0, Math.min(1, spent / limit));
+}
+
+function staminaPercent(goal: ConductorGoal): number {
+  const ratios = [
+    budgetRatio(goal.spent.elapsed_secs, goal.budget.wall_clock_secs),
+    budgetRatio(goal.spent.total_tokens, goal.budget.total_tokens),
+    budgetRatio(goal.spent.usd ?? 0, goal.budget.usd),
+  ].filter((ratio): ratio is number => ratio != null);
+  if (ratios.length === 0) return 100;
+  return Math.max(0, Math.round((1 - Math.max(...ratios)) * 100));
+}
+
+function tokensLabel(goal: ConductorGoal): string {
+  const spent = formatShortNumber(goal.spent.total_tokens);
+  return goal.budget.total_tokens
+    ? `${spent} / ${formatShortNumber(goal.budget.total_tokens)}`
+    : spent;
+}
+
+function usdLabel(goal: ConductorGoal): string {
+  if (goal.spent.usd == null && goal.budget.usd == null) return "—";
+  const spent =
+    goal.spent.usd == null ? "$0.00" : `$${goal.spent.usd.toFixed(2)}`;
+  return goal.budget.usd == null
+    ? spent
+    : `${spent} / $${goal.budget.usd.toFixed(2)}`;
+}
+
+function waitingQuestions(goal: ConductorGoal): number {
+  return goal.ledger.pending_questions.filter(
+    (question) => !question.answered_at,
+  ).length;
+}
+
 export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const dispatch = useAppDispatch();
   const snapshot = useAppSelector(selectBuddySnapshot);
@@ -594,6 +668,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const chatBubbleSnoozedUntil = useAppSelector(selectChatBubbleSnoozedUntil);
   const chatBubbleImpressions = useAppSelector(selectChatBubbleImpressions);
   const ghostMessages = useAppSelector(selectConductorGhostMessages);
+  const conductorGoal = useAppSelector((state) =>
+    selectGoalForChat(state, { chatId }),
+  );
+  const config = useAppSelector(selectConfig);
+  const apiKey = useAppSelector(selectApiKey);
 
   const buddy = useBuddyState();
   const triggerBuddySignal = buddy.signal;
@@ -604,6 +683,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const [updateSettings, { isLoading: isEnabling }] =
     useUpdateBuddySettingsMutation();
   const [answerGhost] = useAnswerConductorGhostMutation();
+  const [pauseGoal] = usePauseConductorGoalMutation();
+  const [resumeGoal] = useResumeConductorGoalMutation();
+  const [setGoalAutonomy] = useSetConductorGoalAutonomyMutation();
+  const [manualWakeGoal] = useManualWakeConductorGoalMutation();
 
   const [dismissedNotificationIds, setDismissedNotificationIds] = useState<
     Set<string>
@@ -1100,6 +1183,84 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     restoreNotification,
   ]);
 
+  const handleGoalAction = useCallback(
+    async (action: "pause" | "resume" | "wake") => {
+      if (!conductorGoal || pendingRef.current) return;
+      pendingRef.current = true;
+      setPending(true);
+      setActionError(null);
+      try {
+        if (action === "pause") {
+          await pauseGoal(conductorGoal.id).unwrap();
+        } else if (action === "resume") {
+          await resumeGoal(conductorGoal.id).unwrap();
+        } else {
+          await manualWakeGoal(conductorGoal.id).unwrap();
+        }
+      } catch (error) {
+        setActionError(formatOpportunityActionError(error));
+      } finally {
+        pendingRef.current = false;
+        setPending(false);
+      }
+    },
+    [conductorGoal, manualWakeGoal, pauseGoal, resumeGoal],
+  );
+
+  const handleAutonomyChange = useCallback(
+    async (event: React.ChangeEvent<HTMLSelectElement>) => {
+      if (!conductorGoal || pendingRef.current) return;
+      const autonomy = event.target.value as GoalAutonomy;
+      pendingRef.current = true;
+      setPending(true);
+      setActionError(null);
+      try {
+        await setGoalAutonomy({ goal_id: conductorGoal.id, autonomy }).unwrap();
+      } catch (error) {
+        setActionError(formatOpportunityActionError(error));
+      } finally {
+        pendingRef.current = false;
+        setPending(false);
+      }
+    },
+    [conductorGoal, setGoalAutonomy],
+  );
+
+  const handleSteer = useCallback(async () => {
+    if (!conductorGoal || pendingRef.current) return;
+    const steering = window.prompt("Steer Buddy conductor with a short note");
+    const content = steering?.trim();
+    if (!content) return;
+    pendingRef.current = true;
+    setPending(true);
+    setActionError(null);
+    try {
+      await sendUserMessage(chatId, content, config, apiKey ?? undefined, true);
+    } catch (error) {
+      setActionError(formatOpportunityActionError(error));
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  }, [apiKey, chatId, conductorGoal, config]);
+
+  const openConductorLog = useCallback(() => {
+    if (!conductorGoal) return;
+    const logChatId = conductorGoal.ledger.chat_ids[0] ?? chatId;
+    dispatch(openBuddyChat({ chat_id: logChatId, title: conductorGoal.title }));
+    dispatch(push({ name: "chat" }));
+  }, [chatId, conductorGoal, dispatch]);
+
+  const openConductorPage = useCallback(() => {
+    dispatch(push({ name: "conductor" }));
+  }, [dispatch]);
+
+  const openPlannerTask = useCallback(() => {
+    const taskId = conductorGoal?.ledger.planner_task_id;
+    if (!taskId) return;
+    dispatch(push({ name: "task workspace", taskId }));
+  }, [conductorGoal, dispatch]);
+
   const handleControl = useCallback(
     async (ctrl: BuddyControl) => {
       if (!notification) return;
@@ -1316,11 +1477,156 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       </div>
     );
   }
-  if (!notification) return null;
+  if (!notification && !conductorGoal) return null;
+
+  const stamina = conductorGoal ? staminaPercent(conductorGoal) : 100;
+  const humanYieldCount = conductorGoal ? waitingQuestions(conductorGoal) : 0;
+  const goalCounts = conductorGoal ? conductorGoalCounts(conductorGoal) : null;
 
   return (
-    <div className={styles.companion} data-notification-id={notification.id}>
-      {notification.ghost?.role === "ask" ? (
+    <div
+      className={styles.companion}
+      data-notification-id={notification?.id ?? `goal:${conductorGoal?.id}`}
+    >
+      {conductorGoal ? (
+        <section
+          className={styles.cockpit}
+          aria-label="Buddy conductor cockpit"
+        >
+          <div className={styles.cockpitHeader}>
+            <div>
+              <Text size="1" className={styles.cockpitKicker}>
+                Conductor cockpit
+              </Text>
+              <Text size="2" weight="bold" className={styles.cockpitTitle}>
+                {conductorGoal.title}
+              </Text>
+            </div>
+            <span className={styles.statusBadge}>
+              {formatStatusToken(conductorGoal.status)}
+            </span>
+          </div>
+
+          <div className={styles.phaseRow}>
+            <span>Phase: {formatStatusToken(conductorGoal.status)}</span>
+            <span>Autonomy: {formatStatusToken(conductorGoal.autonomy)}</span>
+            {humanYieldCount > 0 ||
+            conductorGoal.status === "waiting_for_human" ? (
+              <span className={styles.humanYield}>
+                Human yield · {humanYieldCount}
+              </span>
+            ) : (
+              <span className={styles.autoYield}>No human block</span>
+            )}
+          </div>
+
+          <div className={styles.countRow}>
+            <span>Planner {goalCounts?.planners ?? 0}</span>
+            <span>Cards {goalCounts?.cards ?? 0}</span>
+            <span>Agents {goalCounts?.agents ?? 0}</span>
+          </div>
+
+          <div className={styles.staminaPanel}>
+            <div className={styles.staminaHeader}>
+              <span>Buddy stamina</span>
+              <strong>{stamina}%</strong>
+            </div>
+            <meter
+              className={classNames(styles.staminaMeter, {
+                [styles.staminaLow]: stamina < 30,
+              })}
+              aria-label="Buddy stamina gauge"
+              min={0}
+              max={100}
+              value={stamina}
+            />
+            <div className={styles.budgetGrid}>
+              <span>
+                Elapsed {formatDuration(conductorGoal.spent.elapsed_secs)}
+              </span>
+              <span>Tokens {tokensLabel(conductorGoal)}</span>
+              <span>
+                Cache {formatShortNumber(conductorGoal.spent.cache_read_tokens)}
+              </span>
+              <span>USD {usdLabel(conductorGoal)}</span>
+            </div>
+          </div>
+
+          <div className={styles.controlRow}>
+            <button
+              type="button"
+              className={styles.controlButton}
+              onClick={() => void handleGoalAction("pause")}
+              disabled={pending || conductorGoal.status === "paused"}
+            >
+              Pause
+            </button>
+            <button
+              type="button"
+              className={styles.controlButton}
+              onClick={() => void handleGoalAction("resume")}
+              disabled={pending || conductorGoal.status === "running"}
+            >
+              Resume
+            </button>
+            <button
+              type="button"
+              className={styles.controlButton}
+              onClick={() => void handleSteer()}
+              disabled={pending}
+            >
+              Steer
+            </button>
+            <button
+              type="button"
+              className={styles.controlButton}
+              onClick={() => void handleGoalAction("wake")}
+              disabled={pending}
+            >
+              Manual wake
+            </button>
+            <button
+              type="button"
+              className={styles.controlButton}
+              onClick={openPlannerTask}
+              disabled={!conductorGoal.ledger.planner_task_id}
+            >
+              Spawn planner
+            </button>
+            <button
+              type="button"
+              className={styles.controlButton}
+              onClick={openConductorPage}
+            >
+              Merge trigger
+            </button>
+            <button
+              type="button"
+              className={classNames(
+                styles.controlButton,
+                styles.primaryControl,
+              )}
+              onClick={openConductorLog}
+            >
+              Open conductor log
+            </button>
+            <select
+              className={styles.autonomySelect}
+              value={conductorGoal.autonomy}
+              onChange={(event) => void handleAutonomyChange(event)}
+              aria-label="Set conductor autonomy"
+              disabled={pending}
+            >
+              {AUTONOMY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </section>
+      ) : null}
+      {notification?.ghost?.role === "ask" ? (
         <form
           className={styles.ghostReplyForm}
           onSubmit={(event) => {
@@ -1343,9 +1649,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         state={buddy.state}
         onEvent={buddy.handleCanvasEvent}
         displaySize={160}
-        speechOverride={actionError ?? notification.text}
-        speechControls={notification.controls}
-        speechIntent={notification.speechIntent}
+        speechOverride={
+          actionError ?? notification?.text ?? "Cockpit online, tiny captain."
+        }
+        speechControls={notification?.controls ?? []}
+        speechIntent={notification?.speechIntent ?? "insight"}
         onSpeechControlClick={(ctrl) => void handleControl(ctrl)}
         bubblePosition="left"
         compactBubble

@@ -16,6 +16,139 @@
   pointer-events: auto;
 }
 
+.cockpit {
+  align-self: flex-end;
+  width: 360px;
+  padding: var(--space-3);
+  margin-right: var(--space-2);
+  border: 1px solid var(--accent-a5);
+  border-radius: var(--radius-4);
+  background: var(--color-panel-solid);
+  box-shadow: var(--shadow-4);
+  color: var(--gray-12);
+}
+
+.cockpitHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.cockpitKicker {
+  display: block;
+  color: var(--accent-11);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cockpitTitle {
+  display: block;
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusBadge,
+.humanYield,
+.autoYield {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-6);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.statusBadge {
+  background: var(--accent-a3);
+  color: var(--accent-11);
+}
+
+.phaseRow,
+.countRow,
+.budgetGrid,
+.controlRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.phaseRow,
+.countRow,
+.budgetGrid {
+  margin-top: var(--space-2);
+  color: var(--gray-11);
+  font-size: 12px;
+}
+
+.humanYield {
+  background: var(--amber-a4);
+  color: var(--amber-11);
+}
+
+.autoYield {
+  background: var(--green-a3);
+  color: var(--green-11);
+}
+
+.staminaPanel {
+  margin-top: var(--space-3);
+}
+
+.staminaHeader {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: var(--space-1);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.staminaMeter {
+  width: 100%;
+  height: 10px;
+  border-radius: var(--radius-6);
+  accent-color: var(--green-9);
+}
+
+.staminaLow {
+  accent-color: var(--amber-9);
+}
+
+.controlRow {
+  margin-top: var(--space-3);
+}
+
+.controlButton,
+.autonomySelect {
+  min-height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-3);
+  background: var(--gray-a2);
+  color: var(--gray-12);
+  font: inherit;
+  font-size: 12px;
+}
+
+.controlButton:not(:disabled),
+.autonomySelect:not(:disabled) {
+  cursor: pointer;
+}
+
+.controlButton:disabled,
+.autonomySelect:disabled {
+  opacity: 0.55;
+}
+
+.primaryControl {
+  border-color: var(--accent-a7);
+  background: var(--accent-a3);
+  color: var(--accent-12);
+}
+
 .ghostReplyForm {
   position: absolute;
   right: 150px;
