@@ -396,6 +396,31 @@ pub async fn enqueue_all_wake(gcx: SharedGlobalContext, reason: ConductorWakeRea
     enqueue_target_goals(gcx, targets.goal_ids(), reason).await
 }
 
+pub async fn enqueue_goal_wake(
+    gcx: SharedGlobalContext,
+    goal_id: &str,
+    reason: ConductorWakeReason,
+) -> bool {
+    enqueue_target_goals(gcx, vec![goal_id.to_string()], reason).await
+}
+
+pub async fn enqueue_goal_wake_if_idle(
+    gcx: SharedGlobalContext,
+    goal_id: &str,
+    reason: ConductorWakeReason,
+) -> bool {
+    let now = Utc::now();
+    let mut bus = gcx.conductor_wake_bus.lock().await;
+    if bus
+        .mailbox(goal_id)
+        .map(|mailbox| mailbox.in_flight)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    bus.enqueue_goal(goal_id, reason, now)
+}
+
 pub async fn record_owned_chat_message(
     gcx: SharedGlobalContext,
     chat_id: &str,

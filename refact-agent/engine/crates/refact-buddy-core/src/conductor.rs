@@ -265,6 +265,8 @@ pub struct GoalLedger {
     pub memos: Vec<ConductorMemo>,
     pub learning_records: Vec<ConductorLearningRecord>,
     pub ghost_messages: Vec<crate::types::BuddyGhostMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurring: Option<ConductorRecurring>,
     pub pending_questions: Vec<PendingQuestion>,
     #[serde(default)]
     pub no_progress_wakes: u32,
@@ -276,6 +278,17 @@ pub struct GoalLedger {
     pub last_progress_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_reason: Option<ConductorWakeReason>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConductorRecurring {
+    pub enabled: bool,
+    pub cron: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_enqueued_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_after_secs: Option<u64>,
 }
 
 impl GoalLedger {
@@ -564,6 +577,7 @@ mod tests {
                 }],
                 learning_records: Vec::new(),
                 ghost_messages: Vec::new(),
+                recurring: None,
                 pending_questions: vec![PendingQuestion {
                     id: "question-1".to_string(),
                     question: "Continue?".to_string(),

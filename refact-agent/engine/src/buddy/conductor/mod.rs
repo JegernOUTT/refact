@@ -4,5 +4,7 @@ pub mod ghost;
 pub mod learn;
 pub mod packet;
 pub mod planner_spawn;
+pub mod reattach;
+pub mod recurring;
 pub mod trajectory;
 pub mod wake;

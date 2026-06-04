@@ -1897,11 +1897,7 @@ pub async fn buddy_background_task(gcx: AppState) {
 
     let buddy_arc = gcx.buddy.buddy.clone();
     *buddy_arc.lock().await = Some(service);
-    let targets = super::conductor::wake::refresh_conductor_wake_targets(gcx.gcx.clone()).await;
-    if !targets.is_empty() {
-        super::conductor::wake::enqueue_all_wake(gcx.gcx.clone(), ConductorWakeReason::Heartbeat)
-            .await;
-    }
+    super::conductor::reattach::reattach_conductor_goals(gcx.gcx.clone(), &project_root).await;
     let initial_pulse =
         super::pulse::build_pulse(gcx.clone(), &project_root, &FactStore::new()).await;
     {

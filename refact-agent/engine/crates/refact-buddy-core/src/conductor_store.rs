@@ -238,6 +238,8 @@ mod tests {
                 related_task_id: Some("task-a".to_string()),
             }],
             learning_records: Vec::new(),
+            ghost_messages: Vec::new(),
+            recurring: None,
             pending_questions: vec![PendingQuestion {
                 id: "question-a".to_string(),
                 question: "Proceed?".to_string(),

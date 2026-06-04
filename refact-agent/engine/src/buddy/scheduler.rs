@@ -314,6 +314,12 @@ impl BuddyScheduler {
         buddy_arc: Arc<AMutex<Option<BuddyService>>>,
         project_root: &Path,
     ) {
+        super::conductor::recurring::service_recurring_goals(
+            gcx.gcx.clone(),
+            project_root,
+            chrono::Utc::now(),
+        )
+        .await;
         super::conductor::wake::enqueue_all_wake(gcx.gcx.clone(), ConductorWakeReason::Heartbeat)
             .await;
         super::conductor::conduct_loop::run_due_conductor_wakes(gcx.gcx.clone()).await;
