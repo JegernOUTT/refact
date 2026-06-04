@@ -39,23 +39,50 @@ fn is_source_preserving_summary(msg: &ChatMessage) -> bool {
             == Some("source_preserving")
 }
 
-fn source_preserving_summary_ids(messages: &[ChatMessage]) -> HashSet<String> {
-    messages
+fn source_preserving_summary_id_sets(
+    messages: &[ChatMessage],
+) -> (HashSet<String>, HashSet<String>) {
+    let mut suppressed = HashSet::new();
+    let mut preserved = HashSet::new();
+    for compression in messages
         .iter()
         .filter(|message| is_source_preserving_summary(message))
         .filter_map(|message| message.extra.get("compression"))
-        .filter_map(|compression| compression.get("summarized_source_message_ids"))
-        .filter_map(|ids| ids.as_array())
-        .flat_map(|ids| ids.iter())
-        .filter_map(|id| id.as_str())
-        .filter(|id| !id.is_empty())
-        .map(ToString::to_string)
-        .collect()
+    {
+        collect_compression_ids(
+            compression,
+            "summarized_source_message_ids",
+            &mut suppressed,
+        );
+        collect_compression_ids(compression, "preserved_source_message_ids", &mut preserved);
+    }
+    (suppressed, preserved)
 }
 
-fn can_suppress_source_preserving_source(msg: &ChatMessage) -> bool {
-    msg.role != "user"
-        && msg.role != "event"
+fn collect_compression_ids(
+    compression: &serde_json::Value,
+    field: &str,
+    target: &mut HashSet<String>,
+) {
+    if let Some(ids) = compression.get(field).and_then(|ids| ids.as_array()) {
+        target.extend(
+            ids.iter()
+                .filter_map(|id| id.as_str())
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string),
+        );
+    }
+}
+
+fn can_suppress_source_preserving_source(
+    msg: &ChatMessage,
+    suppressed: &HashSet<String>,
+    preserved: &HashSet<String>,
+) -> bool {
+    !msg.message_id.is_empty()
+        && suppressed.contains(&msg.message_id)
+        && !preserved.contains(&msg.message_id)
+        && !matches!(msg.role.as_str(), "user" | "system" | "plan")
         && !is_authoritative_summary(msg)
         && exemption_for(msg) != CompressionExemption::Never
 }
@@ -84,15 +111,18 @@ fn legacy_summary_ranges(messages: &[ChatMessage]) -> Vec<(usize, usize, String)
 
 pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let summaries = legacy_summary_ranges(&messages);
-    let source_preserving_summary_ids = source_preserving_summary_ids(&messages);
+    let (source_preserving_suppressed_ids, source_preserving_preserved_ids) =
+        source_preserving_summary_id_sets(&messages);
     if summaries.is_empty() {
         return messages
             .into_iter()
             .filter(|message| !is_linearization_only_message(message))
             .filter(|message| {
-                message.message_id.is_empty()
-                    || !source_preserving_summary_ids.contains(&message.message_id)
-                    || !can_suppress_source_preserving_source(message)
+                !can_suppress_source_preserving_source(
+                    message,
+                    &source_preserving_suppressed_ids,
+                    &source_preserving_preserved_ids,
+                )
             })
             .collect();
     }
@@ -148,9 +178,11 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
         }
         if is_linearization_only_message(msg)
             || suppressed.contains(&i)
-            || (!msg.message_id.is_empty()
-                && source_preserving_summary_ids.contains(&msg.message_id)
-                && can_suppress_source_preserving_source(msg))
+            || can_suppress_source_preserving_source(
+                msg,
+                &source_preserving_suppressed_ids,
+                &source_preserving_preserved_ids,
+            )
         {
             continue;
         }
@@ -216,6 +248,42 @@ mod tests {
                     "source_message_count": 1,
                 }),
             )]),
+            ..Default::default()
+        }
+    }
+
+    fn source_preserving_summary(
+        content: &str,
+        summarized_ids: &[&str],
+        preserved_ids: &[&str],
+    ) -> ChatMessage {
+        let mut summary = summarization(content, None);
+        summary.extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "schema_version": 3,
+                "kind": "llm_segment_summary",
+                "insert_mode": "source_preserving",
+                "source_hash": "hash",
+                "source_message_ids": summarized_ids,
+                "summarized_source_message_ids": summarized_ids,
+                "preserved_source_message_ids": preserved_ids,
+                "created_at": "now",
+                "summary_model": "test",
+            }),
+        );
+        summary
+    }
+
+    fn with_id(mut message: ChatMessage, id: &str) -> ChatMessage {
+        message.message_id = id.to_string();
+        message
+    }
+
+    fn context_file(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
             ..Default::default()
         }
     }
@@ -474,6 +542,134 @@ mod tests {
 
         assert_eq!(roles, vec!["user", "assistant", "user"]);
         assert_eq!(text, vec!["first", "legacy summary", "second"]);
+    }
+
+    #[test]
+    fn linearize_source_preserving_summary_suppresses_original_source_messages() {
+        let messages = vec![
+            user("user anchor before source"),
+            with_id(
+                assistant("UNIQUE_ASSISTANT_SOURCE_OUTPUT"),
+                "assistant-source",
+            ),
+            with_id(
+                context_file("UNIQUE_CONTEXT_SOURCE_OUTPUT"),
+                "context-source",
+            ),
+            compression_report("UNIQUE_VISIBLE_REPORT_OUTPUT"),
+            source_preserving_summary(
+                "UNIQUE_INTERNAL_SOURCE_PRESERVING_SUMMARY",
+                &["assistant-source", "context-source"],
+                &[],
+            ),
+            user("user anchor after source"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let text = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert!(!text.contains("UNIQUE_ASSISTANT_SOURCE_OUTPUT"));
+        assert!(!text.contains("UNIQUE_CONTEXT_SOURCE_OUTPUT"));
+        assert!(!text.contains("UNIQUE_VISIBLE_REPORT_OUTPUT"));
+        assert!(text.contains("UNIQUE_INTERNAL_SOURCE_PRESERVING_SUMMARY"));
+        assert!(text.contains("user anchor before source"));
+        assert!(text.contains("user anchor after source"));
+    }
+
+    #[test]
+    fn linearize_source_preserving_summary_keeps_original_user_messages() {
+        let messages = vec![
+            with_id(user("UNIQUE_USER_SOURCE_ANCHOR"), "user-source"),
+            with_id(
+                assistant("UNIQUE_ASSISTANT_SOURCE_TO_SUPPRESS"),
+                "assistant-source",
+            ),
+            source_preserving_summary(
+                "UNIQUE_SUMMARY_WITH_USER_SOURCE",
+                &["user-source", "assistant-source"],
+                &[],
+            ),
+            user("tail user"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let text = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert!(text.contains("UNIQUE_USER_SOURCE_ANCHOR"));
+        assert!(text.contains("UNIQUE_SUMMARY_WITH_USER_SOURCE"));
+        assert!(!text.contains("UNIQUE_ASSISTANT_SOURCE_TO_SUPPRESS"));
+    }
+
+    #[test]
+    fn linearize_source_preserving_summary_keeps_preserved_context_file_ids() {
+        let messages = vec![
+            user("before preserved context"),
+            with_id(
+                context_file("UNIQUE_PRESERVED_CONTEXT_FILE"),
+                "preserved-context",
+            ),
+            with_id(
+                assistant("UNIQUE_SUPPRESSED_ASSISTANT_OUTPUT"),
+                "assistant-source",
+            ),
+            source_preserving_summary(
+                "UNIQUE_SUMMARY_WITH_PRESERVED_CONTEXT",
+                &["preserved-context", "assistant-source"],
+                &["preserved-context"],
+            ),
+            user("after preserved context"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let text = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "context_file", "assistant", "user"]);
+        assert!(text.contains("UNIQUE_PRESERVED_CONTEXT_FILE"));
+        assert!(text.contains("UNIQUE_SUMMARY_WITH_PRESERVED_CONTEXT"));
+        assert!(!text.contains("UNIQUE_SUPPRESSED_ASSISTANT_OUTPUT"));
+    }
+
+    #[test]
+    fn linearize_drops_report_but_keeps_source_preserving_summary() {
+        let messages = vec![
+            user("before source-preserving report"),
+            compression_report("UNIQUE_REPORT_SHOULD_NOT_LINEARIZE"),
+            source_preserving_summary(
+                "UNIQUE_SOURCE_PRESERVING_SUMMARY_STAYS",
+                &["missing-source-id"],
+                &[],
+            ),
+            user("after source-preserving report"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let text = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["user", "assistant", "user"]);
+        assert!(!text.contains("UNIQUE_REPORT_SHOULD_NOT_LINEARIZE"));
+        assert!(text.contains("UNIQUE_SOURCE_PRESERVING_SUMMARY_STAYS"));
     }
 
     #[test]
