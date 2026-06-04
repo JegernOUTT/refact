@@ -2325,6 +2325,16 @@ pub async fn try_save_trajectory(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<bool, String> {
+    let save_mutex = {
+        let session = session_arc.lock().await;
+        if !session.trajectory_dirty {
+            return Ok(true);
+        }
+        session.trajectory_save_mutex.clone()
+    };
+
+    let _save_guard = save_mutex.lock().await;
+
     let snapshot = {
         let session = session_arc.lock().await;
         if !session.trajectory_dirty {
@@ -2347,9 +2357,88 @@ pub async fn try_save_trajectory(
     Ok(!session.trajectory_dirty)
 }
 
+pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
+    let gcx = app.gcx.clone();
+    tokio::spawn(async move {
+        loop {
+            let save_mutex = {
+                let mut session = session_arc.lock().await;
+                if !session.trajectory_dirty {
+                    session.trajectory_save_in_flight = false;
+                    session.trajectory_save_queued = false;
+                    return;
+                }
+                if session.trajectory_save_in_flight {
+                    session.trajectory_save_queued = true;
+                    return;
+                }
+                session.trajectory_save_in_flight = true;
+                session.trajectory_save_queued = false;
+                session.trajectory_save_mutex.clone()
+            };
+
+            let _save_guard = save_mutex.lock().await;
+
+            let snapshot = {
+                let mut session = session_arc.lock().await;
+                if !session.trajectory_dirty {
+                    if session.trajectory_save_queued {
+                        session.trajectory_save_queued = false;
+                        session.trajectory_save_in_flight = false;
+                        drop(session);
+                        continue;
+                    } else {
+                        session.trajectory_save_in_flight = false;
+                        return;
+                    }
+                }
+                trajectory_snapshot_from_session(&session)
+            };
+
+            let saved_version = snapshot.version;
+            let chat_id = snapshot.chat_id.clone();
+            let result = save_trajectory_snapshot(gcx.clone(), snapshot)
+                .await
+                .map_err(|e| format!("Failed to save trajectory for {}: {}", chat_id, e));
+
+            let mut session = session_arc.lock().await;
+            match result {
+                Ok(()) => {
+                    if session.trajectory_version == saved_version {
+                        session.trajectory_dirty = false;
+                    }
+                }
+                Err(e) => {
+                    warn!("{}", e);
+                    session.trajectory_dirty = true;
+                    session.trajectory_save_in_flight = false;
+                    session.trajectory_save_queued = false;
+                    return;
+                }
+            }
+
+            if session.trajectory_dirty || session.trajectory_save_queued {
+                session.trajectory_save_queued = false;
+                session.trajectory_save_in_flight = false;
+                drop(session);
+                continue;
+            }
+
+            session.trajectory_save_in_flight = false;
+            return;
+        }
+    });
+}
+
 pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
-    if let Err(e) = try_save_trajectory(app, session_arc).await {
+    if let Err(e) = try_save_trajectory(app, session_arc.clone()).await {
         warn!("{}", e);
+    } else {
+        let mut session = session_arc.lock().await;
+        if !session.trajectory_dirty {
+            session.trajectory_save_in_flight = false;
+            session.trajectory_save_queued = false;
+        }
     }
 }
 
@@ -11947,7 +12036,7 @@ mod tests {
     fn test_trajectory_snapshot_from_session_captures_fields() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
-        use tokio::sync::{broadcast, Notify};
+        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
         use std::collections::VecDeque;
 
         let (tx, _rx) = broadcast::channel(16);
@@ -12013,6 +12102,9 @@ mod tests {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 5,
+            trajectory_save_in_flight: false,
+            trajectory_save_queued: false,
+            trajectory_save_mutex: Arc::new(AMutex::new(())),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
@@ -12058,7 +12150,7 @@ mod tests {
         use super::super::types::ActiveCommandContext;
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
-        use tokio::sync::{broadcast, Notify};
+        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
         use std::collections::VecDeque;
         use std::time::Instant;
 
@@ -12095,6 +12187,9 @@ mod tests {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 1,
+            trajectory_save_in_flight: false,
+            trajectory_save_queued: false,
+            trajectory_save_mutex: Arc::new(AMutex::new(())),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),

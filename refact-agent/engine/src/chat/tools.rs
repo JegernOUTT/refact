@@ -1112,6 +1112,10 @@ pub async fn process_tool_calls_once(
     }
 
     if tool_calls.is_empty() {
+        if !server_tool_calls.is_empty() {
+            let mut session = session_arc.lock().await;
+            session.set_runtime_state(SessionState::Idle, None);
+        }
         return ToolStepOutcome::NoToolCalls;
     }
 
@@ -1221,6 +1225,13 @@ pub async fn process_tool_calls_once(
         .collect();
 
     if tools_to_execute.is_empty() {
+        let mut session = session_arc.lock().await;
+        session.set_runtime_state(SessionState::Generating, None);
+        drop(session);
+        crate::chat::trajectories::maybe_save_trajectory_background(
+            app.clone(),
+            session_arc.clone(),
+        );
         return ToolStepOutcome::Continue;
     }
 
@@ -1270,6 +1281,13 @@ pub async fn process_tool_calls_once(
     }
 
     if tools_to_execute.is_empty() {
+        let mut session = session_arc.lock().await;
+        session.set_runtime_state(SessionState::Generating, None);
+        drop(session);
+        crate::chat::trajectories::maybe_save_trajectory_background(
+            app.clone(),
+            session_arc.clone(),
+        );
         return ToolStepOutcome::Continue;
     }
 
@@ -1357,7 +1375,7 @@ pub async fn process_tool_calls_once(
             // User abort during regular tools: transition to Idle so UI stops animating
             session.set_runtime_state(SessionState::Idle, None);
         } else {
-            session.set_runtime_state(final_state, None);
+            session.set_runtime_state(SessionState::Generating, None);
         }
     }
 
@@ -1369,7 +1387,14 @@ pub async fn process_tool_calls_once(
         }
     }
 
-    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+    if was_aborted || tool_initiated_stop {
+        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+    } else {
+        crate::chat::trajectories::maybe_save_trajectory_background(
+            app.clone(),
+            session_arc.clone(),
+        );
+    }
 
     if was_aborted || tool_initiated_stop {
         ToolStepOutcome::Stop

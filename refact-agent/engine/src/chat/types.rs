@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{broadcast, Notify, Mutex as AMutex};
 
 use crate::call_validation::{ChatMessage, ChatUsage};
 use crate::git::checkpoints::Checkpoint;
@@ -262,6 +262,9 @@ pub struct ChatSession {
     pub last_tool_progress_at: Option<Instant>,
     pub trajectory_dirty: bool,
     pub trajectory_version: u64,
+    pub trajectory_save_in_flight: bool,
+    pub trajectory_save_queued: bool,
+    pub trajectory_save_mutex: Arc<AMutex<()>>,
     pub created_at: String,
     pub closed: bool,
     pub closed_flag: Arc<AtomicBool>,

@@ -27,7 +27,7 @@ use crate::knowledge::enrichment::enrich_messages_with_knowledge;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
-    frozen_prefix_is_complete, maybe_save_trajectory,
+    frozen_prefix_is_complete, maybe_save_trajectory, maybe_save_trajectory_background,
 };
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{build_canonical_openai_tools, prepare_chat_passthrough, ChatPrepareOptions};
@@ -36,7 +36,6 @@ use super::stream_core::{
     run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal,
     LlmStreamError, LlmStreamOutcome, ABORT_ERROR_MESSAGE,
 };
-use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
@@ -608,6 +607,53 @@ fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
     false
 }
 
+fn latest_assistant_tool_call_window_closed(messages: &[ChatMessage]) -> bool {
+    let Some((assistant_index, assistant)) = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.role == "assistant")
+    else {
+        return true;
+    };
+
+    let Some(tool_calls) = assistant.tool_calls.as_ref() else {
+        return true;
+    };
+    if tool_calls.is_empty() {
+        return true;
+    }
+
+    let mut answered_ids = std::collections::HashSet::new();
+    for message in messages.iter().skip(assistant_index + 1) {
+        match message.role.as_str() {
+            "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                answered_ids.insert(message.tool_call_id.as_str());
+            }
+            role if is_prompt_turn_role(role) || role == "assistant" => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    tool_calls
+        .iter()
+        .all(|tc| answered_ids.contains(tc.id.as_str()))
+}
+
+async fn inject_priority_messages_before_llm_if_safe(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> bool {
+    let can_inject = {
+        let session = session_arc.lock().await;
+        latest_assistant_tool_call_window_closed(&session.messages)
+    };
+
+    can_inject && crate::chat::queue::inject_priority_messages_if_any(app, session_arc).await
+}
+
 fn is_claude_code_model(model: &BaseModelRecord) -> bool {
     model.wire_format == crate::llm::WireFormat::AnthropicMessages && !model.auth_token.is_empty()
 }
@@ -923,6 +969,10 @@ pub fn start_generation(
         let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
         loop {
+            if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
+                continue;
+            }
+
             let (mut thread, chat_id) = {
                 let session = session_arc.lock().await;
                 (session.thread.clone(), session.chat_id.clone())
@@ -1301,7 +1351,7 @@ pub fn start_generation(
                 );
             }
 
-            maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+            maybe_save_trajectory_background(app.clone(), session_arc.clone());
 
             match process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt)
                 .await
@@ -1323,7 +1373,9 @@ pub fn start_generation(
                         maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                         continue;
                     }
-                    if inject_priority_messages_if_any(app.clone(), session_arc.clone()).await {
+                    if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone())
+                        .await
+                    {
                         continue;
                     }
                     let should_continue = {
@@ -1400,7 +1452,11 @@ pub fn start_generation(
                     break;
                 }
                 ToolStepOutcome::Continue => {
-                    inject_priority_messages_if_any(app.clone(), session_arc.clone()).await;
+                    if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone())
+                        .await
+                    {
+                        continue;
+                    }
                 }
             }
         }
@@ -2311,7 +2367,17 @@ async fn run_streaming_generation(
             usage.metering_usd = metering_usd;
         }
 
-        session.finish_stream(result.finish_reason);
+        let next_state = if session
+            .draft_message
+            .as_ref()
+            .and_then(|m| m.tool_calls.as_ref())
+            .is_some_and(|tool_calls| !tool_calls.is_empty())
+        {
+            SessionState::ExecutingTools
+        } else {
+            SessionState::Idle
+        };
+        session.finish_stream_with_next_state(result.finish_reason, next_state);
     }
 
     Ok(GenerationResult::Completed)
@@ -2968,6 +3034,43 @@ mod tests {
             make_tool_msg("srvtoolu_456", "search results 2"),
         ];
         assert!(!tail_needs_assistant(&messages));
+    }
+
+    #[test]
+    fn test_priority_injection_guard_waits_for_tool_results() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("call_123", "cat"),
+        ];
+        assert!(!latest_assistant_tool_call_window_closed(&messages));
+
+        messages.push(make_tool_msg("call_123", "file content"));
+        assert!(latest_assistant_tool_call_window_closed(&messages));
+    }
+
+    #[test]
+    fn test_priority_injection_guard_ignores_stale_tool_results() {
+        let messages = vec![
+            make_user_msg("first"),
+            make_assistant_with_tool_call("call_reused", "cat"),
+            make_tool_msg("call_reused", "old result"),
+            make_user_msg("second"),
+            make_assistant_with_tool_call("call_reused", "cat"),
+        ];
+
+        assert!(!latest_assistant_tool_call_window_closed(&messages));
+    }
+
+    #[test]
+    fn test_priority_injection_guard_waits_for_server_tool_placeholders() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("srvtoolu_123", "web_search"),
+        ];
+        assert!(!latest_assistant_tool_call_window_closed(&messages));
+
+        messages.push(make_tool_msg("srvtoolu_123", "server result placeholder"));
+        assert!(latest_assistant_tool_call_window_closed(&messages));
     }
 
     #[test]
