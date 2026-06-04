@@ -360,6 +360,54 @@ describe("SummarizationMessage", () => {
     ).toBeInTheDocument();
   });
 
+  it("compression report copy says original messages remain visible", () => {
+    render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier1_llm",
+          content: "## Verbose report\n\nThis markdown should stay collapsed.",
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            insert_mode: "source_preserving",
+            source_message_count: 3,
+            estimated_tokens_saved: 1200,
+            preserved_context_file_count: 2,
+            compressed_tool_output_count: 1,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText(/Original messages remain visible/u)).toBeInTheDocument();
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Messages summarized",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "3",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Tokens saved",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "1,200",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Context files preserved",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "2",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Tool outputs compressed",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "1",
+    );
+    expect(screen.queryByText(/This markdown should stay collapsed/u)).toBeNull();
+    expect(screen.queryByText(/replaced/iu)).toBeNull();
+  });
+
   it("toggles expansion from the keyboard", async () => {
     const { user } = render(
       <SummarizationMessage message={makeMessage({ content: "details" })} />,

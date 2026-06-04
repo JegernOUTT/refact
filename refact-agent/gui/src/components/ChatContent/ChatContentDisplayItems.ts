@@ -775,6 +775,29 @@ function findReportAndSummaryReplacementIndex(
   return changedIndex;
 }
 
+function findReportAndSummaryInsertionIndex(
+  previousMessages: ChatMessages,
+  nextMessages: ChatMessages,
+): number | null {
+  if (nextMessages.length !== previousMessages.length + 2) return null;
+
+  const changedIndex = previousMessages.findIndex(
+    (message, index) => message !== nextMessages[index],
+  );
+  if (changedIndex === -1) return null;
+
+  if (!isCompressionReportMessage(nextMessages[changedIndex])) return null;
+  if (!isCompressedAssistantMessage(nextMessages[changedIndex + 1])) {
+    return null;
+  }
+
+  for (let i = changedIndex; i < previousMessages.length; i++) {
+    if (previousMessages[i] !== nextMessages[i + 2]) return null;
+  }
+
+  return changedIndex;
+}
+
 function tryParseSkillActivated(
   content: string,
 ): Omit<DisplayItemSkillActivated, "type" | "key" | "messageIndex"> | null {
@@ -833,6 +856,19 @@ export function tryIncrementalDisplayItemsUpdate(
         nextMessages,
         isStreaming,
         replacementIndex,
+      );
+    }
+
+    const insertionIndex = findReportAndSummaryInsertionIndex(
+      previousMessages,
+      nextMessages,
+    );
+    if (insertionIndex !== null) {
+      return rebuildDisplayItemsFromStart(
+        previousItems,
+        nextMessages,
+        isStreaming,
+        insertionIndex,
       );
     }
 
