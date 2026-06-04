@@ -17,6 +17,7 @@ import type {
   BuddyOpportunity,
   BuddyRuntimeEvent,
   BuddySnapshot,
+  ConductorGoal,
 } from "../features/Buddy/types";
 
 const CONFIG_STATE = {
@@ -158,6 +159,41 @@ function makeRuntimeEvent(
     priority: "high",
     created_at: "2024-01-01T00:00:00Z",
     chat_id: "chat-a",
+    ...overrides,
+  };
+}
+
+function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
+  return {
+    id: "goal-1",
+    title: "Recover task",
+    plan_doc_slug: "task-recovery",
+    plan_markdown: "# Recover task",
+    done_when: { summary: "Done", checklist: [] },
+    status: "running",
+    autonomy: "full_auto",
+    budget: {
+      wall_clock_secs: 7200,
+      no_progress_wakes: 3,
+    },
+    spent: {
+      elapsed_secs: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+      cache_read_tokens: 0,
+      no_progress_wakes: 0,
+    },
+    ledger: {
+      task_ids: [],
+      chat_ids: [],
+      memos: [],
+      learning_records: [],
+      ghost_messages: [],
+      pending_questions: [],
+      no_progress_wakes: 0,
+      turn_failures: 0,
+    },
     ...overrides,
   };
 }
@@ -395,6 +431,114 @@ describe("buddy action execution contract", () => {
     expect(store.getState().buddy.snapshot?.state.identity.name).toBe(
       "Dismiss Snapshot",
     );
+  });
+
+  it("goal_proposal_accept_requires_budgets_and_sends_budget", async () => {
+    let requestBody: unknown = null;
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", async ({ request }) => {
+        requestBody = await request.json();
+        return acceptResponse({
+          kind: "start_conductor_goal",
+          goal: makeConductorGoal(),
+        });
+      }),
+    );
+    const action: BuddyAction = {
+      kind: "start_conductor_goal",
+      plan_doc_slug: "task-recovery",
+      title: "Recover task",
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const accept = screen.getByRole("button", {
+      name: "Start conductor goal",
+    });
+    expect(
+      screen.getByText("Guardrails before Buddy starts the conductor goal"),
+    ).toBeInTheDocument();
+    expect(accept).toBeDisabled();
+
+    await user.type(screen.getByLabelText("Wall-clock hours required"), "2");
+    await user.type(screen.getByLabelText("No-progress wakes required"), "4");
+    await user.type(screen.getByLabelText("Token ceiling optional"), "50000");
+    await user.type(screen.getByLabelText("USD ceiling optional"), "3.25");
+    expect(accept).toBeEnabled();
+    await user.click(accept);
+
+    await waitFor(() => {
+      expect(requestBody).toEqual({
+        action_index: 0,
+        budget: {
+          wall_clock_secs: 7200,
+          no_progress_wakes: 4,
+          total_tokens: 50000,
+          usd: 3.25,
+        },
+      });
+    });
+  });
+
+  it("successful_goal_proposal_accept_navigates_to_conductor", async () => {
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
+        acceptResponse({
+          kind: "start_conductor_goal",
+          goal: makeConductorGoal(),
+        }),
+      ),
+    );
+    const action: BuddyAction = {
+      kind: "start_conductor_goal",
+      plan_doc_slug: "task-recovery",
+      title: "Recover task",
+    };
+
+    const { store, execute } = renderExecutor();
+    await execute(action, makeOpportunity({ proposed_actions: [action] }), 0, {
+      wall_clock_secs: 3600,
+      no_progress_wakes: 2,
+    });
+
+    expect(lastPage(store)).toMatchObject({ name: "conductor" });
+  });
+
+  it("goal_proposal_validation_errors_display_clearly", async () => {
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
+        HttpResponse.json(
+          {
+            detail:
+              "invalid conductor goal: goal budget requires wall_clock_secs",
+          },
+          { status: 400 },
+        ),
+      ),
+    );
+    const action: BuddyAction = {
+      kind: "start_conductor_goal",
+      plan_doc_slug: "task-recovery",
+      title: "Recover task",
+    };
+    const opp = makeOpportunity({ proposed_actions: [action] });
+    const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    await user.type(screen.getByLabelText("Wall-clock hours required"), "1");
+    await user.type(screen.getByLabelText("No-progress wakes required"), "2");
+    await user.click(
+      screen.getByRole("button", { name: "Start conductor goal" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "goal budget requires wall_clock_secs",
+      );
+    });
   });
 
   it("failed_marketplace_install_shows_error_and_stays_retryable", async () => {

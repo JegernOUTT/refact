@@ -809,6 +809,12 @@ export type BuddyActionResult =
     }
   | { kind: "start_conductor_goal"; goal: ConductorGoal };
 
+export interface BuddyOpportunityAcceptRequest {
+  id: string;
+  action_index: number;
+  budget?: GoalBudget;
+}
+
 export interface BuddyOpportunityAcceptResponse {
   snapshot: BuddySnapshot;
   action_result: BuddyActionResult;

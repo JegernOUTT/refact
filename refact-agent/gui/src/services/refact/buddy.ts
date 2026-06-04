@@ -20,6 +20,7 @@ import type {
   BuddyPulse,
   BuddyDraft,
   BuddyOpportunityAcceptResponse,
+  BuddyOpportunityAcceptRequest,
 } from "../../features/Buddy/types";
 import {
   addDraft,
@@ -634,9 +635,9 @@ export const buddyApi = createApi({
     }),
     acceptOpportunity: builder.mutation<
       BuddyOpportunityAcceptResponse,
-      { id: string; action_index: number }
+      BuddyOpportunityAcceptRequest
     >({
-      queryFn: async ({ id, action_index }, api, _opts, baseQuery) => {
+      queryFn: async ({ id, action_index, budget }, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
         const result = await baseQuery({
           url: buddyUrlFromState(
@@ -644,7 +645,7 @@ export const buddyApi = createApi({
             `/v1/buddy/opportunities/${encodeURIComponent(id)}/accept`,
           ),
           method: "POST",
-          body: { action_index },
+          body: budget ? { action_index, budget } : { action_index },
         });
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyOpportunityAcceptResponse };

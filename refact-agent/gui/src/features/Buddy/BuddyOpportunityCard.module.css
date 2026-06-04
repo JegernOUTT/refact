@@ -71,6 +71,44 @@
   gap: var(--space-1);
 }
 
+.goalBudget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a4);
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+}
+
+.goalBudgetTitle {
+  color: var(--gray-11);
+}
+
+.goalBudgetGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-2);
+}
+
+.goalBudgetField {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--gray-11);
+}
+
+.goalBudgetField input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--gray-a6);
+  border-radius: var(--radius-2);
+  background: var(--color-panel-solid);
+  color: var(--gray-12);
+  padding: 4px 6px;
+}
+
 .actionError {
   color: var(--red-11);
 }

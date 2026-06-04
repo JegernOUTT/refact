@@ -12,6 +12,7 @@ import type {
   BuddyAction,
   BuddyOpportunity,
   BuddyOpportunityAcceptResponse,
+  GoalBudget,
 } from "../types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -57,6 +58,7 @@ export function useExecuteBuddyAction() {
       action: BuddyAction,
       opp: BuddyOpportunity | null,
       actionIndex: number,
+      budget?: GoalBudget,
     ) => {
       if (opp == null) {
         if (action.kind === "open_page") {
@@ -81,6 +83,7 @@ export function useExecuteBuddyAction() {
         response = await acceptOpportunity({
           id: opp.id,
           action_index: actionIndex,
+          ...(budget ? { budget } : {}),
         }).unwrap();
       } catch (error) {
         throw new Error(formatOpportunityActionError(error));
@@ -109,7 +112,7 @@ export function useExecuteBuddyAction() {
           dispatch(push({ name: "marketplace hub" }));
           break;
         case "start_conductor_goal":
-          dispatch(push({ name: "buddy" }));
+          dispatch(push({ name: "conductor" }));
           break;
       }
     },

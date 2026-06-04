@@ -5958,6 +5958,7 @@ async fn accept_agents_md_action_returns_content_draft_id() {
         &BuddyAction::DraftAgentsMdPatch {
             content: content.to_string(),
         },
+        None,
     )
     .await
     .expect("agents md draft action must succeed");
@@ -5978,6 +5979,7 @@ async fn accept_pulse_report_action_returns_report_draft_id() {
         &BuddyAction::CreatePulseReport {
             scope: PulseScope::All,
         },
+        None,
     )
     .await
     .expect("pulse report draft action must succeed");
@@ -6345,6 +6347,7 @@ async fn draft_customization_change_reads_real_editor_storage() {
                 id: id.to_string(),
                 patch: serde_json::json!({}),
             },
+            None,
         )
         .await
         .expect("draft action must succeed");
@@ -7345,7 +7348,7 @@ async fn accept_dismiss_action_via_accept_route_is_single_resolution() {
 
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    let outcome = dispatch_action(app.clone(), "opp-acc-dm", &BuddyAction::Dismiss)
+    let outcome = dispatch_action(app.clone(), "opp-acc-dm", &BuddyAction::Dismiss, None)
         .await
         .unwrap();
 
@@ -7397,6 +7400,7 @@ async fn draft_customization_change_dispatches() {
             id: "mode-x".to_string(),
             patch: serde_json::json!({}),
         },
+        None,
     )
     .await
     .unwrap();
@@ -7469,7 +7473,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
         patch: serde_json::json!({}),
     };
 
-    let outcome = dispatch_action(app.clone(), "irrelevant-id", &action)
+    let outcome = dispatch_action(app.clone(), "irrelevant-id", &action, None)
         .await
         .unwrap();
 
@@ -7746,7 +7750,10 @@ async fn accept_route_terminal_status_returns_409() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-terminal-accept".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -7780,7 +7787,10 @@ async fn accept_after_dismiss_returns_409() {
     let accept_err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dismiss-then-accept".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -7817,7 +7827,10 @@ async fn expired_opportunity_cannot_be_accepted() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-expired-accept".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -7870,7 +7883,10 @@ async fn concurrent_accepts_only_one_succeeds() {
         match handle_v1_buddy_opportunity_accept(
             axum::extract::State(app1.clone()),
             Path("opp-concurrent-accept".to_string()),
-            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+            Some(axum::extract::Json(AcceptRequest {
+                action_index: 0,
+                budget: None,
+            })),
         )
         .await
         {
@@ -7882,7 +7898,10 @@ async fn concurrent_accepts_only_one_succeeds() {
         match handle_v1_buddy_opportunity_accept(
             axum::extract::State(app2.clone()),
             Path("opp-concurrent-accept".to_string()),
-            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+            Some(axum::extract::Json(AcceptRequest {
+                action_index: 0,
+                budget: None,
+            })),
         )
         .await
         {
@@ -7914,7 +7933,10 @@ async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted()
     let _ = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-accept-dismiss-action".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap();
@@ -7969,7 +7991,10 @@ async fn accept_route_with_action_index_1_returns_second_action_without_navigati
     let response = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-action-index".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 1 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 1,
+            budget: None,
+        })),
     )
     .await
     .unwrap();
@@ -8009,7 +8034,10 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dispatch-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8027,7 +8055,10 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dispatch-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8056,7 +8087,10 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-marketplace-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8075,7 +8109,10 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-marketplace-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap_err();
@@ -8103,7 +8140,10 @@ async fn successful_marketplace_install_accepts_opportunity() {
     let response = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-marketplace-ok".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+            budget: None,
+        })),
     )
     .await
     .unwrap();
@@ -8857,6 +8897,7 @@ async fn launch_investigation_action_writes_static_prompt_and_envelope() {
                 initial_user_message: "please investigate".to_string(),
             },
         },
+        None,
     )
     .await
     .unwrap();

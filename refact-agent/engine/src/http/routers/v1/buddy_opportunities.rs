@@ -39,6 +39,8 @@ pub struct OpportunitiesQuery {
 pub struct AcceptRequest {
     #[serde(default)]
     pub action_index: usize,
+    #[serde(default)]
+    pub budget: Option<GoalBudget>,
 }
 
 pub(crate) struct ActionOutcome {
@@ -179,7 +181,7 @@ pub async fn handle_v1_buddy_opportunity_accept(
         action
     };
 
-    let outcome = match dispatch_action(app.clone(), &id, &action).await {
+    let outcome = match dispatch_action(app.clone(), &id, &action, req.budget.as_ref()).await {
         Ok(outcome) => outcome,
         Err(err) => {
             clear_accept_claim(gcx.clone(), &id).await;
@@ -246,6 +248,7 @@ pub(crate) async fn dispatch_action(
     app: AppState,
     _opp_id: &str,
     action: &BuddyAction,
+    budget_override: Option<&GoalBudget>,
 ) -> Result<ActionOutcome, ScratchError> {
     match action {
         BuddyAction::OpenPage { page } => {
@@ -448,10 +451,14 @@ pub(crate) async fn dispatch_action(
             plan_doc_slug,
             title,
         } => {
+            let mut req = start_conductor_goal_request(plan_doc_slug, title);
+            if let Some(budget) = budget_override {
+                req.budget = budget.clone();
+            }
             let goal =
                 crate::http::routers::v1::buddy_conductor::handle_v1_buddy_conductor_goal_create(
                     State(app.clone()),
-                    axum::Json(start_conductor_goal_request(plan_doc_slug, title)),
+                    axum::Json(req),
                 )
                 .await?
                 .0;
@@ -1184,6 +1191,7 @@ mod tests {
                 plan_doc_slug: "task-T-42-recovery".to_string(),
                 title: "Recover abandoned task T-42".to_string(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -1219,5 +1227,31 @@ mod tests {
 
         assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("no_progress_wakes"));
+    }
+
+    #[tokio::test]
+    async fn conductor_goal_action_uses_accept_budget_override() {
+        let (app, _dir) = test_app().await;
+        let budget = GoalBudget {
+            wall_clock_secs: Some(900),
+            no_progress_wakes: Some(2),
+            total_tokens: Some(50_000),
+            usd: Some(3.5),
+        };
+
+        let outcome = dispatch_action(
+            app,
+            "opp-1",
+            &BuddyAction::StartConductorGoal {
+                plan_doc_slug: "task-T-42-recovery".to_string(),
+                title: "Recover abandoned task T-42".to_string(),
+            },
+            Some(&budget),
+        )
+        .await
+        .unwrap();
+
+        let goal: ConductorGoal = serde_json::from_value(outcome.result["goal"].clone()).unwrap();
+        assert_eq!(goal.budget, budget);
     }
 }
