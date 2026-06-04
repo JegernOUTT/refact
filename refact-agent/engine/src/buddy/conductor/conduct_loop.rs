@@ -74,7 +74,10 @@ pub fn decide_wake_action(
     if human_steered {
         return WakeAction::SkipHumanWins;
     }
-    if matches!(goal.status, GoalStatus::Failed | GoalStatus::Cancelled) {
+    if matches!(
+        goal.status,
+        GoalStatus::Escalated | GoalStatus::Abandoned | GoalStatus::Failed | GoalStatus::Cancelled
+    ) {
         return WakeAction::Wait;
     }
     if reasons.is_empty() && !board_has_work(board) {
@@ -127,7 +130,7 @@ pub async fn conductor_wake_for_goal(
             goal.ledger.last_wake_reason = reasons.last().copied();
             goal.ledger.turn_failures = 0;
             push_memo(&mut goal.ledger, MemoKind::Escalation, &reason, None);
-            goal.status = GoalStatus::WaitingForHuman;
+            goal.status = GoalStatus::Escalated;
             record_goal_learning(
                 gcx.clone(),
                 &project_root,
@@ -230,7 +233,7 @@ pub async fn conductor_wake_for_goal(
                     goal.ledger.turn_failures, error
                 );
                 push_memo(&mut goal.ledger, MemoKind::Escalation, &reason, None);
-                goal.status = GoalStatus::WaitingForHuman;
+                goal.status = GoalStatus::Escalated;
                 record_goal_learning(
                     gcx.clone(),
                     &project_root,
@@ -526,7 +529,8 @@ async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal: &ConductorGoal) {
         match goal.status {
             GoalStatus::WaitingForHuman => "paused",
             GoalStatus::Done => "completed",
-            GoalStatus::Failed | GoalStatus::Cancelled => "failed",
+            GoalStatus::Escalated => "escalated",
+            GoalStatus::Abandoned | GoalStatus::Failed | GoalStatus::Cancelled => "failed",
             _ => "running",
         },
         Some("normal"),

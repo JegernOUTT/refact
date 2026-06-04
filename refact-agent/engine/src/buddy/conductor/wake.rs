@@ -36,6 +36,8 @@ impl ConductorWakeTargets {
         if matches!(
             ledger.status.unwrap_or_default(),
             refact_buddy_core::conductor::GoalStatus::Done
+                | refact_buddy_core::conductor::GoalStatus::Escalated
+                | refact_buddy_core::conductor::GoalStatus::Abandoned
                 | refact_buddy_core::conductor::GoalStatus::Failed
                 | refact_buddy_core::conductor::GoalStatus::Cancelled
         ) {

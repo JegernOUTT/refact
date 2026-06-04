@@ -24,6 +24,7 @@ const ACTIVE_STATUSES = new Set<GoalStatus>([
   "planned",
   "running",
   "waiting_for_human",
+  "escalated",
   "paused",
 ]);
 
@@ -31,6 +32,8 @@ const FILTERS: { id: GoalFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
   { id: "waiting_for_human", label: "Needs human" },
+  { id: "escalated", label: "Escalated" },
+  { id: "abandoned", label: "Abandoned" },
   { id: "done", label: "Done" },
   { id: "failed", label: "Failed" },
 ];

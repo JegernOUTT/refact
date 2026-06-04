@@ -126,7 +126,7 @@ fn parse_autonomy(value: &str) -> Result<GoalAutonomy, String> {
 fn parse_status(value: &str) -> Result<GoalStatus, String> {
     serde_json::from_value(json!(value)).map_err(|_| {
         format!(
-            "Invalid status '{value}', must be one of: planned, running, waiting_for_human, paused, done, failed, cancelled"
+            "Invalid status '{value}', must be one of: planned, running, waiting_for_human, paused, done, escalated, abandoned, failed, cancelled"
         )
     })
 }
@@ -262,7 +262,8 @@ async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: &Goal
     let status = match goal.status {
         GoalStatus::WaitingForHuman | GoalStatus::Paused => "paused",
         GoalStatus::Done => "completed",
-        GoalStatus::Failed | GoalStatus::Cancelled => "failed",
+        GoalStatus::Escalated => "escalated",
+        GoalStatus::Abandoned | GoalStatus::Failed | GoalStatus::Cancelled => "failed",
         _ => "running",
     };
     let event = make_runtime_event(
@@ -470,7 +471,7 @@ impl Tool for ToolConductorEscalate {
         desc(
             "conductor_escalate",
             "Conductor Escalate",
-            "Mark the conductor goal as waiting for human input and record an escalation memo.",
+            "Mark the conductor goal as escalated and record an escalation memo.",
             json!({"type":"object","properties":{"goal_id":{"type":"string"},"reason":{"type":"string"}},"required":["reason"]}),
         )
     }
@@ -484,7 +485,7 @@ impl Tool for ToolConductorEscalate {
         let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
         ensure_can_mutate(&ledger, "escalate")?;
         let reason = required_string(args, "reason")?;
-        ledger.status = Some(GoalStatus::WaitingForHuman);
+        ledger.status = Some(GoalStatus::Escalated);
         push_memo(&mut ledger, MemoKind::Escalation, reason, None);
         persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
@@ -503,7 +504,7 @@ impl Tool for ToolConductorGoalStatus {
             "conductor_goal_status",
             "Conductor Goal Status",
             "Set conductor goal status. Setting done is always allowed and does not run creation validation.",
-            json!({"type":"object","properties":{"goal_id":{"type":"string"},"status":{"type":"string","enum":["planned","running","waiting_for_human","paused","done","failed","cancelled"]},"reason":{"type":"string"}},"required":["status"]}),
+            json!({"type":"object","properties":{"goal_id":{"type":"string"},"status":{"type":"string","enum":["planned","running","waiting_for_human","paused","done","escalated","abandoned","failed","cancelled"]},"reason":{"type":"string"}},"required":["status"]}),
         )
     }
 
@@ -900,6 +901,39 @@ mod tests {
             .unwrap();
         assert_eq!(ledger.status, Some(GoalStatus::Done));
         assert!(ledger.last_progress_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn tool_conductor_goal_status_sets_escalated_distinctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-escalated", &GoalLedger::default())
+            .await
+            .unwrap();
+        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mut tool = ToolConductorGoalStatus::new();
+
+        tool.tool_execute(
+            ccx(gcx, mock).await,
+            &"call".to_string(),
+            &args(&[
+                ("goal_id", json!("goal-escalated")),
+                ("status", json!("escalated")),
+                ("reason", json!("Needs human review")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let ledger = load_goal_ledger(dir.path(), "goal-escalated")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.status, Some(GoalStatus::Escalated));
+        assert!(ledger
+            .memos
+            .iter()
+            .any(|memo| memo.content == "Needs human review"));
     }
 
     #[tokio::test]

@@ -2228,13 +2228,19 @@ describe("buddy conductor goal state", () => {
     expect(
       conductorMoodForGoals([makeConductorGoal({ status: "done" })]),
     ).toMatchObject({ state: "done", animationType: "celebrate" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "escalated" })]),
+    ).toMatchObject({ state: "escalated", tone: "danger" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "abandoned" })]),
+    ).toMatchObject({ state: "abandoned", tone: "warning" });
   });
 
   test("escalated state outranks blocker and renders distinct panel mood", () => {
     const blocker = makeConductorGoal({ id: "blocked", status: "paused" });
     const escalated = makeConductorGoal({
       id: "escalated",
-      status: "running",
+      status: "escalated",
       ledger: {
         ...makeConductorGoal().ledger,
         memos: [
@@ -2266,6 +2272,13 @@ describe("buddy conductor goal state", () => {
     expect(screen.getByText("🆘 Escalated")).toBeInTheDocument();
     expect(
       screen.getByText(/escalation: Need human rescue/u),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Abandoned" }));
+    expect(
+      screen.getByText(
+        "No conductor goals yet. Tiny chaos engine is idling politely.",
+      ),
     ).toBeInTheDocument();
   });
 

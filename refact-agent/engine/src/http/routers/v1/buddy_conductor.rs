@@ -315,7 +315,11 @@ async fn persist_goal(
 fn apply_goal_status(goal: &mut ConductorGoal, status: GoalStatus) {
     goal.status = status;
     goal.completed_at = match status {
-        GoalStatus::Done | GoalStatus::Failed | GoalStatus::Cancelled => goal
+        GoalStatus::Done
+        | GoalStatus::Escalated
+        | GoalStatus::Abandoned
+        | GoalStatus::Failed
+        | GoalStatus::Cancelled => goal
             .completed_at
             .clone()
             .or_else(|| Some(Utc::now().to_rfc3339())),

@@ -229,7 +229,7 @@ mod rules {
                     format!("task_health:abandoned:{}", task_id),
                     vec![
                         BuddyAction::StartConductorGoal {
-                            plan_doc_slug: format!("task-{}-recovery", task_id),
+                            plan_doc_slug: String::new(),
                             title: format!("Recover abandoned task {}", task_id),
                         },
                         BuddyAction::OpenPage {
@@ -1090,7 +1090,7 @@ mod tests {
                 plan_doc_slug,
                 title,
             } => {
-                assert_eq!(plan_doc_slug, "task-T-42-recovery");
+                assert!(plan_doc_slug.is_empty());
                 assert_eq!(title, "Recover abandoned task T-42");
             }
             other => panic!("expected StartConductorGoal, got {other:?}"),

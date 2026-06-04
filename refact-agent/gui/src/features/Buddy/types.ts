@@ -956,6 +956,8 @@ export type GoalStatus =
   | "waiting_for_human"
   | "paused"
   | "done"
+  | "escalated"
+  | "abandoned"
   | "failed"
   | "cancelled";
 
@@ -966,6 +968,8 @@ export interface GoalBudget {
   no_progress_wakes?: number | null;
   total_tokens?: number | null;
   usd?: number | null;
+  token_ceiling?: number | null;
+  usd_ceiling?: number | null;
 }
 
 export interface GoalBudgetSpent {

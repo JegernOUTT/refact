@@ -120,7 +120,7 @@ async fn maybe_escalate_stale(
     if now.signed_duration_since(anchor).num_seconds() < stale_after_secs as i64 {
         return false;
     }
-    ledger.status = Some(GoalStatus::WaitingForHuman);
+    ledger.status = Some(GoalStatus::Escalated);
     push_escalation(
         ledger,
         format!("Conductor goal went stale for at least {stale_after_secs} seconds."),
@@ -143,7 +143,7 @@ async fn maybe_escalate_invalid_cron(
     if crate::scheduler::parse_cron(&recurring.cron).is_ok() {
         return false;
     }
-    ledger.status = Some(GoalStatus::WaitingForHuman);
+    ledger.status = Some(GoalStatus::Escalated);
     push_escalation(ledger, "Recurring conductor cron is invalid.".to_string());
     save_and_emit(gcx, project_root, goal_id, ledger).await
 }
@@ -172,10 +172,11 @@ fn terminal_or_paused(ledger: &GoalLedger) -> bool {
     matches!(
         ledger.status.unwrap_or_default(),
         GoalStatus::Done
+            | GoalStatus::Escalated
+            | GoalStatus::Abandoned
             | GoalStatus::Failed
             | GoalStatus::Cancelled
             | GoalStatus::Paused
-            | GoalStatus::WaitingForHuman
     )
 }
 
@@ -315,7 +316,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(ledger.status, Some(GoalStatus::WaitingForHuman));
+        assert_eq!(ledger.status, Some(GoalStatus::Escalated));
         assert!(ledger
             .memos
             .iter()
@@ -362,7 +363,7 @@ mod tests {
             BuddyEvent::ConductorGoalUpdated { goal } => {
                 assert_eq!(goal.id, "goal-stale-event");
                 assert_eq!(goal.title, "Stale rich goal");
-                assert_eq!(goal.status, GoalStatus::WaitingForHuman);
+                assert_eq!(goal.status, GoalStatus::Escalated);
                 assert_eq!(goal.budget.wall_clock_secs, Some(600));
                 assert_eq!(goal.spent.no_progress_wakes, 1);
             }

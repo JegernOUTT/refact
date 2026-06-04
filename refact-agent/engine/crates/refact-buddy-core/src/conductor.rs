@@ -52,6 +52,8 @@ pub enum GoalStatus {
     WaitingForHuman,
     Paused,
     Done,
+    Escalated,
+    Abandoned,
     Failed,
     Cancelled,
 }
@@ -84,8 +86,10 @@ pub struct GoalBudget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_progress_wakes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "token_ceiling")]
     pub total_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "usd_ceiling")]
     pub usd: Option<f64>,
 }
 
@@ -662,6 +666,59 @@ Implement the approved plan.
             goal.plan_markdown,
             "# Buddy Conductor\nImplement the approved plan."
         );
+    }
+
+    #[test]
+    fn parse_goal_doc_accepts_approved_budget_aliases() {
+        let doc = r#"---
+title: Budget aliases
+budget:
+  wall_clock_secs: 7200
+  no_progress_wakes: 4
+  token_ceiling: 123456
+  usd_ceiling: 7.25
+---
+# Budget aliases
+"#;
+
+        let goal = parse_goal_doc(doc).unwrap();
+
+        assert_eq!(goal.budget.wall_clock_secs, Some(7200));
+        assert_eq!(goal.budget.no_progress_wakes, Some(4));
+        assert_eq!(goal.budget.total_tokens, Some(123456));
+        assert_eq!(goal.budget.usd, Some(7.25));
+    }
+
+    #[test]
+    fn legacy_budget_keys_still_deserialize() {
+        let budget: GoalBudget = serde_json::from_value(serde_json::json!({
+            "wall_clock_secs": 60,
+            "no_progress_wakes": 2,
+            "total_tokens": 5000,
+            "usd": 1.5
+        }))
+        .unwrap();
+
+        assert_eq!(budget.total_tokens, Some(5000));
+        assert_eq!(budget.usd, Some(1.5));
+    }
+
+    #[test]
+    fn goal_status_deserializes_approved_and_legacy_states() {
+        for (raw, expected) in [
+            ("planned", GoalStatus::Planned),
+            ("running", GoalStatus::Running),
+            ("waiting_for_human", GoalStatus::WaitingForHuman),
+            ("paused", GoalStatus::Paused),
+            ("done", GoalStatus::Done),
+            ("escalated", GoalStatus::Escalated),
+            ("abandoned", GoalStatus::Abandoned),
+            ("failed", GoalStatus::Failed),
+            ("cancelled", GoalStatus::Cancelled),
+        ] {
+            let status: GoalStatus = serde_json::from_value(serde_json::json!(raw)).unwrap();
+            assert_eq!(status, expected);
+        }
     }
 
     #[test]

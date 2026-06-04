@@ -10,6 +10,7 @@ export type ConductorDashboardState =
   | "conducting"
   | "waiting_human"
   | "blocker"
+  | "abandoned"
   | "merging"
   | "review"
   | "surgery"
@@ -27,6 +28,7 @@ export type ConductorMoodView = {
 
 const STATUS_PRIORITY: Record<ConductorDashboardState, number> = {
   escalated: 90,
+  abandoned: 85,
   blocker: 80,
   waiting_human: 70,
   surgery: 65,
@@ -60,6 +62,14 @@ const MOOD_VIEWS: Record<ConductorDashboardState, ConductorMoodView> = {
     mood: "alert",
     animationType: "shake",
     tone: "danger",
+  },
+  abandoned: {
+    state: "abandoned",
+    label: "Abandoned",
+    emoji: "🗑️",
+    mood: "concerned",
+    animationType: "think",
+    tone: "warning",
   },
   merging: {
     state: "merging",
@@ -108,6 +118,8 @@ function memoHas(memo: ConductorMemo, needle: string): boolean {
 }
 
 function statusToState(status: GoalStatus): ConductorDashboardState {
+  if (status === "escalated") return "escalated";
+  if (status === "abandoned") return "abandoned";
   if (status === "waiting_for_human") return "waiting_human";
   if (status === "done") return "done";
   if (status === "failed" || status === "cancelled") return "blocker";
@@ -119,11 +131,13 @@ export function goalToConductorState(
   goal: ConductorGoal,
 ): ConductorDashboardState {
   const memos = goal.ledger.memos;
+  const state = statusToState(goal.status);
+  if (state === "escalated" || state === "abandoned") return state;
   if (memos.some((memo) => memo.kind === "escalation")) return "escalated";
   if (memos.some((memo) => memo.kind === "surgery")) return "surgery";
   if (memos.some((memo) => memoHas(memo, "merge"))) return "merging";
   if (memos.some((memo) => memoHas(memo, "review"))) return "review";
-  return statusToState(goal.status);
+  return state;
 }
 
 export function conductorStateView(

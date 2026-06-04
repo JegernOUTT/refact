@@ -482,13 +482,18 @@ fn start_conductor_goal_request(
     title: &str,
 ) -> crate::http::routers::v1::buddy_conductor::CreateConductorGoalRequest {
     let title = title.trim().to_string();
-    let plan_doc_slug = plan_doc_slug.trim().to_string();
+    let plan_doc_slug = plan_doc_slug.trim();
+    let plan_doc_slug = (!plan_doc_slug.is_empty()).then(|| plan_doc_slug.to_string());
+    let plan_doc_line = plan_doc_slug
+        .as_ref()
+        .map(|slug| format!("\n\nPlan document slug: `{slug}`"))
+        .unwrap_or_default();
     crate::http::routers::v1::buddy_conductor::CreateConductorGoalRequest {
         id: None,
         title: title.clone(),
-        plan_doc_slug: Some(plan_doc_slug.clone()),
+        plan_doc_slug,
         plan_markdown: format!(
-            "# {title}\n\nBuddy proposed this guarded conductor goal from an opportunity card.\n\nPlan document slug: `{plan_doc_slug}`"
+            "# {title}\n\nBuddy proposed this guarded conductor goal from an opportunity card.{plan_doc_line}"
         ),
         done_when: DoneWhen {
             summary: format!("{title} has been resolved or safely handed off"),
@@ -1210,6 +1215,30 @@ mod tests {
             Some(OPPORTUNITY_GOAL_NO_PROGRESS_WAKES)
         );
         assert!(goal.plan_markdown.contains("opportunity card"));
+    }
+
+    #[tokio::test]
+    async fn conductor_goal_action_accepts_empty_plan_slug_with_inline_plan() {
+        let (app, _dir) = test_app().await;
+
+        let outcome = dispatch_action(
+            app,
+            "opp-1",
+            &BuddyAction::StartConductorGoal {
+                plan_doc_slug: String::new(),
+                title: "Recover abandoned task T-42".to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.status, OpportunityStatus::Accepted);
+        let goal: ConductorGoal = serde_json::from_value(outcome.result["goal"].clone()).unwrap();
+        assert_eq!(goal.title, "Recover abandoned task T-42");
+        assert_eq!(goal.plan_doc_slug, None);
+        assert!(goal.plan_markdown.contains("opportunity card"));
+        assert!(!goal.plan_markdown.contains("Plan document slug"));
     }
 
     #[tokio::test]

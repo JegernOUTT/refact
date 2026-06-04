@@ -66,7 +66,7 @@ async fn mark_missing_references(gcx: SharedGlobalContext, project_root: &Path) 
         {
             continue;
         }
-        ledger.status = Some(GoalStatus::WaitingForHuman);
+        ledger.status = Some(GoalStatus::Escalated);
         let content =
             "Conductor goal could not reattach because all declared task references are missing."
                 .to_string();
@@ -116,10 +116,11 @@ fn terminal_or_paused(ledger: &GoalLedger) -> bool {
     matches!(
         ledger.status.unwrap_or_default(),
         GoalStatus::Done
+            | GoalStatus::Escalated
+            | GoalStatus::Abandoned
             | GoalStatus::Failed
             | GoalStatus::Cancelled
             | GoalStatus::Paused
-            | GoalStatus::WaitingForHuman
     )
 }
 
@@ -217,7 +218,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(ledger.status, Some(GoalStatus::WaitingForHuman));
+        assert_eq!(ledger.status, Some(GoalStatus::Escalated));
         assert!(ledger
             .memos
             .iter()
