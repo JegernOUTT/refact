@@ -314,6 +314,27 @@ mod tests {
         }
     }
 
+    fn system(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "system".to_string(),
+            content: ChatContent::SimpleText(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn plan_delta_event(text: &str) -> ChatMessage {
+        let mut message = event(text);
+        message.extra.insert(
+            "event".to_string(),
+            serde_json::json!({
+                "subkind": "plan_delta",
+                "source": "test",
+                "payload": {"seq": 1},
+            }),
+        );
+        message
+    }
+
     #[test]
     fn test_linearize_no_summarization_unchanged() {
         let messages = vec![user("hello"), assistant("hi"), user("world")];
@@ -670,6 +691,48 @@ mod tests {
         assert_eq!(roles, vec!["user", "assistant", "user"]);
         assert!(!text.contains("UNIQUE_REPORT_SHOULD_NOT_LINEARIZE"));
         assert!(text.contains("UNIQUE_SOURCE_PRESERVING_SUMMARY_STAYS"));
+    }
+
+    #[test]
+    fn linearize_source_preserving_summary_keeps_system_plan_and_never_anchors() {
+        let messages = vec![
+            with_id(system("UNIQUE_SYSTEM_SOURCE_ANCHOR"), "system-source"),
+            with_id(plan("UNIQUE_PLAN_SOURCE_ANCHOR"), "plan-source"),
+            with_id(
+                plan_delta_event("UNIQUE_NEVER_EVENT_SOURCE_ANCHOR"),
+                "never-event-source",
+            ),
+            with_id(
+                assistant("UNIQUE_ASSISTANT_SOURCE_TO_SUPPRESS"),
+                "assistant-source",
+            ),
+            source_preserving_summary(
+                "UNIQUE_SUMMARY_WITH_ANCHORS",
+                &[
+                    "system-source",
+                    "plan-source",
+                    "never-event-source",
+                    "assistant-source",
+                ],
+                &[],
+            ),
+            user("tail user"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let text = result
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let roles: Vec<&str> = result.iter().map(|message| message.role.as_str()).collect();
+
+        assert_eq!(roles, vec!["system", "plan", "event", "assistant", "user"]);
+        assert!(text.contains("UNIQUE_SYSTEM_SOURCE_ANCHOR"));
+        assert!(text.contains("UNIQUE_PLAN_SOURCE_ANCHOR"));
+        assert!(text.contains("UNIQUE_NEVER_EVENT_SOURCE_ANCHOR"));
+        assert!(text.contains("UNIQUE_SUMMARY_WITH_ANCHORS"));
+        assert!(!text.contains("UNIQUE_ASSISTANT_SOURCE_TO_SUPPRESS"));
     }
 
     #[test]

@@ -262,6 +262,32 @@ mod tests {
         }
     }
 
+    fn make_v3_source_preserving_segment_summary_msg() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "schema_version": 3,
+                "kind": "llm_segment_summary",
+                "insert_mode": "source_preserving",
+                "source_hash": "source-hash",
+                "source_message_ids": ["assistant-source", "context-source", "plan-source"],
+                "summarized_source_message_ids": ["assistant-source", "context-source"],
+                "preserved_source_message_ids": ["plan-source"],
+                "created_at": "2026-06-04T00:00:00Z",
+                "summary_model": "test-model",
+            }),
+        );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("summary".to_string()),
+            summarization_tier: Some("llm_segment_summary".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     fn assert_only_segment_summary_extra(message: &ChatMessage) {
         assert_eq!(message.role, "assistant");
         assert_eq!(message.content.content_text_only(), "summary");
@@ -270,6 +296,27 @@ mod tests {
             serde_json::json!("llm_segment_summary")
         );
         assert_eq!(message.extra["compression"]["summary_model"], "test-model");
+        assert_eq!(message.extra.len(), 1);
+        assert!(!message.extra.contains_key("unrelated"));
+    }
+
+    fn assert_v3_source_preserving_summary_metadata(message: &ChatMessage) {
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.content.content_text_only(), "summary");
+        let metadata = &message.extra["compression"];
+        assert_eq!(metadata["schema_version"], serde_json::json!(3));
+        assert_eq!(
+            metadata["insert_mode"],
+            serde_json::json!("source_preserving")
+        );
+        assert_eq!(
+            metadata["summarized_source_message_ids"],
+            serde_json::json!(["assistant-source", "context-source"])
+        );
+        assert_eq!(
+            metadata["preserved_source_message_ids"],
+            serde_json::json!(["plan-source"])
+        );
         assert_eq!(message.extra.len(), 1);
         assert!(!message.extra.contains_key("unrelated"));
     }
@@ -471,6 +518,32 @@ mod tests {
             .find(|message| message.content.content_text_only() == "summary")
             .expect("expected selected summary");
         assert_only_segment_summary_extra(summary);
+    }
+
+    #[tokio::test]
+    async fn test_handoff_preserves_v3_source_preserving_summary_extra_after_sanitize() {
+        let messages = vec![
+            make_system_msg("s"),
+            make_user_msg("first question"),
+            make_assistant_msg("first answer"),
+            make_user_msg("second question"),
+            make_v3_source_preserving_segment_summary_msg(),
+        ];
+        let opts = HandoffOptions {
+            include_last_user_plus: true,
+            ..Default::default()
+        };
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (selected, _, _) = handoff_select(&messages, &opts, gcx, false, "test-trajectory-id")
+            .await
+            .unwrap();
+        let sanitized = sanitize_messages_for_new_thread(&selected);
+
+        let summary = sanitized
+            .iter()
+            .find(|message| message.content.content_text_only() == "summary")
+            .expect("expected selected summary");
+        assert_v3_source_preserving_summary_metadata(summary);
     }
 
     #[tokio::test]

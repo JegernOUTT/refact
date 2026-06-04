@@ -1216,12 +1216,16 @@ fn make_segment_compression_report_message(
 ) -> ChatMessage {
     let source_hash = source_hash_for_messages(source_messages);
     let source_ids = source_message_ids(source_messages);
-    let summary_model = summary
-        .extra
-        .get("compression")
+    let summary_metadata = summary.extra.get("compression");
+    let summary_model = summary_metadata
         .and_then(|value| value.get("summary_model"))
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+    let created_at = summary_metadata
+        .and_then(|value| value.get("created_at"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     let tokens_before = crate::chat::trajectory_ops::approx_token_count(source_messages);
     let tokens_after =
         crate::chat::trajectory_ops::approx_token_count(std::slice::from_ref(summary));
@@ -1235,9 +1239,11 @@ fn make_segment_compression_report_message(
     extra.insert(
         "compression_report".to_string(),
         json!({
+            "schema_version": SUMMARY_SCHEMA_VERSION,
             "kind": COMPRESSION_REPORT_KIND,
             "compression_kind": SUMMARY_KIND,
             "insert_mode": SUMMARY_INSERT_MODE,
+            "created_at": created_at,
             "source_message_count": source_messages.len(),
             "source_message_ids": source_ids,
             "summarized_source_message_ids": source_ids,
@@ -1985,8 +1991,12 @@ mod tests {
             Some(SEGMENT_REPORT_TIER)
         );
         let metadata = &report.extra["compression_report"];
+        assert_eq!(metadata["schema_version"], json!(SUMMARY_SCHEMA_VERSION));
         assert_eq!(metadata["kind"], json!(COMPRESSION_REPORT_KIND));
         assert_eq!(metadata["compression_kind"], json!(SUMMARY_KIND));
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(metadata["created_at"].as_str().unwrap()).is_ok()
+        );
         assert_eq!(metadata["source_message_count"], json!(source_count));
         assert_eq!(metadata["summary_model"], json!(summary_model));
         assert_eq!(metadata["insert_mode"], json!(SUMMARY_INSERT_MODE));

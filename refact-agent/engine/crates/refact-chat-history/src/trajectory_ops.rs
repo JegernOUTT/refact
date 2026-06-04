@@ -880,6 +880,64 @@ mod tests {
         }
     }
 
+    fn make_v3_source_preserving_segment_summary_msg() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compression".to_string(),
+            serde_json::json!({
+                "schema_version": 3,
+                "kind": LLM_SEGMENT_SUMMARY_KIND,
+                "insert_mode": "source_preserving",
+                "source_hash": "source-hash",
+                "source_message_ids": ["assistant-source", "context-source", "plan-source"],
+                "summarized_source_message_ids": ["assistant-source", "context-source"],
+                "preserved_source_message_ids": ["plan-source"],
+                "created_at": "2026-06-04T00:00:00Z",
+                "summary_model": "test-model",
+            }),
+        );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("summary".to_string()),
+            summarization_tier: Some(LLM_SEGMENT_SUMMARY_KIND.to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn make_v3_source_preserving_compression_report_msg() -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            COMPRESSION_REPORT_EXTRA_KEY.to_string(),
+            serde_json::json!({
+                "schema_version": 3,
+                "kind": COMPRESSION_REPORT_KIND,
+                "compression_kind": LLM_SEGMENT_SUMMARY_KIND,
+                "insert_mode": "source_preserving",
+                "created_at": "2026-06-04T00:00:00Z",
+                "source_message_count": 2,
+                "source_message_ids": ["assistant-source", "context-source", "plan-source"],
+                "summarized_source_message_ids": ["assistant-source", "context-source"],
+                "preserved_source_message_ids": ["plan-source"],
+                "source_hash": "source-hash",
+                "summary_model": "test-model",
+                "tokens_before": 100,
+                "tokens_after": 20,
+                "estimated_tokens_saved": 80,
+                "reduction_percent": 80,
+            }),
+        );
+        extra.insert("unrelated".to_string(), serde_json::json!("strip me"));
+        ChatMessage {
+            role: COMPRESSION_REPORT_ROLE.to_string(),
+            content: ChatContent::SimpleText("visible report without summary body".to_string()),
+            summarization_tier: Some("tier1_llm".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
     fn make_assistant_with_extra() -> ChatMessage {
         let mut message = make_assistant_msg("response");
         message
@@ -927,6 +985,44 @@ mod tests {
             serde_json::json!(LLM_SEGMENT_SUMMARY_KIND)
         );
         assert_eq!(message.extra["compression"]["summary_model"], "test-model");
+        assert_eq!(message.extra.len(), 1);
+        assert!(!message.extra.contains_key("unrelated"));
+    }
+
+    fn assert_v3_source_preserving_summary_metadata(message: &ChatMessage) {
+        assert_eq!(message.role, "assistant");
+        let metadata = &message.extra["compression"];
+        assert_eq!(metadata["schema_version"], serde_json::json!(3));
+        assert_eq!(metadata["kind"], serde_json::json!(LLM_SEGMENT_SUMMARY_KIND));
+        assert_eq!(metadata["insert_mode"], serde_json::json!("source_preserving"));
+        assert_eq!(
+            metadata["summarized_source_message_ids"],
+            serde_json::json!(["assistant-source", "context-source"])
+        );
+        assert_eq!(
+            metadata["preserved_source_message_ids"],
+            serde_json::json!(["plan-source"])
+        );
+        assert_eq!(metadata["created_at"], serde_json::json!("2026-06-04T00:00:00Z"));
+        assert_eq!(message.extra.len(), 1);
+        assert!(!message.extra.contains_key("unrelated"));
+    }
+
+    fn assert_v3_source_preserving_report_metadata(message: &ChatMessage) {
+        assert_eq!(message.role, COMPRESSION_REPORT_ROLE);
+        let metadata = &message.extra[COMPRESSION_REPORT_EXTRA_KEY];
+        assert_eq!(metadata["schema_version"], serde_json::json!(3));
+        assert_eq!(metadata["kind"], serde_json::json!(COMPRESSION_REPORT_KIND));
+        assert_eq!(metadata["insert_mode"], serde_json::json!("source_preserving"));
+        assert_eq!(
+            metadata["summarized_source_message_ids"],
+            serde_json::json!(["assistant-source", "context-source"])
+        );
+        assert_eq!(
+            metadata["preserved_source_message_ids"],
+            serde_json::json!(["plan-source"])
+        );
+        assert_eq!(metadata["created_at"], serde_json::json!("2026-06-04T00:00:00Z"));
         assert_eq!(message.extra.len(), 1);
         assert!(!message.extra.contains_key("unrelated"));
     }
@@ -1051,6 +1147,20 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_messages_for_new_thread_preserves_v3_source_preserving_metadata() {
+        let messages = vec![
+            make_v3_source_preserving_segment_summary_msg(),
+            make_v3_source_preserving_compression_report_msg(),
+        ];
+
+        let sanitized = sanitize_messages_for_new_thread(&messages);
+
+        assert_eq!(sanitized.len(), 2);
+        assert_v3_source_preserving_summary_metadata(&sanitized[0]);
+        assert_v3_source_preserving_report_metadata(&sanitized[1]);
+    }
+
+    #[test]
     fn sanitize_messages_for_model_switch_preserves_hidden_role_extra_only() {
         let mut messages = vec![make_plan_msg(), make_plan_delta_event()];
 
@@ -1075,6 +1185,20 @@ mod tests {
         assert_only_segment_summary_extra(&messages[0]);
         assert!(messages[1].extra.is_empty());
         assert!(messages[2].extra.is_empty());
+    }
+
+    #[test]
+    fn sanitize_messages_for_model_switch_preserves_v3_source_preserving_metadata() {
+        let mut messages = vec![
+            make_v3_source_preserving_segment_summary_msg(),
+            make_v3_source_preserving_compression_report_msg(),
+        ];
+
+        sanitize_messages_for_model_switch(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_v3_source_preserving_summary_metadata(&messages[0]);
+        assert_v3_source_preserving_report_metadata(&messages[1]);
     }
 
     #[test]
@@ -1118,6 +1242,24 @@ mod tests {
         assert_only_segment_summary_extra(persisted[0]);
         assert!(persisted[1].extra.is_empty());
         assert!(persisted[2].extra.is_empty());
+    }
+
+    #[test]
+    fn compress_in_place_strip_metering_preserves_v3_source_preserving_metadata() {
+        let mut messages = vec![
+            make_v3_source_preserving_segment_summary_msg(),
+            make_v3_source_preserving_compression_report_msg(),
+        ];
+        let opts = CompressOptions {
+            strip_metering: true,
+            ..Default::default()
+        };
+
+        compress_in_place(&mut messages, &opts).unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_v3_source_preserving_summary_metadata(&messages[0]);
+        assert_v3_source_preserving_report_metadata(&messages[1]);
     }
 
     #[test]
