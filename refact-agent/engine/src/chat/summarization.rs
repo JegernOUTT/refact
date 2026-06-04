@@ -193,7 +193,7 @@ Return strict JSON only with this contract:
 Preserve: user goal and constraints, decisions/approvals/rejections, exact edited/created/deleted files and why they matter, failing commands/tests with exact error names or codes, important tool/subagent/planner/code-review outputs, current blocker, and next action. \
 Compress: routine tool outputs into compressed_tool_outputs when useful. \
 Drop: routine reads/searches unless they changed the plan. \
-Do not narrate process, use first person unless quoting the user, invent facts, or include full code snippets unless essential. \
+Do not narrate process, do not use first person unless quoting the user, invent facts, or include full code snippets unless essential. \
 Only preserve context_file message IDs that must remain verbatim.";
 
 pub fn is_segment_summary(message: &ChatMessage) -> bool {
@@ -756,6 +756,13 @@ fn ensure_candidate_source_message_ids(
 ) {
     for range in &candidate.ranges {
         ensure_source_message_ids(messages, *range);
+    }
+}
+
+fn ensure_all_candidate_source_message_ids(messages: &mut [ChatMessage]) {
+    let candidates = compression_candidates(messages);
+    for candidate in candidates {
+        ensure_candidate_source_message_ids(messages, &candidate);
     }
 }
 
@@ -1369,6 +1376,9 @@ fn segment_text(messages: &[ChatMessage]) -> String {
                 importance_prefix,
                 role_label(&message.role)
             )];
+            if !message.message_id.is_empty() {
+                parts.push(format!("source_message_id={}", message.message_id));
+            }
             if !message.tool_call_id.is_empty() {
                 parts.push(format!("tool_call_id={}", message.tool_call_id));
             }
@@ -2137,6 +2147,14 @@ fn emit_compression_skipped_if_owned(
     true
 }
 
+fn emit_compression_applied_if_owned(session: &mut ChatSession, attempt: u64) -> bool {
+    if !owns_compression_attempt(session, attempt) {
+        return false;
+    }
+    emit_compression_applied(session);
+    true
+}
+
 fn emit_compression_running(session: &mut ChatSession) {
     emit_compression_status(
         session,
@@ -2242,6 +2260,27 @@ fn finish_compression_failure_if_owned(
     true
 }
 
+fn finalize_applied_if_owned(session: &mut ChatSession, attempt: u64) -> bool {
+    if !emit_compression_applied_if_owned(session, attempt) {
+        return false;
+    }
+    let snapshot = session.snapshot();
+    session.emit(snapshot);
+    true
+}
+
+fn finish_source_changed_candidate(
+    session: &mut ChatSession,
+    attempt: u64,
+    applied_count: usize,
+) -> bool {
+    if applied_count > 0 {
+        return finalize_applied_if_owned(session, attempt);
+    }
+    emit_compression_skipped_if_owned(session, attempt, CompressionReason::SourceChanged);
+    false
+}
+
 #[cfg(test)]
 fn apply_resolved_segment_summary(
     session: &mut ChatSession,
@@ -2323,6 +2362,7 @@ pub async fn apply_segment_summarization_with_reason(
             return false;
         }
         let attempt = reserve_compression_attempt(&mut session, reason);
+        ensure_all_candidate_source_message_ids(&mut session.messages);
         if session.tier1_compaction_disabled && !force {
             emit_compression_skipped(&mut session, CompressionReason::SessionCompactionDisabled);
             return false;
@@ -2457,10 +2497,10 @@ pub async fn apply_segment_summarization_with_reason(
                 Err(failure) => {
                     let mut session = session_arc.lock().await;
                     if applied_count > 0 {
-                        emit_compression_applied(&mut session);
-                        let snapshot = session.snapshot();
-                        session.emit(snapshot);
-                        return true;
+                        if finalize_applied_if_owned(&mut session, attempt) {
+                            return true;
+                        }
+                        return false;
                     }
                     if finish_compression_failure_if_owned(&mut session, attempt, &failure) {
                         let failure_for_log = safe_segment_summary_failure_for_log(&failure);
@@ -2496,8 +2536,18 @@ pub async fn apply_segment_summarization_with_reason(
             let Some(current_candidate) =
                 find_candidate_by_source_hash(&session.messages, &source_hash)
             else {
-                emit_compression_skipped(&mut session, CompressionReason::SourceChanged);
-                return applied_count > 0;
+                if applied_count > 0 {
+                    if finalize_applied_if_owned(&mut session, attempt) {
+                        return true;
+                    }
+                    return false;
+                }
+                emit_compression_skipped_if_owned(
+                    &mut session,
+                    attempt,
+                    CompressionReason::SourceChanged,
+                );
+                return false;
             };
             ensure_candidate_source_message_ids(&mut session.messages, &current_candidate);
             let current_source =
@@ -2538,9 +2588,9 @@ pub async fn apply_segment_summarization_with_reason(
 
     let mut session = session_arc.lock().await;
     if applied_count > 0 {
-        emit_compression_applied(&mut session);
-        let snapshot = session.snapshot();
-        session.emit(snapshot);
+        if !finalize_applied_if_owned(&mut session, attempt) {
+            return false;
+        }
         info!(
             "Segment summarization applied {} pass(es), messages count now {}",
             applied_count,
@@ -2884,7 +2934,8 @@ mod tests {
         assert!(SEGMENT_SUMMARY_PROMPT.contains("up to 600 words"));
         assert!(SEGMENT_SUMMARY_PROMPT.contains("tool/subagent/planner/code-review outputs"));
         assert!(SEGMENT_SUMMARY_PROMPT.contains("Do not narrate process"));
-        assert!(SEGMENT_SUMMARY_PROMPT.contains("use first person unless quoting the user"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("do not use first person unless quoting the user"));
+        assert!(!SEGMENT_SUMMARY_PROMPT.contains("Do not narrate process, use first person"));
         assert!(!SEGMENT_SUMMARY_PROMPT.contains("<analysis>"));
     }
 
@@ -3071,6 +3122,74 @@ mod tests {
         assert_eq!(
             summary.extra["compression"]["compressed_tool_output_count"],
             json!(0)
+        );
+    }
+
+    #[test]
+    fn segment_text_includes_source_message_id_for_each_source_message() {
+        let messages = vec![
+            with_message_id(assistant("assistant output"), "assistant-id"),
+            with_message_id(tool_with_id("call_id", "tool output"), "tool-id"),
+            with_message_id(
+                context_files(vec![context_file_named("src/lib.rs", "important")]),
+                "context-id",
+            ),
+        ];
+
+        let text = segment_text(&messages);
+
+        assert!(text.contains("[ASSISTANT] source_message_id=assistant-id"));
+        assert!(text.contains("[TOOL_RESULT] source_message_id=tool-id tool_call_id=call_id"));
+        assert!(text.contains("[CONTEXT_FILE] source_message_id=context-id"));
+    }
+
+    #[test]
+    fn ensure_all_candidate_source_message_ids_persists_ids_before_segment_text() {
+        let mut messages = vec![
+            user("first"),
+            assistant_with_named_tool_call("call_read", "cat"),
+            context_file_with_tool_call_id("call_read", "needs id"),
+            user("second"),
+        ];
+
+        ensure_all_candidate_source_message_ids(&mut messages);
+
+        assert!(messages[1].message_id.len() > 8);
+        assert!(messages[2].message_id.len() > 8);
+        let text = segment_text(&[messages[1].clone(), messages[2].clone()]);
+        assert!(text.contains(&format!("source_message_id={}", messages[1].message_id)));
+        assert!(text.contains(&format!("source_message_id={}", messages[2].message_id)));
+    }
+
+    #[test]
+    fn structured_summary_preserves_context_file_by_id_visible_in_segment_text() {
+        let source = vec![
+            with_message_id(
+                context_files(vec![context_file_named("src/keep.rs", "verbatim needed")]),
+                "ctx-visible-id",
+            ),
+            with_message_id(
+                assistant("routine assistant output"),
+                "assistant-visible-id",
+            ),
+        ];
+        let text = segment_text(&source);
+        assert!(text.contains("source_message_id=ctx-visible-id"));
+        let raw = structured_summary_json(
+            "Continue with visible IDs.",
+            json!([{
+                "source_message_id": "ctx-visible-id",
+                "file_name": "src/keep.rs",
+                "reason": "Visible and needed"
+            }]),
+            json!([]),
+        );
+
+        let summary = make_segment_summary_message(raw, &source, "test-model");
+
+        assert_eq!(
+            summary.extra["compression"]["preserved_source_message_ids"],
+            json!(["ctx-visible-id"])
         );
     }
 
@@ -5665,6 +5784,100 @@ mod tests {
         assert!(session.messages.is_empty());
         assert_eq!(session.tier1_compact_attempts, 0);
         assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn source_changed_after_prior_success_finalizes_as_applied_with_snapshot() {
+        let mut session = ChatSession::new("compression-source-changed-after-success".to_string());
+        let attempt = reserve_compression_attempt(&mut session, None);
+        assert!(emit_compression_running_if_owned(&mut session, attempt));
+        session.messages = vec![user("first"), assistant("old answer"), user("second")];
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut session.messages,
+            "already applied summary",
+            "test-model",
+        ));
+        let mut rx = session.subscribe();
+
+        assert!(finish_source_changed_candidate(&mut session, attempt, 1));
+
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
+        assert_eq!(session.compression_reason, None);
+        assert!(session
+            .messages
+            .iter()
+            .any(|message| message.role == COMPRESSION_REPORT_ROLE));
+        assert!(session.messages.iter().any(is_segment_summary));
+        let mut saw_applied_runtime = false;
+        let mut saw_snapshot_with_summary = false;
+        while let Ok(json) = rx.try_recv() {
+            let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+            match envelope.event {
+                ChatEvent::RuntimeUpdated {
+                    is_compressing,
+                    compression_phase,
+                    compression_reason,
+                    ..
+                } => {
+                    saw_applied_runtime = !is_compressing
+                        && compression_phase == Some(CompressionPhase::Applied)
+                        && compression_reason.is_none();
+                }
+                ChatEvent::Snapshot {
+                    messages, runtime, ..
+                } => {
+                    saw_snapshot_with_summary = runtime.compression_phase
+                        == Some(CompressionPhase::Applied)
+                        && messages.iter().any(is_segment_summary);
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_applied_runtime);
+        assert!(saw_snapshot_with_summary);
+    }
+
+    #[test]
+    fn source_changed_without_prior_success_emits_source_changed_skipped() {
+        let mut session = ChatSession::new("compression-source-changed-no-success".to_string());
+        let attempt = reserve_compression_attempt(&mut session, None);
+        assert!(emit_compression_running_if_owned(&mut session, attempt));
+
+        assert!(!finish_source_changed_candidate(&mut session, attempt, 0));
+
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::SourceChanged)
+        );
+    }
+
+    #[test]
+    fn stale_final_applied_does_not_overwrite_newer_attempt_state() {
+        let mut session = ChatSession::new("compression-stale-final-applied".to_string());
+        let stale_attempt = reserve_compression_attempt(&mut session, None);
+        emit_compression_running_if_owned(&mut session, stale_attempt);
+        session.active_compression_attempt = Some(stale_attempt + 1);
+        session.compression_attempt_generation = stale_attempt + 1;
+        session.compression_phase = Some(CompressionPhase::Running);
+        session.runtime.compression_phase = Some(CompressionPhase::Running);
+        session.compression_reason = Some(CompressionReason::PressureLow);
+        session.runtime.compression_reason = Some(CompressionReason::PressureLow);
+        session.is_compressing = true;
+        session.runtime.is_compressing = true;
+        let mut rx = session.subscribe();
+        while rx.try_recv().is_ok() {}
+
+        assert!(!finalize_applied_if_owned(&mut session, stale_attempt));
+
+        assert_eq!(session.active_compression_attempt, Some(stale_attempt + 1));
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Running));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::PressureLow)
+        );
+        assert!(session.is_compressing);
         assert!(rx.try_recv().is_err());
     }
 
