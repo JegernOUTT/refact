@@ -42,6 +42,11 @@ const MIN_SOURCE_TOKENS_FOR_COMPRESSION: usize = 512;
 const MIN_SAVED_TOKENS: usize = 256;
 const MIN_REDUCTION_PERCENT: usize = 20;
 const HUGE_ABSOLUTE_SAVINGS_TOKENS: usize = 2048;
+const MAX_STRUCTURED_PRESERVED_CONTEXT_FILES: usize = 3;
+const MAX_STRUCTURED_PRESERVED_CONTEXT_TOKENS: usize = 2048;
+const MAX_STRUCTURED_COMPRESSED_TOOL_OUTPUTS: usize = 5;
+const MAX_STRUCTURED_TOOL_SUMMARY_CHARS: usize = 1200;
+const MAX_STRUCTURED_TOOL_TITLE_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionBenefit {
@@ -173,31 +178,24 @@ const SEGMENT_SUMMARY_PROMPT: &str =
     "Summarize the following non-user conversation segment for compact context storage. \
 Minimize information loss. Every fact needed to continue the task must be preserved.
 
-Use EXACTLY these Markdown sections (write \"(none)\" if a section has nothing):
+Return strict JSON first, with exactly this shape:
+{
+  \"summary\": \"Terse continuation summary...\",
+  \"preserve_context_files\": [
+    {\"source_message_id\": \"...\", \"file_name\": \"src/lib.rs\", \"reason\": \"Edited and needed\"}
+  ],
+  \"compressed_tool_outputs\": [
+    {\"source_message_id\": \"...\", \"tool_name\": \"shell\", \"title\": \"cargo test failure\", \"summary\": \"...\"}
+  ],
+  \"dropped\": [
+    {\"source_message_id\": \"...\", \"reason\": \"routine read\"}
+  ]
+}
 
-## Current Task State
-What was being worked on. Progress made. Current status or blocker.
-
-## Key Files
-Files EDITED, CREATED, or DELETED: exact path + what changed.
-Files central to errors or needed next: path + why it matters.
-Skip files only read without consequence.
-
-## Decisions & Constraints
-Explicit user requirements, approvals, rejections, constraints. Quote exact user instructions.
-Confirmed assumptions and design decisions.
-
-## Tool Outcomes
-Results that changed state or revealed problems.
-- Failed commands: exact error message and exit code
-- Test failures: test name and failure message
-- Successful writes/edits: file paths only
-Format: `tool(args)` → result. Skip successful read-only operations.
-
-## Dropped Context
-One sentence: what was omitted (e.g. \"14 routine file reads omitted\").
-
-Rules: include exact paths, error text, exit codes. No invented content. 150–500 words total.";
+Rules: include exact paths, error text, exit codes. No invented content. \
+Only preserve context_file message IDs that are essential verbatim. \
+Summarize important tool outputs in compressed_tool_outputs instead of copying them. \
+Keep summary terse, 150–500 words total.";
 
 pub fn is_segment_summary(message: &ChatMessage) -> bool {
     if message.role != "assistant" || is_ui_only_message(message) {
@@ -1473,15 +1471,255 @@ fn extract_non_empty_assistant_summary(
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct StructuredSummaryDecision {
+    summary: String,
+    preserved_context_file_ids: Vec<String>,
+    preserved_context_file_paths: Vec<String>,
+    compressed_tool_outputs: Vec<StructuredCompressedToolOutput>,
+}
+
+#[derive(Debug, Clone)]
+struct StructuredCompressedToolOutput {
+    source_message_id: String,
+    tool_name: String,
+    title: String,
+    summary: String,
+}
+
+fn message_by_id<'a>(
+    source_messages: &'a [ChatMessage],
+    source_message_id: &str,
+) -> Option<&'a ChatMessage> {
+    source_messages
+        .iter()
+        .find(|message| message.message_id == source_message_id)
+}
+
+fn context_file_paths(message: &ChatMessage, fallback_file_name: Option<&str>) -> Vec<String> {
+    match &message.content {
+        ChatContent::ContextFiles(files) => files
+            .iter()
+            .map(|file| sanitize_context_file_name(&file.file_name))
+            .filter(|path| !path.trim().is_empty())
+            .collect(),
+        ChatContent::SimpleText(_) | ChatContent::Multimodal(_) => fallback_file_name
+            .map(sanitize_context_file_name)
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn sanitized_json_string(value: &Value, field: &str, max_chars: usize) -> Option<String> {
+    let raw = value.get(field)?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let redacted = refact_core::string_utils::redact_sensitive(raw);
+    Some(
+        refact_core::string_utils::safe_truncate(&redacted, max_chars)
+            .trim()
+            .to_string(),
+    )
+    .filter(|text| !text.is_empty())
+}
+
+fn context_file_token_count(message: &ChatMessage) -> usize {
+    crate::chat::trajectory_ops::approx_token_count(std::slice::from_ref(message))
+}
+
+fn parse_structured_summary_decision(
+    raw_summary: &str,
+    source_messages: &[ChatMessage],
+) -> Option<StructuredSummaryDecision> {
+    let value: Value = serde_json::from_str(raw_summary.trim()).ok()?;
+    let object = value.as_object()?;
+    let summary = object.get("summary")?.as_str()?.trim();
+    if summary.is_empty() {
+        return None;
+    }
+
+    let mut decision = StructuredSummaryDecision {
+        summary: refact_core::string_utils::redact_sensitive(summary),
+        ..Default::default()
+    };
+    let mut preserved_tokens = 0usize;
+    let mut seen_preserved = HashSet::new();
+    if let Some(entries) = object
+        .get("preserve_context_files")
+        .and_then(|value| value.as_array())
+    {
+        for entry in entries {
+            if decision.preserved_context_file_ids.len() >= MAX_STRUCTURED_PRESERVED_CONTEXT_FILES {
+                break;
+            }
+            let Some(source_message_id) = entry
+                .get("source_message_id")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if !seen_preserved.insert(source_message_id.to_string()) {
+                continue;
+            }
+            let Some(message) = message_by_id(source_messages, source_message_id) else {
+                continue;
+            };
+            if message.role != "context_file" {
+                continue;
+            }
+            let message_tokens = context_file_token_count(message);
+            if preserved_tokens.saturating_add(message_tokens)
+                > MAX_STRUCTURED_PRESERVED_CONTEXT_TOKENS
+            {
+                continue;
+            }
+            preserved_tokens = preserved_tokens.saturating_add(message_tokens);
+            decision
+                .preserved_context_file_ids
+                .push(source_message_id.to_string());
+            let fallback = entry.get("file_name").and_then(|value| value.as_str());
+            for path in context_file_paths(message, fallback) {
+                if decision.preserved_context_file_paths.len()
+                    < MAX_STRUCTURED_PRESERVED_CONTEXT_FILES
+                    && !decision.preserved_context_file_paths.contains(&path)
+                {
+                    decision.preserved_context_file_paths.push(path);
+                }
+            }
+        }
+    }
+
+    let mut seen_compressed = HashSet::new();
+    if let Some(entries) = object
+        .get("compressed_tool_outputs")
+        .and_then(|value| value.as_array())
+    {
+        for entry in entries {
+            if decision.compressed_tool_outputs.len() >= MAX_STRUCTURED_COMPRESSED_TOOL_OUTPUTS {
+                break;
+            }
+            let Some(source_message_id) = entry
+                .get("source_message_id")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if !seen_compressed.insert(source_message_id.to_string()) {
+                continue;
+            }
+            let Some(message) = message_by_id(source_messages, source_message_id) else {
+                continue;
+            };
+            if !matches!(message.role.as_str(), "tool" | "diff") {
+                continue;
+            }
+            let Some(summary) =
+                sanitized_json_string(entry, "summary", MAX_STRUCTURED_TOOL_SUMMARY_CHARS)
+            else {
+                continue;
+            };
+            let tool_name =
+                sanitized_json_string(entry, "tool_name", MAX_STRUCTURED_TOOL_TITLE_CHARS)
+                    .unwrap_or_else(|| message.role.clone());
+            let title = sanitized_json_string(entry, "title", MAX_STRUCTURED_TOOL_TITLE_CHARS)
+                .unwrap_or_else(|| tool_name.clone());
+            decision
+                .compressed_tool_outputs
+                .push(StructuredCompressedToolOutput {
+                    source_message_id: source_message_id.to_string(),
+                    tool_name,
+                    title,
+                    summary,
+                });
+        }
+    }
+
+    Some(decision)
+}
+
+fn structured_summary_from_raw(
+    raw_summary: String,
+    source_messages: &[ChatMessage],
+) -> StructuredSummaryDecision {
+    parse_structured_summary_decision(&raw_summary, source_messages).unwrap_or_else(|| {
+        StructuredSummaryDecision {
+            summary: raw_summary,
+            ..Default::default()
+        }
+    })
+}
+
+fn render_structured_summary_text(decision: &StructuredSummaryDecision) -> String {
+    let mut summary = decision.summary.trim().to_string();
+    if !decision.compressed_tool_outputs.is_empty() {
+        summary.push_str("\n\n## Compressed Tool Outputs");
+        for output in &decision.compressed_tool_outputs {
+            summary.push_str(&format!(
+                "\n- {} ({}, source_message_id={}): {}",
+                output.title, output.tool_name, output.source_message_id, output.summary
+            ));
+        }
+    }
+    summary
+}
+
+fn compression_metadata_string_array(metadata: Option<&Value>, field: &str) -> Vec<String> {
+    metadata
+        .and_then(|value| value.get(field))
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn compression_metadata_usize(metadata: Option<&Value>, field: &str) -> usize {
+    metadata
+        .and_then(|value| value.get(field))
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(0)
+}
+
+fn preserved_source_messages_from_summary(
+    summary: &ChatMessage,
+    source_messages: &[ChatMessage],
+) -> Vec<ChatMessage> {
+    let metadata = summary.extra.get("compression");
+    let preserved_ids: HashSet<String> =
+        compression_metadata_string_array(metadata, "preserved_source_message_ids")
+            .into_iter()
+            .collect();
+    source_messages
+        .iter()
+        .filter(|message| preserved_ids.contains(&message.message_id))
+        .cloned()
+        .collect()
+}
+
 fn make_segment_summary_message(
     summary: String,
     source_messages: &[ChatMessage],
     summary_model: &str,
 ) -> ChatMessage {
     debug_assert!(!summary.trim().is_empty());
+    let decision = structured_summary_from_raw(summary, source_messages);
+    let summary = render_structured_summary_text(&decision);
     let source_hash = source_hash_for_messages(source_messages);
     let source_ids = source_message_ids(source_messages);
     let created_at = chrono::Utc::now().to_rfc3339();
+    let preserved_context_file_count = decision.preserved_context_file_ids.len();
+    let compressed_tool_output_count = decision.compressed_tool_outputs.len();
     let mut extra = serde_json::Map::new();
     extra.insert(
         "compression".to_string(),
@@ -1492,7 +1730,10 @@ fn make_segment_summary_message(
             "source_hash": source_hash,
             "source_message_ids": source_ids,
             "summarized_source_message_ids": source_ids,
-            "preserved_source_message_ids": [],
+            "preserved_source_message_ids": decision.preserved_context_file_ids,
+            "preserved_context_file_count": preserved_context_file_count,
+            "compressed_tool_output_count": compressed_tool_output_count,
+            "preserved_context_file_paths": decision.preserved_context_file_paths,
             "created_at": created_at,
             "summary_model": summary_model,
         }),
@@ -1525,6 +1766,15 @@ fn refresh_segment_summary_metadata(
         .to_string();
     let source_hash = source_hash_for_messages(source_messages);
     let source_ids = source_message_ids(source_messages);
+    let summary_metadata = summary.extra.get("compression");
+    let preserved_source_message_ids =
+        compression_metadata_string_array(summary_metadata, "preserved_source_message_ids");
+    let preserved_context_file_paths =
+        compression_metadata_string_array(summary_metadata, "preserved_context_file_paths");
+    let preserved_context_file_count =
+        compression_metadata_usize(summary_metadata, "preserved_context_file_count");
+    let compressed_tool_output_count =
+        compression_metadata_usize(summary_metadata, "compressed_tool_output_count");
     let created_at = summary
         .extra
         .get("compression")
@@ -1541,7 +1791,10 @@ fn refresh_segment_summary_metadata(
             "source_hash": source_hash,
             "source_message_ids": source_ids,
             "summarized_source_message_ids": source_ids,
-            "preserved_source_message_ids": [],
+            "preserved_source_message_ids": preserved_source_message_ids,
+            "preserved_context_file_count": preserved_context_file_count,
+            "compressed_tool_output_count": compressed_tool_output_count,
+            "preserved_context_file_paths": preserved_context_file_paths,
             "created_at": created_at,
             "summary_model": summary_model,
         }),
@@ -1557,7 +1810,10 @@ fn make_segment_compression_report_message(
     summary: &ChatMessage,
     source_messages: &[ChatMessage],
 ) -> ChatMessage {
-    let benefit = effective_compression_benefit(source_messages, summary, &[]);
+    let preserved_source_messages =
+        preserved_source_messages_from_summary(summary, source_messages);
+    let benefit =
+        effective_compression_benefit(source_messages, summary, &preserved_source_messages);
     make_segment_compression_report_message_with_benefit(summary, source_messages, benefit)
 }
 
@@ -1569,6 +1825,14 @@ fn make_segment_compression_report_message_with_benefit(
     let source_hash = source_hash_for_messages(source_messages);
     let source_ids = source_message_ids(source_messages);
     let summary_metadata = summary.extra.get("compression");
+    let preserved_source_message_ids =
+        compression_metadata_string_array(summary_metadata, "preserved_source_message_ids");
+    let preserved_context_file_paths =
+        compression_metadata_string_array(summary_metadata, "preserved_context_file_paths");
+    let preserved_context_file_count =
+        compression_metadata_usize(summary_metadata, "preserved_context_file_count");
+    let compressed_tool_output_count =
+        compression_metadata_usize(summary_metadata, "compressed_tool_output_count");
     let summary_model = summary_metadata
         .and_then(|value| value.get("summary_model"))
         .and_then(|value| value.as_str())
@@ -1594,7 +1858,10 @@ fn make_segment_compression_report_message_with_benefit(
             "source_message_count": source_messages.len(),
             "source_message_ids": source_ids,
             "summarized_source_message_ids": source_ids,
-            "preserved_source_message_ids": [],
+            "preserved_source_message_ids": preserved_source_message_ids,
+            "preserved_context_file_count": preserved_context_file_count,
+            "compressed_tool_output_count": compressed_tool_output_count,
+            "preserved_context_file_paths": preserved_context_file_paths,
             "source_hash": source_hash,
             "summary_model": summary_model,
             "tokens_before": tokens_before,
@@ -1608,10 +1875,12 @@ fn make_segment_compression_report_message_with_benefit(
         message_id: Uuid::new_v4().to_string(),
         role: COMPRESSION_REPORT_ROLE.to_string(),
         content: ChatContent::SimpleText(format!(
-            "## Chat context compressed\n\nA compact assistant summary was added for future model requests. The original {} message{} remain visible in this chat.\n\n- Compression kind: LLM segment summary\n- Summary model: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%",
+            "## Chat context compressed\n\nA compact assistant summary was added for future model requests. The original {} message{} remain visible in this chat.\n\n- Compression kind: LLM segment summary\n- Summary model: {}\n- Preserved context files: {}\n- Compressed tool outputs: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%",
             source_messages.len(),
             if source_messages.len() == 1 { "" } else { "s" },
             summary_model,
+            preserved_context_file_count,
+            compressed_tool_output_count,
             tokens_before,
             tokens_after,
             estimated_tokens_saved,
@@ -1780,7 +2049,10 @@ pub async fn summarize_oldest_segment_with_resolved_model(
         goal_hint,
     )
     .await?;
-    let benefit = effective_compression_benefit(&source_messages, &summary, &[]);
+    let preserved_source_messages =
+        preserved_source_messages_from_summary(&summary, &source_messages);
+    let benefit =
+        effective_compression_benefit(&source_messages, &summary, &preserved_source_messages);
     if !compression_benefit_is_sufficient(benefit) {
         return Ok(false);
     }
@@ -2206,7 +2478,13 @@ pub async fn apply_segment_summarization_with_reason(
                 }
             };
 
-            let benefit = effective_compression_benefit(&source_messages, &summary, &[]);
+            let preserved_source_messages =
+                preserved_source_messages_from_summary(&summary, &source_messages);
+            let benefit = effective_compression_benefit(
+                &source_messages,
+                &summary,
+                &preserved_source_messages,
+            );
             if !compression_benefit_is_sufficient(benefit) {
                 saw_insufficient_savings = true;
                 continue;
@@ -2225,7 +2503,13 @@ pub async fn apply_segment_summarization_with_reason(
             ensure_candidate_source_message_ids(&mut session.messages, &current_candidate);
             let current_source =
                 source_messages_for_candidate(&session.messages, &current_candidate);
-            let current_benefit = effective_compression_benefit(&current_source, &summary, &[]);
+            let current_preserved_source_messages =
+                preserved_source_messages_from_summary(&summary, &current_source);
+            let current_benefit = effective_compression_benefit(
+                &current_source,
+                &summary,
+                &current_preserved_source_messages,
+            );
             if !compression_benefit_is_sufficient(current_benefit) {
                 saw_insufficient_savings = true;
                 continue;
@@ -2464,6 +2748,11 @@ mod tests {
         }
     }
 
+    fn with_message_id(mut message: ChatMessage, message_id: &str) -> ChatMessage {
+        message.message_id = message_id.to_string();
+        message
+    }
+
     fn diff_message(text: &str) -> ChatMessage {
         ChatMessage {
             role: "diff".to_string(),
@@ -2570,6 +2859,206 @@ mod tests {
         let summary = &messages[report_idx + 1];
         assert!(is_segment_summary(summary));
         assert_eq!(summary.content.content_text_only(), summary_text);
+    }
+
+    fn structured_summary_json(
+        summary: &str,
+        preserve_context_files: Value,
+        compressed_tool_outputs: Value,
+    ) -> String {
+        json!({
+            "summary": summary,
+            "preserve_context_files": preserve_context_files,
+            "compressed_tool_outputs": compressed_tool_outputs,
+            "dropped": [],
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn structured_summary_preserves_selected_context_file_for_linearization() {
+        let source = vec![
+            with_message_id(
+                context_files(vec![context_file_named("src/lib.rs", "important source")]),
+                "ctx-important",
+            ),
+            with_message_id(assistant("routine assistant output"), "assistant-source"),
+        ];
+        let raw = structured_summary_json(
+            "Continue from structured summary.",
+            json!([{
+                "source_message_id": "ctx-important",
+                "file_name": "src/lib.rs",
+                "reason": "Edited and needed"
+            }]),
+            json!([]),
+        );
+
+        let summary = make_segment_summary_message(raw, &source, "test-model");
+        let metadata = &summary.extra["compression"];
+
+        assert_eq!(
+            metadata["preserved_source_message_ids"],
+            json!(["ctx-important"])
+        );
+        assert_eq!(metadata["preserved_context_file_count"], json!(1));
+        assert_eq!(
+            metadata["preserved_context_file_paths"],
+            json!(["src/lib.rs"])
+        );
+
+        let messages = vec![
+            user("before"),
+            source[0].clone(),
+            source[1].clone(),
+            summary,
+            user("after"),
+        ];
+        let linearized = crate::chat::linearize::apply_summarization_linearize(messages);
+        let roles: Vec<&str> = linearized
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        let text = linearized
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(roles, vec!["user", "context_file", "assistant", "user"]);
+        assert!(text.contains("important source"));
+        assert!(text.contains("Continue from structured summary."));
+        assert!(!text.contains("routine assistant output"));
+    }
+
+    #[test]
+    fn structured_summary_rejects_preserve_non_context_file_id() {
+        let source = vec![with_message_id(
+            assistant("assistant source must not be preserved"),
+            "assistant-source",
+        )];
+        let raw = structured_summary_json(
+            "Structured summary remains.",
+            json!([{
+                "source_message_id": "assistant-source",
+                "file_name": "src/lib.rs",
+                "reason": "Invalid role"
+            }]),
+            json!([]),
+        );
+
+        let summary = make_segment_summary_message(raw, &source, "test-model");
+        let metadata = &summary.extra["compression"];
+
+        assert_eq!(metadata["preserved_source_message_ids"], json!([]));
+        assert_eq!(metadata["preserved_context_file_count"], json!(0));
+        assert_eq!(metadata["preserved_context_file_paths"], json!([]));
+    }
+
+    #[test]
+    fn structured_summary_compressed_tool_output_is_in_summary_not_tool_role() {
+        let source = vec![with_message_id(
+            tool_with_id(
+                "call_shell",
+                "raw shell output with api_key=sk-abcdefghijklmnop",
+            ),
+            "tool-source",
+        )];
+        let raw = structured_summary_json(
+            "Tests failed and need a fix.",
+            json!([]),
+            json!([{
+                "source_message_id": "tool-source",
+                "tool_name": "shell",
+                "title": "cargo test failure",
+                "summary": "failure included api_key=sk-abcdefghijklmnop and exit code 101"
+            }]),
+        );
+
+        let summary = make_segment_summary_message(raw, &source, "test-model");
+        let text = summary.content.content_text_only();
+
+        assert_eq!(summary.role, "assistant");
+        assert!(text.contains("## Compressed Tool Outputs"));
+        assert!(text.contains("cargo test failure (shell, source_message_id=tool-source)"));
+        assert!(text.contains("exit code 101"));
+        assert!(text.contains("api_key=[REDACTED]") || text.contains("[REDACTED_SK_TOKEN]"));
+        assert!(!text.contains("sk-abcdefghijklmnop"));
+        assert_eq!(
+            summary.extra["compression"]["compressed_tool_output_count"],
+            json!(1)
+        );
+
+        let report = make_segment_compression_report_message(&summary, &source);
+        assert_eq!(report.role, COMPRESSION_REPORT_ROLE);
+        assert_ne!(report.role, "tool");
+        assert_eq!(
+            report.extra["compression_report"]["compressed_tool_output_count"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn structured_summary_caps_preserved_context_file_budget() {
+        let source = vec![
+            with_message_id(
+                context_files(vec![context_file_named("src/a.rs", "a")]),
+                "ctx-a",
+            ),
+            with_message_id(
+                context_files(vec![context_file_named("src/b.rs", "b")]),
+                "ctx-b",
+            ),
+            with_message_id(
+                context_files(vec![context_file_named("src/c.rs", "c")]),
+                "ctx-c",
+            ),
+            with_message_id(
+                context_files(vec![context_file_named("src/d.rs", "d")]),
+                "ctx-d",
+            ),
+        ];
+        let raw = structured_summary_json(
+            "Preserve only bounded context.",
+            json!([
+                {"source_message_id": "ctx-a", "file_name": "src/a.rs", "reason": "needed"},
+                {"source_message_id": "ctx-b", "file_name": "src/b.rs", "reason": "needed"},
+                {"source_message_id": "ctx-c", "file_name": "src/c.rs", "reason": "needed"},
+                {"source_message_id": "ctx-d", "file_name": "src/d.rs", "reason": "needed"}
+            ]),
+            json!([]),
+        );
+
+        let summary = make_segment_summary_message(raw, &source, "test-model");
+        let metadata = &summary.extra["compression"];
+
+        assert_eq!(metadata["preserved_context_file_count"], json!(3));
+        assert_eq!(
+            metadata["preserved_source_message_ids"],
+            json!(["ctx-a", "ctx-b", "ctx-c"])
+        );
+        assert_eq!(
+            metadata["preserved_context_file_paths"],
+            json!(["src/a.rs", "src/b.rs", "src/c.rs"])
+        );
+    }
+
+    #[test]
+    fn structured_summary_falls_back_to_plain_summary_on_invalid_json() {
+        let source = vec![with_message_id(assistant("source"), "assistant-source")];
+        let raw = "not json but still a useful plain summary".to_string();
+
+        let summary = make_segment_summary_message(raw.clone(), &source, "test-model");
+
+        assert_eq!(summary.content.content_text_only(), raw);
+        assert_eq!(
+            summary.extra["compression"]["preserved_source_message_ids"],
+            json!([])
+        );
+        assert_eq!(
+            summary.extra["compression"]["compressed_tool_output_count"],
+            json!(0)
+        );
     }
 
     mod compression_benefit {
