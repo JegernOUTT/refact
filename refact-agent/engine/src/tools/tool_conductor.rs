@@ -265,6 +265,39 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
+fn ensure_steer_chat_owned(
+    ledger: &GoalLedger,
+    chat_id: &str,
+    thread: &refact_chat_api::ThreadParams,
+) -> Result<(), String> {
+    if ledger
+        .chat_ids
+        .iter()
+        .any(|owned_chat_id| owned_chat_id == chat_id)
+    {
+        return Ok(());
+    }
+    if let Some(task_meta) = thread.task_meta.as_ref() {
+        if ledger
+            .planner_task_id
+            .as_ref()
+            .is_some_and(|task_id| task_id == &task_meta.task_id)
+        {
+            return Ok(());
+        }
+        if ledger
+            .task_ids
+            .iter()
+            .any(|task_id| task_id == &task_meta.task_id)
+        {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "chat {chat_id} is not owned by this conductor goal"
+    ))
+}
+
 async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: &GoalLedger) {
     let goal = goal_from_ledger(goal_id, ledger.clone());
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
@@ -326,6 +359,8 @@ impl Tool for ToolConductorSteerChat {
         let chat_id = required_string(args, "chat_id")?;
         let message = cap(&required_string(args, "message")?, MAX_CONTENT_CHARS);
         let chat_facade = ccx.lock().await.app.chat.facade.clone();
+        let snapshot = chat_facade.session_snapshot(&chat_id).await?;
+        ensure_steer_chat_owned(&ledger, &chat_id, &snapshot.thread)?;
         chat_facade
             .push_priority_command(
                 &chat_id,
@@ -776,6 +811,19 @@ mod tests {
         refact_chat_api::ThreadParams::default()
     }
 
+    fn task_thread(task_id: &str) -> refact_chat_api::ThreadParams {
+        refact_chat_api::ThreadParams {
+            task_meta: Some(refact_chat_api::TaskMeta {
+                task_id: task_id.to_string(),
+                role: "agents".to_string(),
+                agent_id: Some("agent-1".to_string()),
+                card_id: Some("T-1".to_string()),
+                planner_chat_id: Some("planner-chat".to_string()),
+            }),
+            ..Default::default()
+        }
+    }
+
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
             .iter()
@@ -840,9 +888,16 @@ mod tests {
     async fn tool_conductor_steer_chat_pushes_conductor_origin_command() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
-        save_goal_ledger(dir.path(), "goal-steer", &GoalLedger::default())
-            .await
-            .unwrap();
+        save_goal_ledger(
+            dir.path(),
+            "goal-steer",
+            &GoalLedger {
+                chat_ids: vec!["agent-chat-1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-steer")));
         let mut tool = ToolConductorSteerChat::new();
 
@@ -879,6 +934,87 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ledger.chat_ids, vec!["agent-chat-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn conductor_steer_chat_rejects_unowned_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        let original = GoalLedger {
+            chat_ids: vec!["owned-chat".to_string()],
+            task_ids: vec!["owned-task".to_string()],
+            ..Default::default()
+        };
+        save_goal_ledger(dir.path(), "goal-unowned", &original)
+            .await
+            .unwrap();
+        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mut tool = ToolConductorSteerChat::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock.clone()).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-unowned")),
+                    ("chat_id", json!("random-chat")),
+                    ("message", json!("do not inject")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("not owned"), "{error}");
+        assert!(mock.pushed_commands().is_empty());
+        let ledger = load_goal_ledger(dir.path(), "goal-unowned")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger, original);
+    }
+
+    #[tokio::test]
+    async fn conductor_steer_chat_allows_task_owned_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-task-owned",
+            &GoalLedger {
+                planner_task_id: Some("planner-task".to_string()),
+                task_ids: vec!["task-owned".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mock = Arc::new(MockChatFacade::new(task_thread("task-owned")));
+        let mut tool = ToolConductorSteerChat::new();
+
+        tool.tool_execute(
+            ccx(gcx, mock.clone()).await,
+            &"call".to_string(),
+            &args(&[
+                ("goal_id", json!("goal-task-owned")),
+                ("chat_id", json!("agent-chat-task")),
+                ("message", json!("continue task")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let pushed = mock.pushed_commands();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].0, "agent-chat-task");
+        let ledger = load_goal_ledger(dir.path(), "goal-task-owned")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ledger
+            .chat_ids
+            .iter()
+            .any(|chat_id| chat_id == "agent-chat-task"));
+        assert_eq!(ledger.task_ids, vec!["task-owned".to_string()]);
     }
 
     #[tokio::test]
@@ -1042,6 +1178,7 @@ mod tests {
             "goal-full-auto",
             &GoalLedger {
                 autonomy: Some(GoalAutonomy::FullAuto),
+                chat_ids: vec!["agent-chat-1".to_string()],
                 ..Default::default()
             },
         )
