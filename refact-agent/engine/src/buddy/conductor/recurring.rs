@@ -2,11 +2,13 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use refact_buddy_core::conductor::{
-    ConductorMemo, ConductorRecurring, ConductorWakeReason, GoalLedger, GoalStatus, MemoKind,
+    ConductorGoal, ConductorMemo, ConductorRecurring, ConductorWakeReason, GoalLedger, GoalStatus,
+    MemoKind,
 };
 use refact_buddy_core::conductor_store::{list_goal_ledgers, save_goal_ledger};
 use uuid::Uuid;
 
+use crate::buddy::events::BuddyEvent;
 use crate::global_context::SharedGlobalContext;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,11 +32,14 @@ pub async fn service_recurring_goals(
         if terminal_or_paused(&ledger) {
             continue;
         }
-        if maybe_escalate_invalid_cron(project_root, &stored.goal_id, &mut ledger).await {
+        if maybe_escalate_invalid_cron(gcx.clone(), project_root, &stored.goal_id, &mut ledger)
+            .await
+        {
             report.invalid_cron_escalated.push(stored.goal_id.clone());
             continue;
         }
-        if maybe_escalate_stale(project_root, &stored.goal_id, &mut ledger, now).await {
+        if maybe_escalate_stale(gcx.clone(), project_root, &stored.goal_id, &mut ledger, now).await
+        {
             report.stale_escalated.push(stored.goal_id.clone());
             continue;
         }
@@ -85,18 +90,18 @@ async fn maybe_enqueue_due_cron(
     if due != Ok(true) {
         return false;
     }
-    if !super::wake::enqueue_goal_wake(gcx, goal_id, ConductorWakeReason::Cron).await {
+    if !super::wake::enqueue_goal_wake(gcx.clone(), goal_id, ConductorWakeReason::Cron).await {
         return false;
     }
     if let Some(recurring) = ledger.recurring.as_mut() {
         recurring.last_enqueued_at = Some(now.to_rfc3339());
     }
     ledger.last_wake_reason = Some(ConductorWakeReason::Cron);
-    let _ = save_goal_ledger(project_root, goal_id, ledger).await;
-    true
+    save_and_emit(gcx, project_root, goal_id, ledger).await
 }
 
 async fn maybe_escalate_stale(
+    gcx: SharedGlobalContext,
     project_root: &Path,
     goal_id: &str,
     ledger: &mut GoalLedger,
@@ -120,12 +125,11 @@ async fn maybe_escalate_stale(
         ledger,
         format!("Conductor goal went stale for at least {stale_after_secs} seconds."),
     );
-    save_goal_ledger(project_root, goal_id, ledger)
-        .await
-        .is_ok()
+    save_and_emit(gcx, project_root, goal_id, ledger).await
 }
 
 async fn maybe_escalate_invalid_cron(
+    gcx: SharedGlobalContext,
     project_root: &Path,
     goal_id: &str,
     ledger: &mut GoalLedger,
@@ -141,9 +145,27 @@ async fn maybe_escalate_invalid_cron(
     }
     ledger.status = Some(GoalStatus::WaitingForHuman);
     push_escalation(ledger, "Recurring conductor cron is invalid.".to_string());
-    save_goal_ledger(project_root, goal_id, ledger)
+    save_and_emit(gcx, project_root, goal_id, ledger).await
+}
+
+async fn save_and_emit(
+    gcx: SharedGlobalContext,
+    project_root: &Path,
+    goal_id: &str,
+    ledger: &GoalLedger,
+) -> bool {
+    if save_goal_ledger(project_root, goal_id, ledger)
         .await
-        .is_ok()
+        .is_err()
+    {
+        return false;
+    }
+    if let Some(tx) = gcx.buddy_events_tx.as_ref() {
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
+            goal: ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone()),
+        });
+    }
+    true
 }
 
 fn terminal_or_paused(ledger: &GoalLedger) -> bool {
@@ -203,7 +225,9 @@ fn push_escalation(ledger: &mut GoalLedger, content: String) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use refact_buddy_core::conductor::GoalBudget;
     use refact_buddy_core::conductor_store::load_goal_ledger;
+    use tokio::time::timeout;
 
     fn ts(seconds: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(seconds, 0).unwrap()
@@ -296,5 +320,53 @@ mod tests {
             .memos
             .iter()
             .any(|memo| memo.kind == MemoKind::Escalation));
+    }
+
+    #[tokio::test]
+    async fn recurring_stale_emits_complete_goal_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-stale-event",
+            &GoalLedger {
+                title: Some("Stale rich goal".to_string()),
+                budget: Some(GoalBudget {
+                    wall_clock_secs: Some(600),
+                    no_progress_wakes: Some(2),
+                    ..Default::default()
+                }),
+                last_progress_at: Some("2026-01-01T00:00:00Z".to_string()),
+                recurring: Some(ConductorRecurring {
+                    enabled: true,
+                    cron: "0 * * * *".to_string(),
+                    last_enqueued_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    stale_after_secs: Some(60),
+                }),
+                no_progress_wakes: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut rx = gcx.buddy_events_tx.as_ref().unwrap().subscribe();
+
+        let report = service_recurring_goals(gcx, dir.path(), ts(1767225661)).await;
+
+        assert_eq!(report.stale_escalated, vec!["goal-stale-event".to_string()]);
+        let event = timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            BuddyEvent::ConductorGoalUpdated { goal } => {
+                assert_eq!(goal.id, "goal-stale-event");
+                assert_eq!(goal.title, "Stale rich goal");
+                assert_eq!(goal.status, GoalStatus::WaitingForHuman);
+                assert_eq!(goal.budget.wall_clock_secs, Some(600));
+                assert_eq!(goal.spent.no_progress_wakes, 1);
+            }
+            other => panic!("expected ConductorGoalUpdated, got {other:?}"),
+        }
     }
 }

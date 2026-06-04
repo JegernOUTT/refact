@@ -1059,7 +1059,9 @@ mod tests {
         let decoded: ChatCommand = serde_json::from_str(&encoded).unwrap();
 
         match decoded {
-            ChatCommand::UserMessage { content, origin, .. } => {
+            ChatCommand::UserMessage {
+                content, origin, ..
+            } => {
                 assert_eq!(content, json!("hello from conductor"));
                 assert_eq!(origin, Some(MessageOrigin::Conductor));
             }

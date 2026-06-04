@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use hyper::StatusCode;
-use refact_buddy_core::conductor::{ConductorWakeReason, GoalLedger, PendingQuestion};
+use refact_buddy_core::conductor::{ConductorGoal, ConductorWakeReason, GoalLedger, PendingQuestion};
 use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
 use refact_buddy_core::types::{BuddyGhostMessage, BuddyGhostMessageRole};
 use uuid::Uuid;
@@ -39,7 +39,7 @@ pub async fn conductor_ghost_say(
     content: &str,
     source_chat_id: Option<String>,
 ) -> Result<BuddyGhostMessage, ScratchError> {
-    let mut ledger = load_or_default(project_root, goal_id).await?;
+    let mut ledger = load_required(project_root, goal_id).await?;
     let ghost = make_ghost_message(
         goal_id,
         BuddyGhostMessageRole::Say,
@@ -59,7 +59,7 @@ pub async fn conductor_ghost_memo(
     content: &str,
     source_chat_id: Option<String>,
 ) -> Result<BuddyGhostMessage, ScratchError> {
-    let mut ledger = load_or_default(project_root, goal_id).await?;
+    let mut ledger = load_required(project_root, goal_id).await?;
     let ghost = make_ghost_message(
         goal_id,
         BuddyGhostMessageRole::Memo,
@@ -80,7 +80,7 @@ pub async fn conductor_ghost_ask(
     blocking: bool,
     source_chat_id: Option<String>,
 ) -> Result<GhostAskResult, ScratchError> {
-    let mut ledger = load_or_default(project_root, goal_id).await?;
+    let mut ledger = load_required(project_root, goal_id).await?;
     let question_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let capped_question = cap_ghost_content(question);
@@ -138,6 +138,7 @@ pub async fn conductor_ghost_answer(
         .await
         .map_err(store_error)?;
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
+    emit_goal_updated(app.gcx.clone(), goal_id, ledger).await;
     let enqueued = {
         let mut bus = app.buddy.conductor_wake_bus.lock().await;
         bus.enqueue_goal(goal_id, ConductorWakeReason::GhostAnswer, Utc::now())
@@ -167,11 +168,15 @@ fn make_ghost_message(
     }
 }
 
-async fn load_or_default(project_root: &Path, goal_id: &str) -> Result<GoalLedger, ScratchError> {
+async fn load_required(project_root: &Path, goal_id: &str) -> Result<GoalLedger, ScratchError> {
     load_goal_ledger(project_root, goal_id)
         .await
         .map_err(store_error)
-        .map(|ledger| ledger.unwrap_or_default())
+        .and_then(|ledger| {
+            ledger.ok_or_else(|| {
+                ScratchError::new(StatusCode::NOT_FOUND, format!("goal not found: {goal_id}"))
+            })
+        })
 }
 
 async fn persist_and_emit(
@@ -188,7 +193,16 @@ async fn persist_and_emit(
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
         let _ = tx.send(BuddyEvent::ConductorGhostMessage { ghost });
     }
+    emit_goal_updated(gcx, goal_id, ledger.clone()).await;
     Ok(())
+}
+
+async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: GoalLedger) {
+    if let Some(tx) = gcx.buddy_events_tx.as_ref() {
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
+            goal: ConductorGoal::from_ledger(goal_id.to_string(), ledger),
+        });
+    }
 }
 
 fn store_error(error: refact_buddy_core::conductor_store::ConductorStoreError) -> ScratchError {
@@ -207,7 +221,7 @@ fn store_error(error: refact_buddy_core::conductor_store::ConductorStoreError) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_buddy_core::conductor::GoalLedger;
+    use refact_buddy_core::conductor::{GoalBudget, GoalLedger};
     use refact_buddy_core::conductor_store::save_goal_ledger;
     use tokio::time::timeout;
 
@@ -293,6 +307,79 @@ mod tests {
         match event {
             BuddyEvent::ConductorGhostMessage { ghost } => assert_eq!(ghost, result.ghost),
             other => panic!("expected ConductorGhostMessage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_say_rejects_missing_goal_without_creating_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+
+        let error = conductor_ghost_say(gcx, dir.path(), "ghost-missing", "boo", None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::NOT_FOUND);
+        assert!(error.message.contains("goal not found"));
+        assert_eq!(
+            load_goal_ledger(dir.path(), "ghost-missing").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_answer_persists_and_emits_complete_goal_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        let question = PendingQuestion {
+            id: "question-1".to_string(),
+            question: "Continue?".to_string(),
+            asked_at: "2026-06-03T00:00:00Z".to_string(),
+            blocking: true,
+            ..Default::default()
+        };
+        save_goal_ledger(
+            dir.path(),
+            "goal-answer-event",
+            &GoalLedger {
+                title: Some("Answerable goal".to_string()),
+                budget: Some(GoalBudget {
+                    wall_clock_secs: Some(120),
+                    no_progress_wakes: Some(2),
+                    ..Default::default()
+                }),
+                pending_questions: vec![question],
+                no_progress_wakes: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut rx = gcx.buddy_events_tx.as_ref().unwrap().subscribe();
+        let app = AppState::from_gcx(gcx).await;
+
+        let result =
+            conductor_ghost_answer(app, dir.path(), "goal-answer-event", "question-1", "Yes")
+                .await
+                .unwrap();
+
+        assert!(result.answered);
+        let event = timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            BuddyEvent::ConductorGoalUpdated { goal } => {
+                assert_eq!(goal.id, "goal-answer-event");
+                assert_eq!(goal.title, "Answerable goal");
+                assert_eq!(goal.budget.wall_clock_secs, Some(120));
+                assert_eq!(goal.spent.no_progress_wakes, 1);
+                assert_eq!(
+                    goal.ledger.pending_questions[0].answer.as_deref(),
+                    Some("Yes")
+                );
+            }
+            other => panic!("expected ConductorGoalUpdated, got {other:?}"),
         }
     }
 }

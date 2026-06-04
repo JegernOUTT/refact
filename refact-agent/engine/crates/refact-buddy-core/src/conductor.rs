@@ -298,7 +298,8 @@ impl GoalLedger {
             .plan_doc_slug
             .clone()
             .filter(|value| !value.trim().is_empty());
-        self.plan_markdown = Some(goal.plan_markdown.clone()).filter(|value| !value.trim().is_empty());
+        self.plan_markdown =
+            Some(goal.plan_markdown.clone()).filter(|value| !value.trim().is_empty());
         self.done_when = Some(goal.done_when.clone());
         self.budget = Some(goal.budget.clone());
         self.status = Some(goal.status);

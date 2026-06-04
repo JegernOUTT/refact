@@ -189,7 +189,7 @@ async fn goal_context(
     let ledger = load_goal_ledger(&project_root, &goal_id)
         .await
         .map_err(|error| error.to_string())?
-        .unwrap_or_default();
+        .ok_or_else(|| format!("conductor goal not found: {goal_id}"))?;
     Ok((gcx, goal_id, ledger))
 }
 
@@ -218,10 +218,6 @@ fn ledger_autonomy(ledger: &GoalLedger) -> GoalAutonomy {
     ledger.autonomy.unwrap_or_default()
 }
 
-fn ledger_status(ledger: &GoalLedger) -> GoalStatus {
-    ledger.status.unwrap_or_default()
-}
-
 fn ensure_can_mutate(ledger: &GoalLedger, action: &str) -> Result<(), String> {
     if ledger_autonomy(ledger) == GoalAutonomy::ReadOnly {
         return Err(format!(
@@ -232,14 +228,7 @@ fn ensure_can_mutate(ledger: &GoalLedger, action: &str) -> Result<(), String> {
 }
 
 fn goal_from_ledger(goal_id: &str, ledger: GoalLedger) -> ConductorGoal {
-    ConductorGoal {
-        id: goal_id.to_string(),
-        title: goal_id.to_string(),
-        status: ledger_status(&ledger),
-        autonomy: ledger_autonomy(&ledger),
-        ledger,
-        ..ConductorGoal::default()
-    }
+    ConductorGoal::from_ledger(goal_id.to_string(), ledger)
 }
 
 fn push_memo(
@@ -634,7 +623,7 @@ impl Tool for ToolConductorAsk {
         let ledger = load_goal_ledger(&project_root, &goal_id)
             .await
             .map_err(|error| error.to_string())?
-            .unwrap_or_default();
+            .ok_or_else(|| format!("conductor goal not found: {goal_id}"))?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
         tool_message(
             tool_call_id,
@@ -782,6 +771,30 @@ mod tests {
             .collect()
     }
 
+    fn rich_ledger() -> GoalLedger {
+        GoalLedger {
+            title: Some("Rich conductor goal".to_string()),
+            plan_doc_slug: Some("rich-plan".to_string()),
+            plan_markdown: Some("# Rich plan".to_string()),
+            done_when: Some(refact_buddy_core::conductor::DoneWhen {
+                summary: "All rich metadata survives".to_string(),
+                checklist: vec!["budget remains".to_string()],
+            }),
+            budget: Some(refact_buddy_core::conductor::GoalBudget {
+                wall_clock_secs: Some(3600),
+                no_progress_wakes: Some(3),
+                total_tokens: Some(50_000),
+                usd: Some(2.5),
+            }),
+            status: Some(GoalStatus::Running),
+            autonomy: Some(GoalAutonomy::FullAuto),
+            created_at: Some("2026-06-03T00:00:00Z".to_string()),
+            updated_at: Some("2026-06-03T00:00:01Z".to_string()),
+            no_progress_wakes: 2,
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn tool_conductor_registration_includes_core_tools() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -815,6 +828,9 @@ mod tests {
     async fn tool_conductor_steer_chat_pushes_conductor_origin_command() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-steer", &GoalLedger::default())
+            .await
+            .unwrap();
         let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-steer")));
         let mut tool = ToolConductorSteerChat::new();
 
@@ -1014,6 +1030,9 @@ mod tests {
     async fn tool_conductor_memo_persists_content() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-memo", &GoalLedger::default())
+            .await
+            .unwrap();
         let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-memo")));
         let mut tool = ToolConductorMemo::new();
 
@@ -1042,5 +1061,73 @@ mod tests {
             ledger.memos[0].content,
             "Use the existing planner task before spawning more."
         );
+    }
+
+    #[tokio::test]
+    async fn tool_conductor_mutation_rejects_missing_goal_without_creating_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mut tool = ToolConductorMemo::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("missing-goal")),
+                    ("content", json!("do not create by typo")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("conductor goal not found"), "{error}");
+        assert_eq!(
+            load_goal_ledger(dir.path(), "missing-goal").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_conductor_emits_complete_goal_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-rich", &rich_ledger())
+            .await
+            .unwrap();
+        let mut rx = gcx.buddy_events_tx.as_ref().unwrap().subscribe();
+        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mut tool = ToolConductorMemo::new();
+
+        tool.tool_execute(
+            ccx(gcx, mock).await,
+            &"call".to_string(),
+            &args(&[
+                ("goal_id", json!("goal-rich")),
+                ("content", json!("metadata must survive")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            BuddyEvent::ConductorGoalUpdated { goal } => {
+                assert_eq!(goal.id, "goal-rich");
+                assert_eq!(goal.title, "Rich conductor goal");
+                assert_eq!(goal.plan_doc_slug.as_deref(), Some("rich-plan"));
+                assert_eq!(goal.plan_markdown, "# Rich plan");
+                assert_eq!(goal.done_when.summary, "All rich metadata survives");
+                assert_eq!(goal.budget.wall_clock_secs, Some(3600));
+                assert_eq!(goal.budget.no_progress_wakes, Some(3));
+                assert_eq!(goal.spent.no_progress_wakes, 2);
+                assert_eq!(goal.created_at.as_deref(), Some("2026-06-03T00:00:00Z"));
+            }
+            other => panic!("expected ConductorGoalUpdated, got {other:?}"),
+        }
     }
 }
