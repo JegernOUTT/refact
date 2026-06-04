@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::actor::{buddy_enqueue_event, make_runtime_event};
+use crate::buddy::conductor::budget::hydrate_goal_spent;
 use crate::buddy::events::BuddyEvent;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
@@ -304,7 +305,7 @@ fn ensure_steer_chat_owned(
 }
 
 async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: &GoalLedger) {
-    let goal = goal_from_ledger(goal_id, ledger.clone());
+    let goal = hydrate_goal_spent(gcx.clone(), goal_from_ledger(goal_id, ledger.clone())).await;
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
         let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
     }
@@ -715,6 +716,9 @@ impl Tool for ToolConductorAsk {
 mod tests {
     use super::*;
     use crate::tools::tools_description::Tool;
+    use crate::caps::model_caps::ModelCapabilities;
+    use crate::caps::CodeAssistantCaps;
+    use crate::providers::traits::ModelPricing;
     use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
     use refact_runtime_api::{
         ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest,
@@ -881,6 +885,101 @@ mod tests {
             no_progress_wakes: 2,
             ..Default::default()
         }
+    }
+
+    async fn seed_pricing(gcx: &Arc<GlobalContext>, model_id: &str) {
+        let mut model_caps = HashMap::new();
+        model_caps.insert(
+            model_id.to_string(),
+            ModelCapabilities {
+                pricing: Some(ModelPricing {
+                    prompt: 1.0,
+                    generated: 2.0,
+                    cache_read: Some(0.5),
+                    cache_creation: None,
+                    context_over_200k: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let caps = CodeAssistantCaps {
+            model_caps: Arc::new(model_caps),
+            ..Default::default()
+        };
+        gcx.caps_state.write().await.caps = Some(Arc::new(caps));
+    }
+
+    async fn write_task_meta(root: &std::path::Path, task_id: &str, goal_id: &str) {
+        let task_dir = root.join(".refact").join("tasks").join(task_id);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        let meta = crate::tasks::types::TaskMeta {
+            schema_version: 1,
+            id: task_id.to_string(),
+            name: task_id.to_string(),
+            status: crate::tasks::types::TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 0,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: None,
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+            conductor: Some(crate::tasks::types::TaskConductorLink {
+                goal_id: goal_id.to_string(),
+                role: crate::tasks::types::TaskConductorRole::Planner,
+            }),
+        };
+        tokio::fs::write(
+            task_dir.join("meta.yaml"),
+            serde_yaml::to_string(&meta).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn write_trajectory(root: &std::path::Path, task_id: &str, chat_id: &str, model: &str) {
+        let dir = root
+            .join(".refact")
+            .join("tasks")
+            .join(task_id)
+            .join("trajectories")
+            .join("planner");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let task_meta = crate::chat::types::TaskMeta {
+            task_id: task_id.to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(chat_id.to_string()),
+        };
+        let trajectory = json!({
+            "id": chat_id,
+            "model": model,
+            "messages": [{
+                "role": "assistant",
+                "message_id": "usage-event",
+                "content": "ok",
+                "usage": {
+                    "prompt_tokens": 19,
+                    "completion_tokens": 7,
+                    "total_tokens": 26,
+                    "cache_read_input_tokens": 3
+                }
+            }],
+            "task_meta": task_meta
+        });
+        tokio::fs::write(
+            dir.join(format!("{chat_id}.json")),
+            serde_json::to_string(&trajectory).unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1445,6 +1544,63 @@ mod tests {
                 assert_eq!(goal.budget.no_progress_wakes, Some(3));
                 assert_eq!(goal.spent.no_progress_wakes, 2);
                 assert_eq!(goal.created_at.as_deref(), Some("2026-06-03T00:00:00Z"));
+            }
+            other => panic!("expected ConductorGoalUpdated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn conductor_goal_update_emits_hydrated_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        seed_pricing(&gcx, "test/priced").await;
+        write_task_meta(dir.path(), "task-event-spent", "goal-event-spent").await;
+        write_trajectory(
+            dir.path(),
+            "task-event-spent",
+            "planner-event-spent",
+            "test/priced",
+        )
+        .await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-event-spent",
+            &GoalLedger {
+                task_ids: vec!["task-event-spent".to_string()],
+                no_progress_wakes: 5,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut rx = gcx.buddy_events_tx.as_ref().unwrap().subscribe();
+        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mut tool = ToolConductorMemo::new();
+
+        tool.tool_execute(
+            ccx(gcx, mock).await,
+            &"call".to_string(),
+            &args(&[
+                ("goal_id", json!("goal-event-spent")),
+                ("content", json!("hydrate spend on event")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            BuddyEvent::ConductorGoalUpdated { goal } => {
+                assert_eq!(goal.id, "goal-event-spent");
+                assert_eq!(goal.spent.prompt_tokens, 19);
+                assert_eq!(goal.spent.completion_tokens, 7);
+                assert_eq!(goal.spent.total_tokens, 26);
+                assert_eq!(goal.spent.cache_read_tokens, 3);
+                assert_eq!(goal.spent.no_progress_wakes, 5);
+                assert!((goal.spent.usd.unwrap() - 0.0000345).abs() < 1e-12);
             }
             other => panic!("expected ConductorGoalUpdated, got {other:?}"),
         }

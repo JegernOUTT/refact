@@ -13,6 +13,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::app_state::AppState;
+use crate::buddy::conductor::budget::hydrate_goal_spent;
 use crate::buddy::events::BuddyEvent;
 use crate::custom_error::ScratchError;
 
@@ -78,12 +79,19 @@ pub async fn handle_v1_buddy_conductor_goals_list(
     State(app): State<AppState>,
 ) -> Result<axum::Json<ConductorGoalsResponse>, ScratchError> {
     let project_root = project_root(&app).await?;
-    let goals = list_goal_ledgers(&project_root)
+    let stored_goals = list_goal_ledgers(&project_root)
         .await
-        .map_err(store_error)?
-        .into_iter()
-        .map(|stored| ConductorGoal::from_ledger(stored.goal_id, stored.ledger))
-        .collect();
+        .map_err(store_error)?;
+    let mut goals = Vec::with_capacity(stored_goals.len());
+    for stored in stored_goals {
+        goals.push(
+            hydrate_goal_spent(
+                app.gcx.clone(),
+                ConductorGoal::from_ledger(stored.goal_id, stored.ledger),
+            )
+            .await,
+        );
+    }
     Ok(axum::Json(ConductorGoalsResponse { goals }))
 }
 
@@ -135,7 +143,7 @@ pub async fn handle_v1_buddy_conductor_goal_create(
     save_goal_ledger(&project_root, &goal.id, &goal.ledger)
         .await
         .map_err(store_error)?;
-    refresh_targets_and_emit(app, &goal, Some(ConductorWakeReason::GoalCreated)).await;
+    let goal = refresh_targets_and_emit(app, goal, Some(ConductorWakeReason::GoalCreated)).await;
     Ok(axum::Json(goal))
 }
 
@@ -188,7 +196,7 @@ pub async fn handle_v1_buddy_conductor_goal_patch(
         })?;
     }
     persist_goal(&project_root, &mut goal).await?;
-    refresh_targets_and_emit(app, &goal, None).await;
+    let goal = refresh_targets_and_emit(app, goal, None).await;
     Ok(axum::Json(goal))
 }
 
@@ -222,7 +230,7 @@ pub async fn handle_v1_buddy_conductor_goal_autonomy(
     let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
     goal.autonomy = req.autonomy;
     persist_goal(&project_root, &mut goal).await?;
-    refresh_targets_and_emit(app, &goal, None).await;
+    let goal = refresh_targets_and_emit(app, goal, None).await;
     Ok(axum::Json(goal))
 }
 
@@ -280,13 +288,14 @@ async fn set_goal_status(
     let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
     apply_goal_status(&mut goal, status);
     persist_goal(&project_root, &mut goal).await?;
-    refresh_targets_and_emit(app, &goal, None).await;
+    let goal = refresh_targets_and_emit(app, goal, None).await;
     Ok(axum::Json(goal))
 }
 
 async fn load_goal(app: &AppState, goal_id: &str) -> Result<ConductorGoal, ScratchError> {
     let project_root = project_root(app).await?;
-    load_goal_from_root(&project_root, goal_id).await
+    let goal = load_goal_from_root(&project_root, goal_id).await?;
+    Ok(hydrate_goal_spent(app.gcx.clone(), goal).await)
 }
 
 async fn load_goal_from_root(
@@ -327,9 +336,9 @@ fn apply_goal_status(goal: &mut ConductorGoal, status: GoalStatus) {
 
 async fn refresh_targets_and_emit(
     app: AppState,
-    goal: &ConductorGoal,
+    goal: ConductorGoal,
     wake_reason: Option<ConductorWakeReason>,
-) {
+) -> ConductorGoal {
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
     if let Some(reason) = wake_reason {
         let _ = crate::buddy::conductor::wake::enqueue_goal_wake_after_target_refresh(
@@ -339,10 +348,12 @@ async fn refresh_targets_and_emit(
         )
         .await;
     }
+    let goal = hydrate_goal_spent(app.gcx.clone(), goal).await;
     let _ = app
         .buddy
         .buddy_events_tx
         .send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
+    goal
 }
 
 async fn project_root(app: &AppState) -> Result<std::path::PathBuf, ScratchError> {
@@ -383,14 +394,15 @@ fn non_empty(value: String) -> Option<String> {
 mod tests {
     use super::*;
     use crate::app_state::AppState;
-    use refact_buddy_core::conductor::{DoneWhen, GoalBudget};
-    use refact_buddy_core::conductor_store::load_goal_ledger;
     use async_trait::async_trait;
+    use refact_buddy_core::conductor::{DoneWhen, GoalBudget, GoalLedger};
+    use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
     use refact_chat_api::ChatCommand;
     use refact_runtime_api::{
         ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest,
         RuntimeTrajectorySnapshot, SessionState,
     };
+    use serde_json::{json, Value};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::time::timeout;
 
@@ -500,6 +512,89 @@ mod tests {
             .await
             .unwrap()
             .0
+    }
+
+    async fn write_task_meta(root: &std::path::Path, task_id: &str, goal_id: &str) {
+        let task_dir = root.join(".refact").join("tasks").join(task_id);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        let meta = crate::tasks::types::TaskMeta {
+            schema_version: 1,
+            id: task_id.to_string(),
+            name: task_id.to_string(),
+            status: crate::tasks::types::TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 0,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: None,
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+            conductor: Some(crate::tasks::types::TaskConductorLink {
+                goal_id: goal_id.to_string(),
+                role: crate::tasks::types::TaskConductorRole::Planner,
+            }),
+        };
+        tokio::fs::write(
+            task_dir.join("meta.yaml"),
+            serde_yaml::to_string(&meta).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn write_trajectory(
+        root: &std::path::Path,
+        task_id: &str,
+        chat_id: &str,
+        model: &str,
+        messages: Vec<Value>,
+    ) {
+        let dir = root
+            .join(".refact")
+            .join("tasks")
+            .join(task_id)
+            .join("trajectories")
+            .join("planner");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let task_meta = crate::chat::types::TaskMeta {
+            task_id: task_id.to_string(),
+            role: "planner".to_string(),
+            agent_id: None,
+            card_id: None,
+            planner_chat_id: Some(chat_id.to_string()),
+        };
+        let trajectory = json!({
+            "id": chat_id,
+            "model": model,
+            "messages": messages,
+            "task_meta": task_meta
+        });
+        tokio::fs::write(
+            dir.join(format!("{chat_id}.json")),
+            serde_json::to_string(&trajectory).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn usage_message(message_id: &str, prompt: usize, completion: usize, total: usize) -> Value {
+        json!({
+            "role": "assistant",
+            "message_id": message_id,
+            "content": "ok",
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": total,
+                "cache_read_input_tokens": 2
+            }
+        })
     }
 
     #[tokio::test]
@@ -666,6 +761,50 @@ mod tests {
             }
             other => panic!("expected ConductorGoalUpdated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn conductor_goal_routes_return_hydrated_spent() {
+        let (app, dir) = test_app().await;
+        write_task_meta(dir.path(), "task-spent", "goal-spent").await;
+        write_trajectory(
+            dir.path(),
+            "task-spent",
+            "planner-spent",
+            "test/unpriced",
+            vec![usage_message("usage-1", 17, 5, 22)],
+        )
+        .await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-spent",
+            &GoalLedger {
+                task_ids: vec!["task-spent".to_string()],
+                no_progress_wakes: 6,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let listed = handle_v1_buddy_conductor_goals_list(State(app.clone()))
+            .await
+            .unwrap()
+            .0;
+        let fetched =
+            handle_v1_buddy_conductor_goal_get(State(app), Path("goal-spent".to_string()))
+                .await
+                .unwrap()
+                .0;
+
+        assert_eq!(listed.goals[0].spent.prompt_tokens, 17);
+        assert_eq!(listed.goals[0].spent.completion_tokens, 5);
+        assert_eq!(listed.goals[0].spent.total_tokens, 22);
+        assert_eq!(listed.goals[0].spent.cache_read_tokens, 2);
+        assert_eq!(listed.goals[0].spent.usd, None);
+        assert_eq!(listed.goals[0].spent.no_progress_wakes, 6);
+        assert_eq!(fetched.spent.total_tokens, 22);
+        assert_eq!(fetched.spent.no_progress_wakes, 6);
     }
 
     #[tokio::test]

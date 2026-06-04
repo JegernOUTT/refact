@@ -105,6 +105,25 @@ pub async fn aggregate_goal_spent(
     })
 }
 
+pub async fn hydrate_goal_spent(gcx: Arc<GlobalContext>, mut goal: ConductorGoal) -> ConductorGoal {
+    if goal.spent.elapsed_secs > 0
+        || goal.spent.prompt_tokens > 0
+        || goal.spent.completion_tokens > 0
+        || goal.spent.total_tokens > 0
+        || goal.spent.cache_read_tokens > 0
+        || goal.spent.usd.is_some()
+    {
+        goal.spent.no_progress_wakes = goal.ledger.no_progress_wakes;
+        return goal;
+    }
+    if let Ok(spent) = aggregate_goal_spent(gcx, &goal).await {
+        goal.spent = spent;
+    } else {
+        goal.spent.no_progress_wakes = goal.ledger.no_progress_wakes;
+    }
+    goal
+}
+
 async fn owned_goal_task_ids(
     gcx: Arc<GlobalContext>,
     goal: &ConductorGoal,
@@ -531,6 +550,19 @@ mod tests {
         assert_eq!(spent.total_tokens, 15);
         assert_eq!(spent.cache_read_tokens, 2);
         assert_eq!(spent.usd, None);
+    }
+
+    #[tokio::test]
+    async fn hydrate_goal_spent_preserves_no_progress_when_aggregation_fails() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut goal = goal("goal-fallback", vec![], vec![]);
+        goal.ledger.no_progress_wakes = 4;
+        goal.spent.no_progress_wakes = 9;
+
+        let hydrated = hydrate_goal_spent(gcx, goal).await;
+
+        assert_eq!(hydrated.spent.no_progress_wakes, 4);
+        assert_eq!(hydrated.spent.total_tokens, 0);
     }
 
     #[tokio::test]

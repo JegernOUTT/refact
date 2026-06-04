@@ -16,7 +16,7 @@ use crate::call_validation::ChatMessage;
 use crate::global_context::GlobalContext;
 use crate::tasks::types::TaskBoard;
 
-use super::budget::aggregate_goal_spent;
+use super::budget::{aggregate_goal_spent, hydrate_goal_spent};
 use super::learn::{load_prior_lessons, record_goal_learning};
 use super::packet::{
     build_conductor_packet, ConductorAgentSnapshot, ConductorPacketInput, ConductorTaskSnapshot,
@@ -565,6 +565,7 @@ async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal: &ConductorGoal) {
     if goal.status.is_terminal() {
         super::wake::refresh_conductor_wake_targets(gcx.clone()).await;
     }
+    let goal = hydrate_goal_spent(gcx.clone(), goal.clone()).await;
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
         let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
     }

@@ -9,6 +9,7 @@ use refact_buddy_core::types::{BuddyGhostMessage, BuddyGhostMessageRole};
 use uuid::Uuid;
 
 use crate::app_state::AppState;
+use crate::buddy::conductor::budget::hydrate_goal_spent;
 use crate::buddy::events::BuddyEvent;
 use crate::custom_error::ScratchError;
 use crate::global_context::GlobalContext;
@@ -205,9 +206,12 @@ async fn emit_after_mutation(
 
 async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: GoalLedger) {
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
-        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
-            goal: ConductorGoal::from_ledger(goal_id.to_string(), ledger),
-        });
+        let goal = hydrate_goal_spent(
+            gcx.clone(),
+            ConductorGoal::from_ledger(goal_id.to_string(), ledger),
+        )
+        .await;
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal });
     }
 }
 

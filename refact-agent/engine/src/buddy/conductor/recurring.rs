@@ -181,9 +181,12 @@ async fn mutate_and_emit(
     }
     super::wake::refresh_conductor_wake_targets_for_project(gcx.clone(), project_root).await;
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
-        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
-            goal: ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone()),
-        });
+        let goal = super::budget::hydrate_goal_spent(
+            gcx.clone(),
+            ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone()),
+        )
+        .await;
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal });
     }
     Ok(Some(ledger))
 }
