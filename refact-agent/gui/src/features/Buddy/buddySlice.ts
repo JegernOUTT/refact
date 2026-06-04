@@ -16,6 +16,7 @@ import type {
   BuddyStorageMetadata,
   ConductorGoal,
   GoalStatus,
+  BuddyGhostMessage,
 } from "./types";
 
 const HOME_NOTIFICATION_SNOOZE_MS = 10 * 60 * 1000;
@@ -525,6 +526,7 @@ export interface BuddySliceState {
   pulse: BuddyPulse | null;
   activeDrafts: BuddyDraft[];
   conductorGoals: ConductorGoal[];
+  ghostMessages: BuddyGhostMessage[];
   homeSnoozedUntil: number | null;
   seenNotificationIds: Record<string, number>;
   chatBubbleSnoozedUntil: number | null;
@@ -556,6 +558,23 @@ function upsertConductorGoalEntry(
   return next;
 }
 
+function ghostMessagesFromGoals(goals: ConductorGoal[]): BuddyGhostMessage[] {
+  return goals
+    .flatMap((goal) => goal.ledger.ghost_messages)
+    .sort((left, right) => right.created_at.localeCompare(left.created_at));
+}
+
+function upsertGhostMessageEntry(
+  ghosts: BuddyGhostMessage[],
+  ghost: BuddyGhostMessage,
+): BuddyGhostMessage[] {
+  const next = ghosts.filter((entry) => entry.id !== ghost.id);
+  next.unshift(ghost);
+  return next
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    .slice(0, 50);
+}
+
 function initialState(): BuddySliceState {
   const initialChatBubblePolicy = loadChatBubblePolicy();
   return {
@@ -570,6 +589,7 @@ function initialState(): BuddySliceState {
     pulse: null,
     activeDrafts: [],
     conductorGoals: [],
+    ghostMessages: [],
     homeSnoozedUntil: null,
     seenNotificationIds: pruneSeenNotificationIds(loadSeenNotificationIds()),
     chatBubbleSnoozedUntil: initialChatBubblePolicy.snoozedUntil,
@@ -638,6 +658,10 @@ function syncSnapshotConductorGoals(state: BuddySliceState) {
   }
 }
 
+function syncGhostMessagesFromGoals(state: BuddySliceState) {
+  state.ghostMessages = ghostMessagesFromGoals(state.conductorGoals);
+}
+
 const selectUnreadOpportunitiesFromSlice = createSelector(
   [(state: BuddySliceState) => state.opportunities],
   (opportunities) =>
@@ -662,6 +686,7 @@ export const buddySlice = createSlice({
       state.pulse = snapshot.pulse ?? defaultBuddyPulse();
       state.activeDrafts = snapshot.active_drafts ?? [];
       state.conductorGoals = snapshot.conductor_goals ?? [];
+      syncGhostMessagesFromGoals(state);
     },
     /** Called when SSE snapshot reports buddy as disabled/not-ready (no state). */
     setBuddyUnavailable: (state) => {
@@ -675,6 +700,7 @@ export const buddySlice = createSlice({
       state.pulse = null;
       state.activeDrafts = [];
       state.conductorGoals = [];
+      state.ghostMessages = [];
     },
     updateBuddyState: (state, action: PayloadAction<BuddyState>) => {
       state.loaded = true;
@@ -959,7 +985,17 @@ export const buddySlice = createSlice({
         state.conductorGoals,
         action.payload,
       );
+      syncGhostMessagesFromGoals(state);
       syncSnapshotConductorGoals(state);
+    },
+    addConductorGhostMessage: (
+      state,
+      action: PayloadAction<BuddyGhostMessage>,
+    ) => {
+      state.ghostMessages = upsertGhostMessageEntry(
+        state.ghostMessages,
+        action.payload,
+      );
     },
     snoozeHomeNotifications: (
       state,
@@ -1059,6 +1095,7 @@ export const buddySlice = createSlice({
     selectPulse: (state) => state.pulse,
     selectActiveDrafts: (state) => state.activeDrafts,
     selectConductorGoals: (state) => state.conductorGoals,
+    selectConductorGhostMessages: (state) => state.ghostMessages,
     selectActiveConductorGoals: (state) =>
       state.conductorGoals.filter(isConductorGoalActive),
     selectHomeSnoozedUntil: (state) => state.homeSnoozedUntil,
@@ -1097,6 +1134,7 @@ export const {
   consumeDraft,
   removeDraft,
   upsertConductorGoal,
+  addConductorGhostMessage,
   snoozeHomeNotifications,
   markBuddyNotificationSeen,
   recordChatBubbleImpression,
@@ -1128,6 +1166,7 @@ export const {
   selectPulse,
   selectActiveDrafts,
   selectConductorGoals,
+  selectConductorGhostMessages,
   selectActiveConductorGoals,
   selectHomeSnoozedUntil,
   selectSeenNotificationIds,

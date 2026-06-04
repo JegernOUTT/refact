@@ -19,6 +19,7 @@ import {
   selectSeenNotificationIds,
   selectChatBubbleSnoozedUntil,
   selectChatBubbleImpressions,
+  selectConductorGhostMessages,
   dismissBuddySuggestion,
   dismissRuntimeEvent,
   clearActiveSpeech,
@@ -34,6 +35,7 @@ import {
   useDismissBuddySuggestionMutation,
   useDismissBuddyRuntimeEventMutation,
   useUpdateBuddySettingsMutation,
+  useAnswerConductorGhostMutation,
 } from "../../services/refact/buddy";
 import { useBuddyState } from "./hooks/useBuddyState";
 import { BuddyCanvas } from "./BuddyCanvas";
@@ -48,6 +50,7 @@ import type {
   BuddyRuntimeEvent,
   BuddySuggestion,
   DiagnosticContext,
+  BuddyGhostMessage,
 } from "./types";
 import { isBuddyOverlaySuppressedIssue } from "./investigation";
 import { executeBuddyAction } from "./executeBuddyAction";
@@ -87,10 +90,12 @@ interface NotificationItem {
     | "runtime"
     | "diagnostic"
     | "suggestion"
-    | "opportunity";
+    | "opportunity"
+    | "ghost";
   controls: BuddyControl[];
   diagnostic?: DiagnosticContext | null;
   opportunity?: BuddyOpportunity;
+  ghost?: BuddyGhostMessage;
   speechIntent?: string;
   ttlMs?: number | null;
   ttlSeconds?: number;
@@ -188,6 +193,7 @@ function notificationTriggerSource(
 ): "thread" | "runtime" | "diagnostic" | "suggestion" | "frontend" {
   if (source === "speech") return "runtime";
   if (source === "opportunity") return "suggestion";
+  if (source === "ghost") return "runtime";
   return source;
 }
 
@@ -551,6 +557,30 @@ function runtimeEventRank(event: BuddyRuntimeEvent, index: number): number {
   return 60 + index;
 }
 
+function ghostLabel(ghost: BuddyGhostMessage): string {
+  if (ghost.role === "ask") return `👻 Buddy asks: ${ghost.content}`;
+  if (ghost.role === "memo") return `👻 Buddy memo: ${ghost.content}`;
+  return `👻 Buddy says: ${ghost.content}`;
+}
+
+function ghostControls(ghost: BuddyGhostMessage): BuddyControl[] {
+  if (ghost.role !== "ask" || !ghost.question_id || !ghost.goal_id) return [];
+  return [
+    {
+      id: `answer-${ghost.id}`,
+      label: "Answer Buddy",
+      action: "answer_conductor_ghost",
+      style: "primary",
+    },
+    {
+      id: `dismiss-${ghost.id}`,
+      label: "Later gremlin",
+      action: "dismiss",
+      style: "ghost",
+    },
+  ];
+}
+
 export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const dispatch = useAppDispatch();
   const snapshot = useAppSelector(selectBuddySnapshot);
@@ -563,6 +593,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const seenNotificationIds = useAppSelector(selectSeenNotificationIds);
   const chatBubbleSnoozedUntil = useAppSelector(selectChatBubbleSnoozedUntil);
   const chatBubbleImpressions = useAppSelector(selectChatBubbleImpressions);
+  const ghostMessages = useAppSelector(selectConductorGhostMessages);
 
   const buddy = useBuddyState();
   const triggerBuddySignal = buddy.signal;
@@ -572,6 +603,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
   const [updateSettings, { isLoading: isEnabling }] =
     useUpdateBuddySettingsMutation();
+  const [answerGhost] = useAnswerConductorGhostMutation();
 
   const [dismissedNotificationIds, setDismissedNotificationIds] = useState<
     Set<string>
@@ -583,6 +615,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pinnedReaction, setPinnedReaction] =
     useState<PinnedReactionCandidate | null>(null);
+  const [ghostReply, setGhostReply] = useState("");
   const [, refreshSpeechExpiry] = useState(0);
   const pendingRef = useRef(false);
   const prevChatIdRef = useRef(chatId);
@@ -792,6 +825,27 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         });
       });
 
+    ghostMessages
+      .filter((ghost) => isEligible(notificationIdentity("ghost", ghost.id)))
+      .forEach((ghost, index) => {
+        candidates.push({
+          kind: ghost.role === "ask" ? "actionable" : "event_once",
+          rank: 5 + index,
+          notification: {
+            id: notificationIdentity("ghost", ghost.id),
+            sourceId: ghost.id,
+            text: ghostLabel(ghost),
+            createdAt: ghost.created_at,
+            source: "ghost",
+            controls: ghostControls(ghost),
+            diagnostic: null,
+            ghost,
+            ttlMs: ghost.role === "memo" ? 30_000 : null,
+            speechIntent: ghost.role === "ask" ? "question" : "insight",
+          },
+        });
+      });
+
     return candidates;
   }, [
     activeNotificationId,
@@ -800,6 +854,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     diagnostics,
     dismissedNotificationIds,
     errorControls,
+    ghostMessages,
     nowPlaying,
     runtimeQueue,
     seenNotificationIds,
@@ -912,6 +967,10 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   }, [notification?.id]);
 
   useEffect(() => {
+    setGhostReply("");
+  }, [notification?.id]);
+
+  useEffect(() => {
     if (!notification) {
       setActiveNotificationId(null);
       return;
@@ -1005,6 +1064,41 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const handleEnable = useCallback(() => {
     void updateSettings({ enabled: true });
   }, [updateSettings]);
+
+  const submitGhostReply = useCallback(async () => {
+    if (!notification?.ghost) return;
+    const ghost = notification.ghost;
+    const answer = ghostReply.trim();
+    if (!ghost.goal_id || !ghost.question_id || !answer || pendingRef.current) {
+      return;
+    }
+    pendingRef.current = true;
+    setPending(true);
+    setActionError(null);
+    try {
+      await answerGhost({
+        goal_id: ghost.goal_id,
+        question_id: ghost.question_id,
+        answer,
+      }).unwrap();
+      dismissNotification(notification.id);
+      completeBubbleInteraction();
+      setGhostReply("");
+    } catch (error) {
+      restoreNotification(notification.id);
+      setActionError(formatOpportunityActionError(error));
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  }, [
+    answerGhost,
+    completeBubbleInteraction,
+    dismissNotification,
+    ghostReply,
+    notification,
+    restoreNotification,
+  ]);
 
   const handleControl = useCallback(
     async (ctrl: BuddyControl) => {
@@ -1123,6 +1217,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         return;
       }
 
+      if (ctrl.action === "answer_conductor_ghost") {
+        await submitGhostReply();
+        return;
+      }
+
       if (ctrl.action.startsWith("care_")) {
         completeBubbleInteraction();
         await executeBuddyAction(ctrl, dispatch);
@@ -1195,6 +1294,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       dispatch,
       chatId,
       completeBubbleInteraction,
+      submitGhostReply,
     ],
   );
 
@@ -1220,6 +1320,25 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   return (
     <div className={styles.companion} data-notification-id={notification.id}>
+      {notification.ghost?.role === "ask" ? (
+        <form
+          className={styles.ghostReplyForm}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitGhostReply();
+          }}
+          aria-label="Answer Buddy ask"
+        >
+          <input
+            className={styles.ghostReplyInput}
+            value={ghostReply}
+            onChange={(event) => setGhostReply(event.target.value)}
+            placeholder="Answer Buddy..."
+            aria-label="Buddy answer"
+            disabled={pending}
+          />
+        </form>
+      ) : null}
       <BuddyCanvas
         state={buddy.state}
         onEvent={buddy.handleCanvasEvent}

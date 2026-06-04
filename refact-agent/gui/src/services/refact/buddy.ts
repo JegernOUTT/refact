@@ -228,6 +228,18 @@ export interface BuddyOpportunityDismissResponse {
   snapshot: BuddySnapshot;
 }
 
+export interface ConductorAnswerRequest {
+  goal_id: string;
+  question_id: string;
+  answer: string;
+}
+
+export interface ConductorAnswerResponse {
+  goal_id: string;
+  question_id: string;
+  answered: boolean;
+}
+
 export interface BuddyInvestigationContextResponse {
   logs: string;
   internal_context: string;
@@ -657,6 +669,21 @@ export const buddyApi = createApi({
       },
       invalidatesTags: ["BuddyOpportunities", "BuddySnapshot"],
     }),
+    answerConductorGhost: builder.mutation<
+      ConductorAnswerResponse,
+      ConductorAnswerRequest
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(state, "/v1/buddy/conductor/answer"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as ConductorAnswerResponse };
+      },
+    }),
     getPulse: builder.query<BuddyPulse, undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
@@ -941,6 +968,7 @@ export const {
   useGetOpportunitiesQuery,
   useAcceptOpportunityMutation,
   useDismissOpportunityMutation,
+  useAnswerConductorGhostMutation,
   useGetPulseQuery,
   useCreateSkillDraftMutation,
   useCreateCommandDraftMutation,

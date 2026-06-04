@@ -16,6 +16,31 @@
   pointer-events: auto;
 }
 
+.ghostReplyForm {
+  position: absolute;
+  right: 150px;
+  bottom: 18px;
+  z-index: 1;
+  display: flex;
+  width: 220px;
+}
+
+.ghostReplyInput {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--accent-a7);
+  border-radius: var(--radius-3);
+  background: var(--color-panel-solid);
+  color: var(--gray-12);
+  box-shadow: var(--shadow-3);
+  font: inherit;
+}
+
+.ghostReplyInput:focus {
+  outline: 2px solid var(--accent-a8);
+  outline-offset: 2px;
+}
+
 .disabledCompanion {
   position: absolute;
   right: 0;

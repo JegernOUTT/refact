@@ -546,6 +546,44 @@ describe("useSidebarSubscription", () => {
     postMessageSpy.mockRestore();
   });
 
+  it("routes conductor ghost messages into Buddy state", async () => {
+    server.use(
+      http.get(
+        "*/v1/sidebar/subscribe",
+        () =>
+          new HttpResponse(
+            sseStream([
+              sectionUpdate(0, "buddy", {
+                event_type: "ConductorGhostMessage",
+                ghost: {
+                  id: "ghost-sidebar",
+                  goal_id: "goal-sidebar",
+                  role: "ask",
+                  content: "Answer from overlay?",
+                  created_at: "2024-01-01T00:00:00Z",
+                  source_chat_id: "chat-a",
+                  question_id: "question-sidebar",
+                },
+              }),
+            ]),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    const { store } = render(<TestHarness />, { preloadedState: CONFIG_STATE });
+
+    await waitFor(() => {
+      expect(store.getState().buddy.ghostMessages).toEqual([
+        expect.objectContaining({
+          id: "ghost-sidebar",
+          role: "ask",
+          question_id: "question-sidebar",
+        }),
+      ]);
+    });
+  });
+
   it("clears stale buddy state when a later v2 buddy snapshot is null", async () => {
     server.use(
       http.get(

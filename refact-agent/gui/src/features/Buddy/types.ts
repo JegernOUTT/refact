@@ -1063,6 +1063,7 @@ export interface GoalLedger {
   memos: ConductorMemo[];
   learning_records: ConductorLearningRecord[];
   pending_questions: PendingQuestion[];
+  ghost_messages: BuddyGhostMessage[];
   no_progress_wakes: number;
   turn_failures: number;
   last_wake_at?: string | null;
@@ -1086,7 +1087,7 @@ export interface ConductorGoal {
   completed_at?: string | null;
 }
 
-export type BuddyGhostMessageRole = "ask" | "answer" | "note";
+export type BuddyGhostMessageRole = "say" | "ask" | "memo";
 
 export interface BuddyGhostMessage {
   id: string;

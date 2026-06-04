@@ -51,6 +51,7 @@ import {
   updateBuddySettings,
   upsertConductorGoal,
   selectConductorGoals,
+  selectConductorGhostMessages,
   selectActiveConductorGoals,
   selectGoalById,
   selectGoalForChat,
@@ -92,6 +93,7 @@ import type {
   DraftKind,
   ConductorGoal,
   GoalStatus,
+  BuddyGhostMessage,
 } from "../features/Buddy/types";
 import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
 import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
@@ -388,6 +390,21 @@ function makeChatSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
   };
 }
 
+function makeGhostMessage(
+  overrides?: Partial<BuddyGhostMessage>,
+): BuddyGhostMessage {
+  return {
+    id: "ghost-1",
+    goal_id: "goal-1",
+    role: "say",
+    content: "Tiny ghost says hi",
+    created_at: new Date().toISOString(),
+    source_chat_id: "chat-a",
+    question_id: null,
+    ...overrides,
+  };
+}
+
 function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
   const status: GoalStatus = overrides?.status ?? "running";
   return {
@@ -422,6 +439,7 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       memos: [],
       learning_records: [],
       pending_questions: [],
+      ghost_messages: [],
       no_progress_wakes: 1,
       turn_failures: 0,
     },
@@ -672,6 +690,92 @@ describe("Buddy chat notification freshness", () => {
     await waitFor(() => {
       expect(capturedBody).toEqual({ enabled: true });
     });
+  });
+
+  test("ghost say renders in companion overlay", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      const store = setUpStore();
+      const ghost = makeGhostMessage({
+        id: "ghost-say",
+        role: "say",
+        content: "I found a tiny clue",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch({
+        type: "buddy/addConductorGhostMessage",
+        payload: ghost,
+      });
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+
+      await expectCompanionNotification(container, "ghost:ghost-say");
+      await vi.advanceTimersByTimeAsync(50);
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Buddy says: I found a tiny clue/),
+        ).toBeInTheDocument();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("ghost ask renders reply control and posts only conductor answer", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    try {
+      let answerBody: unknown = null;
+      let chatCommandCalled = false;
+      server.use(
+        http.post("*/v1/buddy/conductor/answer", async ({ request }) => {
+          answerBody = await request.json();
+          return HttpResponse.json({
+            goal_id: "goal-ask",
+            question_id: "question-ask",
+            answered: true,
+          });
+        }),
+        http.post("*/v1/chats/:id/commands", () => {
+          chatCommandCalled = true;
+          return HttpResponse.json({ ok: true });
+        }),
+      );
+      const store = setUpStore();
+      const ghost = makeGhostMessage({
+        id: "ghost-ask",
+        goal_id: "goal-ask",
+        role: "ask",
+        content: "Can I keep poking this?",
+        question_id: "question-ask",
+        created_at: "2024-01-01T00:00:00Z",
+      });
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch({
+        type: "buddy/addConductorGhostMessage",
+        payload: ghost,
+      });
+
+      const { container } = renderBuddyChatCompanion(store, "chat-a");
+      await expectCompanionNotification(container, "ghost:ghost-ask");
+      fireEvent.change(screen.getByLabelText("Buddy answer"), {
+        target: { value: "Yes, gremlin approved" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Answer Buddy" }));
+
+      await waitFor(() => {
+        expect(answerBody).toEqual({
+          goal_id: "goal-ask",
+          question_id: "question-ask",
+          answer: "Yes, gremlin approved",
+        });
+      });
+      expect(chatCommandCalled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("global active speech still renders", async () => {
@@ -2006,6 +2110,23 @@ describe("buddy conductor goal state", () => {
 
     expect(selectConductorGoals(rootState)).toEqual([goal]);
     expect(selectGoalById(rootState, "goal-snapshot")).toEqual(goal);
+  });
+
+  test("setBuddySnapshot hydrates ghost messages from conductor ledgers", () => {
+    const ghost = makeGhostMessage({ id: "ghost-ledger", role: "memo" });
+    const goal = makeConductorGoal({
+      id: "goal-ghost-ledger",
+      ledger: {
+        ...makeConductorGoal().ledger,
+        ghost_messages: [ghost],
+      },
+    });
+    const state = reducer(
+      undefined,
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [goal] })),
+    );
+
+    expect(selectConductorGhostMessages({ buddy: state })).toEqual([ghost]);
   });
 
   test("legacy snapshot without conductor goals remains compatible", () => {

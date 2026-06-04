@@ -300,6 +300,7 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       memos: [],
       learning_records: [],
       pending_questions: [],
+      ghost_messages: [],
       no_progress_wakes: 0,
       turn_failures: 0,
     },

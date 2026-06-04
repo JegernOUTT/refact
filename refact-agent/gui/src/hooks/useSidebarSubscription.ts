@@ -52,6 +52,7 @@ import {
   consumeDraft,
   removeDraft,
   upsertConductorGoal,
+  addConductorGhostMessage,
 } from "../features/Buddy/buddySlice";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 
@@ -765,6 +766,7 @@ export function useSidebarSubscription() {
           dispatch(upsertConductorGoal(event.goal));
           break;
         case "ConductorGhostMessage":
+          dispatch(addConductorGhostMessage(event.ghost));
           break;
       }
     },
