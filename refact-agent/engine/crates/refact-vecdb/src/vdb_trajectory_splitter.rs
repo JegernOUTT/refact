@@ -7,6 +7,7 @@ use refact_core::vecdb_types::SplitResult;
 const MESSAGES_PER_CHUNK: usize = 4;
 const MAX_CONTENT_PER_MESSAGE: usize = 2000;
 const OVERLAP_MESSAGES: usize = 1;
+const LLM_SEGMENT_SUMMARY_KIND: &str = "llm_segment_summary";
 
 pub struct TrajectoryFileSplitter {
     max_tokens: usize,
@@ -98,10 +99,7 @@ impl TrajectoryFileSplitter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                if matches!(
-                    role.as_str(),
-                    "context_file" | "cd_instruction" | "compression_report" | "system"
-                ) {
+                if self.should_skip_message(msg, &role) {
                     return None;
                 }
                 let content = self.extract_content(msg);
@@ -126,6 +124,16 @@ impl TrajectoryFileSplitter {
                 })
             })
             .collect()
+    }
+
+    fn should_skip_message(&self, msg: &Value, role: &str) -> bool {
+        if matches!(
+            role,
+            "context_file" | "cd_instruction" | "compression_report" | "system"
+        ) {
+            return true;
+        }
+        role == "assistant" && message_compression_kind(msg) == Some(LLM_SEGMENT_SUMMARY_KIND)
     }
 
     fn extract_content(&self, msg: &Value) -> String {
@@ -209,7 +217,113 @@ impl TrajectoryFileSplitter {
     }
 }
 
+fn message_compression_kind(msg: &Value) -> Option<&str> {
+    msg.get("extra")
+        .and_then(|extra| extra.get("compression"))
+        .and_then(|compression| compression.get("kind"))
+        .and_then(|kind| kind.as_str())
+        .or_else(|| {
+            msg.get("compression")
+                .and_then(|compression| compression.get("kind"))
+                .and_then(|kind| kind.as_str())
+        })
+}
+
 pub fn is_trajectory_file(path: &PathBuf) -> bool {
     path.to_string_lossy().contains(".refact/trajectories/")
         && path.extension().map(|e| e == "json").unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn split_texts(results: &[SplitResult]) -> Vec<String> {
+        results
+            .iter()
+            .map(|result| result.window_text.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn split_skips_source_preserving_compression_report_and_internal_summary_pair() {
+        let trajectory = json!({
+            "id": "traj-compression",
+            "title": "Compression artifacts",
+            "messages": [
+                {"role": "user", "content": "keep indexed user goal"},
+                {"role": "assistant", "content": "normal assistant remains indexed"},
+                {
+                    "role": "compression_report",
+                    "content": "compression report must not be indexed",
+                    "extra": {
+                        "compression_report": {
+                            "kind": "chat_compression_report",
+                            "compression_kind": "llm_segment_summary",
+                            "insert_mode": "source_preserving"
+                        }
+                    }
+                },
+                {
+                    "role": "assistant",
+                    "content": "internal llm segment summary must not be indexed",
+                    "extra": {
+                        "compression": {
+                            "kind": "llm_segment_summary",
+                            "insert_mode": "source_preserving"
+                        }
+                    }
+                },
+                {"role": "assistant", "content": "normal assistant after summary remains indexed"}
+            ]
+        });
+        let splitter = TrajectoryFileSplitter::new(10_000);
+        let results = splitter
+            .split(
+                &trajectory.to_string(),
+                &PathBuf::from(".refact/trajectories/traj-compression.json"),
+            )
+            .await
+            .unwrap();
+        let text = split_texts(&results).join("\n");
+
+        assert!(text.contains("keep indexed user goal"));
+        assert!(text.contains("normal assistant remains indexed"));
+        assert!(text.contains("normal assistant after summary remains indexed"));
+        assert!(!text.contains("compression report must not be indexed"));
+        assert!(!text.contains("internal llm segment summary must not be indexed"));
+    }
+
+    #[tokio::test]
+    async fn split_skips_legacy_top_level_llm_segment_summary_shape() {
+        let trajectory = json!({
+            "id": "traj-legacy-compression",
+            "title": "Legacy compression artifacts",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "legacy top-level summary must not be indexed",
+                    "compression": {"kind": "llm_segment_summary"}
+                },
+                {
+                    "role": "assistant",
+                    "content": "malformed compression metadata remains normal assistant",
+                    "extra": {"compression": "not an object"}
+                }
+            ]
+        });
+        let splitter = TrajectoryFileSplitter::new(10_000);
+        let results = splitter
+            .split(
+                &trajectory.to_string(),
+                &PathBuf::from(".refact/trajectories/traj-legacy-compression.json"),
+            )
+            .await
+            .unwrap();
+        let text = split_texts(&results).join("\n");
+
+        assert!(!text.contains("legacy top-level summary must not be indexed"));
+        assert!(text.contains("malformed compression metadata remains normal assistant"));
+    }
 }
