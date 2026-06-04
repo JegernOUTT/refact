@@ -112,6 +112,39 @@ pub struct SummarySegment {
     pub end: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompressionCandidate {
+    pub ranges: Vec<SummarySegment>,
+    pub source_message_ids: Vec<String>,
+    pub estimated_source_tokens: usize,
+    pub estimated_preserved_tokens: usize,
+    pub reason: CandidateReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateReason {
+    ClosedTurn,
+    TailTurn,
+    LargeToolOutput,
+    LargeContextFile,
+    BatchOldNonUserRuns,
+}
+
+impl CompressionCandidate {
+    pub fn estimated_savings(&self) -> usize {
+        self.estimated_source_tokens
+            .saturating_sub(self.estimated_preserved_tokens)
+    }
+
+    fn start(&self) -> usize {
+        self.ranges
+            .iter()
+            .map(|range| range.start)
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+}
+
 fn safe_char_boundary(s: &str, mut idx: usize) -> usize {
     if idx >= s.len() {
         return s.len();
@@ -609,6 +642,222 @@ pub fn eligible_tail_non_user_segment(messages: &[ChatMessage]) -> Option<Summar
     tail_non_user_segment_candidates(messages)
         .into_iter()
         .find(|segment| tail_candidate_is_eligible(messages, *segment))
+}
+
+fn segment_is_eligible(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+    if segment.start > segment.end || segment.end >= messages.len() {
+        return false;
+    }
+    let candidate = &messages[segment.start..=segment.end];
+    !candidate.iter().any(is_excluded_from_segment)
+        && has_tail_summarizable_output(candidate)
+        && !tail_has_pending_tool_calls(candidate)
+        && !segment_contains_external_tool_completion(messages, segment)
+        && !segment_is_existing_summary(messages, segment)
+        && !segment_has_source_preserving_summary_after(messages, segment)
+}
+
+fn source_messages_for_ranges(
+    messages: &[ChatMessage],
+    ranges: &[SummarySegment],
+) -> Vec<ChatMessage> {
+    ranges
+        .iter()
+        .flat_map(|range| messages[range.start..=range.end].iter().cloned())
+        .collect()
+}
+
+fn source_hash_has_existing_summary(messages: &[ChatMessage], ranges: &[SummarySegment]) -> bool {
+    let source_messages = source_messages_for_ranges(messages, ranges);
+    let source_hash = source_hash_for_messages(&source_messages);
+    messages.iter().any(|message| {
+        is_segment_summary(message)
+            && message.extra.get("compression").is_some_and(|metadata| {
+                metadata.get("insert_mode").and_then(|value| value.as_str())
+                    == Some(SUMMARY_INSERT_MODE)
+                    && metadata.get("source_hash").and_then(|value| value.as_str())
+                        == Some(source_hash.as_str())
+            })
+    })
+}
+
+fn estimated_tokens_for_ranges(messages: &[ChatMessage], ranges: &[SummarySegment]) -> usize {
+    let source_messages = source_messages_for_ranges(messages, ranges);
+    crate::chat::trajectory_ops::approx_token_count(&source_messages)
+}
+
+fn candidate_source_message_ids(
+    messages: &[ChatMessage],
+    ranges: &[SummarySegment],
+) -> Vec<String> {
+    ranges
+        .iter()
+        .flat_map(|range| {
+            (range.start..=range.end).map(|idx| {
+                let message = &messages[idx];
+                if message.message_id.is_empty() {
+                    format!("pending:{}", idx)
+                } else {
+                    message.message_id.clone()
+                }
+            })
+        })
+        .collect()
+}
+
+fn candidate_has_complete_tool_result_pair(
+    messages: &[ChatMessage],
+    candidate: &CompressionCandidate,
+) -> bool {
+    let mut ids = HashSet::new();
+    let mut completions = HashSet::new();
+    let mut read_ids = HashSet::new();
+    let mut context_completions = HashSet::new();
+    for range in &candidate.ranges {
+        for message in &messages[range.start..=range.end] {
+            if let Some(tool_calls) = &message.tool_calls {
+                for tool_call in tool_calls {
+                    ids.insert(tool_call.id.as_str());
+                    if is_read_like_tool_name(&tool_call.function.name) {
+                        read_ids.insert(tool_call.id.as_str());
+                    }
+                }
+            }
+            match message.role.as_str() {
+                "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                    completions.insert(message.tool_call_id.as_str());
+                }
+                "context_file" if !message.tool_call_id.is_empty() => {
+                    context_completions.insert(message.tool_call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+    }
+    ids.iter().any(|id| completions.contains(id))
+        || read_ids.iter().any(|id| context_completions.contains(id))
+}
+
+fn make_compression_candidate(
+    messages: &[ChatMessage],
+    ranges: Vec<SummarySegment>,
+    reason: CandidateReason,
+) -> Option<CompressionCandidate> {
+    if ranges.is_empty()
+        || ranges
+            .iter()
+            .any(|segment| !segment_is_eligible(messages, *segment))
+        || source_hash_has_existing_summary(messages, &ranges)
+    {
+        return None;
+    }
+    let estimated_source_tokens = estimated_tokens_for_ranges(messages, &ranges);
+    if estimated_source_tokens == 0 {
+        return None;
+    }
+    Some(CompressionCandidate {
+        source_message_ids: candidate_source_message_ids(messages, &ranges),
+        estimated_preserved_tokens: 0,
+        estimated_source_tokens,
+        ranges,
+        reason,
+    })
+}
+
+fn completed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment> {
+    let mut segments = closed_non_user_segments(messages);
+    segments.extend(tail_non_user_segment_candidates(messages));
+    segments
+}
+
+fn segment_contains_role(messages: &[ChatMessage], segment: SummarySegment, role: &str) -> bool {
+    messages[segment.start..=segment.end]
+        .iter()
+        .any(|message| message.role == role)
+}
+
+fn batch_old_non_user_run_candidates(messages: &[ChatMessage]) -> Vec<Vec<SummarySegment>> {
+    let runs: Vec<SummarySegment> = closed_non_user_segments(messages)
+        .into_iter()
+        .filter(|segment| segment_is_eligible(messages, *segment))
+        .collect();
+    if runs.len() < 2 {
+        return Vec::new();
+    }
+    vec![runs]
+}
+
+pub fn compression_candidates(messages: &[ChatMessage]) -> Vec<CompressionCandidate> {
+    if current_tail_has_active_pending_tool_calls(messages) {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for segment in closed_non_user_segments(messages) {
+        if let Some(candidate) =
+            make_compression_candidate(messages, vec![segment], CandidateReason::ClosedTurn)
+        {
+            candidates.push(candidate);
+        }
+    }
+    for segment in tail_non_user_segment_candidates(messages) {
+        if let Some(candidate) =
+            make_compression_candidate(messages, vec![segment], CandidateReason::TailTurn)
+        {
+            candidates.push(candidate);
+        }
+    }
+    for segment in completed_non_user_segments(messages) {
+        if segment_contains_role(messages, segment, "tool")
+            || segment_contains_role(messages, segment, "diff")
+        {
+            if let Some(candidate) = make_compression_candidate(
+                messages,
+                vec![segment],
+                CandidateReason::LargeToolOutput,
+            ) {
+                candidates.push(candidate);
+            }
+        }
+        if segment_contains_role(messages, segment, "context_file") {
+            if let Some(candidate) = make_compression_candidate(
+                messages,
+                vec![segment],
+                CandidateReason::LargeContextFile,
+            ) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    for ranges in batch_old_non_user_run_candidates(messages) {
+        if let Some(candidate) =
+            make_compression_candidate(messages, ranges, CandidateReason::BatchOldNonUserRuns)
+        {
+            candidates.push(candidate);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| {
+        let key = candidate
+            .ranges
+            .iter()
+            .map(|range| format!("{}..{}", range.start, range.end))
+            .collect::<Vec<_>>()
+            .join(",");
+        seen.insert(key)
+    });
+    candidates.sort_by(|left, right| {
+        right
+            .estimated_savings()
+            .cmp(&left.estimated_savings())
+            .then_with(|| left.start().cmp(&right.start()))
+            .then_with(|| {
+                candidate_has_complete_tool_result_pair(messages, right)
+                    .cmp(&candidate_has_complete_tool_result_pair(messages, left))
+            })
+    });
+    candidates
 }
 
 fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
@@ -3025,6 +3274,124 @@ mod tests {
         ));
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
         assert_eq!(messages[5].content.content_text_only(), "tail new");
+    }
+
+    #[test]
+    fn candidate_planner_single_user_large_tail_is_eligible() {
+        let messages = vec![user("single user"), assistant(&"large tail ".repeat(2_000))];
+
+        let candidates = compression_candidates(&messages);
+
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].reason, CandidateReason::TailTurn);
+        assert_eq!(
+            candidates[0].ranges,
+            vec![SummarySegment { start: 1, end: 1 }]
+        );
+    }
+
+    #[test]
+    fn candidate_planner_skips_tiny_oldest_and_selects_larger_later_candidate() {
+        let messages = vec![
+            user("first"),
+            assistant("tiny"),
+            user("second"),
+            assistant(&"large later ".repeat(2_000)),
+            user("third"),
+        ];
+
+        let candidates = compression_candidates(&messages);
+
+        let single_range_candidates: Vec<&CompressionCandidate> = candidates
+            .iter()
+            .filter(|candidate| candidate.ranges.len() == 1)
+            .collect();
+        assert!(single_range_candidates.len() >= 2);
+        assert_eq!(
+            single_range_candidates[0].ranges,
+            vec![SummarySegment { start: 3, end: 3 }]
+        );
+        assert!(
+            single_range_candidates[0].estimated_savings()
+                > single_range_candidates[1].estimated_savings()
+        );
+        assert_eq!(
+            first_eligible_segment(&messages),
+            Some(SummarySegment { start: 1, end: 1 })
+        );
+    }
+
+    #[test]
+    fn candidate_planner_can_batch_small_non_user_runs_across_user_messages() {
+        let mut messages = vec![
+            user("first"),
+            assistant("small one ".repeat(20).as_str()),
+            user("preserved middle"),
+            assistant("small two ".repeat(20).as_str()),
+            user("tail"),
+        ];
+        messages[1].message_id = "assistant-one".to_string();
+        messages[2].message_id = "preserved-user".to_string();
+        messages[3].message_id = "assistant-two".to_string();
+
+        let candidates = compression_candidates(&messages);
+
+        assert_eq!(candidates[0].reason, CandidateReason::BatchOldNonUserRuns);
+        assert_eq!(
+            candidates[0].ranges,
+            vec![
+                SummarySegment { start: 1, end: 1 },
+                SummarySegment { start: 3, end: 3 },
+            ]
+        );
+        assert_eq!(
+            candidates[0].source_message_ids,
+            vec!["assistant-one".to_string(), "assistant-two".to_string()]
+        );
+    }
+
+    #[test]
+    fn candidate_planner_does_not_include_unresolved_tool_call_window() {
+        let messages = vec![
+            user("run tool"),
+            assistant_with_tool_call_id("call_unresolved"),
+            assistant(&"later safe output ".repeat(200)),
+        ];
+
+        let candidates = compression_candidates(&messages);
+
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| candidate
+            .ranges
+            .iter()
+            .all(|range| !(range.start <= 1 && range.end >= 1))));
+        assert_eq!(
+            candidates[0].ranges,
+            vec![SummarySegment { start: 2, end: 2 }]
+        );
+    }
+
+    #[test]
+    fn candidate_planner_keeps_tool_call_and_result_in_same_candidate() {
+        let messages = vec![
+            user("run tool"),
+            assistant_with_tool_call_id("call_done"),
+            tool_with_id("call_done", &"tool output ".repeat(200)),
+            user("next"),
+        ];
+
+        let candidates = compression_candidates(&messages);
+
+        assert!(!candidates.is_empty());
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.ranges == vec![SummarySegment { start: 1, end: 2 }]));
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.ranges != vec![SummarySegment { start: 1, end: 1 }]));
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.ranges != vec![SummarySegment { start: 2, end: 2 }]));
     }
 
     #[test]
