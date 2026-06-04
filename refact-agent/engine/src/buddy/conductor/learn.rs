@@ -6,7 +6,7 @@ use refact_buddy_core::conductor::{
     ConductorGoal, ConductorLearningRecord, GoalLedger, LearningBudgetSnapshot, LearningOutcome,
     MemoKind,
 };
-use refact_buddy_core::conductor_store::{list_goal_ledgers, save_goal_ledger};
+use refact_buddy_core::conductor_store::{list_goal_ledgers, mutate_goal_ledger, MissingGoalBehavior};
 use uuid::Uuid;
 
 use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;
@@ -40,9 +40,18 @@ pub async fn record_goal_learning(
 ) -> Result<bool, String> {
     let inserted = append_learning_record(goal, outcome, reason, source_chat_id);
     if inserted {
-        save_goal_ledger(project_root, &goal.id, &goal.ledger)
-            .await
-            .map_err(|error| error.to_string())?;
+        let replacement = goal.ledger.clone();
+        mutate_goal_ledger(
+            project_root,
+            &goal.id,
+            MissingGoalBehavior::CreateDefault,
+            |ledger| {
+                *ledger = replacement;
+                Ok(())
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         persist_learning_knowledge_if_appropriate(gcx, goal.ledger.learning_records.last()).await;
     }
     Ok(inserted)

@@ -5,7 +5,7 @@ use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, ConductorRecurring, ConductorWakeReason, GoalLedger, GoalStatus,
     MemoKind,
 };
-use refact_buddy_core::conductor_store::{list_goal_ledgers, save_goal_ledger};
+use refact_buddy_core::conductor_store::{list_goal_ledgers, mutate_goal_ledger, MissingGoalBehavior};
 use uuid::Uuid;
 
 use crate::buddy::events::BuddyEvent;
@@ -28,24 +28,19 @@ pub async fn service_recurring_goals(
         return report;
     };
     for stored in stored_ledgers {
-        let mut ledger = stored.ledger;
+        let ledger = stored.ledger;
         if terminal_or_paused(&ledger) {
             continue;
         }
-        if maybe_escalate_invalid_cron(gcx.clone(), project_root, &stored.goal_id, &mut ledger)
-            .await
-        {
+        if maybe_escalate_invalid_cron(gcx.clone(), project_root, &stored.goal_id, &ledger).await {
             report.invalid_cron_escalated.push(stored.goal_id.clone());
             continue;
         }
-        if maybe_escalate_stale(gcx.clone(), project_root, &stored.goal_id, &mut ledger, now).await
-        {
+        if maybe_escalate_stale(gcx.clone(), project_root, &stored.goal_id, &ledger, now).await {
             report.stale_escalated.push(stored.goal_id.clone());
             continue;
         }
-        if maybe_enqueue_due_cron(gcx.clone(), project_root, &stored.goal_id, &mut ledger, now)
-            .await
-        {
+        if maybe_enqueue_due_cron(gcx.clone(), project_root, &stored.goal_id, &ledger, now).await {
             report.cron_enqueued.push(stored.goal_id.clone());
         }
     }
@@ -80,7 +75,7 @@ async fn maybe_enqueue_due_cron(
     gcx: SharedGlobalContext,
     project_root: &Path,
     goal_id: &str,
-    ledger: &mut GoalLedger,
+    ledger: &GoalLedger,
     now: DateTime<Utc>,
 ) -> bool {
     let due = match ledger.recurring.as_ref() {
@@ -93,18 +88,25 @@ async fn maybe_enqueue_due_cron(
     if !super::wake::enqueue_goal_wake(gcx.clone(), goal_id, ConductorWakeReason::Cron).await {
         return false;
     }
-    if let Some(recurring) = ledger.recurring.as_mut() {
-        recurring.last_enqueued_at = Some(now.to_rfc3339());
-    }
-    ledger.last_wake_reason = Some(ConductorWakeReason::Cron);
-    save_and_emit(gcx, project_root, goal_id, ledger).await
+    let Ok(Some(ledger)) = mutate_and_emit(gcx, project_root, goal_id, |ledger| {
+        if let Some(recurring) = ledger.recurring.as_mut() {
+            recurring.last_enqueued_at = Some(now.to_rfc3339());
+        }
+        ledger.last_wake_reason = Some(ConductorWakeReason::Cron);
+        Ok(true)
+    })
+    .await
+    else {
+        return false;
+    };
+    ledger.recurring.is_some()
 }
 
 async fn maybe_escalate_stale(
     gcx: SharedGlobalContext,
     project_root: &Path,
     goal_id: &str,
-    ledger: &mut GoalLedger,
+    ledger: &GoalLedger,
     now: DateTime<Utc>,
 ) -> bool {
     let Some(stale_after_secs) = ledger
@@ -120,19 +122,25 @@ async fn maybe_escalate_stale(
     if now.signed_duration_since(anchor).num_seconds() < stale_after_secs as i64 {
         return false;
     }
-    apply_terminal_status(ledger, GoalStatus::Escalated);
-    push_escalation(
-        ledger,
-        format!("Conductor goal went stale for at least {stale_after_secs} seconds."),
-    );
-    save_and_emit(gcx, project_root, goal_id, ledger).await
+    mutate_and_emit(gcx, project_root, goal_id, move |ledger| {
+        apply_terminal_status(ledger, GoalStatus::Escalated);
+        push_escalation(
+            ledger,
+            format!("Conductor goal went stale for at least {stale_after_secs} seconds."),
+        );
+        Ok(true)
+    })
+    .await
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 async fn maybe_escalate_invalid_cron(
     gcx: SharedGlobalContext,
     project_root: &Path,
     goal_id: &str,
-    ledger: &mut GoalLedger,
+    ledger: &GoalLedger,
 ) -> bool {
     let Some(recurring) = ledger.recurring.as_ref() else {
         return false;
@@ -143,22 +151,33 @@ async fn maybe_escalate_invalid_cron(
     if crate::scheduler::parse_cron(&recurring.cron).is_ok() {
         return false;
     }
-    apply_terminal_status(ledger, GoalStatus::Escalated);
-    push_escalation(ledger, "Recurring conductor cron is invalid.".to_string());
-    save_and_emit(gcx, project_root, goal_id, ledger).await
+    mutate_and_emit(gcx, project_root, goal_id, |ledger| {
+        apply_terminal_status(ledger, GoalStatus::Escalated);
+        push_escalation(ledger, "Recurring conductor cron is invalid.".to_string());
+        Ok(true)
+    })
+    .await
+    .ok()
+    .flatten()
+    .is_some()
 }
 
-async fn save_and_emit(
+async fn mutate_and_emit(
     gcx: SharedGlobalContext,
     project_root: &Path,
     goal_id: &str,
-    ledger: &GoalLedger,
-) -> bool {
-    if save_goal_ledger(project_root, goal_id, ledger)
-        .await
-        .is_err()
-    {
-        return false;
+    updater: impl FnOnce(&mut GoalLedger) -> Result<bool, String>,
+) -> Result<Option<GoalLedger>, String> {
+    let (ledger, changed) = mutate_goal_ledger(
+        project_root,
+        goal_id,
+        MissingGoalBehavior::RequireExisting,
+        updater,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if !changed {
+        return Ok(None);
     }
     super::wake::refresh_conductor_wake_targets_for_project(gcx.clone(), project_root).await;
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
@@ -166,7 +185,7 @@ async fn save_and_emit(
             goal: ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone()),
         });
     }
-    true
+    Ok(Some(ledger))
 }
 
 fn apply_terminal_status(ledger: &mut GoalLedger, status: GoalStatus) {
@@ -228,7 +247,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use refact_buddy_core::conductor::GoalBudget;
-    use refact_buddy_core::conductor_store::load_goal_ledger;
+    use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
     use tokio::time::timeout;
 
     fn ts(seconds: i64) -> DateTime<Utc> {

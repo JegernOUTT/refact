@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use refact_buddy_core::conductor::{ConductorMemo, GoalLedger, MemoKind};
-use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
+use refact_buddy_core::conductor_store::{load_goal_ledger, mutate_goal_ledger, MissingGoalBehavior};
 use refact_runtime_api::{ChatSessionSnapshot, ChatSessionUpdate, SessionState};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -183,21 +183,26 @@ async fn goal_context(
     let ledger = load_goal_ledger(&project_root, &goal_id)
         .await
         .map_err(|error| error.to_string())?
-        .unwrap_or_default();
+        .ok_or_else(|| format!("conductor goal not found: {goal_id}"))?;
     Ok((gcx, goal_id, ledger))
 }
 
-async fn persist_ledger(
+async fn mutate_existing_ledger<R>(
     gcx: Arc<GlobalContext>,
     goal_id: &str,
-    ledger: &GoalLedger,
-) -> Result<(), String> {
+    updater: impl FnOnce(&mut GoalLedger) -> Result<R, String>,
+) -> Result<(GoalLedger, R), String> {
     let project_root = conductor_project_root(gcx.clone()).await?;
-    save_goal_ledger(&project_root, goal_id, ledger)
-        .await
-        .map_err(|error| error.to_string())?;
+    let updated = mutate_goal_ledger(
+        &project_root,
+        goal_id,
+        MissingGoalBehavior::RequireExisting,
+        updater,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(gcx).await;
-    Ok(())
+    Ok(updated)
 }
 
 fn push_surgery_memo(
@@ -353,7 +358,7 @@ async fn apply_surgery(
     detail: String,
     build_messages: impl FnOnce(&[ChatMessage]) -> Result<Vec<ChatMessage>, String>,
 ) -> Result<String, String> {
-    let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
+    let (gcx, goal_id, ledger) = goal_context(&ccx, args).await?;
     let chat_id = required_string(args, "chat_id")?;
     let source_chat_id = ccx.lock().await.chat_id.clone();
     let chat_facade = ccx.lock().await.app.chat.facade.clone();
@@ -363,8 +368,12 @@ async fn apply_surgery(
     validate_pairing(&snapshot.messages).map_err(|error| error.to_string())?;
     let messages = build_messages(&snapshot.messages)?;
     validate_pairing(&messages).map_err(|error| error.to_string())?;
-    push_surgery_memo(&mut ledger, &chat_id, action, detail, Some(source_chat_id));
-    persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
+    mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
+        ensure_owned_snapshot(ledger, &chat_id, &snapshot)?;
+        push_surgery_memo(ledger, &chat_id, action, detail, Some(source_chat_id));
+        Ok(())
+    })
+    .await?;
     chat_facade
         .update_session(
             &chat_id,
@@ -697,7 +706,7 @@ mod tests {
     use crate::app_state::AppState;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use crate::tools::tools_description::Tool;
-    use refact_buddy_core::conductor_store::load_goal_ledger;
+    use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
     use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
     use refact_runtime_api::{ChatSessionFacade, CreateSessionRequest, RuntimeTrajectorySnapshot};
     use std::sync::Mutex as StdMutex;

@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use tokio::fs;
+use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
 use crate::conductor::GoalLedger;
@@ -10,6 +13,8 @@ use crate::conductor::GoalLedger;
 #[derive(Debug)]
 pub enum ConductorStoreError {
     InvalidGoalId(String),
+    MissingGoal(String),
+    Update(String),
     Io {
         action: &'static str,
         path: PathBuf,
@@ -25,6 +30,8 @@ impl fmt::Display for ConductorStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidGoalId(goal_id) => write!(f, "invalid conductor goal id: {goal_id}"),
+            Self::MissingGoal(goal_id) => write!(f, "conductor goal not found: {goal_id}"),
+            Self::Update(error) => write!(f, "failed to update conductor ledger: {error}"),
             Self::Io {
                 action,
                 path,
@@ -42,9 +49,15 @@ impl std::error::Error for ConductorStoreError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Json { source, .. } => Some(source),
-            Self::InvalidGoalId(_) => None,
+            Self::InvalidGoalId(_) | Self::MissingGoal(_) | Self::Update(_) => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingGoalBehavior {
+    RequireExisting,
+    CreateDefault,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +110,29 @@ pub async fn load_goal_ledger(
         }
         Err(err) => Err(err),
     }
+}
+
+pub async fn mutate_goal_ledger<R>(
+    project_root: &Path,
+    goal_id: &str,
+    missing: MissingGoalBehavior,
+    updater: impl FnOnce(&mut GoalLedger) -> Result<R, String>,
+) -> Result<(GoalLedger, R), ConductorStoreError> {
+    let path = goal_ledger_path(project_root, goal_id)?;
+    let lock = mutation_lock(&path).await;
+    let _guard = lock.lock().await;
+    let mut ledger = match load_goal_ledger(project_root, goal_id).await? {
+        Some(ledger) => ledger,
+        None => match missing {
+            MissingGoalBehavior::RequireExisting => {
+                return Err(ConductorStoreError::MissingGoal(goal_id.to_string()));
+            }
+            MissingGoalBehavior::CreateDefault => GoalLedger::default(),
+        },
+    };
+    let result = updater(&mut ledger).map_err(ConductorStoreError::Update)?;
+    save_goal_ledger(project_root, goal_id, &ledger).await?;
+    Ok((ledger, result))
 }
 
 pub async fn list_goal_ledgers(
@@ -152,6 +188,16 @@ fn conductor_store_dir(project_root: &Path) -> PathBuf {
 fn goal_ledger_path(project_root: &Path, goal_id: &str) -> Result<PathBuf, ConductorStoreError> {
     validate_goal_id(goal_id)?;
     Ok(conductor_store_dir(project_root).join(format!("{goal_id}.json")))
+}
+
+async fn mutation_lock(path: &Path) -> Arc<AMutex<()>> {
+    static LOCKS: OnceLock<AMutex<HashMap<PathBuf, Arc<AMutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(Default::default);
+    let mut guard = locks.lock().await;
+    guard
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(AMutex::new(())))
+        .clone()
 }
 
 fn validate_goal_id(goal_id: &str) -> Result<(), ConductorStoreError> {
@@ -356,5 +402,91 @@ mod tests {
 
         assert!(matches!(load_error, ConductorStoreError::Json { .. }));
         assert!(matches!(list_error, ConductorStoreError::Json { .. }));
+    }
+
+    #[tokio::test]
+    async fn mutate_goal_ledger_serializes_concurrent_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        save_goal_ledger(dir.path(), "goal-race", &GoalLedger::default())
+            .await
+            .unwrap();
+
+        let first_root = dir.path().to_path_buf();
+        let second_root = dir.path().to_path_buf();
+        let first = tokio::spawn(async move {
+            mutate_goal_ledger(
+                &first_root,
+                "goal-race",
+                MissingGoalBehavior::RequireExisting,
+                |ledger| {
+                    ledger.chat_ids.push("chat-a".to_string());
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let second = tokio::spawn(async move {
+            mutate_goal_ledger(
+                &second_root,
+                "goal-race",
+                MissingGoalBehavior::RequireExisting,
+                |ledger| {
+                    ledger.task_ids.push("task-b".to_string());
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        first.await.unwrap();
+        second.await.unwrap();
+
+        let ledger = load_goal_ledger(dir.path(), "goal-race")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.chat_ids, vec!["chat-a".to_string()]);
+        assert_eq!(ledger.task_ids, vec!["task-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn mutate_goal_ledger_missing_behavior_is_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = mutate_goal_ledger(
+            dir.path(),
+            "goal-missing",
+            MissingGoalBehavior::RequireExisting,
+            |ledger| {
+                ledger.chat_ids.push("must-not-write".to_string());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing, ConductorStoreError::MissingGoal(_)));
+        assert_eq!(
+            load_goal_ledger(dir.path(), "goal-missing").await.unwrap(),
+            None
+        );
+
+        mutate_goal_ledger(
+            dir.path(),
+            "goal-created",
+            MissingGoalBehavior::CreateDefault,
+            |ledger| {
+                ledger.chat_ids.push("created".to_string());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        let created = load_goal_ledger(dir.path(), "goal-created")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.chat_ids, vec!["created".to_string()]);
     }
 }

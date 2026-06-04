@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use hyper::StatusCode;
 use refact_buddy_core::conductor::{ConductorGoal, ConductorWakeReason, GoalLedger, PendingQuestion};
-use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
+use refact_buddy_core::conductor_store::{mutate_goal_ledger, MissingGoalBehavior};
 use refact_buddy_core::types::{BuddyGhostMessage, BuddyGhostMessageRole};
 use uuid::Uuid;
 
@@ -39,7 +39,6 @@ pub async fn conductor_ghost_say(
     content: &str,
     source_chat_id: Option<String>,
 ) -> Result<BuddyGhostMessage, ScratchError> {
-    let mut ledger = load_required(project_root, goal_id).await?;
     let ghost = make_ghost_message(
         goal_id,
         BuddyGhostMessageRole::Say,
@@ -47,8 +46,12 @@ pub async fn conductor_ghost_say(
         source_chat_id,
         None,
     );
-    ledger.ghost_messages.push(ghost.clone());
-    persist_and_emit(gcx, project_root, goal_id, &ledger, ghost.clone()).await?;
+    let (ledger, ()) = mutate_required(project_root, goal_id, |ledger| {
+        ledger.ghost_messages.push(ghost.clone());
+        Ok(())
+    })
+    .await?;
+    emit_after_mutation(gcx, project_root, goal_id, &ledger, Some(ghost.clone())).await;
     Ok(ghost)
 }
 
@@ -59,7 +62,6 @@ pub async fn conductor_ghost_memo(
     content: &str,
     source_chat_id: Option<String>,
 ) -> Result<BuddyGhostMessage, ScratchError> {
-    let mut ledger = load_required(project_root, goal_id).await?;
     let ghost = make_ghost_message(
         goal_id,
         BuddyGhostMessageRole::Memo,
@@ -67,8 +69,12 @@ pub async fn conductor_ghost_memo(
         source_chat_id,
         None,
     );
-    ledger.ghost_messages.push(ghost.clone());
-    persist_and_emit(gcx, project_root, goal_id, &ledger, ghost.clone()).await?;
+    let (ledger, ()) = mutate_required(project_root, goal_id, |ledger| {
+        ledger.ghost_messages.push(ghost.clone());
+        Ok(())
+    })
+    .await?;
+    emit_after_mutation(gcx, project_root, goal_id, &ledger, Some(ghost.clone())).await;
     Ok(ghost)
 }
 
@@ -80,7 +86,6 @@ pub async fn conductor_ghost_ask(
     blocking: bool,
     source_chat_id: Option<String>,
 ) -> Result<GhostAskResult, ScratchError> {
-    let mut ledger = load_required(project_root, goal_id).await?;
     let question_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let capped_question = cap_ghost_content(question);
@@ -100,9 +105,13 @@ pub async fn conductor_ghost_ask(
         source_chat_id,
         Some(question_id),
     );
-    ledger.pending_questions.push(pending.clone());
-    ledger.ghost_messages.push(ghost.clone());
-    persist_and_emit(gcx, project_root, goal_id, &ledger, ghost.clone()).await?;
+    let (ledger, ()) = mutate_required(project_root, goal_id, |ledger| {
+        ledger.pending_questions.push(pending.clone());
+        ledger.ghost_messages.push(ghost.clone());
+        Ok(())
+    })
+    .await?;
+    emit_after_mutation(gcx, project_root, goal_id, &ledger, Some(ghost.clone())).await;
     Ok(GhostAskResult {
         ghost,
         question: pending,
@@ -116,27 +125,18 @@ pub async fn conductor_ghost_answer(
     question_id: &str,
     answer: &str,
 ) -> Result<GhostAnswerResult, ScratchError> {
-    let mut ledger = load_goal_ledger(project_root, goal_id)
-        .await
-        .map_err(store_error)?
-        .ok_or_else(|| {
-            ScratchError::new(StatusCode::NOT_FOUND, format!("goal not found: {goal_id}"))
-        })?;
-    let question = ledger
-        .pending_questions
-        .iter_mut()
-        .find(|question| question.id == question_id)
-        .ok_or_else(|| {
-            ScratchError::new(
-                StatusCode::NOT_FOUND,
-                format!("question not found: {question_id}"),
-            )
-        })?;
-    question.answer = Some(cap_ghost_content(answer));
-    question.answered_at = Some(Utc::now().to_rfc3339());
-    save_goal_ledger(project_root, goal_id, &ledger)
-        .await
-        .map_err(store_error)?;
+    let capped_answer = cap_ghost_content(answer);
+    let (ledger, ()) = mutate_required(project_root, goal_id, |ledger| {
+        let question = ledger
+            .pending_questions
+            .iter_mut()
+            .find(|question| question.id == question_id)
+            .ok_or_else(|| format!("question not found: {question_id}"))?;
+        question.answer = Some(capped_answer);
+        question.answered_at = Some(Utc::now().to_rfc3339());
+        Ok(())
+    })
+    .await?;
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
     emit_goal_updated(app.gcx.clone(), goal_id, ledger).await;
     let enqueued = crate::buddy::conductor::wake::enqueue_goal_wake_after_target_refresh(
@@ -170,33 +170,37 @@ fn make_ghost_message(
     }
 }
 
-async fn load_required(project_root: &Path, goal_id: &str) -> Result<GoalLedger, ScratchError> {
-    load_goal_ledger(project_root, goal_id)
-        .await
-        .map_err(store_error)
-        .and_then(|ledger| {
-            ledger.ok_or_else(|| {
-                ScratchError::new(StatusCode::NOT_FOUND, format!("goal not found: {goal_id}"))
-            })
-        })
+async fn mutate_required<R>(
+    project_root: &Path,
+    goal_id: &str,
+    updater: impl FnOnce(&mut GoalLedger) -> Result<R, String>,
+) -> Result<(GoalLedger, R), ScratchError> {
+    mutate_goal_ledger(
+        project_root,
+        goal_id,
+        MissingGoalBehavior::RequireExisting,
+        updater,
+    )
+    .await
+    .map_err(store_error)
 }
 
-async fn persist_and_emit(
+async fn emit_after_mutation(
     gcx: Arc<GlobalContext>,
     project_root: &Path,
     goal_id: &str,
     ledger: &GoalLedger,
-    ghost: BuddyGhostMessage,
-) -> Result<(), ScratchError> {
-    save_goal_ledger(project_root, goal_id, ledger)
-        .await
-        .map_err(store_error)?;
-    crate::buddy::conductor::wake::refresh_conductor_wake_targets(gcx.clone()).await;
-    if let Some(tx) = gcx.buddy_events_tx.as_ref() {
+    ghost: Option<BuddyGhostMessage>,
+) {
+    crate::buddy::conductor::wake::refresh_conductor_wake_targets_for_project(
+        gcx.clone(),
+        project_root,
+    )
+    .await;
+    if let (Some(tx), Some(ghost)) = (gcx.buddy_events_tx.as_ref(), ghost) {
         let _ = tx.send(BuddyEvent::ConductorGhostMessage { ghost });
     }
     emit_goal_updated(gcx, goal_id, ledger.clone()).await;
-    Ok(())
 }
 
 async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: GoalLedger) {
@@ -212,6 +216,10 @@ fn store_error(error: refact_buddy_core::conductor_store::ConductorStoreError) -
         refact_buddy_core::conductor_store::ConductorStoreError::InvalidGoalId(_) => {
             StatusCode::BAD_REQUEST
         }
+        refact_buddy_core::conductor_store::ConductorStoreError::MissingGoal(_) => {
+            StatusCode::NOT_FOUND
+        }
+        refact_buddy_core::conductor_store::ConductorStoreError::Update(_) => StatusCode::NOT_FOUND,
         refact_buddy_core::conductor_store::ConductorStoreError::Io { .. }
         | refact_buddy_core::conductor_store::ConductorStoreError::Json { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
@@ -224,7 +232,7 @@ fn store_error(error: refact_buddy_core::conductor_store::ConductorStoreError) -
 mod tests {
     use super::*;
     use refact_buddy_core::conductor::{GoalBudget, GoalLedger, GoalStatus};
-    use refact_buddy_core::conductor_store::save_goal_ledger;
+    use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
     use tokio::time::timeout;
 
     async fn gcx(root: &Path) -> Arc<GlobalContext> {

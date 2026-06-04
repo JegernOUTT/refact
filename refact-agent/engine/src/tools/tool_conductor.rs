@@ -6,7 +6,7 @@ use chrono::Utc;
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, GoalAutonomy, GoalLedger, GoalStatus, MemoKind,
 };
-use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
+use refact_buddy_core::conductor_store::{load_goal_ledger, mutate_goal_ledger, MissingGoalBehavior};
 use refact_chat_api::{ChatCommand, MessageOrigin};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
@@ -212,17 +212,22 @@ async fn conductor_project_root(gcx: Arc<GlobalContext>) -> Result<std::path::Pa
         .ok_or_else(|| "No workspace folder found".to_string())
 }
 
-async fn persist_ledger(
+async fn mutate_existing_ledger<R>(
     gcx: Arc<GlobalContext>,
     goal_id: &str,
-    ledger: &GoalLedger,
-) -> Result<(), String> {
+    updater: impl FnOnce(&mut GoalLedger) -> Result<R, String>,
+) -> Result<(GoalLedger, R), String> {
     let project_root = conductor_project_root(gcx.clone()).await?;
-    save_goal_ledger(&project_root, goal_id, ledger)
-        .await
-        .map_err(|error| error.to_string())?;
+    let updated = mutate_goal_ledger(
+        &project_root,
+        goal_id,
+        MissingGoalBehavior::RequireExisting,
+        updater,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(gcx).await;
-    Ok(())
+    Ok(updated)
 }
 
 fn ledger_autonomy(ledger: &GoalLedger) -> GoalAutonomy {
@@ -354,7 +359,7 @@ impl Tool for ToolConductorSteerChat {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
+        let (gcx, goal_id, ledger) = goal_context(&ccx, args).await?;
         ensure_can_mutate(&ledger, "steer chats")?;
         let chat_id = required_string(args, "chat_id")?;
         let message = cap(&required_string(args, "message")?, MAX_CONTENT_CHARS);
@@ -373,14 +378,20 @@ impl Tool for ToolConductorSteerChat {
                 },
             )
             .await?;
-        push_unique(&mut ledger.chat_ids, chat_id.clone());
-        push_memo(
-            &mut ledger,
-            MemoKind::HumanSteering,
-            format!("Conductor steered chat {chat_id}: {message}"),
-            Some(chat_id.clone()),
-        );
-        persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
+        let chat_id_for_update = chat_id.clone();
+        let message_for_update = message.clone();
+        let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
+            ensure_steer_chat_owned(ledger, &chat_id_for_update, &snapshot.thread)?;
+            push_unique(&mut ledger.chat_ids, chat_id_for_update.clone());
+            push_memo(
+                ledger,
+                MemoKind::HumanSteering,
+                format!("Conductor steered chat {chat_id_for_update}: {message_for_update}"),
+                Some(chat_id_for_update.clone()),
+            );
+            Ok(())
+        })
+        .await?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
         tool_message(tool_call_id, format!("✅ Conductor steered chat {chat_id}"))
     }
@@ -449,13 +460,17 @@ impl Tool for ToolConductorMemo {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
+        let (gcx, goal_id, ledger) = goal_context(&ccx, args).await?;
         ensure_can_mutate(&ledger, "write memos")?;
         let kind = parse_memo_kind(args.get("kind"))?;
         let content = required_string(args, "content")?;
         let source_chat_id = optional_string(args, "source_chat_id");
-        push_memo(&mut ledger, kind, content, source_chat_id);
-        persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
+        let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
+            ensure_can_mutate(ledger, "write memos")?;
+            push_memo(ledger, kind, content, source_chat_id);
+            Ok(())
+        })
+        .await?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
         tool_message(
             tool_call_id,
@@ -485,20 +500,22 @@ impl Tool for ToolConductorSetAutonomy {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
+        let (gcx, goal_id, ledger) = goal_context(&ccx, args).await?;
         let autonomy = parse_autonomy(&required_string(args, "autonomy")?)?;
         if ledger_autonomy(&ledger) == GoalAutonomy::ReadOnly {
             return Err("read-only conductor goals cannot change autonomy".to_string());
         }
-        ledger.autonomy = Some(autonomy);
-        push_memo(
-            &mut ledger,
-            MemoKind::Decision,
-            optional_string(args, "reason")
-                .unwrap_or_else(|| format!("Conductor autonomy set to {autonomy:?}")),
-            None,
-        );
-        persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
+        let reason = optional_string(args, "reason")
+            .unwrap_or_else(|| format!("Conductor autonomy set to {autonomy:?}"));
+        let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
+            if ledger_autonomy(ledger) == GoalAutonomy::ReadOnly {
+                return Err("read-only conductor goals cannot change autonomy".to_string());
+            }
+            ledger.autonomy = Some(autonomy);
+            push_memo(ledger, MemoKind::Decision, reason, None);
+            Ok(())
+        })
+        .await?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
         tool_message(
             tool_call_id,
@@ -528,12 +545,16 @@ impl Tool for ToolConductorEscalate {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
+        let (gcx, goal_id, ledger) = goal_context(&ccx, args).await?;
         ensure_can_mutate(&ledger, "escalate")?;
         let reason = required_string(args, "reason")?;
-        apply_ledger_status(&mut ledger, GoalStatus::Escalated);
-        push_memo(&mut ledger, MemoKind::Escalation, reason, None);
-        persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
+        let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
+            ensure_can_mutate(ledger, "escalate")?;
+            apply_ledger_status(ledger, GoalStatus::Escalated);
+            push_memo(ledger, MemoKind::Escalation, reason, None);
+            Ok(())
+        })
+        .await?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
         tool_message(tool_call_id, format!("✅ Conductor escalated {goal_id}"))
     }
@@ -560,27 +581,34 @@ impl Tool for ToolConductorGoalStatus {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
+        let (gcx, goal_id, ledger) = goal_context(&ccx, args).await?;
         if !is_done_status(args) {
             ensure_can_mutate(&ledger, "change status")?;
         }
         let status = parse_status(&required_string(args, "status")?)?;
-        apply_ledger_status(&mut ledger, status);
-        if status == GoalStatus::Done {
-            ledger.last_progress_at = Some(Utc::now().to_rfc3339());
-        }
-        push_memo(
-            &mut ledger,
+        let reason = optional_string(args, "reason")
+            .unwrap_or_else(|| format!("Goal status set to {status:?}"));
+        let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
+            if status != GoalStatus::Done {
+                ensure_can_mutate(ledger, "change status")?;
+            }
+            apply_ledger_status(ledger, status);
             if status == GoalStatus::Done {
-                MemoKind::Progress
-            } else {
-                MemoKind::Decision
-            },
-            optional_string(args, "reason")
-                .unwrap_or_else(|| format!("Goal status set to {status:?}")),
-            None,
-        );
-        persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
+                ledger.last_progress_at = Some(Utc::now().to_rfc3339());
+            }
+            push_memo(
+                ledger,
+                if status == GoalStatus::Done {
+                    MemoKind::Progress
+                } else {
+                    MemoKind::Decision
+                },
+                reason,
+                None,
+            );
+            Ok(())
+        })
+        .await?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
         tool_message(
             tool_call_id,
@@ -687,7 +715,7 @@ impl Tool for ToolConductorAsk {
 mod tests {
     use super::*;
     use crate::tools::tools_description::Tool;
-    use refact_buddy_core::conductor_store::load_goal_ledger;
+    use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
     use refact_runtime_api::{
         ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest,
         RuntimeTrajectorySnapshot, SessionState,
@@ -1321,6 +1349,63 @@ mod tests {
             load_goal_ledger(dir.path(), "missing-goal").await.unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_conductor_ledger_mutations_preserve_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-concurrent", &GoalLedger::default())
+            .await
+            .unwrap();
+        let first_mock = Arc::new(MockChatFacade::new(conductor_thread("goal-concurrent")));
+        let second_mock = Arc::new(MockChatFacade::new(conductor_thread("goal-concurrent")));
+
+        let first_gcx = gcx.clone();
+        let first = tokio::spawn(async move {
+            let mut tool = ToolConductorMemo::new();
+            tool.tool_execute(
+                ccx(first_gcx, first_mock).await,
+                &"memo".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-concurrent")),
+                    ("content", json!("memo survived")),
+                ]),
+            )
+            .await
+            .unwrap();
+        });
+        let second = tokio::spawn(async move {
+            let mut tool = ToolConductorGoalStatus::new();
+            tool.tool_execute(
+                ccx(gcx, second_mock).await,
+                &"status".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-concurrent")),
+                    ("status", json!("running")),
+                    ("reason", json!("status survived")),
+                ]),
+            )
+            .await
+            .unwrap();
+        });
+
+        first.await.unwrap();
+        second.await.unwrap();
+
+        let ledger = load_goal_ledger(dir.path(), "goal-concurrent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.status, Some(GoalStatus::Running));
+        assert!(ledger
+            .memos
+            .iter()
+            .any(|memo| memo.content == "memo survived"));
+        assert!(ledger
+            .memos
+            .iter()
+            .any(|memo| memo.content == "status survived"));
     }
 
     #[tokio::test]

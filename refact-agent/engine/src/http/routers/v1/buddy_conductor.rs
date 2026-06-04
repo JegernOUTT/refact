@@ -361,6 +361,8 @@ async fn project_root(app: &AppState) -> Result<std::path::PathBuf, ScratchError
 fn store_error(error: ConductorStoreError) -> ScratchError {
     let status = match error {
         ConductorStoreError::InvalidGoalId(_) => StatusCode::BAD_REQUEST,
+        ConductorStoreError::MissingGoal(_) => StatusCode::NOT_FOUND,
+        ConductorStoreError::Update(_) => StatusCode::BAD_REQUEST,
         ConductorStoreError::Io { .. } | ConductorStoreError::Json { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

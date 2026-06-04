@@ -5,7 +5,7 @@ use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, ConductorWakeReason, GoalBudgetSpent, GoalLedger, GoalStatus,
     LearningOutcome, MemoKind,
 };
-use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
+use refact_buddy_core::conductor_store::{load_goal_ledger, mutate_goal_ledger, MissingGoalBehavior};
 use uuid::Uuid;
 
 use crate::app_state::AppState;
@@ -140,7 +140,7 @@ pub async fn conductor_wake_for_goal(
                 None,
             )
             .await?;
-            save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+            persist_goal_ledger_serialized(&project_root, &goal.id, &goal.ledger)
                 .await
                 .map_err(|error| error.to_string())?;
             emit_goal_updated(gcx, &goal).await;
@@ -155,7 +155,7 @@ pub async fn conductor_wake_for_goal(
                 "Skipped conductor turn because a human steered the goal.",
                 None,
             );
-            save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+            persist_goal_ledger_serialized(&project_root, &goal.id, &goal.ledger)
                 .await
                 .map_err(|error| error.to_string())?;
             emit_goal_updated(gcx, &goal).await;
@@ -175,7 +175,7 @@ pub async fn conductor_wake_for_goal(
                 source_chat_id,
             )
             .await?;
-            save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+            persist_goal_ledger_serialized(&project_root, &goal.id, &goal.ledger)
                 .await
                 .map_err(|error| error.to_string())?;
             emit_goal_updated(gcx, &goal).await;
@@ -218,7 +218,7 @@ pub async fn conductor_wake_for_goal(
                 "Conductor ran one bounded decision turn.",
                 outcome.chat_id.clone(),
             );
-            save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+            persist_goal_ledger_serialized(&project_root, &goal.id, &goal.ledger)
                 .await
                 .map_err(|error| error.to_string())?;
             goal.spent.no_progress_wakes = goal.ledger.no_progress_wakes;
@@ -247,7 +247,7 @@ pub async fn conductor_wake_for_goal(
                     None,
                 )
                 .await?;
-                save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+                persist_goal_ledger_serialized(&project_root, &goal.id, &goal.ledger)
                     .await
                     .map_err(|error| error.to_string())?;
                 emit_goal_updated(gcx, &goal).await;
@@ -259,7 +259,7 @@ pub async fn conductor_wake_for_goal(
                     &format!("Transient conductor turn failure: {error}"),
                     None,
                 );
-                save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+                persist_goal_ledger_serialized(&project_root, &goal.id, &goal.ledger)
                     .await
                     .map_err(|error| error.to_string())?;
                 requeue_backoff(gcx, &goal.id).await;
@@ -371,6 +371,26 @@ async fn conductor_project_root(gcx: Arc<GlobalContext>) -> Result<std::path::Pa
         .into_iter()
         .next()
         .ok_or_else(|| "No workspace folder found".to_string())
+}
+
+async fn persist_goal_ledger_serialized(
+    project_root: &std::path::Path,
+    goal_id: &str,
+    ledger: &GoalLedger,
+) -> Result<(), String> {
+    let replacement = ledger.clone();
+    mutate_goal_ledger(
+        project_root,
+        goal_id,
+        MissingGoalBehavior::CreateDefault,
+        |ledger| {
+            *ledger = replacement;
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 async fn collect_task_snapshots(
@@ -636,7 +656,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use refact_buddy_core::conductor::{DoneWhen, GoalBudget};
-    use refact_buddy_core::conductor_store::load_goal_ledger;
+    use refact_buddy_core::conductor_store::{load_goal_ledger, save_goal_ledger};
     use tokio::time::timeout;
 
     async fn test_serial() -> tokio::sync::MutexGuard<'static, ()> {
