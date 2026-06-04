@@ -175,27 +175,26 @@ fn safe_char_boundary(s: &str, mut idx: usize) -> usize {
 }
 
 const SEGMENT_SUMMARY_PROMPT: &str =
-    "Summarize the following non-user conversation segment for compact context storage. \
-Minimize information loss. Every fact needed to continue the task must be preserved.
-
-Return strict JSON first, with exactly this shape:
+    "Summarize the following non-user conversation segment as compact continuation context. \
+Return strict JSON only with this contract:
 {
-  \"summary\": \"Terse continuation summary...\",
+  \"summary\": \"150-350 word continuation summary, up to 600 words only for many files or failures\",
   \"preserve_context_files\": [
-    {\"source_message_id\": \"...\", \"file_name\": \"src/lib.rs\", \"reason\": \"Edited and needed\"}
+    {\"source_message_id\": \"...\", \"file_name\": \"src/lib.rs\", \"reason\": \"Needed verbatim for the next step\"}
   ],
   \"compressed_tool_outputs\": [
-    {\"source_message_id\": \"...\", \"tool_name\": \"shell\", \"title\": \"cargo test failure\", \"summary\": \"...\"}
+    {\"source_message_id\": \"...\", \"tool_name\": \"shell\", \"title\": \"cargo test failure\", \"summary\": \"Exact error, exit code, and implication\"}
   ],
   \"dropped\": [
-    {\"source_message_id\": \"...\", \"reason\": \"routine read\"}
+    {\"source_message_id\": \"...\", \"reason\": \"routine read/search that changed nothing\"}
   ]
 }
 
-Rules: include exact paths, error text, exit codes. No invented content. \
-Only preserve context_file message IDs that are essential verbatim. \
-Summarize important tool outputs in compressed_tool_outputs instead of copying them. \
-Keep summary terse, 150–500 words total.";
+Preserve: user goal and constraints, decisions/approvals/rejections, exact edited/created/deleted files and why they matter, failing commands/tests with exact error names or codes, important tool/subagent/planner/code-review outputs, current blocker, and next action. \
+Compress: routine tool outputs into compressed_tool_outputs when useful. \
+Drop: routine reads/searches unless they changed the plan. \
+Do not narrate process, use first person unless quoting the user, invent facts, or include full code snippets unless essential. \
+Only preserve context_file message IDs that must remain verbatim.";
 
 pub fn is_segment_summary(message: &ChatMessage) -> bool {
     if message.role != "assistant" || is_ui_only_message(message) {
@@ -2873,6 +2872,20 @@ mod tests {
             "dropped": [],
         })
         .to_string()
+    }
+
+    #[test]
+    fn segment_summary_prompt_keeps_structured_compact_contract() {
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("Return strict JSON only"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("preserve_context_files"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("compressed_tool_outputs"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("dropped"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("150-350 word"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("up to 600 words"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("tool/subagent/planner/code-review outputs"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("Do not narrate process"));
+        assert!(SEGMENT_SUMMARY_PROMPT.contains("use first person unless quoting the user"));
+        assert!(!SEGMENT_SUMMARY_PROMPT.contains("<analysis>"));
     }
 
     #[test]

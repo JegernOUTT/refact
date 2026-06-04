@@ -82,12 +82,30 @@ pub async fn compress_trajectory(
 mod tests {
     use super::*;
 
+    const DEFAULT_COMPRESS_TRAJECTORY_YAML: &str = include_str!(
+        "../../crates/refact-yaml-configs/src/defaults/subagents/compress_trajectory.yaml"
+    );
+
     fn message(role: &str, text: &str) -> ChatMessage {
         ChatMessage {
             role: role.to_string(),
             content: ChatContent::SimpleText(text.to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn compress_trajectory_prompt_is_compact_continuation_handoff() {
+        assert!(!DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("<analysis>"));
+        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("150-350 words"));
+        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("up to 600 words"));
+        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML
+            .contains("tool, subagent, planner, and code-review outputs"));
+        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML
+            .contains("Do not use first person unless quoting the user"));
+        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("Drop routine reads, searches"));
+        assert!(!DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("Chronologically analyze"));
+        assert!(!DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("Here's an example"));
     }
 
     #[test]
