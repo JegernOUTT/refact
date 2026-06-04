@@ -29,6 +29,7 @@ import {
   selectThreadPauseById,
   selectIsCompressingById,
   selectCompressionPhaseById,
+  selectCompressionReasonById,
   selectCompressionPulseSeqById,
 } from "../../features/Chat/Thread/selectors";
 import {
@@ -63,8 +64,32 @@ import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
 import { PlanBanner } from "./PlanBanner";
+import type {
+  CompressionPhase,
+  CompressionReason,
+} from "../../services/refact/chatSubscription";
 
 const COMPRESSION_MIN_VISIBLE_MS = 500;
+
+function compressionProgressText(
+  phase: CompressionPhase | undefined,
+  reason: CompressionReason | undefined,
+): string {
+  if (reason === "provider_length_stop" || reason === "context_length_stop") {
+    return "Compacting context after provider limit…";
+  }
+
+  if (phase === "checking") return "Checking context size…";
+  if (phase === "running") return "Compacting older context…";
+  if (phase === "applied") return "Context compacted";
+  if (phase === "failed") return "Context compaction failed";
+  if (phase === "skipped") {
+    if (reason === "no_eligible_segment") return "Nothing safe to compact";
+    return "Context already compact enough";
+  }
+
+  return "Compacting older context…";
+}
 
 export type ChatContentProps = {
   onRetry: (index: number, question: UserMessage["content"]) => void;
@@ -101,6 +126,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   );
   const compressionPhase = useAppSelector((s) =>
     selectCompressionPhaseById(s, renderChatId),
+  );
+  const compressionReason = useAppSelector((s) =>
+    selectCompressionReasonById(s, renderChatId),
   );
   const compressionPulseSeq = useAppSelector((s) =>
     selectCompressionPulseSeqById(s, renderChatId),
@@ -140,6 +168,10 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const compressionPulseActive =
     compressionPulseSeq !== undefined &&
     compressionPulseSeq !== handledCompressionPulseSeqRef.current;
+  const compressionStatusText = compressionProgressText(
+    compressionPhase,
+    compressionReason,
+  );
 
   useEffect(() => {
     if (compressionActive) {
@@ -333,7 +365,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
                   aria-live="polite"
                   data-testid="compression-progress"
                 >
-                  Compressing context…
+                  {compressionStatusText}
                 </Text>
               )}
             </>
@@ -341,7 +373,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         </Flex>
       </>
     ),
-    [isStreaming, isWaiting, isWaitingForConfirmation, visibleCompression],
+    [
+      compressionStatusText,
+      isStreaming,
+      isWaiting,
+      isWaitingForConfirmation,
+      visibleCompression,
+    ],
   );
 
   const renderDisplayItem = useCallback(

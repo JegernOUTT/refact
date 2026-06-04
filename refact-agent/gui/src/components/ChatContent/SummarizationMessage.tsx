@@ -93,12 +93,6 @@ function tokenLabelFor(
 
 type StatCell = { label: string; value: string };
 
-function parseStringStat(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 function parseNumberStat(value: unknown, suffix = ""): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return `${value.toLocaleString()}${suffix}`;
@@ -147,7 +141,6 @@ function statsFromCompressionReportMetadata(
     ),
     ...statCell("Tokens saved", parseNumberStat(report.estimated_tokens_saved)),
     ...statCell("Reduction", parseNumberStat(report.reduction_percent, "%")),
-    ...statCell("Summary model", parseStringStat(report.summary_model)),
     ...statCell(
       sourcePreserving ? "Context files preserved" : "Context files removed",
       parseNumberStat(
@@ -180,7 +173,6 @@ function isPrimaryReportStat(stat: StatCell): boolean {
     stat.label === "Messages compressed" ||
     stat.label === "Tokens saved" ||
     stat.label === "Reduction" ||
-    stat.label === "Summary model" ||
     stat.label === "Context files preserved" ||
     stat.label === "Tool outputs compressed"
   );
@@ -294,8 +286,8 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const reportSummaryStats = isSegmentCompressionReport
     ? primaryReportStats(reportStats)
     : reportStats;
-  const hasReportSummary =
-    isSegmentCompressionReport || reportSummaryStats !== null;
+  const hasMetadataReport = compressionReport !== null;
+  const hasReportSummary = hasMetadataReport && reportSummaryStats !== null;
   const cardClassName = compressionReport
     ? `${styles.card} ${styles.reportCard}`
     : styles.card;
@@ -364,7 +356,9 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
           className={styles.body}
           data-testid="summarization-card-body"
         >
-          {contentText.length > 0 ? (
+          {hasMetadataReport ? (
+            <span>Details are shown in the compact report above.</span>
+          ) : contentText.length > 0 ? (
             <ToolMarkdown>{contentText}</ToolMarkdown>
           ) : (
             <span>No details available.</span>

@@ -364,7 +364,10 @@ function normalizeCompressionReason(
     value === "pending_tool_calls" ||
     value === "no_eligible_segment" ||
     value === "effective_context_unknown" ||
+    value === "provider_length_stop" ||
+    value === "context_length_stop" ||
     value === "pressure_low" ||
+    value === "insufficient_savings" ||
     value === "no_summary_model" ||
     value === "input_too_large" ||
     value === "transient_failure" ||

@@ -301,12 +301,12 @@ describe("SummarizationMessage", () => {
         "Older context was summarized so this chat can continue within the model limit.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Summary kept for the model/u)).toBeInTheDocument();
+    expect(screen.queryByText(/Summary kept for the model/u)).toBeNull();
     const stats = screen.getByTestId("summarization-card-stats");
     expect(stats).toHaveTextContent("Messages compressed");
     expect(stats).toHaveTextContent("4");
-    expect(stats).toHaveTextContent("Summary model");
-    expect(stats).toHaveTextContent("summary-model");
+    expect(stats).not.toHaveTextContent("Summary model");
+    expect(stats).not.toHaveTextContent("summary-model");
     expect(stats).toHaveTextContent("Tokens saved");
     expect(stats).toHaveTextContent("9,000");
     expect(stats).toHaveTextContent("Reduction");
@@ -350,14 +350,15 @@ describe("SummarizationMessage", () => {
     expect(stats).toHaveTextContent("9,000");
     expect(stats).toHaveTextContent("Reduction");
     expect(stats).toHaveTextContent("75%");
-    expect(stats).toHaveTextContent("Summary model");
-    expect(stats).toHaveTextContent("summary-model");
+    expect(stats).not.toHaveTextContent("Summary model");
+    expect(stats).not.toHaveTextContent("summary-model");
     expect(stats).not.toHaveTextContent("Tokens before");
 
     await user.click(screen.getByTestId("summarization-card-header"));
     expect(
-      screen.getByText(/Markdown details stay expandable/u),
+      screen.getByText(/Details are shown in the compact report above/u),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/Markdown details stay expandable/u)).toBeNull();
   });
 
   it("legacy compression report copy does not claim original messages remain visible", () => {
