@@ -134,6 +134,13 @@ import {
   isFreshErrorWithinGrace,
 } from "../features/Buddy/buddyRuntimeEvents";
 import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
+import { BuddyConductorGoalsPanel } from "../features/Buddy/BuddyConductorGoalsPanel";
+import {
+  conductorMoodForGoals,
+  goalToConductorState,
+} from "../features/Buddy/conductorMood";
+import { AssistantInput } from "../components/ChatContent/AssistantInput";
+import { getSurgeryBadgeInfo } from "../components/ChatContent/SurgeryBadgeInfo";
 import { server } from "../utils/mockServer";
 const reducer = buddySlice.reducer;
 const buddyDir = path.join(__dirname, "../features/Buddy");
@@ -2204,6 +2211,124 @@ describe("buddy conductor goal state", () => {
     expect(
       selectGoalForChat(rootState, { chatId: "chat-missing" }),
     ).toBeUndefined();
+  });
+
+  test("status-to-mood mapping covers conducting, waiting, blocker, and done", () => {
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "running" })]),
+    ).toMatchObject({ state: "conducting", mood: "focused" });
+    expect(
+      conductorMoodForGoals([
+        makeConductorGoal({ status: "waiting_for_human" }),
+      ]),
+    ).toMatchObject({ state: "waiting_human", animationType: "perk" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "paused" })]),
+    ).toMatchObject({ state: "blocker", mood: "alert" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "done" })]),
+    ).toMatchObject({ state: "done", animationType: "celebrate" });
+  });
+
+  test("escalated state outranks blocker and renders distinct panel mood", () => {
+    const blocker = makeConductorGoal({ id: "blocked", status: "paused" });
+    const escalated = makeConductorGoal({
+      id: "escalated",
+      status: "running",
+      ledger: {
+        ...makeConductorGoal().ledger,
+        memos: [
+          {
+            id: "memo-escalation",
+            kind: "escalation",
+            content: "Need human rescue",
+            created_at: "2024-01-01T00:00:30Z",
+            source_chat_id: "chat-1",
+            related_task_id: null,
+          },
+        ],
+      },
+    });
+    const store = setUpStore();
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [blocker, escalated] })),
+    );
+
+    expect(conductorMoodForGoals([blocker, escalated])).toMatchObject({
+      state: "escalated",
+      tone: "danger",
+    });
+
+    render(React.createElement(BuddyConductorGoalsPanel, { compact: true }), {
+      store,
+    });
+
+    expect(screen.getByText("🆘 Escalated")).toBeInTheDocument();
+    expect(
+      screen.getByText(/escalation: Need human rescue/u),
+    ).toBeInTheDocument();
+  });
+
+  test("surgery and done conductor states render dashboard labels", () => {
+    const surgery = makeConductorGoal({
+      id: "goal-surgery",
+      ledger: {
+        ...makeConductorGoal().ledger,
+        memos: [
+          {
+            id: "memo-surgery",
+            kind: "surgery",
+            content: "Trajectory surgery edit on chat agent-chat",
+            created_at: "2024-01-01T00:00:20Z",
+            source_chat_id: "chat-1",
+            related_task_id: null,
+          },
+        ],
+        ghost_messages: [
+          makeGhostMessage({
+            id: "ghost-memo",
+            role: "memo",
+            content: "Cleaned agent transcript",
+            created_at: "2024-01-01T00:00:21Z",
+          }),
+        ],
+      },
+    });
+    const done = makeConductorGoal({ id: "goal-done", status: "done" });
+    const store = setUpStore();
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot({ conductor_goals: [surgery, done] })),
+    );
+
+    expect(goalToConductorState(surgery)).toBe("surgery");
+    expect(goalToConductorState(done)).toBe("done");
+
+    render(React.createElement(BuddyConductorGoalsPanel), {
+      store,
+    });
+
+    expect(screen.getByText(/Surgery audit/u)).toBeInTheDocument();
+    expect(screen.getAllByText(/Done/u).length).toBeGreaterThan(1);
+    expect(
+      screen.getByText(/memo: Cleaned agent transcript/u),
+    ).toBeInTheDocument();
+  });
+
+  test("surgery badge renders subtle audit marker from backend metadata", () => {
+    const info = getSurgeryBadgeInfo({
+      conductor_surgery: { action: "edit", reason: "Trim stale tool result" },
+    });
+
+    render(
+      React.createElement(AssistantInput, {
+        message: "Adjusted transcript result.",
+        surgeryBadge: info,
+      }),
+    );
+
+    expect(screen.getByTestId("buddy-surgery-badge")).toHaveTextContent(
+      "Buddy surgery",
+    );
   });
 });
 

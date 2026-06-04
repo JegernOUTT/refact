@@ -5,7 +5,13 @@ import { useAppDispatch, useAppSelector } from "../../hooks";
 import { push, openScheduler } from "../Pages/pagesSlice";
 import { openBuddyChat } from "../Chat/Thread";
 import { selectConductorGoals } from "./buddySlice";
-import type { ConductorGoal, GoalStatus } from "./types";
+import { conductorStateView, goalToConductorState } from "./conductorMood";
+import type {
+  BuddyGhostMessage,
+  ConductorGoal,
+  ConductorMemo,
+  GoalStatus,
+} from "./types";
 import styles from "./BuddyConductorGoalsPanel.module.css";
 
 type GoalFilter = "all" | "active" | GoalStatus;
@@ -54,19 +60,55 @@ function firstChatId(goal: ConductorGoal): string | undefined {
   return goal.ledger.chat_ids[0];
 }
 
+function formatBudgetPercent(spent: number, budget: number | null | undefined) {
+  if (!budget || budget <= 0) return "—";
+  return `${Math.min(999, Math.round((spent / budget) * 100))}%`;
+}
+
+function latestMemo(goal: ConductorGoal): ConductorMemo | undefined {
+  return [...goal.ledger.memos].sort((left, right) =>
+    right.created_at.localeCompare(left.created_at),
+  )[0];
+}
+
+function latestGhost(goal: ConductorGoal): BuddyGhostMessage | undefined {
+  return [...goal.ledger.ghost_messages].sort((left, right) =>
+    right.created_at.localeCompare(left.created_at),
+  )[0];
+}
+
 function GoalCard({ goal }: { goal: ConductorGoal }) {
   const dispatch = useAppDispatch();
   const chatId = firstChatId(goal);
   const plannerTaskId = goal.ledger.planner_task_id;
   const primaryTaskId = plannerTaskId ?? goal.ledger.task_ids[0];
+  const stateView = conductorStateView(goalToConductorState(goal));
+  const memo = latestMemo(goal);
+  const ghost = latestGhost(goal);
+  const hasRecent = [memo, ghost].some((item) => item != null);
+  const tokenBudgetPercent = formatBudgetPercent(
+    goal.spent.total_tokens,
+    goal.budget.total_tokens,
+  );
 
   return (
-    <article className={styles.goalCard} data-testid="conductor-goal-card">
+    <article
+      className={classNames(styles.goalCard, styles[`tone_${stateView.tone}`])}
+      data-testid="conductor-goal-card"
+      data-conductor-state={stateView.state}
+    >
       <div className={styles.goalHeader}>
-        <Text size="2" weight="bold" className={styles.goalTitle}>
-          {goal.title}
-        </Text>
-        <span className={styles.statusBadge}>{formatStatus(goal.status)}</span>
+        <div className={styles.goalTitleGroup}>
+          <Text size="2" weight="bold" className={styles.goalTitle}>
+            {goal.title}
+          </Text>
+          <span className={styles.stateLine}>
+            {stateView.emoji} {stateView.label}
+          </span>
+        </div>
+        <span className={classNames(styles.statusBadge, styles.statusAccent)}>
+          {formatStatus(goal.status)}
+        </span>
       </div>
 
       <div className={styles.metaGrid}>
@@ -75,9 +117,9 @@ function GoalCard({ goal }: { goal: ConductorGoal }) {
           <span className={styles.metaValue}>{plannerTaskId ?? "—"}</span>
         </div>
         <div className={styles.metaItem}>
-          <span className={styles.metaLabel}>Tasks</span>
+          <span className={styles.metaLabel}>Planners / Agents</span>
           <span className={styles.metaValue}>
-            {goal.ledger.task_ids.length}
+            {plannerTaskId ? 1 : 0} / {goal.ledger.task_ids.length}
           </span>
         </div>
         <div className={styles.metaItem}>
@@ -102,6 +144,16 @@ function GoalCard({ goal }: { goal: ConductorGoal }) {
           </span>
         </div>
         <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>Budget</span>
+          <span className={styles.metaValue}>{tokenBudgetPercent}</span>
+        </div>
+        <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>Questions</span>
+          <span className={styles.metaValue}>
+            {goal.ledger.pending_questions.filter((q) => !q.answer).length} open
+          </span>
+        </div>
+        <div className={styles.metaItem}>
           <span className={styles.metaLabel}>Model stats</span>
           <span className={styles.metaValue}>
             P {formatTokens(goal.spent.prompt_tokens)} · C{" "}
@@ -109,6 +161,27 @@ function GoalCard({ goal }: { goal: ConductorGoal }) {
           </span>
         </div>
       </div>
+
+      {hasRecent ? (
+        <div className={styles.recentRail}>
+          {memo && (
+            <div className={styles.recentItem}>
+              <span className={styles.metaLabel}>Recent memo</span>
+              <span className={styles.recentText}>
+                {memo.kind}: {memo.content}
+              </span>
+            </div>
+          )}
+          {ghost && (
+            <div className={styles.recentItem}>
+              <span className={styles.metaLabel}>Recent ghost</span>
+              <span className={styles.recentText}>
+                {ghost.role}: {ghost.content}
+              </span>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       <div className={styles.linkRow}>
         {primaryTaskId && (

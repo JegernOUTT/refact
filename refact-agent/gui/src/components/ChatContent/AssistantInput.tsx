@@ -16,6 +16,8 @@ import { fallbackCopying } from "../../utils/fallbackCopying";
 import { ReasoningContent } from "./ReasoningContent";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
 import { ServerContentBlocks } from "./ServerContentBlocks";
+import { SurgeryBadge } from "./SurgeryBadge";
+import type { SurgeryBadgeInfo } from "./SurgeryBadgeInfo";
 import { GlobeIcon } from "@radix-ui/react-icons";
 import scrollbarStyles from "../shared/scrollbar.module.css";
 
@@ -34,6 +36,7 @@ type ChatInputProps = {
   diffsByToolId?: Record<string, DiffChunk[]>;
   usage?: Usage | null;
   isStreaming?: boolean;
+  surgeryBadge?: SurgeryBadgeInfo | null;
 };
 
 const _AssistantInput: React.FC<ChatInputProps> = ({
@@ -51,6 +54,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
   diffsByToolId,
   usage,
   isStreaming = false,
+  surgeryBadge,
 }) => {
   // Get unique server-executed tool names for display
   const serverToolNames = useMemo(() => {
@@ -101,6 +105,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
 
   return (
     <MessageWrapper>
+      <SurgeryBadge info={surgeryBadge ?? null} />
       {combinedReasoning && (
         <Box mb={!message ? "3" : undefined}>
           <ReasoningContent

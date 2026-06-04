@@ -111,6 +111,31 @@
   min-width: 0;
 }
 
+.tone_info {
+  border-color: var(--blue-a6);
+  background: linear-gradient(180deg, var(--blue-a2), var(--gray-a2));
+}
+
+.tone_warning {
+  border-color: var(--amber-a7);
+  background: linear-gradient(180deg, var(--amber-a2), var(--gray-a2));
+}
+
+.tone_danger {
+  border-color: var(--red-a7);
+  background: linear-gradient(180deg, var(--red-a2), var(--gray-a2));
+}
+
+.tone_success {
+  border-color: var(--green-a7);
+  background: linear-gradient(180deg, var(--green-a2), var(--gray-a2));
+}
+
+.tone_purple {
+  border-color: var(--purple-a7);
+  background: linear-gradient(180deg, var(--purple-a2), var(--gray-a2));
+}
+
 .goalHeader {
   display: flex;
   align-items: flex-start;
@@ -125,6 +150,19 @@
   white-space: nowrap;
 }
 
+.goalTitleGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stateLine {
+  color: var(--gray-11);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .statusBadge {
   flex-shrink: 0;
   border-radius: 9999px;
@@ -134,6 +172,10 @@
   padding: 2px 8px;
   font-size: 10px;
   text-transform: capitalize;
+}
+
+.statusAccent {
+  background: var(--color-panel-solid);
 }
 
 .metaGrid {
@@ -168,6 +210,30 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+.recentRail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-2);
+}
+
+.recentItem {
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--gray-a3);
+  border-radius: var(--radius-2);
+  background: var(--gray-a2);
+}
+
+.recentText {
+  display: block;
+  margin-top: 2px;
+  color: var(--gray-12);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .controlsArea {
