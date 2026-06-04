@@ -117,6 +117,7 @@ pub enum CompressionReason {
     InputTooLarge,
     TransientFailure,
     SourceChanged,
+    InsufficientSavings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
