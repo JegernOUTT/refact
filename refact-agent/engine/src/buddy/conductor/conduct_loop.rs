@@ -130,7 +130,7 @@ pub async fn conductor_wake_for_goal(
             goal.ledger.last_wake_reason = reasons.last().copied();
             goal.ledger.turn_failures = 0;
             push_memo(&mut goal.ledger, MemoKind::Escalation, &reason, None);
-            goal.status = GoalStatus::Escalated;
+            apply_goal_status(&mut goal, GoalStatus::Escalated);
             record_goal_learning(
                 gcx.clone(),
                 &project_root,
@@ -140,6 +140,9 @@ pub async fn conductor_wake_for_goal(
                 None,
             )
             .await?;
+            save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+                .await
+                .map_err(|error| error.to_string())?;
             emit_goal_updated(gcx, &goal).await;
             return Ok(ConductWakeOutcome::Escalated { reason });
         }
@@ -162,6 +165,7 @@ pub async fn conductor_wake_for_goal(
             goal.ledger.last_wake_at = Some(now.clone());
             goal.ledger.last_wake_reason = reasons.last().copied();
             let source_chat_id = goal.ledger.chat_ids.last().cloned();
+            apply_goal_status(&mut goal, GoalStatus::Done);
             record_goal_learning(
                 gcx.clone(),
                 &project_root,
@@ -233,7 +237,7 @@ pub async fn conductor_wake_for_goal(
                     goal.ledger.turn_failures, error
                 );
                 push_memo(&mut goal.ledger, MemoKind::Escalation, &reason, None);
-                goal.status = GoalStatus::Escalated;
+                apply_goal_status(&mut goal, GoalStatus::Escalated);
                 record_goal_learning(
                     gcx.clone(),
                     &project_root,
@@ -243,6 +247,9 @@ pub async fn conductor_wake_for_goal(
                     None,
                 )
                 .await?;
+                save_goal_ledger(&project_root, &goal.id, &goal.ledger)
+                    .await
+                    .map_err(|error| error.to_string())?;
                 emit_goal_updated(gcx, &goal).await;
                 Ok(ConductWakeOutcome::Escalated { reason })
             } else {
@@ -339,6 +346,23 @@ fn update_no_progress_counter(ledger: &mut GoalLedger, now: &str) {
         ledger.no_progress_wakes = ledger.no_progress_wakes.saturating_add(1);
     }
     ledger.last_wake_at = Some(now.to_string());
+}
+
+fn apply_goal_status(goal: &mut ConductorGoal, status: GoalStatus) {
+    goal.status = status;
+    goal.ledger.status = Some(status);
+    if status.is_terminal() {
+        let completed_at = goal
+            .completed_at
+            .clone()
+            .or_else(|| goal.ledger.completed_at.clone())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        goal.completed_at = Some(completed_at.clone());
+        goal.ledger.completed_at = Some(completed_at);
+    } else {
+        goal.completed_at = None;
+        goal.ledger.completed_at = None;
+    }
 }
 
 async fn conductor_project_root(gcx: Arc<GlobalContext>) -> Result<std::path::PathBuf, String> {
@@ -518,6 +542,9 @@ async fn requeue_backoff(gcx: Arc<GlobalContext>, goal_id: &str) {
 }
 
 async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal: &ConductorGoal) {
+    if goal.status.is_terminal() {
+        super::wake::refresh_conductor_wake_targets(gcx.clone()).await;
+    }
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
         let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
     }
@@ -807,6 +834,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ledger.turn_failures, 2);
+        assert_eq!(ledger.status, Some(GoalStatus::Escalated));
+        assert!(ledger.completed_at.is_some());
         assert!(ledger
             .memos
             .iter()

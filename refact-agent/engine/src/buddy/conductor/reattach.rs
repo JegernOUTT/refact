@@ -28,6 +28,12 @@ pub async fn reattach_conductor_goals(
         ..Default::default()
     };
     report.missing_reference_escalated = mark_missing_references(gcx.clone(), project_root).await;
+    if !report.missing_reference_escalated.is_empty() {
+        let refreshed =
+            super::wake::refresh_conductor_wake_targets_for_project(gcx.clone(), project_root)
+                .await;
+        report.active_goals = refreshed.goal_ids();
+    }
     super::recurring::service_recurring_goals(gcx.clone(), project_root, Utc::now()).await;
     for goal_id in heartbeat_goal_ids {
         if super::wake::enqueue_goal_wake_if_idle(
@@ -66,7 +72,7 @@ async fn mark_missing_references(gcx: SharedGlobalContext, project_root: &Path) 
         {
             continue;
         }
-        ledger.status = Some(GoalStatus::Escalated);
+        apply_terminal_status(&mut ledger, GoalStatus::Escalated);
         let content =
             "Conductor goal could not reattach because all declared task references are missing."
                 .to_string();
@@ -122,6 +128,13 @@ fn terminal_or_paused(ledger: &GoalLedger) -> bool {
             | GoalStatus::Cancelled
             | GoalStatus::Paused
     )
+}
+
+fn apply_terminal_status(ledger: &mut GoalLedger, status: GoalStatus) {
+    ledger.status = Some(status);
+    if status.is_terminal() && ledger.completed_at.is_none() {
+        ledger.completed_at = Some(Utc::now().to_rfc3339());
+    }
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -208,7 +221,7 @@ mod tests {
         .await
         .unwrap();
 
-        let report = reattach_conductor_goals(gcx, dir.path()).await;
+        let report = reattach_conductor_goals(gcx.clone(), dir.path()).await;
 
         assert_eq!(
             report.missing_reference_escalated,
@@ -219,6 +232,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ledger.status, Some(GoalStatus::Escalated));
+        assert!(ledger.completed_at.is_some());
+        assert!(!gcx
+            .conductor_wake_targets
+            .lock()
+            .await
+            .contains_goal("goal-missing"));
         assert!(ledger
             .memos
             .iter()

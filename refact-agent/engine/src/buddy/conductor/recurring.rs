@@ -120,7 +120,7 @@ async fn maybe_escalate_stale(
     if now.signed_duration_since(anchor).num_seconds() < stale_after_secs as i64 {
         return false;
     }
-    ledger.status = Some(GoalStatus::Escalated);
+    apply_terminal_status(ledger, GoalStatus::Escalated);
     push_escalation(
         ledger,
         format!("Conductor goal went stale for at least {stale_after_secs} seconds."),
@@ -143,7 +143,7 @@ async fn maybe_escalate_invalid_cron(
     if crate::scheduler::parse_cron(&recurring.cron).is_ok() {
         return false;
     }
-    ledger.status = Some(GoalStatus::Escalated);
+    apply_terminal_status(ledger, GoalStatus::Escalated);
     push_escalation(ledger, "Recurring conductor cron is invalid.".to_string());
     save_and_emit(gcx, project_root, goal_id, ledger).await
 }
@@ -165,7 +165,15 @@ async fn save_and_emit(
             goal: ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone()),
         });
     }
+    super::wake::refresh_conductor_wake_targets_for_project(gcx, project_root).await;
     true
+}
+
+fn apply_terminal_status(ledger: &mut GoalLedger, status: GoalStatus) {
+    ledger.status = Some(status);
+    if status.is_terminal() && ledger.completed_at.is_none() {
+        ledger.completed_at = Some(Utc::now().to_rfc3339());
+    }
 }
 
 fn terminal_or_paused(ledger: &GoalLedger) -> bool {
@@ -317,10 +325,93 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ledger.status, Some(GoalStatus::Escalated));
+        assert!(ledger.completed_at.is_some());
         assert!(ledger
             .memos
             .iter()
             .any(|memo| memo.kind == MemoKind::Escalation));
+    }
+
+    #[tokio::test]
+    async fn stale_recurring_escalation_refreshes_active_wake_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-stale-target",
+            &GoalLedger {
+                task_ids: vec!["task-stale".to_string()],
+                last_progress_at: Some("2026-01-01T00:00:00Z".to_string()),
+                recurring: Some(ConductorRecurring {
+                    enabled: true,
+                    cron: "0 * * * *".to_string(),
+                    last_enqueued_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    stale_after_secs: Some(60),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::buddy::conductor::wake::refresh_conductor_wake_targets(gcx.clone()).await;
+        assert!(gcx
+            .conductor_wake_targets
+            .lock()
+            .await
+            .contains_goal("goal-stale-target"));
+
+        let report = service_recurring_goals(gcx.clone(), dir.path(), ts(1767225661)).await;
+
+        assert_eq!(
+            report.stale_escalated,
+            vec!["goal-stale-target".to_string()]
+        );
+        let targets = gcx.conductor_wake_targets.lock().await.clone();
+        assert!(!targets.contains_goal("goal-stale-target"));
+        assert!(targets.goals_for_task("task-stale").is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_recurring_cron_escalation_refreshes_active_wake_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-invalid-cron",
+            &GoalLedger {
+                task_ids: vec!["task-invalid-cron".to_string()],
+                recurring: Some(ConductorRecurring {
+                    enabled: true,
+                    cron: "not a cron".to_string(),
+                    last_enqueued_at: None,
+                    stale_after_secs: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::buddy::conductor::wake::refresh_conductor_wake_targets(gcx.clone()).await;
+        assert!(gcx
+            .conductor_wake_targets
+            .lock()
+            .await
+            .contains_goal("goal-invalid-cron"));
+
+        let report = service_recurring_goals(gcx.clone(), dir.path(), ts(1767225661)).await;
+
+        assert_eq!(
+            report.invalid_cron_escalated,
+            vec!["goal-invalid-cron".to_string()]
+        );
+        let targets = gcx.conductor_wake_targets.lock().await.clone();
+        assert!(!targets.contains_goal("goal-invalid-cron"));
+        assert!(targets.goals_for_task("task-invalid-cron").is_empty());
+        let ledger = load_goal_ledger(dir.path(), "goal-invalid-cron")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ledger.completed_at.is_some());
     }
 
     #[tokio::test]

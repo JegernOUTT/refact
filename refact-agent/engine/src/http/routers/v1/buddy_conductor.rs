@@ -314,16 +314,12 @@ async fn persist_goal(
 
 fn apply_goal_status(goal: &mut ConductorGoal, status: GoalStatus) {
     goal.status = status;
-    goal.completed_at = match status {
-        GoalStatus::Done
-        | GoalStatus::Escalated
-        | GoalStatus::Abandoned
-        | GoalStatus::Failed
-        | GoalStatus::Cancelled => goal
-            .completed_at
+    goal.completed_at = if status.is_terminal() {
+        goal.completed_at
             .clone()
-            .or_else(|| Some(Utc::now().to_rfc3339())),
-        _ => None,
+            .or_else(|| Some(Utc::now().to_rfc3339()))
+    } else {
+        None
     };
 }
 
@@ -334,7 +330,8 @@ async fn refresh_targets_and_emit(
 ) {
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
     if let Some(reason) = wake_reason {
-        let _ = crate::buddy::conductor::wake::enqueue_all_wake(app.gcx.clone(), reason).await;
+        let _ = crate::buddy::conductor::wake::enqueue_goal_wake(app.gcx.clone(), &goal.id, reason)
+            .await;
     }
     let _ = app
         .buddy
@@ -601,6 +598,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buddy_conductor_routes_goal_created_wake_targets_only_created_goal() {
+        let (app, _dir) = test_app().await;
+        create_goal(app.clone(), "goal-existing").await;
+        {
+            let mut bus = app.buddy.conductor_wake_bus.lock().await;
+            bus.reconcile_targets(&crate::buddy::conductor::wake::ConductorWakeTargets::default());
+        }
+
+        create_goal(app.clone(), "goal-new").await;
+
+        let bus = app.buddy.conductor_wake_bus.lock().await;
+        assert!(bus.mailbox("goal-existing").is_none());
+        let mailbox = bus.mailbox("goal-new").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::GoalCreated]);
+    }
+
+    #[tokio::test]
     async fn buddy_conductor_routes_startup_reattach_refreshes_targets() {
         let (app, dir) = test_app().await;
         let mut goal = create_req("goal-reattach");
@@ -727,5 +741,6 @@ mod tests {
             .unwrap();
         assert_eq!(ledger.autonomy, Some(GoalAutonomy::ReadOnly));
         assert_eq!(ledger.status, Some(GoalStatus::Cancelled));
+        assert!(ledger.completed_at.is_some());
     }
 }

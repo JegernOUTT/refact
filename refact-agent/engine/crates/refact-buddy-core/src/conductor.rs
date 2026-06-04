@@ -64,6 +64,15 @@ impl Default for GoalStatus {
     }
 }
 
+impl GoalStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Done | Self::Escalated | Self::Abandoned | Self::Failed | Self::Cancelled
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalAutonomy {

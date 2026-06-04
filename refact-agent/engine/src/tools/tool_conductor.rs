@@ -146,6 +146,17 @@ fn is_done_status(args: &HashMap<String, Value>) -> bool {
         .is_some_and(|status| status == "done")
 }
 
+fn apply_ledger_status(ledger: &mut GoalLedger, status: GoalStatus) {
+    ledger.status = Some(status);
+    if status.is_terminal() {
+        if ledger.completed_at.is_none() {
+            ledger.completed_at = Some(Utc::now().to_rfc3339());
+        }
+    } else {
+        ledger.completed_at = None;
+    }
+}
+
 fn context_allowed_from_snapshot(thread: &refact_chat_api::ThreadParams) -> bool {
     thread
         .buddy_meta
@@ -485,7 +496,7 @@ impl Tool for ToolConductorEscalate {
         let (gcx, goal_id, mut ledger) = goal_context(&ccx, args).await?;
         ensure_can_mutate(&ledger, "escalate")?;
         let reason = required_string(args, "reason")?;
-        ledger.status = Some(GoalStatus::Escalated);
+        apply_ledger_status(&mut ledger, GoalStatus::Escalated);
         push_memo(&mut ledger, MemoKind::Escalation, reason, None);
         persist_ledger(gcx.clone(), &goal_id, &ledger).await?;
         emit_goal_updated(gcx, &goal_id, &ledger).await;
@@ -519,7 +530,7 @@ impl Tool for ToolConductorGoalStatus {
             ensure_can_mutate(&ledger, "change status")?;
         }
         let status = parse_status(&required_string(args, "status")?)?;
-        ledger.status = Some(status);
+        apply_ledger_status(&mut ledger, status);
         if status == GoalStatus::Done {
             ledger.last_progress_at = Some(Utc::now().to_rfc3339());
         }
@@ -901,6 +912,7 @@ mod tests {
             .unwrap();
         assert_eq!(ledger.status, Some(GoalStatus::Done));
         assert!(ledger.last_progress_at.is_some());
+        assert!(ledger.completed_at.is_some());
     }
 
     #[tokio::test]
@@ -930,6 +942,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ledger.status, Some(GoalStatus::Escalated));
+        assert!(ledger.completed_at.is_some());
         assert!(ledger
             .memos
             .iter()
