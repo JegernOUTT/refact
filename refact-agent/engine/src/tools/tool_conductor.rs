@@ -950,6 +950,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_conductor_terminal_status_drops_wake_target_and_mailbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-terminal-wake",
+            &GoalLedger {
+                task_ids: vec!["task-terminal".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::buddy::conductor::wake::refresh_conductor_wake_targets(gcx.clone()).await;
+        assert!(
+            crate::buddy::conductor::wake::enqueue_goal_wake(
+                gcx.clone(),
+                "goal-terminal-wake",
+                refact_buddy_core::conductor::ConductorWakeReason::Manual,
+            )
+            .await
+        );
+        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mut tool = ToolConductorGoalStatus::new();
+
+        tool.tool_execute(
+            ccx(gcx.clone(), mock).await,
+            &"call".to_string(),
+            &args(&[
+                ("goal_id", json!("goal-terminal-wake")),
+                ("status", json!("done")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert!(!gcx
+            .conductor_wake_targets
+            .lock()
+            .await
+            .contains_goal("goal-terminal-wake"));
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-terminal-wake")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn tool_conductor_read_only_rejects_mutating_steer() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;

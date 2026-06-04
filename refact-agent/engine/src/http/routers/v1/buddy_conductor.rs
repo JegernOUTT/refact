@@ -231,10 +231,12 @@ pub async fn handle_v1_buddy_conductor_goal_manual_wake(
     Path(goal_id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
     let goal = load_goal(&app, &goal_id).await?;
-    let enqueued = {
-        let mut bus = app.buddy.conductor_wake_bus.lock().await;
-        bus.enqueue_goal(&goal.id, ConductorWakeReason::Manual, Utc::now())
-    };
+    let enqueued = crate::buddy::conductor::wake::enqueue_goal_wake(
+        app.gcx.clone(),
+        &goal.id,
+        ConductorWakeReason::Manual,
+    )
+    .await;
     Ok(axum::Json(
         json!({ "enqueued": enqueued, "goal_id": goal.id }),
     ))
@@ -330,8 +332,12 @@ async fn refresh_targets_and_emit(
 ) {
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
     if let Some(reason) = wake_reason {
-        let _ = crate::buddy::conductor::wake::enqueue_goal_wake(app.gcx.clone(), &goal.id, reason)
-            .await;
+        let _ = crate::buddy::conductor::wake::enqueue_goal_wake_after_target_refresh(
+            app.gcx.clone(),
+            &goal.id,
+            reason,
+        )
+        .await;
     }
     let _ = app
         .buddy
@@ -615,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buddy_conductor_routes_startup_reattach_refreshes_targets() {
+    async fn buddy_conductor_routes_startup_reattach_excludes_paused_targets() {
         let (app, dir) = test_app().await;
         let mut goal = create_req("goal-reattach");
         goal.title = "Reattach me".to_string();
@@ -637,11 +643,8 @@ mod tests {
         let targets =
             crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
 
-        assert_eq!(targets.goal_ids(), vec!["goal-reattach".to_string()]);
-        assert_eq!(
-            targets.goals_for_task("task-1"),
-            vec!["goal-reattach".to_string()]
-        );
+        assert!(targets.goal_ids().is_empty());
+        assert!(targets.goals_for_task("task-1").is_empty());
     }
 
     #[tokio::test]

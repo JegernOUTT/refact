@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
-use refact_buddy_core::conductor::{ConductorWakeReason, GoalLedger};
+use refact_buddy_core::conductor::{ConductorWakeReason, GoalLedger, GoalStatus};
 use refact_buddy_core::conductor_store::list_goal_ledgers;
 use refact_chat_api::MessageOrigin;
 
@@ -33,14 +33,8 @@ impl ConductorWakeTargets {
     }
 
     pub fn register_goal_ledger(&mut self, goal_id: impl Into<String>, ledger: &GoalLedger) {
-        if matches!(
-            ledger.status.unwrap_or_default(),
-            refact_buddy_core::conductor::GoalStatus::Done
-                | refact_buddy_core::conductor::GoalStatus::Escalated
-                | refact_buddy_core::conductor::GoalStatus::Abandoned
-                | refact_buddy_core::conductor::GoalStatus::Failed
-                | refact_buddy_core::conductor::GoalStatus::Cancelled
-        ) {
+        let status = ledger.status.unwrap_or_default();
+        if status.is_terminal() || status == GoalStatus::Paused {
             return;
         }
         let goal_id = normalized_goal_id(goal_id.into());
@@ -403,6 +397,24 @@ pub async fn enqueue_goal_wake(
     goal_id: &str,
     reason: ConductorWakeReason,
 ) -> bool {
+    if !refresh_conductor_wake_targets(gcx.clone())
+        .await
+        .contains_goal(goal_id)
+    {
+        return false;
+    }
+    enqueue_target_goals(gcx, vec![goal_id.to_string()], reason).await
+}
+
+pub async fn enqueue_goal_wake_after_target_refresh(
+    gcx: SharedGlobalContext,
+    goal_id: &str,
+    reason: ConductorWakeReason,
+) -> bool {
+    let targets = gcx.conductor_wake_targets.lock().await.clone();
+    if !targets.contains_goal(goal_id) {
+        return false;
+    }
     enqueue_target_goals(gcx, vec![goal_id.to_string()], reason).await
 }
 
@@ -411,6 +423,12 @@ pub async fn enqueue_goal_wake_if_idle(
     goal_id: &str,
     reason: ConductorWakeReason,
 ) -> bool {
+    if !refresh_conductor_wake_targets(gcx.clone())
+        .await
+        .contains_goal(goal_id)
+    {
+        return false;
+    }
     let now = Utc::now();
     let mut bus = gcx.conductor_wake_bus.lock().await;
     if bus
@@ -758,6 +776,89 @@ mod tests {
         let bus = gcx.conductor_wake_bus.lock().await;
         let mailbox = bus.mailbox("goal-1").unwrap();
         assert_eq!(mailbox.reasons, vec![ConductorWakeReason::TaskBoard]);
+    }
+
+    #[tokio::test]
+    async fn direct_goal_wake_requires_active_target_unless_target_refresh_bypass_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-terminal",
+            &GoalLedger {
+                status: Some(GoalStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !enqueue_goal_wake_if_idle(gcx.clone(), "goal-terminal", ConductorWakeReason::Manual)
+                .await
+        );
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-terminal")
+            .is_none());
+
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-created",
+            &GoalLedger::default(),
+        )
+        .await
+        .unwrap();
+        refresh_conductor_wake_targets(gcx.clone()).await;
+        assert!(
+            enqueue_goal_wake_after_target_refresh(
+                gcx.clone(),
+                "goal-created",
+                ConductorWakeReason::GoalCreated,
+            )
+            .await
+        );
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-created").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::GoalCreated]);
+    }
+
+    #[test]
+    fn wake_targets_exclude_terminal_and_paused_goals() {
+        let targets = ConductorWakeTargets::from_goal_ledgers(vec![
+            (
+                "goal-running",
+                GoalLedger {
+                    status: Some(GoalStatus::Running),
+                    ..Default::default()
+                },
+            ),
+            (
+                "goal-paused",
+                GoalLedger {
+                    status: Some(GoalStatus::Paused),
+                    ..Default::default()
+                },
+            ),
+            (
+                "goal-done",
+                GoalLedger {
+                    status: Some(GoalStatus::Done),
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        assert_eq!(targets.goal_ids(), vec!["goal-running".to_string()]);
+        assert!(!targets.contains_goal("goal-paused"));
+        assert!(!targets.contains_goal("goal-done"));
     }
 
     #[tokio::test]

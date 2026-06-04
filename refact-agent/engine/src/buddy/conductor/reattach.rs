@@ -20,22 +20,14 @@ pub async fn reattach_conductor_goals(
     gcx: SharedGlobalContext,
     project_root: &Path,
 ) -> ReattachReport {
-    let heartbeat_goal_ids = runnable_goal_ids(project_root).await;
+    super::wake::refresh_conductor_wake_targets_for_project(gcx.clone(), project_root).await;
+    let mut report = ReattachReport::default();
+    report.missing_reference_escalated = mark_missing_references(gcx.clone(), project_root).await;
+    super::recurring::service_recurring_goals(gcx.clone(), project_root, Utc::now()).await;
     let targets =
         super::wake::refresh_conductor_wake_targets_for_project(gcx.clone(), project_root).await;
-    let mut report = ReattachReport {
-        active_goals: targets.goal_ids(),
-        ..Default::default()
-    };
-    report.missing_reference_escalated = mark_missing_references(gcx.clone(), project_root).await;
-    if !report.missing_reference_escalated.is_empty() {
-        let refreshed =
-            super::wake::refresh_conductor_wake_targets_for_project(gcx.clone(), project_root)
-                .await;
-        report.active_goals = refreshed.goal_ids();
-    }
-    super::recurring::service_recurring_goals(gcx.clone(), project_root, Utc::now()).await;
-    for goal_id in heartbeat_goal_ids {
+    report.active_goals = targets.goal_ids();
+    for goal_id in report.active_goals.clone() {
         if super::wake::enqueue_goal_wake_if_idle(
             gcx.clone(),
             &goal_id,
@@ -47,17 +39,6 @@ pub async fn reattach_conductor_goals(
         }
     }
     report
-}
-
-async fn runnable_goal_ids(project_root: &Path) -> Vec<String> {
-    let Ok(stored_ledgers) = list_goal_ledgers(project_root).await else {
-        return Vec::new();
-    };
-    stored_ledgers
-        .into_iter()
-        .filter(|stored| !terminal_or_paused(&stored.ledger))
-        .map(|stored| stored.goal_id)
-        .collect()
 }
 
 async fn mark_missing_references(gcx: SharedGlobalContext, project_root: &Path) -> Vec<String> {
@@ -119,15 +100,8 @@ async fn all_declared_task_refs_missing(gcx: SharedGlobalContext, ledger: &GoalL
 }
 
 fn terminal_or_paused(ledger: &GoalLedger) -> bool {
-    matches!(
-        ledger.status.unwrap_or_default(),
-        GoalStatus::Done
-            | GoalStatus::Escalated
-            | GoalStatus::Abandoned
-            | GoalStatus::Failed
-            | GoalStatus::Cancelled
-            | GoalStatus::Paused
-    )
+    let status = ledger.status.unwrap_or_default();
+    status.is_terminal() || status == GoalStatus::Paused
 }
 
 fn apply_terminal_status(ledger: &mut GoalLedger, status: GoalStatus) {
@@ -238,9 +212,58 @@ mod tests {
             .lock()
             .await
             .contains_goal("goal-missing"));
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-missing")
+            .is_none());
         assert!(ledger
             .memos
             .iter()
             .any(|memo| memo.kind == MemoKind::Escalation));
+    }
+
+    #[tokio::test]
+    async fn invalid_recurring_goal_does_not_get_heartbeat_after_reattach() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-invalid-recurring",
+            &GoalLedger {
+                recurring: Some(ConductorRecurring {
+                    enabled: true,
+                    cron: "not a cron".to_string(),
+                    last_enqueued_at: None,
+                    stale_after_secs: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = reattach_conductor_goals(gcx.clone(), dir.path()).await;
+
+        assert!(!report
+            .heartbeat_enqueued
+            .contains(&"goal-invalid-recurring".to_string()));
+        assert!(!gcx
+            .conductor_wake_targets
+            .lock()
+            .await
+            .contains_goal("goal-invalid-recurring"));
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-invalid-recurring")
+            .is_none());
+        let ledger = load_goal_ledger(dir.path(), "goal-invalid-recurring")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.status, Some(GoalStatus::Escalated));
     }
 }

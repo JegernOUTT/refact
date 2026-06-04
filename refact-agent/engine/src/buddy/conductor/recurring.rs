@@ -160,12 +160,12 @@ async fn save_and_emit(
     {
         return false;
     }
+    super::wake::refresh_conductor_wake_targets_for_project(gcx.clone(), project_root).await;
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
         let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
             goal: ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone()),
         });
     }
-    super::wake::refresh_conductor_wake_targets_for_project(gcx, project_root).await;
     true
 }
 
@@ -177,15 +177,8 @@ fn apply_terminal_status(ledger: &mut GoalLedger, status: GoalStatus) {
 }
 
 fn terminal_or_paused(ledger: &GoalLedger) -> bool {
-    matches!(
-        ledger.status.unwrap_or_default(),
-        GoalStatus::Done
-            | GoalStatus::Escalated
-            | GoalStatus::Abandoned
-            | GoalStatus::Failed
-            | GoalStatus::Cancelled
-            | GoalStatus::Paused
-    )
+    let status = ledger.status.unwrap_or_default();
+    status.is_terminal() || status == GoalStatus::Paused
 }
 
 fn latest_activity(ledger: &GoalLedger) -> Option<DateTime<Utc>> {
