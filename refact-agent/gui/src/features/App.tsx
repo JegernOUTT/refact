@@ -30,7 +30,6 @@ import {
 } from "../hooks";
 import { useGetPing } from "../hooks/useGetPing";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
-import { FIMDebug } from "./FIM";
 import { store } from "../app/store";
 import { Provider } from "react-redux";
 import { Theme } from "../components/Theme";
@@ -512,10 +511,6 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
                 />
               </InternalLinkProvider>
             )}
-            {!pageSwitching &&
-              renderedPage.name === "fill in the middle debug page" && (
-                <FIMDebug host={config.host} tabbed={config.tabbed} />
-              )}
             {!pageSwitching && renderedPage.name === "integrations page" && (
               <Integrations
                 backFromIntegrations={goBackFromIntegrations}

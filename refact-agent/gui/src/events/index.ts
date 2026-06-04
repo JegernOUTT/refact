@@ -18,7 +18,6 @@ import { request, ready, receive, error } from "../features/FIM/actions";
 import type { HistoryState } from "../features/History/historySlice";
 import type { TipOfTheDayState } from "../features/TipOfTheDay";
 import type { PageSliceState } from "../features/Pages/pagesSlice";
-import type { FIMDebugState } from "../hooks";
 import { CurrentProjectInfo } from "../features/Chat/currentProject";
 
 export { updateConfig, type Config } from "../features/Config/configSlice";
@@ -48,7 +47,6 @@ export type {
 
 // TODO: re-exporting from redux seems to break things :/
 export type InitialState = {
-  fim: FIMDebugState;
   tipOfTheDay: TipOfTheDayState;
   config: Config;
   active_file: FileInfo;

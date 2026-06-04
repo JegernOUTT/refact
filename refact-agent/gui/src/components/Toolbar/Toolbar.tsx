@@ -224,8 +224,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         openSettings();
       } else if (to === "hot keys") {
         openHotKeys();
-      } else if (to === "fim") {
-        dispatch(push({ name: "fill in the middle debug page" }));
       } else if (to === "stats") {
         dispatch(push({ name: "stats dashboard" }));
       } else if (to === "integrations") {
