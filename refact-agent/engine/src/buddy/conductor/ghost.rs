@@ -139,10 +139,12 @@ pub async fn conductor_ghost_answer(
         .map_err(store_error)?;
     crate::buddy::conductor::wake::refresh_conductor_wake_targets(app.gcx.clone()).await;
     emit_goal_updated(app.gcx.clone(), goal_id, ledger).await;
-    let enqueued = {
-        let mut bus = app.buddy.conductor_wake_bus.lock().await;
-        bus.enqueue_goal(goal_id, ConductorWakeReason::GhostAnswer, Utc::now())
-    };
+    let enqueued = crate::buddy::conductor::wake::enqueue_goal_wake_after_target_refresh(
+        app.gcx.clone(),
+        goal_id,
+        ConductorWakeReason::GhostAnswer,
+    )
+    .await;
     Ok(GhostAnswerResult {
         goal_id: goal_id.to_string(),
         question_id: question_id.to_string(),
@@ -221,7 +223,7 @@ fn store_error(error: refact_buddy_core::conductor_store::ConductorStoreError) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use refact_buddy_core::conductor::{GoalBudget, GoalLedger};
+    use refact_buddy_core::conductor::{GoalBudget, GoalLedger, GoalStatus};
     use refact_buddy_core::conductor_store::save_goal_ledger;
     use tokio::time::timeout;
 
@@ -381,5 +383,116 @@ mod tests {
             }
             other => panic!("expected ConductorGoalUpdated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_answer_active_goal_enqueues_ghost_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_answerable_goal(dir.path(), "goal-answer-active", GoalStatus::Running).await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+
+        let result =
+            conductor_ghost_answer(app, dir.path(), "goal-answer-active", "question-1", "Yes")
+                .await
+                .unwrap();
+
+        assert!(result.answered);
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-active")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.pending_questions[0].answer.as_deref(), Some("Yes"));
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-answer-active").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::GhostAnswer]);
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_answer_terminal_goal_persists_without_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_answerable_goal(dir.path(), "goal-answer-done", GoalStatus::Done).await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+
+        let result = conductor_ghost_answer(
+            app,
+            dir.path(),
+            "goal-answer-done",
+            "question-1",
+            "Done answer",
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.answered);
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-done")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ledger.pending_questions[0].answer.as_deref(),
+            Some("Done answer")
+        );
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-answer-done")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_answer_paused_goal_persists_without_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_answerable_goal(dir.path(), "goal-answer-paused", GoalStatus::Paused).await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+
+        let result = conductor_ghost_answer(
+            app,
+            dir.path(),
+            "goal-answer-paused",
+            "question-1",
+            "Pause answer",
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.answered);
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-paused")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ledger.pending_questions[0].answer.as_deref(),
+            Some("Pause answer")
+        );
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-answer-paused")
+            .is_none());
+    }
+
+    async fn save_answerable_goal(project_root: &Path, goal_id: &str, status: GoalStatus) {
+        save_goal_ledger(
+            project_root,
+            goal_id,
+            &GoalLedger {
+                status: Some(status),
+                pending_questions: vec![PendingQuestion {
+                    id: "question-1".to_string(),
+                    question: "Continue?".to_string(),
+                    asked_at: "2026-06-03T00:00:00Z".to_string(),
+                    blocking: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 }
