@@ -207,6 +207,9 @@ function buildCompressionDisplayItem(
   return null;
 }
 
+// Adjacent matching report+summary pairs render as one report card: source-preserving
+// hides only the internal model summary, and legacy replacement-style reports keep
+// their historical collapse behavior.
 function isCompressedAssistantPairedWithReport(
   messages: ChatMessages,
   index: number,

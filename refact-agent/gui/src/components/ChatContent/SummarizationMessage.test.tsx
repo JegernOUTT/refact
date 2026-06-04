@@ -360,6 +360,35 @@ describe("SummarizationMessage", () => {
     ).toBeInTheDocument();
   });
 
+  it("legacy compression report copy does not claim original messages remain visible", () => {
+    render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier1_llm",
+          content: "## Legacy report\n\nThis markdown should stay collapsed.",
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            source_message_count: 3,
+            estimated_tokens_saved: 1200,
+          },
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        /Older context was summarized so this chat can continue within the model limit/u,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Original messages remain visible/u),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Messages compressed",
+    );
+  });
+
   it("compression report copy says original messages remain visible", () => {
     render(
       <SummarizationMessage

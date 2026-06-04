@@ -147,6 +147,27 @@ function matchingLlmCompressionReportMessage(
   });
 }
 
+function legacyLlmCompressionReportMessage(
+  overrides: Partial<CompressionReportMessage> = {},
+): CompressionReportMessage {
+  return compressionReportMessage({
+    content:
+      "## Chat context compressed\n\nOlder messages were summarized for future model context.",
+    extra: {
+      compression_report: {
+        kind: "chat_compression_report",
+        compression_kind: "llm_segment_summary",
+        source_hash: "legacy-source-hash-1",
+        source_message_ids: ["assistant-old-1"],
+        source_message_count: 1,
+        summary_model: "summary-model",
+        estimated_tokens_saved: 1000,
+      },
+    },
+    ...overrides,
+  });
+}
+
 function eventMessage(overrides: Partial<EventMessage> = {}): EventMessage {
   const subkind = overrides.subkind ?? "system_notice";
   const source = overrides.source ?? "chat.summarizer";
@@ -411,27 +432,18 @@ describe("ChatContent display items", () => {
     );
   });
 
-  it("old replacement-style sequence still renders one report card", () => {
+  it("legacy replacement-style report and summary intentionally collapse to one report card", () => {
     const messages: ChatMessages = [
       userMessage({ message_id: "user-before" }),
-      matchingLlmCompressionReportMessage({
+      legacyLlmCompressionReportMessage({
         message_id: "compression-report",
-        extra: {
-          compression_report: {
-            kind: "chat_compression_report",
-            compression_kind: "llm_segment_summary",
-            source_hash: "replacement-hash",
-            source_message_ids: ["assistant-old-1"],
-            source_message_count: 1,
-          },
-        },
       }),
       compressedAssistantMessage({
         message_id: "legacy-internal-summary",
         extra: {
           compression: {
             kind: "llm_segment_summary",
-            source_hash: "replacement-hash",
+            source_hash: "legacy-source-hash-1",
             source_message_ids: ["assistant-old-1"],
           },
         },
@@ -440,6 +452,7 @@ describe("ChatContent display items", () => {
     ];
 
     const items = buildDisplayItems(messages, false);
+    const reportItem = items.find((item) => item.type === "summarization");
 
     expect(items.map((item) => item.type)).toEqual([
       "user",
@@ -449,6 +462,17 @@ describe("ChatContent display items", () => {
     expect(items.filter((item) => item.type === "summarization")).toHaveLength(
       1,
     );
+    expect(reportItem?.type).toBe("summarization");
+    if (reportItem?.type !== "summarization") {
+      throw new Error("Expected legacy report summarization item");
+    }
+    expect(reportItem.message.content).toContain(
+      "Older messages were summarized",
+    );
+    expect(reportItem.message.content).not.toContain(
+      "Original messages remain visible",
+    );
+    expect(reportItem.message.compression_report?.insert_mode).toBeUndefined();
   });
 
   it("matching_llm_report_and_summary_render_single_report_card", () => {
