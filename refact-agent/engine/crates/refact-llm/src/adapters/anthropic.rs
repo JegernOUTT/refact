@@ -386,7 +386,11 @@ impl LlmWireAdapter for AnthropicAdapter {
             "message_delta" => {
                 let mut has_stop_reason = false;
                 if let Some(delta) = json.get("delta") {
-                    if let Some(reason) = delta.get("stop_reason").and_then(|r| r.as_str()) {
+                    if let Some(reason) = delta
+                        .get("stop_reason")
+                        .or_else(|| delta.get("stopping_reason"))
+                        .and_then(|r| r.as_str())
+                    {
                         has_stop_reason = true;
                         deltas.push(LlmStreamDelta::SetFinishReason {
                             reason: reason.to_string(),

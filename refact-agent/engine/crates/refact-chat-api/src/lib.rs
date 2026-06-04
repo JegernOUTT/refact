@@ -110,6 +110,8 @@ pub enum CompressionReason {
     PendingToolCalls,
     NoEligibleSegment,
     EffectiveContextUnknown,
+    ProviderLengthStop,
+    ContextLengthStop,
     PressureLow,
     NoSummaryModel,
     InputTooLarge,
