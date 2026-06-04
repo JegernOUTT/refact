@@ -781,7 +781,13 @@ mod tests {
         process_id: &ExecProcessId,
         needle: &str,
     ) {
-        for _ in 0..40 {
+        let timeout = if cfg!(windows) {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(2)
+        };
+        let started = Instant::now();
+        while started.elapsed() < timeout {
             let read = registry.read(process_id, 0, None).await;
             if read.chunks.iter().any(|chunk| chunk.text.contains(needle)) {
                 return;
@@ -1148,7 +1154,7 @@ mod tests {
     async fn background_can_be_listed_read_and_killed() {
         let registry = ExecRegistry::new();
         let command = if cfg!(windows) {
-            "[Console]::Out.Write('ready'); Start-Sleep -Seconds 5"
+            "[Console]::Out.WriteLine('ready'); Start-Sleep -Seconds 5"
         } else {
             "printf ready; sleep 5"
         };
@@ -1185,7 +1191,7 @@ mod tests {
     async fn closed_channel_does_not_spin() {
         let registry = ExecRegistry::new();
         let command = if cfg!(windows) {
-            "[Console]::Out.Write('ready'); Start-Sleep -Seconds 30"
+            "[Console]::Out.WriteLine('ready'); Start-Sleep -Seconds 30"
         } else {
             "printf ready; sleep 30"
         };
