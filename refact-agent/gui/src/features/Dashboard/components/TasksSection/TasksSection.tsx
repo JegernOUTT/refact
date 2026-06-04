@@ -94,7 +94,9 @@ function buildFlatList(tasks: TaskMeta[]): FlatItem[] {
   const items: FlatItem[] = [];
   for (const [label, groupTasks] of groups) {
     if (groupTasks.length > 0) {
-      items.push({ type: "header", label });
+      if (label !== "Today") {
+        items.push({ type: "header", label });
+      }
       for (const task of groupTasks) {
         items.push({ type: "task", task });
       }
@@ -180,38 +182,53 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
   const showTaskError = Boolean(loadError);
   const tasksLoading = !showTaskError && projectLoading;
 
-  const renderHeader = (children?: React.ReactNode) => (
+  const renderHeader = (children?: React.ReactNode, showSearch = false) => (
     <div className={styles.header}>
-      <button
-        type="button"
-        className={styles.headerToggle}
-        onClick={onToggleCollapsed}
-        aria-expanded={!collapsed}
-      >
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
-          TASKS
-        </Text>
-        <Flex align="center" gap="1">
-          {activeCount > 0 && (
-            <Text size="1" color="gray">
-              {activeCount} active
-            </Text>
-          )}
-          <Text size="1" color={showTaskError ? "red" : "gray"}>
-            {tasksLoading
-              ? "Loading"
-              : showTaskError
-                ? "Error"
-                : `${filteredTasks.length} total`}
+      <div className={styles.headerMain}>
+        <button
+          type="button"
+          className={styles.headerToggle}
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
+        >
+          <Text size="1" weight="bold" color="gray" className={styles.label}>
+            TASKS
           </Text>
           {collapsed ? (
             <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
           ) : (
             <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
           )}
-        </Flex>
-      </button>
-      {children}
+        </button>
+        {showSearch && !collapsed && (
+          <TextField.Root
+            size="1"
+            placeholder="Search..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className={styles.searchField}
+          >
+            <TextField.Slot>
+              <MagnifyingGlassIcon width={12} height={12} />
+            </TextField.Slot>
+          </TextField.Root>
+        )}
+      </div>
+      <div className={styles.headerActions}>
+        {activeCount > 0 && (
+          <Text size="1" color="gray">
+            {activeCount} active
+          </Text>
+        )}
+        <Text size="1" color={showTaskError ? "red" : "gray"}>
+          {tasksLoading
+            ? "Loading"
+            : showTaskError
+              ? "Error"
+              : `${filteredTasks.length} total`}
+        </Text>
+        {children}
+      </div>
     </div>
   );
 
@@ -275,21 +292,9 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
           <PlusIcon width={12} height={12} />
           <Text size="1">New Task</Text>
         </button>,
+        true,
       )}
       <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
-        <div className={styles.controls}>
-          <TextField.Root
-            size="1"
-            placeholder="Search..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          >
-            <TextField.Slot>
-              <MagnifyingGlassIcon width={12} height={12} />
-            </TextField.Slot>
-          </TextField.Root>
-        </div>
-
         <div className={styles.list}>
           <Virtuoso
             data={flatItems}

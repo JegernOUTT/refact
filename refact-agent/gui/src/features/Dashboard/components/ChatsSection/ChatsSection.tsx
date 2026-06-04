@@ -85,7 +85,9 @@ function buildFlatList(
   const items: FlatItem[] = [];
   for (const [key, nodes] of groups) {
     if (nodes.length > 0) {
-      items.push({ type: "header", label: key });
+      if (key !== "Today") {
+        items.push({ type: "header", label: key });
+      }
       items.push(...flattenWithExpansion(nodes, expandedIds, 0));
     }
   }
@@ -209,50 +211,52 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
   return (
     <div className={styles.section} data-collapsed={collapsed || undefined}>
       <div className={styles.header}>
-        <button
-          type="button"
-          className={styles.headerToggle}
-          onClick={onToggleCollapsed}
-          aria-expanded={!collapsed}
-        >
-          <Text size="1" weight="bold" color="gray" className={styles.label}>
-            CHATS
-          </Text>
-          <Flex align="center" gap="1">
-            <Text size="1" color="gray">
-              {totalLabel}
+        <div className={styles.headerMain}>
+          <button
+            type="button"
+            className={styles.headerToggle}
+            onClick={onToggleCollapsed}
+            aria-expanded={!collapsed}
+          >
+            <Text size="1" weight="bold" color="gray" className={styles.label}>
+              CHATS
             </Text>
             {collapsed ? (
               <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
             ) : (
               <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
             )}
-          </Flex>
-        </button>
-        <button
-          type="button"
-          className={styles.newChatButton}
-          onClick={handleNewChat}
-        >
-          <PlusIcon width={12} height={12} />
-          <Text size="1">New Chat</Text>
-        </button>
+          </button>
+          {!collapsed && (
+            <TextField.Root
+              size="1"
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className={styles.searchField}
+            >
+              <TextField.Slot>
+                <MagnifyingGlassIcon width={12} height={12} />
+              </TextField.Slot>
+            </TextField.Root>
+          )}
+        </div>
+        <div className={styles.headerActions}>
+          <Text size="1" color="gray">
+            {totalLabel}
+          </Text>
+          <button
+            type="button"
+            className={styles.newChatButton}
+            onClick={handleNewChat}
+          >
+            <PlusIcon width={12} height={12} />
+            <Text size="1">New Chat</Text>
+          </button>
+        </div>
       </div>
 
       <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
-        <div className={styles.controls}>
-          <TextField.Root
-            size="1"
-            placeholder="Search..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          >
-            <TextField.Slot>
-              <MagnifyingGlassIcon width={12} height={12} />
-            </TextField.Slot>
-          </TextField.Root>
-        </div>
-
         <div className={styles.list}>
           {showLoadError ? (
             <Flex direction="column" align="center" gap="2" p="4">

@@ -13,7 +13,6 @@
   gap: 0;
 }
 
-/* bodyPanel: the CollapsePanel that wraps controls + list */
 .bodyPanel {
   flex: 1;
   min-height: 0;
@@ -27,15 +26,32 @@
   gap: var(--space-2);
 }
 
+.headerMain {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .headerToggle {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: var(--space-1);
   background: transparent;
   border: none;
   cursor: pointer;
   padding: var(--space-1) 0;
-  flex: 1;
+  flex: 0 0 auto;
   min-width: 0;
 }
 
@@ -47,10 +63,12 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  height: var(--space-5);
   padding: 0 var(--space-2);
   border-radius: var(--radius-2);
   border: 1px solid var(--gray-a5);
   background: transparent;
+  box-sizing: border-box;
   cursor: pointer;
   color: var(--gray-11);
   font-size: var(--font-size-1);
@@ -77,11 +95,11 @@
   letter-spacing: 0.05em;
 }
 
-.controls {
-  display: flex;
-  gap: var(--space-2);
-  padding-bottom: var(--space-1);
-  flex-shrink: 0;
+.searchField {
+  flex: 0 1 180px;
+  height: var(--space-5);
+  min-width: 120px;
+  max-width: 220px;
 }
 
 .list {
