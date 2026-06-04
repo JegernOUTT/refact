@@ -18,11 +18,26 @@
 .engineUrl {
   max-width: 180px;
   overflow: hidden;
+  padding: 0;
+  border: none;
+  background: transparent;
   color: var(--gray-10);
+  cursor: pointer;
+  font: inherit;
   font-size: 11px;
   line-height: 1;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.engineUrl:hover {
+  color: var(--gray-12);
+}
+
+.engineUrl:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 2px;
 }
 
 .iconButton {

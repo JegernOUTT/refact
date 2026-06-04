@@ -4,7 +4,6 @@ import {
   Cross1Icon,
   PlusIcon,
   CheckboxIcon,
-  ExternalLinkIcon,
   MoonIcon,
   SunIcon,
 } from "@radix-ui/react-icons";
@@ -602,13 +601,15 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       <div className={styles.toolbarSection}>
         <ConnectionStatusIndicator />
-        <span
+        <button
+          type="button"
           className={styles.engineUrl}
           title={engineUrl}
           aria-label={`Engine URL ${engineUrl}`}
+          onClick={onOpenChatInBrowser}
         >
           {engineUrl}
-        </span>
+        </button>
       </div>
 
       <div className={styles.toolbarDivider} />
@@ -626,13 +627,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div className={styles.toolbarDivider} />
 
       <div className={styles.toolbarSection}>
-        <ToolbarIconButton
-          label="Open Chat in Browser"
-          onClick={onOpenChatInBrowser}
-        >
-          <ExternalLinkIcon />
-        </ToolbarIconButton>
-
         {host === "web" && (
           <ToolbarIconButton label="Toggle Dark Mode" onClick={toggleDarkMode}>
             {isDarkMode ? <MoonIcon /> : <SunIcon />}

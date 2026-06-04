@@ -65,7 +65,9 @@ describe("Toolbar", () => {
       screen.getByLabelText(`Engine URL ${window.location.origin}`),
     ).toBeInTheDocument();
 
-    await userEvent.click(screen.getByLabelText("Open Chat in Browser"));
+    await userEvent.click(
+      screen.getByLabelText(`Engine URL ${window.location.origin}`),
+    );
 
     expect(open).toHaveBeenCalledWith(
       window.location.origin,
@@ -97,7 +99,9 @@ describe("Toolbar", () => {
       screen.getByLabelText("Engine URL http://workstation.local:8765"),
     ).toBeInTheDocument();
 
-    await userEvent.click(screen.getByLabelText("Open Chat in Browser"));
+    await userEvent.click(
+      screen.getByLabelText("Engine URL http://workstation.local:8765"),
+    );
 
     expect(open).toHaveBeenCalledWith(
       "http://workstation.local:8765",
@@ -126,7 +130,9 @@ describe("Toolbar", () => {
       screen.getByLabelText("Engine URL http://192.168.1.42:8765"),
     ).toBeInTheDocument();
 
-    await userEvent.click(screen.getByLabelText("Open Chat in Browser"));
+    await userEvent.click(
+      screen.getByLabelText("Engine URL http://192.168.1.42:8765"),
+    );
 
     expect(open).toHaveBeenCalledWith(
       "http://192.168.1.42:8765",
@@ -154,7 +160,9 @@ describe("Toolbar", () => {
       screen.getByLabelText("Engine URL https://example.com/refact"),
     ).toBeInTheDocument();
 
-    await userEvent.click(screen.getByLabelText("Open Chat in Browser"));
+    await userEvent.click(
+      screen.getByLabelText("Engine URL https://example.com/refact"),
+    );
 
     expect(open).toHaveBeenCalledWith(
       "https://example.com/refact",
