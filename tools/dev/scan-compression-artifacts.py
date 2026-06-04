@@ -184,13 +184,24 @@ def has_matching_pair(report_meta: dict[str, Any] | None, summary_meta: dict[str
         return False
     report_hash = report_meta.get("source_hash")
     summary_hash = summary_meta.get("source_hash")
-    if isinstance(report_hash, str) and report_hash and report_hash != summary_hash:
-        return False
+    hashes_match = (
+        isinstance(report_hash, str)
+        and bool(report_hash)
+        and isinstance(summary_hash, str)
+        and report_hash == summary_hash
+    )
     report_ids = source_ids(report_meta)
     summary_ids = source_ids(summary_meta)
-    if report_ids and summary_ids and report_ids != summary_ids:
-        return False
-    return True
+    ids_match = bool(report_ids) and report_ids == summary_ids
+    return hashes_match or ids_match
+
+
+def report_requires_adjacent_summary(report_meta: dict[str, Any], next_summary: dict[str, Any] | None) -> bool:
+    return (
+        report_meta.get("compression_kind") == "llm_segment_summary"
+        or report_meta.get("insert_mode") == "source_preserving"
+        or next_summary is not None
+    )
 
 
 def compression_attempt_after(messages: list[dict[str, Any]], start: int) -> bool:
@@ -270,7 +281,7 @@ def scan_messages(
                 add_finding(counts, examples, "ZERO_SAVINGS_APPLIED", relpath, idx, report, max_examples)
 
             next_summary = summary_compression(messages[idx + 1]) if idx + 1 < len(messages) else None
-            if not has_matching_pair(report, next_summary):
+            if report_requires_adjacent_summary(report, next_summary) and not has_matching_pair(report, next_summary):
                 add_finding(
                     counts,
                     examples,
@@ -448,7 +459,57 @@ def self_test() -> int:
                 },
             ],
         )
-        result = scan_root(root, since_days=3, max_examples=3)
+        write_json(
+            root / "trajectories" / "unidentifiable-pair.json",
+            [
+                {"role": "user", "message_id": "u3", "content": "hello"},
+                {
+                    "role": "compression_report",
+                    "content": "Context compression applied",
+                    "extra": {
+                        "compression_report": {
+                            "kind": "chat_compression_report",
+                            "insert_mode": "source_preserving",
+                            "tokens_before": 100,
+                            "tokens_after": 50,
+                            "estimated_tokens_saved": 50,
+                            "reduction_percent": 50,
+                        }
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "content": "internal summary",
+                    "extra": {
+                        "compression": {
+                            "kind": "llm_segment_summary",
+                            "insert_mode": "source_preserving",
+                        }
+                    },
+                },
+            ],
+        )
+        write_json(
+            root / "trajectories" / "deterministic-report-only.json",
+            [
+                {"role": "user", "message_id": "u4", "content": "hello"},
+                {
+                    "role": "compression_report",
+                    "content": "Chat context compressed deterministically",
+                    "extra": {
+                        "compression_report": {
+                            "kind": "chat_compression_report",
+                            "insert_mode": "deterministic",
+                            "tokens_before": 100,
+                            "tokens_after": 60,
+                            "estimated_tokens_saved": 40,
+                            "reduction_percent": 40,
+                        }
+                    },
+                },
+            ],
+        )
+        result = scan_root(root, since_days=3, max_examples=10)
         required = [
             "BAD_REPORT_CONTENT",
             "REPORT_SAYS_REPLACED",
@@ -467,6 +528,20 @@ def self_test() -> int:
         if result.counts["INTERNAL_SUMMARY_UNPAIRED"] < 2:
             print_result(result)
             print("SELF_TEST_FAILED lone summary was not detected", file=sys.stderr)
+            return 1
+        pair_mismatch_examples = result.examples.get("REPORT_SUMMARY_PAIR_MISMATCH", [])
+        if any(item.path.endswith("deterministic-report-only.json") for item in pair_mismatch_examples):
+            print_result(result)
+            print("SELF_TEST_FAILED deterministic report-only artifact was flagged as pair mismatch", file=sys.stderr)
+            return 1
+        unidentifiable_pair_count = sum(
+            1
+            for item in pair_mismatch_examples
+            if item.path.endswith("unidentifiable-pair.json")
+        )
+        if unidentifiable_pair_count < 2:
+            print_result(result)
+            print("SELF_TEST_FAILED unidentifiable report/summary pair was not detected", file=sys.stderr)
             return 1
         rendered = result.examples["BAD_REPORT_CONTENT"][0].preview
         if "sk-test-secret123" in rendered:
