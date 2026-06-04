@@ -33,7 +33,8 @@ const TOOL_CALL_ARGUMENTS_TRUNCATED_MARKER: &str = "…";
 const GOAL_HINT_TRUNCATED_MARKER: &str = "\n[... user goal truncated ...]";
 const GOAL_HINT_PROMPT_PREFIX: &str = "User goal for this segment: ";
 const SUMMARY_KIND: &str = "llm_segment_summary";
-const SUMMARY_SCHEMA_VERSION: u64 = 2;
+const SUMMARY_SCHEMA_VERSION: u64 = 3;
+const SUMMARY_INSERT_MODE: &str = "source_preserving";
 const SEGMENT_REPORT_TIER: &str = "tier1_llm";
 
 #[derive(Debug, Clone)]
@@ -232,6 +233,7 @@ fn canonical_source_value(message: &ChatMessage) -> Value {
     let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
     if let Some(obj) = value.as_object_mut() {
         obj.remove("message_id");
+        obj.remove("id");
     }
     value
 }
@@ -247,12 +249,38 @@ pub fn source_hash_for_messages(messages: &[ChatMessage]) -> String {
 fn source_message_ids(messages: &[ChatMessage]) -> Vec<String> {
     messages
         .iter()
-        .map(|message| message.message_id.clone())
+        .filter_map(|message| (!message.message_id.is_empty()).then(|| message.message_id.clone()))
         .collect()
+}
+
+fn ensure_source_message_ids(messages: &mut [ChatMessage], segment: SummarySegment) {
+    for message in &mut messages[segment.start..=segment.end] {
+        if message.message_id.is_empty() {
+            message.message_id = Uuid::new_v4().to_string();
+        }
+    }
 }
 
 fn segment_is_existing_summary(messages: &[ChatMessage], segment: SummarySegment) -> bool {
     segment.start == segment.end && is_segment_summary(&messages[segment.start])
+}
+
+fn segment_has_source_preserving_summary_after(
+    messages: &[ChatMessage],
+    segment: SummarySegment,
+) -> bool {
+    let Some(summary) = messages.get(segment.end + 2) else {
+        return false;
+    };
+    if !is_segment_summary(summary) {
+        return false;
+    }
+    let source_hash = source_hash_for_messages(&messages[segment.start..=segment.end]);
+    summary.extra.get("compression").is_some_and(|metadata| {
+        metadata.get("insert_mode").and_then(|value| value.as_str()) == Some(SUMMARY_INSERT_MODE)
+            && metadata.get("source_hash").and_then(|value| value.as_str())
+                == Some(source_hash.as_str())
+    })
 }
 
 fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
@@ -513,6 +541,7 @@ fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment)
         && !tail_has_pending_tool_calls(tail)
         && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_existing_summary(messages, segment)
+        && !segment_has_source_preserving_summary_after(messages, segment)
 }
 
 fn segment_contains_external_tool_completion(
@@ -594,6 +623,7 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
                 && has_tail_summarizable_output(candidate)
                 && !tail_has_pending_tool_calls(candidate)
                 && !segment_contains_external_tool_completion(messages, *segment)
+                && !segment_has_source_preserving_summary_after(messages, *segment)
         })
         .or_else(|| eligible_tail_non_user_segment(messages))
 }
@@ -1115,8 +1145,11 @@ fn make_segment_summary_message(
         json!({
             "schema_version": SUMMARY_SCHEMA_VERSION,
             "kind": SUMMARY_KIND,
+            "insert_mode": SUMMARY_INSERT_MODE,
             "source_hash": source_hash,
             "source_message_ids": source_ids,
+            "summarized_source_message_ids": source_ids,
+            "preserved_source_message_ids": [],
             "created_at": created_at,
             "summary_model": summary_model,
         }),
@@ -1134,6 +1167,47 @@ fn make_segment_summary_message(
         extra,
         ..Default::default()
     }
+}
+
+fn refresh_segment_summary_metadata(
+    mut summary: ChatMessage,
+    source_messages: &[ChatMessage],
+) -> ChatMessage {
+    let summary_model = summary
+        .extra
+        .get("compression")
+        .and_then(|value| value.get("summary_model"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let source_hash = source_hash_for_messages(source_messages);
+    let source_ids = source_message_ids(source_messages);
+    let created_at = summary
+        .extra
+        .get("compression")
+        .and_then(|value| value.get("created_at"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    summary.extra.insert(
+        "compression".to_string(),
+        json!({
+            "schema_version": SUMMARY_SCHEMA_VERSION,
+            "kind": SUMMARY_KIND,
+            "insert_mode": SUMMARY_INSERT_MODE,
+            "source_hash": source_hash,
+            "source_message_ids": source_ids,
+            "summarized_source_message_ids": source_ids,
+            "preserved_source_message_ids": [],
+            "created_at": created_at,
+            "summary_model": summary_model,
+        }),
+    );
+    summary.summarization_tier = Some(SUMMARY_KIND.to_string());
+    summary.summarized_token_estimate = Some(crate::chat::trajectory_ops::approx_token_count(
+        source_messages,
+    ));
+    summary
 }
 
 fn make_segment_compression_report_message(
@@ -1157,15 +1231,17 @@ fn make_segment_compression_report_message(
     } else {
         0
     };
-    let summary_text = summary.content.content_text_only();
     let mut extra = serde_json::Map::new();
     extra.insert(
         "compression_report".to_string(),
         json!({
             "kind": COMPRESSION_REPORT_KIND,
             "compression_kind": SUMMARY_KIND,
+            "insert_mode": SUMMARY_INSERT_MODE,
             "source_message_count": source_messages.len(),
             "source_message_ids": source_ids,
+            "summarized_source_message_ids": source_ids,
+            "preserved_source_message_ids": [],
             "source_hash": source_hash,
             "summary_model": summary_model,
             "tokens_before": tokens_before,
@@ -1179,15 +1255,14 @@ fn make_segment_compression_report_message(
         message_id: Uuid::new_v4().to_string(),
         role: COMPRESSION_REPORT_ROLE.to_string(),
         content: ChatContent::SimpleText(format!(
-            "## Chat context compressed\n\nContext compression replaced {} earlier message{} with a compact assistant summary for future model requests.\n\n- Compression kind: LLM segment summary\n- Summary model: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%\n\n## Summary kept for the model\n\n{}",
+            "## Chat context compressed\n\nA compact assistant summary was added for future model requests. The original {} message{} remain visible in this chat.\n\n- Compression kind: LLM segment summary\n- Summary model: {}\n- Tokens before: {}\n- Tokens after: {}\n- Estimated tokens saved: {}\n- Reduction: {}%",
             source_messages.len(),
             if source_messages.len() == 1 { "" } else { "s" },
             summary_model,
             tokens_before,
             tokens_after,
             estimated_tokens_saved,
-            reduction_percent,
-            summary_text
+            reduction_percent
         )),
         summarized_range: None,
         summarization_tier: Some(SEGMENT_REPORT_TIER.to_string()),
@@ -1292,14 +1367,17 @@ fn effective_n_ctx_for_resolved_summary_model(
     }
 }
 
-fn replace_segment_with_report_and_summary(
+fn insert_source_preserving_report_and_summary(
     messages: &mut Vec<ChatMessage>,
     segment: SummarySegment,
     source_messages: &[ChatMessage],
     summary: ChatMessage,
-) {
+) -> usize {
+    let summary = refresh_segment_summary_metadata(summary, source_messages);
     let report = make_segment_compression_report_message(&summary, source_messages);
-    messages.splice(segment.start..=segment.end, [report, summary]);
+    let insert_idx = (segment.end + 1).min(messages.len());
+    messages.splice(insert_idx..insert_idx, [report, summary]);
+    insert_idx
 }
 
 pub async fn summarize_oldest_segment_with_resolved_model(
@@ -1314,6 +1392,7 @@ pub async fn summarize_oldest_segment_with_resolved_model(
     let Some(segment) = first_eligible_segment(messages) else {
         return Err(SegmentSummaryFailure::NoMessagesToSummarize);
     };
+    ensure_source_message_ids(messages, segment);
     let goal_hint = messages[..segment.start]
         .iter()
         .rev()
@@ -1327,7 +1406,7 @@ pub async fn summarize_oldest_segment_with_resolved_model(
         goal_hint,
     )
     .await?;
-    replace_segment_with_report_and_summary(messages, segment, &source_messages, summary);
+    insert_source_preserving_report_and_summary(messages, segment, &source_messages, summary);
     Ok(true)
 }
 
@@ -1465,10 +1544,11 @@ pub fn summarize_oldest_segment_with_static_summary(
     let Some(segment) = first_eligible_segment(messages) else {
         return false;
     };
+    ensure_source_message_ids(messages, segment);
     let source_messages = messages[segment.start..=segment.end].to_vec();
     let summary =
         make_segment_summary_message(summary_text.to_string(), &source_messages, summary_model);
-    replace_segment_with_report_and_summary(messages, segment, &source_messages, summary);
+    insert_source_preserving_report_and_summary(messages, segment, &source_messages, summary);
     true
 }
 
@@ -1529,13 +1609,16 @@ fn apply_resolved_segment_summary(
         emit_compression_skipped(session, CompressionReason::NoEligibleSegment);
         return false;
     };
-    let current_source = session.messages[current_segment.start..=current_segment.end].to_vec();
-    if source_hash_for_messages(&current_source) != source_hash {
+    let current_source_before_ids =
+        session.messages[current_segment.start..=current_segment.end].to_vec();
+    if source_hash_for_messages(&current_source_before_ids) != source_hash {
         warn!("Segment summarization skipped because source messages changed while summarizing");
         emit_compression_skipped(session, CompressionReason::SourceChanged);
         return false;
     }
-    replace_segment_with_report_and_summary(
+    ensure_source_message_ids(&mut session.messages, current_segment);
+    let current_source = session.messages[current_segment.start..=current_segment.end].to_vec();
+    insert_source_preserving_report_and_summary(
         &mut session.messages,
         current_segment,
         &current_source,
@@ -1906,6 +1989,7 @@ mod tests {
         assert_eq!(metadata["compression_kind"], json!(SUMMARY_KIND));
         assert_eq!(metadata["source_message_count"], json!(source_count));
         assert_eq!(metadata["summary_model"], json!(summary_model));
+        assert_eq!(metadata["insert_mode"], json!(SUMMARY_INSERT_MODE));
         assert!(metadata["source_hash"]
             .as_str()
             .is_some_and(|hash| !hash.is_empty()));
@@ -1913,6 +1997,11 @@ mod tests {
             metadata["source_message_ids"].as_array().unwrap().len(),
             source_count
         );
+        assert_eq!(
+            metadata["summarized_source_message_ids"],
+            metadata["source_message_ids"]
+        );
+        assert_eq!(metadata["preserved_source_message_ids"], json!([]));
         assert!(metadata["tokens_before"].as_u64().unwrap() > 0);
         assert!(metadata["tokens_after"].as_u64().unwrap() > 0);
         assert!(metadata["reduction_percent"].as_u64().unwrap() <= 100);
@@ -1924,9 +2013,12 @@ mod tests {
         );
         let content = report.content.content_text_only();
         assert!(content.contains("Chat context compressed"));
-        assert!(content.contains("Context compression replaced"));
-        assert!(content.contains("Summary kept for the model"));
-        assert!(content.contains(summary_text));
+        assert!(content.contains("original"));
+        assert!(content.contains("remain visible"));
+        assert!(!content.to_lowercase().contains("replaced"));
+        if summary_text.len() > 16 {
+            assert!(!content.contains(summary_text));
+        }
     }
 
     fn assert_segment_report_summary_pair(
@@ -1936,6 +2028,15 @@ mod tests {
         summary_model: &str,
         summary_text: &str,
     ) {
+        let report_idx = if messages[report_idx].role == COMPRESSION_REPORT_ROLE {
+            report_idx
+        } else {
+            messages[report_idx..]
+                .iter()
+                .position(|message| message.role == COMPRESSION_REPORT_ROLE)
+                .map(|offset| report_idx + offset)
+                .expect("expected compression report at or after report_idx")
+        };
         assert_llm_compression_report(
             &messages[report_idx],
             source_count,
@@ -2256,9 +2357,9 @@ mod tests {
             "test-model",
             "compressed planner tool work",
         );
-        assert_eq!(messages[5].role, crate::chat::internal_roles::EVENT_ROLE);
-        assert!(is_ui_only_message(&messages[5]));
-        assert_eq!(messages[6].role, "error");
+        assert_eq!(messages[8].role, crate::chat::internal_roles::EVENT_ROLE);
+        assert!(is_ui_only_message(&messages[8]));
+        assert_eq!(messages[9].role, "error");
     }
 
     #[test]
@@ -2320,7 +2421,7 @@ mod tests {
             "compressed tail",
             "test-model",
         ));
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, "user");
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed tail");
     }
@@ -2342,10 +2443,10 @@ mod tests {
             "compressed tail",
             "test-model",
         ));
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, "user");
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed tail");
-        assert_eq!(messages[3].role, "event");
+        assert_eq!(messages[4].role, "event");
     }
 
     #[test]
@@ -2361,16 +2462,17 @@ mod tests {
             eligible_tail_non_user_segment(&messages),
             Some(SummarySegment { start: 1, end: 1 })
         );
+
         assert!(summarize_oldest_segment_with_static_summary(
             &mut messages,
             "compressed subspan",
             "test-model",
         ));
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed subspan");
-        assert_eq!(messages[3].role, "cd_instruction");
+        assert_eq!(messages[4].role, "cd_instruction");
         assert_eq!(
-            messages[4].content.content_text_only(),
+            messages[5].content.content_text_only(),
             "second assistant output"
         );
     }
@@ -2393,10 +2495,10 @@ mod tests {
             "compressed body",
             "test-model",
         ));
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed body");
-        assert_eq!(messages[3].role, "error");
         assert_eq!(messages[4].role, "error");
+        assert_eq!(messages[5].role, "error");
     }
 
     #[test]
@@ -2435,7 +2537,7 @@ mod tests {
             "compressed after excluded",
             "test-model",
         ));
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_eq!(messages[1].role, "event");
         assert_eq!(messages[2].role, "plan");
         assert_segment_report_summary_pair(
@@ -2484,7 +2586,7 @@ mod tests {
             "test-model",
         ));
 
-        assert_eq!(messages.len(), 8);
+        assert_eq!(messages.len(), 11);
         assert!(is_segment_summary(&messages[1]));
         assert_eq!(messages[2].role, "user");
         assert_eq!(messages[3].role, "cd_instruction");
@@ -2495,8 +2597,8 @@ mod tests {
             "test-model",
             "compressed selected tail body",
         );
-        assert_eq!(messages[6].role, "error");
-        assert_eq!(messages[7].role, "error");
+        assert_eq!(messages[9].role, "error");
+        assert_eq!(messages[10].role, "error");
     }
 
     #[test]
@@ -2549,7 +2651,7 @@ mod tests {
             "compressed later output",
             "test-model",
         ));
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 5);
         assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call_stale");
         assert_segment_report_summary_pair(
             &messages,
@@ -2607,7 +2709,7 @@ mod tests {
             "compressed later safe output",
             "test-model",
         ));
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 7);
         assert_eq!(messages[1].tool_calls.as_ref().unwrap().len(), 2);
         assert_eq!(messages[2].role, "event");
         assert_segment_report_summary_pair(
@@ -2649,7 +2751,7 @@ mod tests {
             "test-model",
         ));
 
-        assert_eq!(messages.len(), 6);
+        assert_eq!(messages.len(), 11);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call_stale");
         assert_segment_report_summary_pair(
@@ -2659,8 +2761,8 @@ mod tests {
             "test-model",
             "compressed completed output after stale call",
         );
-        assert_eq!(messages[4].role, "error");
-        assert_eq!(messages[5].role, "error");
+        assert_eq!(messages[9].role, "error");
+        assert_eq!(messages[10].role, "error");
     }
 
     #[test]
@@ -2682,14 +2784,14 @@ mod tests {
             "compressed safe prefix",
             "test-model",
         ));
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "compressed safe prefix");
         assert_eq!(
-            messages[3].tool_calls.as_ref().unwrap()[0].id,
+            messages[4].tool_calls.as_ref().unwrap()[0].id,
             "call_unresolved"
         );
         assert_eq!(
-            messages[4].content.content_text_only(),
+            messages[5].content.content_text_only(),
             "safe output after pending"
         );
     }
@@ -2724,7 +2826,7 @@ mod tests {
             "tool turn summary",
             "test-model",
         ));
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 5);
         assert_segment_report_summary_pair(&messages, 1, 2, "test-model", "tool turn summary");
     }
 
@@ -2761,12 +2863,13 @@ mod tests {
             eligible_tail_non_user_segment(&messages),
             Some(SummarySegment { start: 1, end: 3 })
         );
+
         assert!(summarize_oldest_segment_with_static_summary(
             &mut messages,
             "tool turn summary",
             "test-model",
         ));
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 6);
         assert_segment_report_summary_pair(&messages, 1, 3, "test-model", "tool turn summary");
     }
 
@@ -2788,7 +2891,7 @@ mod tests {
             "read result summary",
             "test-model",
         ));
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 5);
         assert_segment_report_summary_pair(&messages, 1, 2, "test-model", "read result summary");
     }
 
@@ -2894,7 +2997,7 @@ mod tests {
             "test-model",
         ));
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
-        assert_eq!(messages[4].content.content_text_only(), "tail new");
+        assert_eq!(messages[5].content.content_text_only(), "tail new");
     }
 
     #[test]
@@ -2993,8 +3096,8 @@ mod tests {
             "test-model",
         ));
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
-        assert_eq!(messages[4].role, "assistant");
-        assert_eq!(messages[5].role, "tool");
+        assert_eq!(messages[5].role, "assistant");
+        assert_eq!(messages[6].role, "tool");
     }
 
     #[test]
@@ -3018,8 +3121,8 @@ mod tests {
             "test-model",
         ));
         assert_segment_report_summary_pair(&messages, 1, 1, "test-model", "closed summary");
-        assert_eq!(messages[4].role, "assistant");
-        assert_eq!(messages[5].role, "context_file");
+        assert_eq!(messages[5].role, "assistant");
+        assert_eq!(messages[6].role, "context_file");
     }
 
     #[test]
@@ -3215,7 +3318,7 @@ mod tests {
             "test-model",
             "compressed post-summary run",
         );
-        assert_eq!(messages[4].content.content_text_only(), "second");
+        assert_eq!(messages[6].content.content_text_only(), "second");
     }
 
     #[test]
@@ -3500,6 +3603,44 @@ mod tests {
     }
 
     #[test]
+    fn source_preserving_summary_inserts_after_source_without_removing_messages() {
+        let mut messages = vec![
+            user("first"),
+            assistant_with_tool_call_id("call_done"),
+            tool_with_id("call_done", "tool result"),
+            user("second"),
+        ];
+        messages[1].message_id = "assistant-source-id".to_string();
+        messages[2].message_id = "tool-source-id".to_string();
+        let assistant_before = serde_json::to_string(&messages[1]).unwrap();
+        let tool_before = serde_json::to_string(&messages[2]).unwrap();
+
+        assert!(summarize_oldest_segment_with_static_summary(
+            &mut messages,
+            "source-preserving internal summary",
+            "test-model",
+        ));
+
+        assert_eq!(messages.len(), 6);
+        assert_eq!(
+            serde_json::to_string(&messages[1]).unwrap(),
+            assistant_before
+        );
+        assert_eq!(serde_json::to_string(&messages[2]).unwrap(), tool_before);
+        assert_eq!(messages[3].role, COMPRESSION_REPORT_ROLE);
+        assert!(is_segment_summary(&messages[4]));
+        assert_eq!(messages[5].role, "user");
+        assert_eq!(
+            messages[3].extra["compression_report"]["insert_mode"],
+            json!(SUMMARY_INSERT_MODE)
+        );
+        assert_eq!(
+            messages[4].extra["compression"]["insert_mode"],
+            json!(SUMMARY_INSERT_MODE)
+        );
+    }
+
+    #[test]
     fn static_summary_inserts_report_and_internal_summary() {
         let mut messages = vec![user("a"), assistant("old"), user("b")];
         assert!(summarize_oldest_segment_with_static_summary(
@@ -3508,14 +3649,20 @@ mod tests {
             "test-model",
         ));
 
-        assert_eq!(messages.len(), 4);
-        assert_llm_compression_report(&messages[1], 1, "test-model", "summary");
-        assert!(is_segment_summary(&messages[2]));
-        let compression = messages[2].extra.get("compression").unwrap();
-        assert_eq!(compression["schema_version"], json!(2));
+        assert_eq!(messages.len(), 5);
+        assert_llm_compression_report(&messages[2], 1, "test-model", "summary");
+        assert!(is_segment_summary(&messages[3]));
+        let compression = messages[3].extra.get("compression").unwrap();
+        assert_eq!(compression["schema_version"], json!(SUMMARY_SCHEMA_VERSION));
         assert_eq!(compression["kind"], json!(SUMMARY_KIND));
+        assert_eq!(compression["insert_mode"], json!(SUMMARY_INSERT_MODE));
+        assert_eq!(
+            compression["summarized_source_message_ids"],
+            compression["source_message_ids"]
+        );
+        assert_eq!(compression["preserved_source_message_ids"], json!([]));
         assert_eq!(compression["summary_model"], json!("test-model"));
-        assert_eq!(messages[2].content.content_text_only(), "summary");
+        assert_eq!(messages[3].content.content_text_only(), "summary");
     }
 
     #[test]
@@ -3547,14 +3694,14 @@ mod tests {
             "test-model",
         ));
 
-        assert_eq!(messages[1].summarized_range, None);
-        assert_eq!(
-            messages[1].summarization_tier,
-            Some(SEGMENT_REPORT_TIER.to_string())
-        );
         assert_eq!(messages[2].summarized_range, None);
         assert_eq!(
             messages[2].summarization_tier,
+            Some(SEGMENT_REPORT_TIER.to_string())
+        );
+        assert_eq!(messages[3].summarized_range, None);
+        assert_eq!(
+            messages[3].summarization_tier,
             Some(SUMMARY_KIND.to_string())
         );
     }
@@ -3573,8 +3720,8 @@ mod tests {
             "summary",
             "test-model",
         ));
-        assert_eq!(messages[1].role, COMPRESSION_REPORT_ROLE);
-        assert!(is_segment_summary(&messages[2]));
+        assert_eq!(messages[3].role, COMPRESSION_REPORT_ROLE);
+        assert!(is_segment_summary(&messages[4]));
         let result = crate::chat::linearize::apply_summarization_linearize(messages);
         let text: Vec<String> = result
             .iter()
@@ -4134,8 +4281,8 @@ mod tests {
             apply_session.compression_phase,
             Some(CompressionPhase::Applied)
         );
-        assert_eq!(apply_session.messages[1].role, COMPRESSION_REPORT_ROLE);
-        assert!(is_segment_summary(&apply_session.messages[2]));
+        assert_eq!(apply_session.messages[2].role, COMPRESSION_REPORT_ROLE);
+        assert!(is_segment_summary(&apply_session.messages[3]));
     }
 
     #[test]
@@ -4339,21 +4486,27 @@ mod tests {
             .collect();
         assert_eq!(
             roles,
-            vec!["user", COMPRESSION_REPORT_ROLE, "assistant", "user"]
+            vec![
+                "user",
+                "assistant",
+                COMPRESSION_REPORT_ROLE,
+                "assistant",
+                "user"
+            ]
         );
         assert_llm_compression_report(
-            &session.messages[1],
+            &session.messages[2],
             1,
             "test-model",
             "compressed summary for model",
         );
-        assert!(is_segment_summary(&session.messages[2]));
+        assert!(is_segment_summary(&session.messages[3]));
         assert_eq!(
-            session.messages[2].extra["compression"]["kind"],
+            session.messages[3].extra["compression"]["kind"],
             json!(SUMMARY_KIND)
         );
         assert_eq!(
-            session.messages[2].content.content_text_only(),
+            session.messages[3].content.content_text_only(),
             "compressed summary for model"
         );
     }
@@ -4383,11 +4536,11 @@ mod tests {
 
         assert!(!session.is_compressing);
         assert!(!session.runtime.is_compressing);
-        assert_eq!(session.messages.len(), 4);
-        assert_llm_compression_report(&session.messages[1], 1, "test-model", "compressed summary");
-        assert!(is_segment_summary(&session.messages[2]));
+        assert_eq!(session.messages.len(), 5);
+        assert_llm_compression_report(&session.messages[2], 1, "test-model", "compressed summary");
+        assert!(is_segment_summary(&session.messages[3]));
         assert_eq!(
-            session.messages[2].content.content_text_only(),
+            session.messages[3].content.content_text_only(),
             "compressed summary"
         );
         let mut saw_runtime_false = false;
@@ -4415,10 +4568,10 @@ mod tests {
                     saw_snapshot_with_summary = !runtime.is_compressing
                         && runtime.compression_phase == Some(CompressionPhase::Applied)
                         && runtime.compression_reason.is_none()
-                        && messages.len() == 4
-                        && messages[1].role == COMPRESSION_REPORT_ROLE
-                        && is_segment_summary(&messages[2])
-                        && messages[2].content.content_text_only() == "compressed summary";
+                        && messages.len() == 5
+                        && messages[2].role == COMPRESSION_REPORT_ROLE
+                        && is_segment_summary(&messages[3])
+                        && messages[3].content.content_text_only() == "compressed summary";
                 }
                 _ => {}
             }

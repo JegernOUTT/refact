@@ -29,6 +29,37 @@ fn is_legacy_range_summary(msg: &ChatMessage) -> bool {
     is_authoritative_summary(msg) && msg.summarized_range.is_some()
 }
 
+fn is_source_preserving_summary(msg: &ChatMessage) -> bool {
+    is_authoritative_summary(msg)
+        && msg
+            .extra
+            .get("compression")
+            .and_then(|compression| compression.get("insert_mode"))
+            .and_then(|mode| mode.as_str())
+            == Some("source_preserving")
+}
+
+fn source_preserving_summary_ids(messages: &[ChatMessage]) -> HashSet<String> {
+    messages
+        .iter()
+        .filter(|message| is_source_preserving_summary(message))
+        .filter_map(|message| message.extra.get("compression"))
+        .filter_map(|compression| compression.get("summarized_source_message_ids"))
+        .filter_map(|ids| ids.as_array())
+        .flat_map(|ids| ids.iter())
+        .filter_map(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn can_suppress_source_preserving_source(msg: &ChatMessage) -> bool {
+    msg.role != "user"
+        && msg.role != "event"
+        && !is_authoritative_summary(msg)
+        && exemption_for(msg) != CompressionExemption::Never
+}
+
 fn is_visual_compression_report(msg: &ChatMessage) -> bool {
     msg.role == COMPRESSION_REPORT_ROLE
 }
@@ -53,10 +84,16 @@ fn legacy_summary_ranges(messages: &[ChatMessage]) -> Vec<(usize, usize, String)
 
 pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let summaries = legacy_summary_ranges(&messages);
+    let source_preserving_summary_ids = source_preserving_summary_ids(&messages);
     if summaries.is_empty() {
         return messages
             .into_iter()
             .filter(|message| !is_linearization_only_message(message))
+            .filter(|message| {
+                message.message_id.is_empty()
+                    || !source_preserving_summary_ids.contains(&message.message_id)
+                    || !can_suppress_source_preserving_source(message)
+            })
             .collect();
     }
 
@@ -109,7 +146,12 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
                 });
             }
         }
-        if is_linearization_only_message(msg) || suppressed.contains(&i) {
+        if is_linearization_only_message(msg)
+            || suppressed.contains(&i)
+            || (!msg.message_id.is_empty()
+                && source_preserving_summary_ids.contains(&msg.message_id)
+                && can_suppress_source_preserving_source(msg))
+        {
             continue;
         }
         result.push(msg.clone());
