@@ -40,7 +40,7 @@ type DropdownProps = {
 };
 
 function linkForBugReports(_host: Config["host"]): string {
-  return "https://github.com/smallcloudai/refact/issues";
+  return "https://github.com/JegernOUTT/refact/issues";
 }
 
 export const Dropdown: React.FC<DropdownProps> = ({
