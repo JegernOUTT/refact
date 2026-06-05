@@ -5790,7 +5790,8 @@ mod tests {
             .join("trajectories")
             .join("planner")
             .join("planner-chat.json");
-        let mut planner = sample_trajectory("planner-chat", "Planner Chat", "2024-01-01T00:00:035Z");
+        let mut planner =
+            sample_trajectory("planner-chat", "Planner Chat", "2024-01-01T00:00:035Z");
         planner["mode"] = json!("task_planner");
         planner["task_meta"] = json!({ "task_id": "task-list", "role": "planner" });
         tokio::fs::create_dir_all(planner_path.parent().unwrap())
@@ -12454,6 +12455,7 @@ mod tests {
 
         let wake_up_at = chrono::Utc::now() + chrono::Duration::minutes(5);
         let mut session = ChatSession::new("wake-roundtrip".to_string());
+        session.thread.title = "Wake Roundtrip".to_string();
         session.created_at = "2024-01-01T00:00:00Z".to_string();
         session.wake_up_at = Some(wake_up_at);
         session.add_message(ChatMessage::new("user".to_string(), "wait".to_string()));
@@ -12523,6 +12525,7 @@ mod tests {
 
         let card_ids = vec!["T-1".to_string(), "T-10".to_string(), "T-2".to_string()];
         let mut session = ChatSession::new("wait-card-roundtrip".to_string());
+        session.thread.title = "Wait Card Roundtrip".to_string();
         session.created_at = "2024-01-01T00:00:00Z".to_string();
         session.waiting_for_card_ids = card_ids.clone();
         session.add_message(ChatMessage::new("user".to_string(), "waiting".to_string()));
