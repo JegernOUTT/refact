@@ -431,12 +431,14 @@ fn markdown_table(cards: &[KnowledgeCard]) -> String {
 }
 
 async fn append_audit_op(gcx: Arc<GlobalContext>, mut op: MemoryLifecycleOp) -> Result<(), String> {
-    let root = project_root(gcx).await?;
+    let root = project_root(gcx.clone()).await?;
     let now = Utc::now().to_rfc3339();
     op.status = MemoryOpStatus::Applied;
     op.requires_approval = false;
     op.applied_at = Some(now);
-    enqueue_memory_op(&root, op).await?;
+    let memory_ops = enqueue_memory_op(&root, op).await?;
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    crate::buddy::actor::buddy_apply_memory_ops_state(app, memory_ops).await;
     Ok(())
 }
 
@@ -971,6 +973,20 @@ mod tests {
         ))
     }
 
+    async fn install_buddy_service(gcx: Arc<GlobalContext>, root: &Path) {
+        let tx = gcx.buddy_events_tx.as_ref().unwrap().clone();
+        let service = crate::buddy::actor::BuddyService::new(
+            root.to_path_buf(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        *gcx.buddy.lock().await = Some(service);
+    }
+
     fn text(result: &(bool, Vec<ContextEnum>)) -> String {
         result
             .1
@@ -1066,6 +1082,41 @@ mod tests {
         assert!(cards.iter().any(|card| card.title == "Create Test"));
         let state = load_memory_ops(dir.path()).await;
         assert_eq!(state.applied_count, 1);
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_create_updates_live_memory_ops_and_snapshot_pulse() {
+        let dir = tempfile::tempdir().unwrap();
+        let ccx = ccx(dir.path()).await;
+        let gcx = { ccx.lock().await.app.gcx.clone() };
+        install_buddy_service(gcx.clone(), dir.path()).await;
+        let mut tool = ToolBuddyMemoryCreate {
+            config_path: String::new(),
+        };
+
+        tool.tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(vec![
+                ("title", serde_json::json!("Create Live Test")),
+                ("content", serde_json::json!("remember the live frog")),
+                ("tags", serde_json::json!(["test"])),
+                ("kind", serde_json::json!("lesson")),
+                ("source_id", serde_json::json!("src-live-create")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let disk_state = load_memory_ops(dir.path()).await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let snapshot = crate::buddy::actor::buddy_snapshot(app).await.unwrap();
+        assert_eq!(disk_state.applied_count, 1);
+        assert_eq!(snapshot.pulse.memory.applied_ops, 1);
+        assert_eq!(snapshot.pulse.memory.pending_ops, 0);
+        let buddy = gcx.buddy.lock().await;
+        let service = buddy.as_ref().unwrap();
+        assert_eq!(service.memory_ops, disk_state);
     }
 
     #[tokio::test]
@@ -1236,6 +1287,48 @@ mod tests {
             .unwrap();
         assert!(text(&first).contains("Archived:"));
         assert!(text(&second).contains("Already archived:"));
+    }
+
+    #[tokio::test]
+    async fn buddy_memory_archive_updates_live_memory_ops_and_snapshot_pulse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_memory(
+            dir.path(),
+            "archive-live.md",
+            "Archive Live",
+            "lesson",
+            &["old"],
+            "old live body",
+        )
+        .await;
+        let ccx = ccx(dir.path()).await;
+        let gcx = { ccx.lock().await.app.gcx.clone() };
+        install_buddy_service(gcx.clone(), dir.path()).await;
+        let mut tool = ToolBuddyMemoryArchive {
+            config_path: String::new(),
+        };
+
+        tool.tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(vec![
+                ("path", serde_json::json!(path.to_string_lossy())),
+                ("reason", serde_json::json!("obsolete live")),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let disk_state = load_memory_ops(dir.path()).await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let snapshot = crate::buddy::actor::buddy_snapshot(app).await.unwrap();
+        assert_eq!(disk_state.applied_count, 1);
+        assert_eq!(snapshot.pulse.memory.applied_ops, 1);
+        assert_eq!(snapshot.pulse.memory.pending_ops, 0);
+        assert_eq!(disk_state.ops[0].op_type, MemoryOpType::ArchiveCandidate);
+        let buddy = gcx.buddy.lock().await;
+        let service = buddy.as_ref().unwrap();
+        assert_eq!(service.memory_ops, disk_state);
     }
 
     #[tokio::test]

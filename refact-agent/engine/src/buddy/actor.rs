@@ -1709,6 +1709,15 @@ pub async fn buddy_snapshot(gcx: AppState) -> Option<BuddySnapshot> {
     lock.as_ref().map(|svc| svc.snapshot())
 }
 
+pub async fn buddy_apply_memory_ops_state(gcx: AppState, memory_ops: MemoryOpsState) {
+    let buddy_arc = gcx.buddy.buddy.clone();
+    let mut lock = buddy_arc.lock().await;
+    let Some(svc) = lock.as_mut() else { return };
+    svc.memory_ops = memory_ops;
+    let pulse = svc.pulse.clone();
+    svc.set_pulse(pulse);
+}
+
 pub async fn buddy_update_speech(gcx: AppState, speech: BuddySpeechItem) {
     let buddy_arc = gcx.buddy.buddy.clone();
     let mut lock = buddy_arc.lock().await;
