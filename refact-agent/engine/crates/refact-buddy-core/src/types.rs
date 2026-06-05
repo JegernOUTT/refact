@@ -55,6 +55,8 @@ pub struct BuddyRuntimeEvent {
     pub chat_id: Option<String>,
     #[serde(default)]
     pub dismissed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

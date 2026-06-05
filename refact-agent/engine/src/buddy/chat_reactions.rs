@@ -812,6 +812,7 @@ pub fn build_reaction_event(
         controls: vec![],
         chat_id: Some(chat_id.to_string()),
         dismissed: false,
+        dismissed_at: None,
     }
 }
 

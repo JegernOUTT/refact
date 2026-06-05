@@ -23,6 +23,15 @@ fn runtime_event_created_at(event: &BuddyRuntimeEvent) -> Option<DateTime<Utc>> 
         .map(|created_at| created_at.with_timezone(&Utc))
 }
 
+fn runtime_event_dismissed_at(event: &BuddyRuntimeEvent) -> Option<DateTime<Utc>> {
+    event
+        .dismissed_at
+        .as_deref()
+        .and_then(|dismissed_at| DateTime::parse_from_rfc3339(dismissed_at).ok())
+        .map(|dismissed_at| dismissed_at.with_timezone(&Utc))
+        .or_else(|| runtime_event_created_at(event))
+}
+
 fn older_runtime_event_position(
     left: &(usize, &BuddyRuntimeEvent),
     right: &(usize, &BuddyRuntimeEvent),
@@ -78,7 +87,8 @@ fn runtime_event_stale_without_ttl_at(
     now: DateTime<Utc>,
 ) -> bool {
     if event.dismissed {
-        return created_at
+        let dismissed_at = runtime_event_dismissed_at(event).unwrap_or(created_at);
+        return dismissed_at
             .checked_add_signed(chrono::Duration::minutes(
                 DISMISSED_NO_TTL_RETENTION_MINUTES,
             ))
@@ -210,7 +220,15 @@ impl RuntimeQueue {
                 existing.chat_id = event.chat_id;
                 existing.created_at = event.created_at;
                 existing.bubble_policy = event.bubble_policy;
+                let dismissed_at = if existing.dismissed {
+                    existing.dismissed_at.clone()
+                } else if event.dismissed {
+                    event.dismissed_at.clone()
+                } else {
+                    None
+                };
                 existing.dismissed = existing.dismissed || event.dismissed;
+                existing.dismissed_at = dismissed_at;
                 return removed;
             }
             if let Some(existing) = self
@@ -236,13 +254,15 @@ impl RuntimeQueue {
                 existing.chat_id = event.chat_id;
                 existing.created_at = event.created_at;
                 existing.bubble_policy = event.bubble_policy;
-                // Sticky dismissal: once the user dismissed an event, any
-                // subsequent re-emission with the same dedupe_key (e.g.
-                // because the same window error fired again) stays hidden.
-                // We OR the flags so an explicit dismiss flag on the new
-                // event also takes effect, but a fresh (undismissed)
-                // event can never silently un-dismiss the existing one.
+                let dismissed_at = if existing.dismissed {
+                    existing.dismissed_at.clone()
+                } else if event.dismissed {
+                    event.dismissed_at.clone()
+                } else {
+                    None
+                };
                 existing.dismissed = existing.dismissed || event.dismissed;
+                existing.dismissed_at = dismissed_at;
                 return removed;
             }
         }
@@ -375,6 +395,7 @@ mod tests {
             controls: vec![],
             chat_id: None,
             dismissed: false,
+            dismissed_at: None,
         }
     }
 
@@ -712,6 +733,75 @@ mod tests {
         assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
         assert!(has_event(&queue, "diag-durable"));
         assert!(!has_event(&queue, "reaction-0"));
+    }
+
+    #[test]
+    fn dismissed_no_ttl_expiry_uses_dismissed_at() {
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-dismissed", "dismissed-key");
+        event.status = "info".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.dismissed = true;
+        event.dismissed_at = Some("2024-01-02T00:00:00Z".to_string());
+        queue.items.push_back(event);
+
+        let recent = DateTime::parse_from_rfc3339("2024-01-02T00:14:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let removed = queue.prune_expired_at(recent);
+        assert!(removed.is_empty());
+        assert_eq!(queue.items.len(), 1);
+
+        let expired = DateTime::parse_from_rfc3339("2024-01-02T00:16:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let removed = queue.prune_expired_at(expired);
+        assert_eq!(removed, vec!["ev-dismissed".to_string()]);
+        assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn legacy_dismissed_no_ttl_expiry_falls_back_to_created_at() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T00:16:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut queue = RuntimeQueue::new();
+        let mut event = make_event("ev-legacy-dismissed", "legacy-dismissed-key");
+        event.status = "info".to_string();
+        event.created_at = "2024-01-01T00:00:00Z".to_string();
+        event.dismissed = true;
+        event.dismissed_at = None;
+        queue.items.push_back(event);
+
+        let removed = queue.prune_expired_at(now);
+
+        assert_eq!(removed, vec!["ev-legacy-dismissed".to_string()]);
+        assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn coalesced_dismissed_event_preserves_existing_dismissed_at() {
+        let mut queue = RuntimeQueue::new();
+        let existing_dismissed_at = Utc::now().to_rfc3339();
+        let replacement_dismissed_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+        let mut event = make_event("ev1", "dismissed-coalesce-key");
+        event.dismissed = true;
+        event.dismissed_at = Some(existing_dismissed_at.clone());
+        queue.enqueue(event);
+
+        let mut replacement = make_event("ev2", "dismissed-coalesce-key");
+        replacement.title = "Updated".to_string();
+        replacement.dismissed = true;
+        replacement.dismissed_at = Some(replacement_dismissed_at);
+        queue.enqueue(replacement);
+
+        assert_eq!(queue.items.len(), 1);
+        assert!(queue.items[0].dismissed);
+        assert_eq!(
+            queue.items[0].dismissed_at.as_deref(),
+            Some(existing_dismissed_at.as_str())
+        );
+        assert_eq!(queue.items[0].title, "Updated");
     }
 
     #[test]

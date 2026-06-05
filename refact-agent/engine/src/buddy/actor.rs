@@ -431,6 +431,15 @@ pub async fn render_buddy_activity_title(
     )
 }
 
+fn runtime_event_dismissal_memory_at(event: &BuddyRuntimeEvent) -> Option<DateTime<Utc>> {
+    event
+        .dismissed_at
+        .as_deref()
+        .and_then(|dismissed_at| DateTime::parse_from_rfc3339(dismissed_at).ok())
+        .or_else(|| DateTime::parse_from_rfc3339(&event.created_at).ok())
+        .map(|dismissed_at| dismissed_at.with_timezone(&Utc))
+}
+
 impl BuddyService {
     pub fn new(
         project_root: std::path::PathBuf,
@@ -450,7 +459,12 @@ impl BuddyService {
             .iter()
             .chain(runtime_queue.now_playing.iter())
             .filter(|event| event.dismissed)
-            .filter_map(|event| event.dedupe_key.clone().map(|key| (key, Utc::now())))
+            .filter_map(|event| {
+                event
+                    .dedupe_key
+                    .clone()
+                    .zip(runtime_event_dismissal_memory_at(event))
+            })
             .collect();
         let opportunity_snapshot = opportunity_queue.snapshot();
         let dismissed_snapshot = opportunity_queue.dismissed_history_snapshot();
@@ -807,13 +821,14 @@ impl BuddyService {
         self.dismissed_runtime_keys
             .retain(|_, dismissed_at| *dismissed_at >= cutoff);
         if let Some(key) = event.dedupe_key.as_deref() {
-            if self
+            if let Some(dismissed_at) = self
                 .dismissed_runtime_keys
                 .get(key)
-                .map(|dismissed_at| *dismissed_at >= cutoff)
-                .unwrap_or(false)
+                .copied()
+                .filter(|dismissed_at| *dismissed_at >= cutoff)
             {
                 event.dismissed = true;
+                event.dismissed_at = Some(dismissed_at.to_rfc3339());
             }
         }
         event
@@ -880,21 +895,27 @@ impl BuddyService {
     pub fn dismiss_runtime_event_by_id(&mut self, id: &str) -> bool {
         let mut found = false;
         let mut updated_event: Option<BuddyRuntimeEvent> = None;
+        let dismissed_at = Utc::now().to_rfc3339();
         if let Some(e) = self.runtime_queue.items.iter_mut().find(|e| e.id == id) {
             e.dismissed = true;
+            e.dismissed_at = Some(dismissed_at.clone());
             updated_event = Some(e.clone());
             found = true;
         }
         if let Some(ref mut np) = self.runtime_queue.now_playing {
             if np.id == id {
                 np.dismissed = true;
+                np.dismissed_at = Some(dismissed_at.clone());
                 updated_event = Some(np.clone());
                 found = true;
             }
         }
         if let Some(event) = updated_event {
             if let Some(key) = event.dedupe_key.as_ref() {
-                self.dismissed_runtime_keys.insert(key.clone(), Utc::now());
+                if let Some(dismissed_at) = runtime_event_dismissal_memory_at(&event) {
+                    self.dismissed_runtime_keys
+                        .insert(key.clone(), dismissed_at);
+                }
             }
             self.dirty = true;
             let _ = self.events_tx.send(BuddyEvent::RuntimeEvent {
@@ -1607,6 +1628,7 @@ pub fn make_runtime_event(
         controls: Vec::new(),
         chat_id: None,
         dismissed: false,
+        dismissed_at: None,
     }
 }
 

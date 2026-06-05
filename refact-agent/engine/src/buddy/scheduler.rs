@@ -1310,6 +1310,7 @@ mod tests {
                 controls: vec![],
                 chat_id: None,
                 dismissed: false,
+                dismissed_at: None,
             }),
             last_result: Some("unhealthy".to_string()),
             ..Default::default()

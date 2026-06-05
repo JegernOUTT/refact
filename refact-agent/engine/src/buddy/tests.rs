@@ -2604,6 +2604,122 @@ async fn test_runtime_queue_dismissal_survives_restart() {
     assert!(restored.dismissed, "dismissal must survive replay");
 }
 
+#[tokio::test]
+async fn test_runtime_queue_dismissal_timestamp_survives_restart() {
+    use super::actor::make_runtime_event;
+    use super::storage::{append_runtime_record, load_runtime_queue, RuntimeQueueRecord};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut ev = make_runtime_event(
+        "error",
+        "boom",
+        "frontend",
+        "dismissed-at-key",
+        "failed",
+        Some("high"),
+    );
+    let dismissed_at = chrono::Utc::now().to_rfc3339();
+    ev.dismissed = true;
+    ev.dismissed_at = Some(dismissed_at.clone());
+    append_runtime_record(root, &RuntimeQueueRecord::Event { event: ev })
+        .await
+        .unwrap();
+
+    let queue = load_runtime_queue(root).await;
+    let restored = queue.items.front().expect("event missing");
+
+    assert!(restored.dismissed);
+    assert_eq!(
+        restored.dismissed_at.as_deref(),
+        Some(dismissed_at.as_str())
+    );
+}
+
+#[test]
+fn buddy_service_restart_uses_original_dismissed_at_for_dedupe_window() {
+    use super::actor::make_runtime_event;
+
+    let (events_tx, _) = broadcast::channel(16);
+    let mut queue = super::runtime_queue::RuntimeQueue::new();
+    let mut event = make_runtime_event(
+        "error",
+        "boom",
+        "frontend",
+        "restart-key",
+        "failed",
+        Some("high"),
+    );
+    event.dismissed = true;
+    event.dismissed_at = Some((chrono::Utc::now() - Duration::hours(23)).to_rfc3339());
+    queue.items.push_back(event);
+    let mut svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        queue,
+        events_tx,
+        None,
+    );
+
+    let incoming = make_runtime_event(
+        "error",
+        "boom again",
+        "frontend",
+        "restart-key",
+        "failed",
+        Some("high"),
+    );
+    let stored = svc.enqueue_runtime_event_with_stored(incoming).unwrap();
+
+    assert!(stored.dismissed);
+    assert_eq!(
+        stored.dismissed_at.as_deref(),
+        svc.dismissed_runtime_keys
+            .get("restart-key")
+            .map(|at| at.to_rfc3339())
+            .as_deref()
+    );
+}
+
+#[test]
+fn buddy_service_legacy_dismissed_runtime_key_uses_created_at_on_restart() {
+    use super::actor::make_runtime_event;
+
+    let (events_tx, _) = broadcast::channel(16);
+    let mut queue = super::runtime_queue::RuntimeQueue::new();
+    let mut event = make_runtime_event(
+        "error",
+        "boom",
+        "frontend",
+        "legacy-restart-key",
+        "failed",
+        Some("high"),
+    );
+    event.created_at = "2024-01-01T00:00:00Z".to_string();
+    event.dismissed = true;
+    event.dismissed_at = None;
+    queue.items.push_back(event);
+    let svc = BuddyService::new(
+        std::env::temp_dir().join(format!("buddy-test-{}", uuid::Uuid::new_v4())),
+        default_buddy_state(),
+        BuddySettings::default(),
+        Vec::new(),
+        queue,
+        events_tx,
+        None,
+    );
+
+    assert_eq!(
+        svc.dismissed_runtime_keys
+            .get("legacy-restart-key")
+            .map(|at| at.to_rfc3339())
+            .as_deref(),
+        Some("2024-01-01T00:00:00+00:00")
+    );
+}
+
 /// Fill the queue past its cap, write a `Removed` tombstone for an evicted
 /// event, then verify replay matches the in-memory survivors.
 #[tokio::test]
