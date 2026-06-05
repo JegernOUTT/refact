@@ -290,7 +290,6 @@ mod tests {
                     "search_symbol_definition",
                     "create_textdoc",
                     "buddy_runtime_event",
-                    "buddy_open_issue",
                 ],
             ),
         ];
@@ -305,6 +304,14 @@ mod tests {
             for tool in tools {
                 assert!(config.tools.iter().any(|configured| configured == tool));
             }
+            assert!(
+                !config
+                    .tools
+                    .iter()
+                    .any(|configured| configured == "buddy_open_issue"
+                        || configured == "buddy_create_issue"),
+                "autonomous workflow {id} must not expose issue creation tools"
+            );
         }
     }
 }

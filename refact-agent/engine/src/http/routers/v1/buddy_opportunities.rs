@@ -223,24 +223,14 @@ async fn clear_accept_claim(gcx: Arc<GlobalContext>, id: &str) {
 
 fn provider_defaults_patch(defaults_kind: DefaultsKind) -> serde_json::Value {
     match defaults_kind {
-        DefaultsKind::ChatModel => {
-            serde_json::json!({ "chat": { "model": "your-provider/model-name" } })
-        }
-        DefaultsKind::ChatModel2 => {
-            serde_json::json!({ "chat_model_2": { "model": "your-provider/model-name" } })
-        }
+        DefaultsKind::ChatModel => serde_json::json!({ "chat": {} }),
+        DefaultsKind::ChatModel2 => serde_json::json!({ "chat_model_2": {} }),
         DefaultsKind::TaskPlannerAgentModel => {
-            serde_json::json!({ "task_planner_agent_model": { "model": "your-provider/model-name" } })
+            serde_json::json!({ "task_planner_agent_model": {} })
         }
-        DefaultsKind::ChatLightModel => {
-            serde_json::json!({ "chat_light": { "model": "your-provider/model-name" } })
-        }
-        DefaultsKind::ChatThinkingModel => {
-            serde_json::json!({ "chat_thinking": { "model": "your-provider/model-name" } })
-        }
-        DefaultsKind::ChatBuddyModel => {
-            serde_json::json!({ "chat_buddy": { "model": "your-provider/model-name" } })
-        }
+        DefaultsKind::ChatLightModel => serde_json::json!({ "chat_light": {} }),
+        DefaultsKind::ChatThinkingModel => serde_json::json!({ "chat_thinking": {} }),
+        DefaultsKind::ChatBuddyModel => serde_json::json!({ "chat_buddy": {} }),
     }
 }
 
