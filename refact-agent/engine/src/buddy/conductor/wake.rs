@@ -412,36 +412,53 @@ pub async fn enqueue_budget_threshold_wakes_for_project(
             return false;
         }
     };
+    let targets = ConductorWakeTargets::from_goal_ledgers(
+        ledgers
+            .iter()
+            .map(|stored| (stored.goal_id.clone(), stored.ledger.clone())),
+    );
+    install_conductor_wake_targets(gcx.clone(), targets).await;
+
     let mut enqueued = false;
     for stored in ledgers {
-        if stored.ledger.status.unwrap_or_default().is_terminal()
-            || stored.ledger.status == Some(GoalStatus::Paused)
-        {
+        if ledger_is_inactive(&stored.ledger) {
             continue;
         }
         let mut goal = ConductorGoal::from_ledger(stored.goal_id.clone(), stored.ledger.clone());
-        let spent = aggregate_goal_spent(gcx.clone(), &goal)
-            .await
-            .unwrap_or_else(|_| goal.spent.clone());
+        let spent = match aggregate_goal_spent(gcx.clone(), &goal).await {
+            Ok(spent) => spent,
+            Err(error) => {
+                tracing::warn!(
+                    "conductor budget wake aggregation failed for {}: {}",
+                    goal.id,
+                    error
+                );
+                continue;
+            }
+        };
         goal.spent = GoalBudgetSpent {
             no_progress_wakes: goal.ledger.no_progress_wakes,
             ..spent
         };
-        let current = budget_wake_buckets(&goal);
+        let current = monotonic_budget_wake_buckets(
+            &goal.ledger.budget_wake_buckets,
+            &budget_wake_buckets(&goal),
+        );
         if current == goal.ledger.budget_wake_buckets {
             continue;
         }
-        let crossed = budget_bucket_crossed(&goal.ledger.budget_wake_buckets, &current);
+        if !enqueue_goal_wake_after_target_refresh(
+            gcx.clone(),
+            &goal.id,
+            ConductorWakeReason::Budget,
+        )
+        .await
+        {
+            continue;
+        }
         match persist_budget_wake_buckets(project_root, &goal.id, current).await {
-            Ok(()) if crossed => {
-                enqueued |= enqueue_goal_wake_after_target_refresh(
-                    gcx.clone(),
-                    &goal.id,
-                    ConductorWakeReason::Budget,
-                )
-                .await;
-            }
-            Ok(()) => {}
+            Ok(true) => enqueued = true,
+            Ok(false) => {}
             Err(error) => tracing::warn!(
                 "conductor budget wake bucket persist failed for {}: {}",
                 goal.id,
@@ -605,29 +622,43 @@ async fn persist_budget_wake_buckets(
     project_root: &Path,
     goal_id: &str,
     buckets: GoalBudgetWakeBuckets,
-) -> Result<(), String> {
-    mutate_goal_ledger(
+) -> Result<bool, String> {
+    let (_, persisted) = mutate_goal_ledger(
         project_root,
         goal_id,
         MissingGoalBehavior::RequireExisting,
         |ledger| {
-            ledger.budget_wake_buckets = buckets;
-            Ok(())
+            if ledger_is_inactive(ledger) {
+                return Ok(false);
+            }
+            let next = monotonic_budget_wake_buckets(&ledger.budget_wake_buckets, &buckets);
+            if next == ledger.budget_wake_buckets {
+                return Ok(false);
+            }
+            ledger.budget_wake_buckets = next;
+            Ok(true)
         },
     )
     .await
     .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(persisted)
 }
 
-fn budget_bucket_crossed(
+fn ledger_is_inactive(ledger: &GoalLedger) -> bool {
+    let status = ledger.status.unwrap_or_default();
+    status.is_terminal() || status == GoalStatus::Paused
+}
+
+fn monotonic_budget_wake_buckets(
     previous: &GoalBudgetWakeBuckets,
     current: &GoalBudgetWakeBuckets,
-) -> bool {
-    current.wall_clock_secs > previous.wall_clock_secs
-        || current.no_progress_wakes > previous.no_progress_wakes
-        || current.total_tokens > previous.total_tokens
-        || current.usd > previous.usd
+) -> GoalBudgetWakeBuckets {
+    GoalBudgetWakeBuckets {
+        wall_clock_secs: previous.wall_clock_secs.max(current.wall_clock_secs),
+        no_progress_wakes: previous.no_progress_wakes.max(current.no_progress_wakes),
+        total_tokens: previous.total_tokens.max(current.total_tokens),
+        usd: previous.usd.max(current.usd),
+    }
 }
 
 fn budget_wake_buckets(goal: &ConductorGoal) -> GoalBudgetWakeBuckets {
@@ -719,6 +750,51 @@ mod tests {
             task_ids: vec!["task-1".to_string()],
             ..Default::default()
         }
+    }
+
+    async fn save_task_meta(root: &Path, task_id: &str, goal_id: &str) {
+        let task_dir = root.join(".refact/tasks").join(task_id);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        let meta = crate::tasks::types::TaskMeta {
+            schema_version: 1,
+            id: task_id.to_string(),
+            name: task_id.to_string(),
+            status: crate::tasks::types::TaskStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            cards_total: 0,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: None,
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: None,
+            conductor: Some(crate::tasks::types::TaskConductorLink {
+                goal_id: goal_id.to_string(),
+                role: crate::tasks::types::TaskConductorRole::Planner,
+            }),
+        };
+        tokio::fs::write(
+            task_dir.join("meta.yaml"),
+            serde_yaml::to_string(&meta).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn write_invalid_budget_trajectory(root: &Path, task_id: &str) {
+        let dir = root
+            .join(".refact/tasks")
+            .join(task_id)
+            .join("trajectories/planner");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("bad.json"), "{not-json")
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -981,6 +1057,208 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(ledger.budget_wake_buckets.no_progress_wakes, 80);
+    }
+
+    #[tokio::test]
+    async fn budget_threshold_crossing_refreshes_targets_without_pre_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-no-pre-refresh",
+            &test_goal(8, 0),
+        )
+        .await
+        .unwrap();
+
+        assert!(enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+
+        let targets = gcx.conductor_wake_targets.lock().await.clone();
+        assert!(targets.contains_goal("goal-no-pre-refresh"));
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-no-pre-refresh").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::Budget]);
+        let ledger =
+            refact_buddy_core::conductor_store::load_goal_ledger(dir.path(), "goal-no-pre-refresh")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(ledger.budget_wake_buckets.no_progress_wakes, 80);
+    }
+
+    #[tokio::test]
+    async fn stale_targets_do_not_persist_crossed_threshold_without_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "stale-goal",
+            &GoalLedger::default(),
+        )
+        .await
+        .unwrap();
+        refresh_conductor_wake_targets_for_project(gcx.clone(), dir.path()).await;
+        refact_buddy_core::conductor_store::remove_goal_ledger(dir.path(), "stale-goal")
+            .await
+            .unwrap();
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-fresh-budget",
+            &test_goal(8, 0),
+        )
+        .await
+        .unwrap();
+
+        assert!(enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-fresh-budget")
+            .is_some());
+        let ledger =
+            refact_buddy_core::conductor_store::load_goal_ledger(dir.path(), "goal-fresh-budget")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(ledger.budget_wake_buckets.no_progress_wakes, 80);
+    }
+
+    #[tokio::test]
+    async fn budget_aggregation_failure_does_not_mutate_stored_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        save_task_meta(dir.path(), "task-bad-budget", "goal-bad-budget").await;
+        write_invalid_budget_trajectory(dir.path(), "task-bad-budget").await;
+        let mut ledger = test_goal(8, 0);
+        ledger.task_ids = vec!["task-bad-budget".to_string()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-bad-budget",
+            &ledger,
+        )
+        .await
+        .unwrap();
+
+        assert!(!enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-bad-budget")
+            .is_none());
+        let ledger =
+            refact_buddy_core::conductor_store::load_goal_ledger(dir.path(), "goal-bad-budget")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(ledger.budget_wake_buckets, GoalBudgetWakeBuckets::default());
+    }
+
+    #[tokio::test]
+    async fn budget_wake_bucket_persistence_is_monotonic() {
+        let dir = tempfile::tempdir().unwrap();
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-monotonic",
+            &GoalLedger {
+                budget_wake_buckets: GoalBudgetWakeBuckets {
+                    wall_clock_secs: 90,
+                    no_progress_wakes: 80,
+                    total_tokens: 0,
+                    usd: 100,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(persist_budget_wake_buckets(
+            dir.path(),
+            "goal-monotonic",
+            GoalBudgetWakeBuckets {
+                wall_clock_secs: 80,
+                no_progress_wakes: 100,
+                total_tokens: 90,
+                usd: 0,
+            },
+        )
+        .await
+        .unwrap());
+
+        let ledger =
+            refact_buddy_core::conductor_store::load_goal_ledger(dir.path(), "goal-monotonic")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            ledger.budget_wake_buckets,
+            GoalBudgetWakeBuckets {
+                wall_clock_secs: 90,
+                no_progress_wakes: 100,
+                total_tokens: 90,
+                usd: 100,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_bucket_persistence_skips_paused_and_terminal_ledgers() {
+        let dir = tempfile::tempdir().unwrap();
+        for (goal_id, status) in [
+            ("goal-paused", GoalStatus::Paused),
+            ("goal-done", GoalStatus::Done),
+        ] {
+            refact_buddy_core::conductor_store::save_goal_ledger(
+                dir.path(),
+                goal_id,
+                &GoalLedger {
+                    status: Some(status),
+                    budget_wake_buckets: GoalBudgetWakeBuckets {
+                        no_progress_wakes: 80,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+            assert!(!persist_budget_wake_buckets(
+                dir.path(),
+                goal_id,
+                GoalBudgetWakeBuckets {
+                    no_progress_wakes: 100,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap());
+
+            let ledger = refact_buddy_core::conductor_store::load_goal_ledger(dir.path(), goal_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(ledger.budget_wake_buckets.no_progress_wakes, 80);
+        }
     }
 
     #[tokio::test]
