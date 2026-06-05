@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 
 use crate::buddy::conversation_ledger::list_all_buddy_conversations;
 use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;
@@ -16,6 +17,9 @@ use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 
 pub const BUDDY_PULSE_MARKER: &str = "buddy_project_memory_pulse";
 const MAX_MARKDOWN_CHARS: usize = 2000;
+const MAX_PROFILE_BYTES: u64 = 64 * 1024;
+const MAX_KNOWLEDGE_FILE_BYTES: u64 = 64 * 1024;
+const MAX_KNOWLEDGE_AGGREGATE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuddyPulsePayload {
@@ -258,8 +262,13 @@ pub fn render_pulse_as_markdown(payload: &BuddyPulsePayload) -> String {
     }
 }
 async fn read_preferences(project_root: &Path) -> Vec<PulsePreference> {
-    let path = project_root.join(".refact/buddy/user_profile.md");
-    let Ok(text) = tokio::fs::read_to_string(path).await else {
+    let Some(text) = read_checked_project_file(
+        &project_root.join(".refact/buddy"),
+        &project_root.join(".refact/buddy/user_profile.md"),
+        MAX_PROFILE_BYTES,
+    )
+    .await
+    else {
         return Vec::new();
     };
     let mut prefs = parse_user_profile(&text)
@@ -330,23 +339,44 @@ fn parse_profile_value(value: &str) -> String {
 
 async fn read_lessons(project_root: &Path) -> Vec<PulseLesson> {
     let dir = project_root.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
-    if !dir.exists() {
+    let Some(root) = canonical_safe_dir(&dir).await else {
         return Vec::new();
-    }
-    let mut lessons = Vec::new();
-    for entry in walkdir::WalkDir::new(&dir)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-    {
+    };
+    let mut paths = Vec::new();
+    let walker = walkdir::WalkDir::new(&dir).follow_links(false);
+    for entry in walker.into_iter().filter_map(|entry| entry.ok()) {
+        if entry.file_type().is_symlink() {
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
         let path = entry.path().to_path_buf();
-        if !path.is_file() || path_has_component(&path, "archive") {
+        if path_has_component(&path, "archive") {
             continue;
         }
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         if ext != "md" && ext != "mdx" {
             continue;
         }
-        let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        paths.push(path);
+    }
+    paths.sort();
+    let mut lessons = Vec::new();
+    let mut aggregate_bytes = 0_u64;
+    for path in paths {
+        let Some(text) = read_checked_project_file_with_canonical_root(
+            &root,
+            &path,
+            MAX_KNOWLEDGE_FILE_BYTES,
+            Some(&mut aggregate_bytes),
+            MAX_KNOWLEDGE_AGGREGATE_BYTES,
+        )
+        .await
+        else {
             continue;
         };
         let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
@@ -405,6 +435,52 @@ async fn read_lessons(project_root: &Path) -> Vec<PulseLesson> {
         .take(5)
         .map(|candidate| candidate.lesson)
         .collect()
+}
+
+async fn canonical_safe_dir(path: &Path) -> Option<PathBuf> {
+    let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    tokio::fs::canonicalize(path).await.ok()
+}
+
+async fn read_checked_project_file(root: &Path, path: &Path, max_bytes: u64) -> Option<String> {
+    let root = canonical_safe_dir(root).await?;
+    read_checked_project_file_with_canonical_root(&root, path, max_bytes, None, u64::MAX).await
+}
+
+async fn read_checked_project_file_with_canonical_root(
+    canonical_root: &Path,
+    path: &Path,
+    max_bytes: u64,
+    aggregate_bytes: Option<&mut u64>,
+    aggregate_max_bytes: u64,
+) -> Option<String> {
+    let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > max_bytes {
+        return None;
+    }
+    let canonical_path = tokio::fs::canonicalize(path).await.ok()?;
+    if !canonical_path.starts_with(canonical_root) {
+        return None;
+    }
+    if let Some(total) = aggregate_bytes {
+        let next_total = total.checked_add(metadata.len())?;
+        if next_total > aggregate_max_bytes {
+            return None;
+        }
+        *total = next_total;
+    }
+    read_bounded_to_string(&canonical_path, max_bytes).await
+}
+
+async fn read_bounded_to_string(path: &Path, max_bytes: u64) -> Option<String> {
+    let file = tokio::fs::File::open(path).await.ok()?;
+    let mut reader = file.take(max_bytes);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await.ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 async fn build_friction(gcx: AppState) -> PulseFriction {
@@ -637,6 +713,36 @@ mod tests {
     use chrono::Duration;
     use tokio::sync::broadcast;
 
+    #[cfg(unix)]
+    fn symlink_file(from: &Path, to: &Path) {
+        std::os::unix::fs::symlink(from, to).unwrap();
+    }
+
+    fn valid_profile(statement: &str) -> String {
+        format!(
+            "# User Profile\n\n## pref\n- statement: \"{}\"\n- confidence: 0.90\n- last_updated: 2026-05-14T10:00:00Z\n",
+            statement
+        )
+    }
+
+    fn valid_lesson(title: &str, body: &str) -> String {
+        format!(
+            "---\ntitle: \"{}\"\ntags: [\"lesson\"]\nupdated: 2026-05-14\n---\n\n{}\n",
+            title, body
+        )
+    }
+
+    async fn write_knowledge_file(root: &Path, name: &str, content: String) -> PathBuf {
+        let path = root
+            .join(crate::file_filter::KNOWLEDGE_FOLDER_NAME)
+            .join(name);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, content).await.unwrap();
+        path
+    }
+
     async fn make_gcx_with_buddy(project_root: &Path) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let (tx, _) = broadcast::channel(16);
@@ -745,6 +851,91 @@ mod tests {
         let payload = build_buddy_pulse_payload(gcx).await.unwrap();
         assert_eq!(payload.preferences.len(), 1);
         assert_eq!(payload.preferences[0].statement, "Keep me");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pulse_ignores_symlinked_profile_pointing_outside_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(outside.path(), valid_profile("Do not read outside"))
+            .await
+            .unwrap();
+        let profile = dir.path().join(".refact/buddy/user_profile.md");
+        tokio::fs::create_dir_all(profile.parent().unwrap())
+            .await
+            .unwrap();
+        symlink_file(outside.path(), &profile);
+
+        let prefs = read_preferences(dir.path()).await;
+
+        assert!(prefs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pulse_ignores_oversized_profile_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join(".refact/buddy/user_profile.md");
+        tokio::fs::create_dir_all(profile.parent().unwrap())
+            .await
+            .unwrap();
+        let content = format!(
+            "{}{}",
+            valid_profile("Too large"),
+            "x".repeat(MAX_PROFILE_BYTES as usize)
+        );
+        tokio::fs::write(&profile, content).await.unwrap();
+
+        let prefs = read_preferences(dir.path()).await;
+
+        assert!(prefs.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pulse_ignores_symlinked_outside_knowledge_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(outside.path(), valid_lesson("Outside", "do not read"))
+            .await
+            .unwrap();
+        let knowledge_dir = dir.path().join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        symlink_file(outside.path(), &knowledge_dir.join("outside.md"));
+
+        let lessons = read_lessons(dir.path()).await;
+
+        assert!(lessons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pulse_ignores_oversized_knowledge_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let oversized = valid_lesson("Too large", &"x".repeat(MAX_KNOWLEDGE_FILE_BYTES as usize));
+        write_knowledge_file(dir.path(), "large.md", oversized).await;
+
+        let lessons = read_lessons(dir.path()).await;
+
+        assert!(lessons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pulse_enforces_knowledge_aggregate_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let padding = "x".repeat((MAX_KNOWLEDGE_FILE_BYTES - 1024) as usize);
+        for idx in 0..5 {
+            write_knowledge_file(
+                dir.path(),
+                &format!("lesson-{idx}.md"),
+                valid_lesson(&format!("Lesson {idx}"), &padding),
+            )
+            .await;
+        }
+
+        let lessons = read_lessons(dir.path()).await;
+
+        assert_eq!(lessons.len(), 4);
+        assert!(lessons.iter().all(|lesson| lesson.title != "Lesson 4"));
     }
 
     #[tokio::test]
