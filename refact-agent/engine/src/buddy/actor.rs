@@ -283,7 +283,7 @@ fn cap_generated_buddy_text(text: &str, max_chars: usize) -> String {
         .to_string()
 }
 
-fn safe_buddy_candidate(text: &str, max_chars: usize) -> Option<String> {
+pub(crate) fn safe_buddy_candidate(text: &str, max_chars: usize) -> Option<String> {
     let normalized = normalize_generated_buddy_text(text);
     let redacted = redact_sensitive(&normalized);
     if normalized.is_empty() || redacted != normalized || contains_redaction_marker(&normalized) {
@@ -382,6 +382,8 @@ pub async fn render_buddy_runtime_event(
         .render_runtime_event(gcx, voice_ctx, status)
         .await;
     let title_is_safe = safe_buddy_candidate(&title, BUDDY_TITLE_MAX_CHARS).is_some();
+    let safe_description =
+        description.and_then(|text| safe_buddy_candidate(&text, BUDDY_DESCRIPTION_MAX_CHARS));
     (
         safe_generated_buddy_text(
             &title,
@@ -390,7 +392,60 @@ pub async fn render_buddy_runtime_event(
             BUDDY_TITLE_MAX_CHARS,
         ),
         safe_generated_buddy_text_opt(
-            if title_is_safe { description } else { None },
+            if title_is_safe {
+                safe_description
+            } else {
+                None
+            },
+            fallback_description,
+            BUDDY_STATIC_DESCRIPTION_FALLBACK,
+            BUDDY_DESCRIPTION_MAX_CHARS,
+        ),
+    )
+}
+
+pub async fn render_buddy_runtime_event_fast(
+    gcx: AppState,
+    persona: BuddyPersonalityProfile,
+    identity_name: String,
+    pulse: BuddyPulse,
+    workflow_id: Option<String>,
+    workflow_summary: String,
+    status: &str,
+    fallback_title: String,
+    fallback_description: Option<String>,
+) -> (String, Option<String>) {
+    let pulse_one_liner = format!(
+        "{} pending ops, {} stuck tasks",
+        pulse.memory.pending_ops, pulse.tasks.stuck
+    );
+    let voice_ctx = VoiceCtx {
+        persona: &persona,
+        identity_name: identity_name.as_str(),
+        pulse_one_liner,
+        workflow_id: workflow_id.as_deref(),
+        workflow_summary: Some(workflow_summary.as_str()),
+    };
+    let (title, description) = voice_service()
+        .await
+        .render_runtime_event_fast(gcx, voice_ctx, status)
+        .await;
+    let title_is_safe = safe_buddy_candidate(&title, BUDDY_TITLE_MAX_CHARS).is_some();
+    let safe_description =
+        description.and_then(|text| safe_buddy_candidate(&text, BUDDY_DESCRIPTION_MAX_CHARS));
+    (
+        safe_generated_buddy_text(
+            &title,
+            fallback_title,
+            BUDDY_STATIC_TITLE_FALLBACK,
+            BUDDY_TITLE_MAX_CHARS,
+        ),
+        safe_generated_buddy_text_opt(
+            if title_is_safe {
+                safe_description
+            } else {
+                None
+            },
             fallback_description,
             BUDDY_STATIC_DESCRIPTION_FALLBACK,
             BUDDY_DESCRIPTION_MAX_CHARS,

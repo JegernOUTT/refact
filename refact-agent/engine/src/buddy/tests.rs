@@ -3135,6 +3135,42 @@ async fn generated_runtime_event_title_and_description_with_secret_use_fallbacks
 }
 
 #[tokio::test]
+async fn generated_runtime_event_fast_with_unsafe_output_uses_fallbacks() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/test-user".to_string());
+    let (service, _renderer) =
+        crate::buddy::voice_service::test_voice_service_with_responses(vec![Some(format!(
+            "Runtime copied {home}/private/project token=FASTSECRET"
+        ))]);
+    let _guard = crate::buddy::voice_service::install_test_voice_service(service).await;
+    let app =
+        crate::app_state::AppState::from_gcx(crate::global_context::tests::make_test_gcx().await)
+            .await;
+    let fallback_title = "Safe fast runtime title".to_string();
+    let fallback_description = "Safe fast runtime description".to_string();
+
+    let (title, description) = super::actor::render_buddy_runtime_event_fast(
+        app,
+        super::types::BuddyPersonalityProfile::default(),
+        "Puck".to_string(),
+        BuddyPulse::default(),
+        Some("secret_runtime_fast_test".to_string()),
+        format!("Description token=SUMMARYSECRET at {home}/private/project"),
+        "completed",
+        fallback_title.clone(),
+        Some(fallback_description.clone()),
+    )
+    .await;
+
+    assert_eq!(title, fallback_title);
+    assert_eq!(description.as_deref(), Some(fallback_description.as_str()));
+    let rendered = format!("{} {}", title, description.unwrap_or_default());
+    assert!(!rendered.contains("FASTSECRET"));
+    assert!(!rendered.contains("SUMMARYSECRET"));
+    assert!(!rendered.contains(home.as_str()));
+    assert!(!rendered.contains("[REDACTED"));
+}
+
+#[tokio::test]
 async fn generated_activity_title_with_secret_uses_fallback() {
     let (service, _renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
         vec![Some("Activity token=ACTIVITYSECRET".to_string())],
