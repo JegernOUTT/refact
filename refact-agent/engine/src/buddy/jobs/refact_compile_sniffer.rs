@@ -18,6 +18,7 @@ const COOLDOWN_SECONDS: u64 = 60 * 60;
 const PRIORITY: u32 = 5;
 const MAX_LOG_LINES: usize = 5;
 const MAX_LOG_BYTES: u64 = 16 * 1024;
+const MAX_LOG_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LOG_LINE_CHARS: usize = 1_000;
 
 fn modified_unix_secs(path: &Path) -> u64 {
@@ -29,16 +30,39 @@ fn modified_unix_secs(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+fn validated_rustbinary_log_candidate(logs_dir: &Path, path: PathBuf) -> Option<PathBuf> {
+    let canonical_logs_dir = logs_dir.canonicalize().ok()?;
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    if metadata.len() > MAX_LOG_FILE_BYTES {
+        return None;
+    }
+    let canonical_path = path.canonicalize().ok()?;
+    if !canonical_path.starts_with(&canonical_logs_dir) {
+        return None;
+    }
+    Some(canonical_path)
+}
+
 fn newest_rustbinary_log(logs_dir: &Path) -> Option<PathBuf> {
     let pattern = logs_dir.join("rustbinary.*").to_string_lossy().to_string();
     glob(&pattern)
         .ok()?
         .filter_map(Result::ok)
-        .filter(|path| path.is_file())
+        .filter_map(|path| validated_rustbinary_log_candidate(logs_dir, path))
         .max_by_key(|path| modified_unix_secs(path))
 }
 
 fn first_log_lines(path: &Path) -> Option<Vec<String>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_LOG_FILE_BYTES
+    {
+        return None;
+    }
     let file = File::open(path).ok()?.take(MAX_LOG_BYTES);
     let reader = BufReader::new(file);
     let mut lines = Vec::new();
@@ -262,6 +286,39 @@ mod tests {
         assert!(evidence.contains("newest_log=rustbinary.2026-05-15"));
         assert!(evidence.contains("[REDACTED"));
         assert_no_compile_sniffer_leaks(&evidence);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compile_error_evidence_ignores_symlinked_newest_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let older = logs_dir.join("rustbinary.2026-05-15");
+        let outside = dir.path().join("outside.log");
+        let symlink = logs_dir.join("rustbinary.2026-05-16");
+        std::fs::write(&older, "error[E0425]: older compile error").unwrap();
+        std::fs::write(&outside, "error[E9999]: outside compile error").unwrap();
+        std::os::unix::fs::symlink(&outside, &symlink).unwrap();
+
+        let evidence = compile_error_evidence(&logs_dir).unwrap();
+
+        assert!(evidence.contains("newest_log=rustbinary.2026-05-15"));
+        assert!(!evidence.contains("rustbinary.2026-05-16"));
+        assert!(!evidence.contains("outside compile error"));
+    }
+
+    #[test]
+    fn compile_error_evidence_ignores_oversized_log_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let path = logs_dir.join("rustbinary.2026-05-15");
+        let mut contents = String::from("error[E0425]: oversized compile error\n");
+        contents.push_str(&"x".repeat(MAX_LOG_FILE_BYTES as usize));
+        std::fs::write(&path, contents).unwrap();
+
+        assert!(compile_error_evidence(&logs_dir).is_none());
     }
 
     #[test]
