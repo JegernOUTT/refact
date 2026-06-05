@@ -1389,6 +1389,14 @@ impl BuddyService {
         );
         ev.description = Some(redacted);
         ev.chat_id = ctx.chat_id.clone();
+        if matches!(
+            ctx.severity,
+            DiagnosticSeverity::Critical | DiagnosticSeverity::High
+        ) {
+            ev.persistent = true;
+            ev.ttl_ms = None;
+            ev.bubble_policy = Some(super::types::BuddyBubblePolicy::Durable);
+        }
         self.enqueue_runtime_event(ev);
     }
 

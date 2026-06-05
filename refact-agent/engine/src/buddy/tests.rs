@@ -2246,6 +2246,32 @@ async fn duplicate_diagnostic_coalesces_without_history_spam() {
 }
 
 #[tokio::test]
+async fn high_diagnostic_runtime_event_is_durable() {
+    let mut svc = make_service();
+    let ctx = DiagnosticContext {
+        error_type: "frontend".to_string(),
+        error_message: "Critical render error".to_string(),
+        source_file: Some("frontend/window_error".to_string()),
+        tool_name: None,
+        chat_id: Some("chat-1".to_string()),
+        collected_at: chrono::Utc::now().to_rfc3339(),
+        severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
+    };
+
+    svc.add_diagnostic(ctx);
+
+    let event = svc.runtime_queue.items.front().unwrap();
+    assert_eq!(event.priority, "high");
+    assert!(event.persistent);
+    assert_eq!(event.ttl_ms, None);
+    assert_eq!(
+        event.bubble_policy,
+        Some(super::types::BuddyBubblePolicy::Durable)
+    );
+}
+
+#[tokio::test]
 async fn duplicate_diagnostic_occurrence_increment_persists() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();

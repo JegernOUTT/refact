@@ -1,10 +1,9 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use crate::types::BuddyRuntimeEvent;
 
 const MAX_QUEUE_SIZE: usize = 100;
-const PERSONALITY_RESERVED_SLOTS: usize = 8;
 const DISMISSED_NO_TTL_RETENTION_MINUTES: i64 = 15;
 const COMPLETED_NO_TTL_RETENTION_HOURS: i64 = 1;
 const FAILED_NO_TTL_RETENTION_HOURS: i64 = 24;
@@ -39,13 +38,6 @@ fn older_runtime_event_position(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => left.0.cmp(&right.0),
     }
-}
-
-fn newer_runtime_event_position(
-    left: &(usize, &BuddyRuntimeEvent),
-    right: &(usize, &BuddyRuntimeEvent),
-) -> std::cmp::Ordering {
-    older_runtime_event_position(left, right).reverse()
 }
 
 pub fn runtime_event_expired_at(event: &BuddyRuntimeEvent, now: DateTime<Utc>) -> bool {
@@ -136,6 +128,41 @@ fn runtime_event_is_failed(event: &BuddyRuntimeEvent) -> bool {
         || event.failure_summary.is_some()
 }
 
+fn runtime_event_is_durable_diagnostic(event: &BuddyRuntimeEvent) -> bool {
+    event.persistent
+        && matches!(event.priority.as_str(), "critical" | "high")
+        && (event
+            .dedupe_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("diag:"))
+            || runtime_event_is_failed(event))
+}
+
+fn runtime_event_eviction_class(event: &BuddyRuntimeEvent) -> u8 {
+    if runtime_event_is_durable_diagnostic(event) {
+        return 7;
+    }
+    if !event.persistent && event.priority == "low" {
+        return 0;
+    }
+    if !event.persistent && event.dismissed {
+        return 1;
+    }
+    if !event.persistent && is_personality_runtime_event(event) {
+        return 2;
+    }
+    if !event.persistent {
+        return 3;
+    }
+    if event.priority == "low" {
+        return 4;
+    }
+    if is_personality_runtime_event(event) {
+        return 5;
+    }
+    6
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeQueue {
     #[serde(default)]
@@ -221,7 +248,6 @@ impl RuntimeQueue {
         }
 
         // Priority insertion: critical/high go to front
-        let input_id = event.id.clone();
         let insert_front = event.priority == "critical" || event.priority == "high";
         if insert_front {
             self.items.push_front(event);
@@ -230,11 +256,8 @@ impl RuntimeQueue {
         }
 
         while self.items.len() > MAX_QUEUE_SIZE {
-            let protected = self.protected_eviction_ids(&input_id);
-            let incoming_protected = HashSet::from([input_id.clone()]);
             let dropped = self
-                .eviction_victim_position(&protected, false)
-                .or_else(|| self.eviction_victim_position(&incoming_protected, true))
+                .eviction_victim_position()
                 .and_then(|pos| self.items.remove(pos));
             if let Some(ev) = dropped {
                 removed.push(ev.id);
@@ -245,56 +268,15 @@ impl RuntimeQueue {
         removed
     }
 
-    fn protected_eviction_ids(&self, incoming_id: &str) -> HashSet<String> {
-        let mut protected = HashSet::from([incoming_id.to_string()]);
-        let mut personality_events = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, event)| is_personality_runtime_event(event))
-            .collect::<Vec<_>>();
-        personality_events.sort_by(newer_runtime_event_position);
-        for (_, event) in personality_events
-            .into_iter()
-            .take(PERSONALITY_RESERVED_SLOTS.min(MAX_QUEUE_SIZE))
-        {
-            protected.insert(event.id.clone());
-        }
-        protected
-    }
-
-    fn eviction_victim_position(
-        &self,
-        protected: &HashSet<String>,
-        allow_protected_personality_transient: bool,
-    ) -> Option<usize> {
-        if allow_protected_personality_transient {
-            return self
-                .oldest_position(|event| !event.persistent && !protected.contains(&event.id));
-        }
-        self.oldest_position(|event| event.priority == "low" && !protected.contains(&event.id))
-            .or_else(|| {
-                self.oldest_position(|event| event.dismissed && !protected.contains(&event.id))
-            })
-            .or_else(|| {
-                self.oldest_position(|event| {
-                    !protected.contains(&event.id)
-                        && !is_personality_runtime_event(event)
-                        && !event.persistent
-                })
-            })
-            .or_else(|| self.oldest_position(|event| !protected.contains(&event.id)))
-    }
-
-    fn oldest_position(
-        &self,
-        mut predicate: impl FnMut(&BuddyRuntimeEvent) -> bool,
-    ) -> Option<usize> {
+    fn eviction_victim_position(&self) -> Option<usize> {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, event)| predicate(event))
-            .min_by(older_runtime_event_position)
+            .min_by(|left, right| {
+                runtime_event_eviction_class(left.1)
+                    .cmp(&runtime_event_eviction_class(right.1))
+                    .then_with(|| older_runtime_event_position(left, right))
+            })
             .map(|(pos, _)| pos)
     }
 
@@ -654,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_reaction_survives_full_high_error_queue() {
+    fn chat_reaction_does_not_evict_full_durable_diagnostic_queue() {
         let mut queue = RuntimeQueue::new();
         for i in 0..MAX_QUEUE_SIZE {
             queue.enqueue(make_error_event(&format!("error-{i}"), i));
@@ -663,59 +645,73 @@ mod tests {
         let removed = queue.enqueue(make_personality_event("reaction-fresh", 0));
 
         assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        assert_eq!(removed, vec!["reaction-fresh".to_string()]);
+        assert!(!has_event(&queue, "reaction-fresh"));
+        for i in 0..MAX_QUEUE_SIZE {
+            assert!(has_event(&queue, &format!("error-{i}")));
+        }
+    }
+
+    #[test]
+    fn transient_personality_events_are_evicted_before_high_diagnostics() {
+        let mut queue = RuntimeQueue::new();
+        for i in 0..10 {
+            queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
+        }
+        for i in 0..MAX_QUEUE_SIZE {
+            queue.enqueue(make_error_event(&format!("error-{i}"), i));
+        }
+
+        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        for i in 0..10 {
+            assert!(!has_event(&queue, &format!("reaction-{i}")));
+        }
+        for i in 10..MAX_QUEUE_SIZE {
+            assert!(has_event(&queue, &format!("error-{i}")));
+        }
+    }
+
+    #[test]
+    fn low_transient_events_are_evicted_before_personality_events() {
+        let mut queue = RuntimeQueue::new();
+        let mut low = make_event("low-old", "low-key");
+        low.priority = "low".to_string();
+        low.status = "info".to_string();
+        low.created_at = "2024-01-01T00:00:00Z".to_string();
+        queue.enqueue(low);
+        for i in 0..(MAX_QUEUE_SIZE - 1) {
+            queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
+        }
+
+        let removed = queue.enqueue(make_personality_event("reaction-fresh", MAX_QUEUE_SIZE));
+
+        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        assert_eq!(removed, vec!["low-old".to_string()]);
+        assert!(!has_event(&queue, "low-old"));
         assert!(has_event(&queue, "reaction-fresh"));
-        assert_eq!(removed, vec!["error-0".to_string()]);
-        assert!(!has_event(&queue, "error-0"));
     }
 
     #[test]
-    fn reserved_personality_events_survive_new_high_errors() {
+    fn persistent_high_diagnostics_survive_prune_and_enqueue_pressure() {
+        let now = DateTime::parse_from_rfc3339("2024-01-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let mut queue = RuntimeQueue::new();
-        for i in 0..PERSONALITY_RESERVED_SLOTS {
-            queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
-        }
-        for i in 0..(MAX_QUEUE_SIZE + 20) {
-            queue.enqueue(make_error_event(&format!("error-{i}"), i));
-        }
+        let mut diagnostic = make_error_event("diag-durable", 0);
+        diagnostic.dedupe_key = Some("diag:durable".to_string());
+        diagnostic.created_at = "2024-01-01T00:00:00Z".to_string();
+        diagnostic.ttl_ms = Some(1000);
+        queue.items.push_back(diagnostic);
 
-        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
-        for i in 0..PERSONALITY_RESERVED_SLOTS {
-            assert!(has_event(&queue, &format!("reaction-{i}")));
-        }
-    }
-
-    #[test]
-    fn personality_reserve_does_not_exceed_queue_cap() {
-        let mut queue = RuntimeQueue::new();
-        for i in 0..(PERSONALITY_RESERVED_SLOTS * 3) {
-            queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
-        }
-        for i in 0..(MAX_QUEUE_SIZE * 2) {
-            queue.enqueue(make_error_event(&format!("error-{i}"), i));
-        }
-
-        assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
-        let personality_count = queue
-            .items
-            .iter()
-            .filter(|event| is_personality_runtime_event(event))
-            .count();
-        assert!(personality_count >= PERSONALITY_RESERVED_SLOTS);
-        assert!(personality_count <= MAX_QUEUE_SIZE);
-    }
-
-    #[test]
-    fn excess_old_personality_events_can_be_evicted() {
-        let mut queue = RuntimeQueue::new();
-        for i in 0..(MAX_QUEUE_SIZE + PERSONALITY_RESERVED_SLOTS + 3) {
+        let pruned = queue.prune_expired_at(now);
+        for i in 0..MAX_QUEUE_SIZE {
             queue.enqueue(make_personality_event(&format!("reaction-{i}"), i));
         }
 
+        assert!(pruned.is_empty());
         assert_eq!(queue.items.len(), MAX_QUEUE_SIZE);
+        assert!(has_event(&queue, "diag-durable"));
         assert!(!has_event(&queue, "reaction-0"));
-        for i in (MAX_QUEUE_SIZE + 3)..(MAX_QUEUE_SIZE + PERSONALITY_RESERVED_SLOTS + 3) {
-            assert!(has_event(&queue, &format!("reaction-{i}")));
-        }
     }
 
     #[test]
