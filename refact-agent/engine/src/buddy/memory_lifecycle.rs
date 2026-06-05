@@ -191,6 +191,7 @@ pub struct MemoryLifecyclePayload {
     pub source_content_hash: Option<String>,
     pub superseded_by: Option<String>,
     pub superseded_paths: Vec<String>,
+    pub canonical_path: Option<String>,
     pub canonical: Option<MemoryCreatePayload>,
 }
 
@@ -232,6 +233,7 @@ impl MemoryLifecyclePayload {
         self.source_content_hash = normalize_optional_string(self.source_content_hash.as_deref());
         self.superseded_by = normalize_optional_string(self.superseded_by.as_deref());
         self.superseded_paths = normalize_paths(&self.superseded_paths);
+        self.canonical_path = self.canonical_path.as_deref().and_then(normalize_path);
         self.canonical = self.canonical.map(|canonical| canonical.normalized());
         self
     }
@@ -1477,6 +1479,7 @@ fn build_merge_candidate(
     op.requires_approval = true;
     op.payload.superseded_by = Some(canonical.stable_key());
     op.payload.superseded_paths = superseded_paths;
+    op.payload.canonical_path = Some(canonical.path.clone());
     op.payload.canonical = Some(MemoryCreatePayload {
         title: Some(canonical.title.clone()).filter(|title| !title.is_empty()),
         content: canonical.content.clone(),
@@ -2835,6 +2838,85 @@ async fn apply_merge_archive(
         superseded_paths.push(validate_existing_memory_path(target, &roots).await?);
     }
 
+    if let Some(canonical_path) = &op.payload.canonical_path {
+        let canonical_path = validate_existing_memory_path(canonical_path, &roots).await?;
+        if superseded_paths.iter().any(|path| path == &canonical_path) {
+            return Err("merge_archive canonical path cannot be superseded".to_string());
+        }
+
+        let changed =
+            update_memory_document_frontmatter(gcx.gcx.clone(), &canonical_path, |frontmatter| {
+                let old = (
+                    frontmatter.tags.clone(),
+                    frontmatter.filenames.clone(),
+                    frontmatter.related_files.clone(),
+                    frontmatter.links.clone(),
+                    frontmatter.kind.clone(),
+                    frontmatter.review_after.clone(),
+                    frontmatter.source_commit.clone(),
+                    frontmatter.source_tool.clone(),
+                    frontmatter.source_confidence,
+                );
+                let mut tags = frontmatter.tags.clone();
+                tags.extend(canonical.tags.clone());
+                if tags.is_empty() {
+                    tags.push("memory".to_string());
+                }
+                frontmatter.tags = normalize_memory_tags(&tags, 16);
+                frontmatter.filenames = merged_paths(&frontmatter.filenames, &canonical.filenames);
+                frontmatter.related_files =
+                    merged_paths(&frontmatter.related_files, &canonical.related_files);
+                frontmatter.links = merged_strings(&frontmatter.links, &canonical.links);
+                if frontmatter.kind.is_none() {
+                    frontmatter.kind = Some(canonical.kind.clone());
+                }
+                if frontmatter.review_after.is_none() {
+                    frontmatter.review_after = canonical.review_after.clone();
+                }
+                if frontmatter.source_commit.is_none() {
+                    frontmatter.source_commit = canonical.source_commit.clone();
+                }
+                frontmatter.source_tool =
+                    Some(format!("buddy_memory_lifecycle:{}", op.source.as_str()));
+                frontmatter.source_confidence = Some(op.confidence);
+                let new = (
+                    frontmatter.tags.clone(),
+                    frontmatter.filenames.clone(),
+                    frontmatter.related_files.clone(),
+                    frontmatter.links.clone(),
+                    frontmatter.kind.clone(),
+                    frontmatter.review_after.clone(),
+                    frontmatter.source_commit.clone(),
+                    frontmatter.source_tool.clone(),
+                    frontmatter.source_confidence,
+                );
+                if old == new {
+                    return Ok(false);
+                }
+                frontmatter.updated = Some(today_string());
+                Ok(true)
+            })
+            .await?;
+        let canonical_id = memory_file_frontmatter_id(&canonical_path)
+            .await?
+            .unwrap_or_else(|| canonical_path.to_string_lossy().to_string());
+        let mut paths = if changed {
+            vec![canonical_path.clone()]
+        } else {
+            Vec::new()
+        };
+        for path in superseded_paths {
+            let changed = archive_memory_file(gcx.clone(), &path, Some(&canonical_id)).await?;
+            if changed {
+                paths.push(path);
+            }
+        }
+        if paths.is_empty() {
+            return Ok(MemoryApplyOutcome::skipped("merge already applied"));
+        }
+        return Ok(MemoryApplyOutcome::applied(paths));
+    }
+
     let mut tags = canonical.tags.clone();
     if tags.is_empty() {
         tags.push("memory".to_string());
@@ -2869,6 +2951,26 @@ async fn apply_merge_archive(
     }
 
     Ok(MemoryApplyOutcome::applied(paths))
+}
+
+fn merged_paths(existing: &[String], incoming: &[String]) -> Vec<String> {
+    let mut values = existing.to_vec();
+    values.extend(incoming.to_vec());
+    normalize_paths(&values)
+}
+
+fn merged_strings(existing: &[String], incoming: &[String]) -> Vec<String> {
+    let mut values = existing.to_vec();
+    values.extend(incoming.to_vec());
+    normalize_strings(&values)
+}
+
+async fn memory_file_frontmatter_id(path: &Path) -> Result<Option<String>, String> {
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("Failed to read memory file: {}", e))?;
+    let (frontmatter, _) = KnowledgeFrontmatter::parse(&text);
+    Ok(frontmatter.id)
 }
 
 pub async fn archive_memory_file_checked(
@@ -3479,6 +3581,42 @@ mod tests {
         assert_eq!(merge.status, MemoryOpStatus::Pending);
         assert_eq!(merge.target_paths, strings(&["/tmp/auto.md"]));
         assert_eq!(merge.payload.superseded_by.as_deref(), Some("pinned"));
+        assert_eq!(
+            merge.payload.canonical_path.as_deref(),
+            Some("/tmp/pinned.md")
+        );
+    }
+
+    #[test]
+    fn merge_candidate_sets_existing_canonical_path() {
+        let canonical = snapshot(
+            "canonical",
+            "Use Rustfmt",
+            "Canonical body",
+            &["rust"],
+            &["src/lib.rs"],
+            "active",
+            MemorySourceClass::AutoGenerated,
+        );
+        let duplicate = snapshot(
+            "duplicate",
+            "Use Rustfmt",
+            "Duplicate body",
+            &["rust"],
+            &["src/lib.rs"],
+            "proposed",
+            MemorySourceClass::AutoGenerated,
+        );
+
+        let op = build_merge_candidate(&[duplicate, canonical], &[0, 1], "test", 0.91, fixed_now())
+            .expect("merge op");
+
+        assert_eq!(
+            op.payload.canonical_path.as_deref(),
+            Some("/tmp/canonical.md")
+        );
+        assert_eq!(op.payload.superseded_paths, strings(&["/tmp/duplicate.md"]));
+        assert_eq!(op.payload.superseded_by.as_deref(), Some("canonical"));
     }
 
     #[test]
@@ -4654,6 +4792,131 @@ mod tests {
         let (canonical_frontmatter, canonical_body) = frontmatter_and_body(&canonical_text);
         assert_eq!(canonical_frontmatter.title.as_deref(), Some("Canonical"));
         assert_eq!(canonical_body, "Canonical body");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_archive_reuses_existing_canonical_and_preserves_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let canonical_path = knowledge_dir.join("canonical.md");
+        let old_path = knowledge_dir.join("old.md");
+        let mut canonical_frontmatter = active_frontmatter("canonical-id", &["old"]);
+        canonical_frontmatter.id = Some("canonical-id".to_string());
+        canonical_frontmatter.filenames = strings(&["old.rs"]);
+        canonical_frontmatter.related_files = strings(&["old-related.rs"]);
+        canonical_frontmatter.links = strings(&["old-link"]);
+        write_memory_file(
+            &canonical_path,
+            canonical_frontmatter,
+            "Canonical body must stay put",
+        )
+        .await;
+        write_memory_file(
+            &old_path,
+            active_frontmatter("old-id", &["duplicate"]),
+            "Old body",
+        )
+        .await;
+        let before_count = std::fs::read_dir(&knowledge_dir).unwrap().count();
+
+        let mut op = MemoryLifecycleOp::pending(
+            "op-merge-existing",
+            MemorySource::MemoryGarden,
+            MemoryOpType::MergeArchive,
+            vec![old_path.to_string_lossy().to_string()],
+            "merge existing",
+            0.91,
+            "2026-05-02T00:00:00Z",
+        );
+        op.status = MemoryOpStatus::Approved;
+        op.payload.canonical_path = Some(canonical_path.to_string_lossy().to_string());
+        op.payload.superseded_paths = vec![old_path.to_string_lossy().to_string()];
+        op.payload.canonical = Some(MemoryCreatePayload {
+            title: Some("Merged canonical".to_string()),
+            content: "New canonical body that must not replace existing body".to_string(),
+            tags: strings(&["new", "old"]),
+            kind: "domain".to_string(),
+            filenames: strings(&["new.rs"]),
+            related_files: strings(&["new-related.rs"]),
+            links: strings(&["new-link"]),
+            ..Default::default()
+        });
+
+        let outcome = apply_memory_lifecycle_op(gcx, &op).await.unwrap();
+
+        assert_eq!(outcome.status, MemoryOpStatus::Applied);
+        assert_eq!(
+            std::fs::read_dir(&knowledge_dir).unwrap().count(),
+            before_count
+        );
+        let (canonical_frontmatter, canonical_body) =
+            frontmatter_and_body(&tokio::fs::read_to_string(&canonical_path).await.unwrap());
+        assert_eq!(canonical_body, "Canonical body must stay put");
+        assert_eq!(canonical_frontmatter.tags, strings(&["old", "new"]));
+        assert_eq!(
+            canonical_frontmatter.filenames,
+            strings(&["new.rs", "old.rs"])
+        );
+        assert_eq!(
+            canonical_frontmatter.related_files,
+            strings(&["new-related.rs", "old-related.rs"])
+        );
+        assert_eq!(
+            canonical_frontmatter.links,
+            strings(&["new-link", "old-link"])
+        );
+        let (old_frontmatter, old_body) =
+            frontmatter_and_body(&tokio::fs::read_to_string(&old_path).await.unwrap());
+        assert_eq!(old_frontmatter.status.as_deref(), Some("archived"));
+        assert_eq!(
+            old_frontmatter.superseded_by.as_deref(),
+            Some("canonical-id")
+        );
+        assert_eq!(old_body, "Old body");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_archive_rejects_canonical_self_archive_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx_with_workspace(dir.path()).await;
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let canonical_path = knowledge_dir.join("canonical.md");
+        write_memory_file(
+            &canonical_path,
+            active_frontmatter("canonical-id", &["old"]),
+            "Canonical body",
+        )
+        .await;
+        let before = tokio::fs::read_to_string(&canonical_path).await.unwrap();
+
+        let mut op = MemoryLifecycleOp::pending(
+            "op-merge-self",
+            MemorySource::MemoryGarden,
+            MemoryOpType::MergeArchive,
+            vec![canonical_path.to_string_lossy().to_string()],
+            "merge self",
+            0.91,
+            "2026-05-02T00:00:00Z",
+        );
+        op.status = MemoryOpStatus::Approved;
+        op.payload.canonical_path = Some(canonical_path.to_string_lossy().to_string());
+        op.payload.superseded_paths = vec![canonical_path.to_string_lossy().to_string()];
+        op.payload.canonical = Some(MemoryCreatePayload {
+            title: Some("Canonical".to_string()),
+            content: "Canonical body".to_string(),
+            tags: strings(&["new"]),
+            kind: "domain".to_string(),
+            ..Default::default()
+        });
+
+        let err = apply_memory_lifecycle_op(gcx, &op).await.unwrap_err();
+
+        assert!(err.contains("canonical path cannot be superseded"));
+        let after = tokio::fs::read_to_string(&canonical_path).await.unwrap();
+        assert_eq!(after, before);
     }
 
     #[tokio::test(flavor = "multi_thread")]
