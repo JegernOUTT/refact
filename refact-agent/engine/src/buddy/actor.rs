@@ -38,6 +38,8 @@ const SUGGESTION_RATE_LIMIT_SECS: u64 = 300;
 const SUGGESTION_EXPIRY_SECS: i64 = 300;
 const PET_DECAY_INTERVAL_SECS: u64 = 15;
 const OBSERVER_CONCURRENCY: usize = 4;
+const OBSERVER_TIMEOUT_SECS: u64 = 5;
+const OBSERVER_FAILURE_SURFACE_THRESHOLD: u32 = 3;
 const MEMORY_OPS_ARCHIVE_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 const MEMORY_OPS_COMPACT_INTERVAL_SECS: u64 = 6 * 60 * 60;
 const BUDDY_SPEECH_MAX_CHARS: usize = 280;
@@ -46,6 +48,42 @@ const BUDDY_DESCRIPTION_MAX_CHARS: usize = 500;
 const BUDDY_STATIC_SPEECH_FALLBACK: &str = "Tiny gremlin update: something needs attention.";
 const BUDDY_STATIC_TITLE_FALLBACK: &str = "Buddy update";
 const BUDDY_STATIC_DESCRIPTION_FALLBACK: &str = "Buddy has an update ready.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ObserverFailureKind {
+    Timeout,
+    Panic,
+}
+
+impl ObserverFailureKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Panic => "panic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObserverFailure {
+    pub observer_id: &'static str,
+    pub kind: ObserverFailureKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ObserverRunReport {
+    pub facts: Vec<BuddyFact>,
+    pub successes: Vec<&'static str>,
+    pub failures: Vec<ObserverFailure>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ObserverHealthState {
+    pub consecutive_failures: u32,
+    pub surfaced: bool,
+    pub last_failure: Option<String>,
+}
 
 pub(crate) fn chat_phrase_bank_is_fresh(bank: &BuddyChatPhraseBank, now: DateTime<Utc>) -> bool {
     bank.day == now.date_naive().to_string()
@@ -56,30 +94,69 @@ pub(crate) async fn observe_buddy_facts_parallel(
     gcx: AppState,
     project_root: std::path::PathBuf,
     now: DateTime<Utc>,
-) -> Vec<BuddyFact> {
+) -> ObserverRunReport {
     use futures::stream::{FuturesUnordered, StreamExt};
 
     let mut pending = FuturesUnordered::new();
-    let mut all_facts = Vec::new();
+    let mut report = ObserverRunReport::default();
     for obs in due_observers {
         let gcx = gcx.clone();
         let project_root = project_root.clone();
         pending.push(async move {
+            let observer_id = obs.id();
             let ctx = ObserverContext { project_root, now };
-            tokio::time::timeout(tokio::time::Duration::from_secs(5), obs.observe(gcx, &ctx))
-                .await
-                .unwrap_or_default()
+            let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+                tokio::time::Duration::from_secs(OBSERVER_TIMEOUT_SECS),
+                obs.observe(gcx, &ctx),
+            ));
+            match futures::FutureExt::catch_unwind(result).await {
+                Ok(Ok(facts)) => Ok((observer_id, facts)),
+                Ok(Err(_)) => Err(ObserverFailure {
+                    observer_id,
+                    kind: ObserverFailureKind::Timeout,
+                    message: format!(
+                        "observer '{}' timed out after {}s",
+                        observer_id, OBSERVER_TIMEOUT_SECS
+                    ),
+                }),
+                Err(_) => Err(ObserverFailure {
+                    observer_id,
+                    kind: ObserverFailureKind::Panic,
+                    message: format!("observer '{}' panicked while collecting facts", observer_id),
+                }),
+            }
         });
         if pending.len() >= OBSERVER_CONCURRENCY {
-            if let Some(facts) = pending.next().await {
-                all_facts.extend(facts);
+            if let Some(result) = pending.next().await {
+                apply_observer_result(&mut report, result);
             }
         }
     }
-    while let Some(facts) = pending.next().await {
-        all_facts.extend(facts);
+    while let Some(result) = pending.next().await {
+        apply_observer_result(&mut report, result);
     }
-    all_facts
+    report
+}
+
+fn apply_observer_result(
+    report: &mut ObserverRunReport,
+    result: Result<(&'static str, Vec<BuddyFact>), ObserverFailure>,
+) {
+    match result {
+        Ok((observer_id, facts)) => {
+            report.successes.push(observer_id);
+            report.facts.extend(facts);
+        }
+        Err(failure) => {
+            warn!(
+                observer_id = failure.observer_id,
+                failure_kind = failure.kind.as_str(),
+                "buddy: observer failed: {}",
+                failure.message
+            );
+            report.failures.push(failure);
+        }
+    }
 }
 
 pub(crate) fn validate_workflow_id(id: &str) -> bool {
@@ -253,6 +330,7 @@ pub struct BuddyService {
     pub pulse: BuddyPulse,
     pub draft_store: DraftStore,
     pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
+    pub(crate) observer_health: HashMap<&'static str, ObserverHealthState>,
     pub observers: Vec<Arc<dyn BuddyObserver>>,
     pub chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter,
     pub chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState,
@@ -548,6 +626,7 @@ impl BuddyService {
             pulse: BuddyPulse::default(),
             draft_store: DraftStore::new(),
             last_observer_tick: HashMap::new(),
+            observer_health: HashMap::new(),
             observers: build_observer_registry(),
             chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter::new(),
             chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState::new(),
@@ -699,6 +778,40 @@ impl BuddyService {
         self.apply_memory_ops_to_pulse(&mut pulse);
         self.pulse = pulse.clone();
         let _ = self.events_tx.send(BuddyEvent::PulseUpdated { pulse });
+    }
+
+    pub(crate) fn record_observer_run(&mut self, report: &ObserverRunReport) {
+        for observer_id in &report.successes {
+            self.observer_health.remove(observer_id);
+        }
+
+        let mut diagnostics = Vec::new();
+        for failure in &report.failures {
+            let health = self.observer_health.entry(failure.observer_id).or_default();
+            health.consecutive_failures = health.consecutive_failures.saturating_add(1);
+            health.last_failure = Some(failure.message.clone());
+            if health.consecutive_failures >= OBSERVER_FAILURE_SURFACE_THRESHOLD && !health.surfaced
+            {
+                health.surfaced = true;
+                diagnostics.push(super::diagnostics::DiagnosticContext {
+                    error_type: "observer_health".to_string(),
+                    error_message: format!(
+                        "Buddy observer '{}' failed {} consecutive times: {}",
+                        failure.observer_id, health.consecutive_failures, failure.message
+                    ),
+                    source_file: Some(format!("buddy.observer.{}", failure.observer_id)),
+                    tool_name: None,
+                    chat_id: None,
+                    collected_at: Utc::now().to_rfc3339(),
+                    severity: super::diagnostics::DiagnosticSeverity::High,
+                    occurrence_count: health.consecutive_failures as u64,
+                });
+            }
+        }
+
+        for diagnostic in diagnostics {
+            self.add_diagnostic(diagnostic);
+        }
     }
 
     fn apply_memory_ops_to_pulse(&self, pulse: &mut BuddyPulse) {
@@ -2183,7 +2296,7 @@ pub async fn buddy_background_task(gcx: AppState) {
             if !due_observers.is_empty() {
                 // Run observers without holding buddy lock (prevents deadlock with
                 // DiagnosticClusterObserver which also locks buddy).
-                let all_facts = observe_buddy_facts_parallel(
+                let observer_report = observe_buddy_facts_parallel(
                     due_observers.clone(),
                     gcx.clone(),
                     project_root.clone(),
@@ -2197,7 +2310,8 @@ pub async fn buddy_background_task(gcx: AppState) {
                         for obs in &due_observers {
                             svc.last_observer_tick.insert(obs.id(), now);
                         }
-                        svc.fact_store.ingest_many(all_facts);
+                        svc.record_observer_run(&observer_report);
+                        svc.fact_store.ingest_many(observer_report.facts);
                         let candidates = OpportunityDetector::new().detect(
                             &svc.fact_store,
                             &svc.pulse,
@@ -2403,6 +2517,87 @@ mod tests {
             UserAction::CommitMade { sha, message_first_line, .. }
                 if sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && message_first_line == "new commit"
         )));
+    }
+
+    fn test_observer_failure(observer_id: &'static str) -> ObserverFailure {
+        ObserverFailure {
+            observer_id,
+            kind: ObserverFailureKind::Timeout,
+            message: format!("observer '{observer_id}' timed out after 5s"),
+        }
+    }
+
+    fn make_test_service() -> BuddyService {
+        let (tx, _) = broadcast::channel(16);
+        BuddyService::new(
+            std::env::temp_dir().join(format!("buddy-actor-test-{}", uuid::Uuid::new_v4())),
+            crate::buddy::state::default_buddy_state(),
+            BuddySettings::default(),
+            Vec::new(),
+            RuntimeQueue::new(),
+            tx,
+            None,
+        )
+    }
+
+    #[test]
+    fn observer_result_tracks_successes_and_failures() {
+        let mut report = ObserverRunReport::default();
+
+        apply_observer_result(&mut report, Ok(("ok_observer", Vec::new())));
+        apply_observer_result(&mut report, Err(test_observer_failure("slow_observer")));
+
+        assert_eq!(report.successes, vec!["ok_observer"]);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].observer_id, "slow_observer");
+        assert_eq!(report.failures[0].kind, ObserverFailureKind::Timeout);
+    }
+
+    #[tokio::test]
+    async fn repeated_observer_failures_surface_once_and_reset_on_success() {
+        let mut svc = make_test_service();
+
+        for _ in 0..(OBSERVER_FAILURE_SURFACE_THRESHOLD - 1) {
+            svc.record_observer_run(&ObserverRunReport {
+                failures: vec![test_observer_failure("slow_observer")],
+                ..Default::default()
+            });
+        }
+        assert!(svc.recent_diagnostics.is_empty());
+        assert_eq!(svc.runtime_queue.items.len(), 0);
+
+        svc.record_observer_run(&ObserverRunReport {
+            failures: vec![test_observer_failure("slow_observer")],
+            ..Default::default()
+        });
+        assert_eq!(svc.recent_diagnostics.len(), 1);
+        assert_eq!(svc.runtime_queue.items.len(), 1);
+        assert_eq!(svc.recent_diagnostics[0].error_type, "observer_health");
+        assert!(svc.recent_diagnostics[0]
+            .error_message
+            .contains("slow_observer"));
+
+        svc.record_observer_run(&ObserverRunReport {
+            failures: vec![test_observer_failure("slow_observer")],
+            ..Default::default()
+        });
+        assert_eq!(svc.recent_diagnostics.len(), 1);
+        assert_eq!(svc.runtime_queue.items.len(), 1);
+
+        svc.record_observer_run(&ObserverRunReport {
+            successes: vec!["slow_observer"],
+            ..Default::default()
+        });
+        assert!(!svc.observer_health.contains_key("slow_observer"));
+
+        for _ in 0..OBSERVER_FAILURE_SURFACE_THRESHOLD {
+            svc.record_observer_run(&ObserverRunReport {
+                failures: vec![test_observer_failure("slow_observer")],
+                ..Default::default()
+            });
+        }
+        assert_eq!(svc.recent_diagnostics.len(), 1);
+        assert_eq!(svc.recent_diagnostics[0].occurrence_count, 6);
     }
 
     #[tokio::test]

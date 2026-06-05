@@ -4695,7 +4695,7 @@ async fn parallel_observer_execution_not_sequentially_additive() {
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let start = std::time::Instant::now();
-    let facts = super::actor::observe_buddy_facts_parallel(
+    let report = super::actor::observe_buddy_facts_parallel(
         observers,
         app,
         std::env::temp_dir(),
@@ -4703,7 +4703,9 @@ async fn parallel_observer_execution_not_sequentially_additive() {
     )
     .await;
     let elapsed = start.elapsed();
-    assert_eq!(facts.len(), 2);
+    assert_eq!(report.facts.len(), 2);
+    assert_eq!(report.successes.len(), 2);
+    assert!(report.failures.is_empty());
     assert!(
         elapsed < tokio::time::Duration::from_millis(1700),
         "parallel observers took too long: {:?}",
