@@ -62,7 +62,7 @@ pub async fn aggregate_goal_spent(
     let mut pricing_cache: HashMap<String, Option<ModelPricing>> = HashMap::new();
     let mut seen_paths = HashSet::new();
     let mut seen_trajectory_ids = HashSet::new();
-    let mut seen_message_ids = HashSet::new();
+    let mut seen_message_keys = HashSet::new();
 
     for path in trajectory_paths {
         if !seen_paths.insert(path.clone()) {
@@ -77,14 +77,15 @@ pub async fn aggregate_goal_spent(
         } else {
             trajectory.id.clone()
         };
-        if !seen_trajectory_ids.insert(trajectory_key) {
+        if !seen_trajectory_ids.insert(trajectory_key.clone()) {
             continue;
         }
         add_trajectory_usage(
             gcx.clone(),
             &mut pricing_cache,
             &mut accumulator,
-            &mut seen_message_ids,
+            &mut seen_message_keys,
+            &trajectory_key,
             &trajectory,
         )
         .await;
@@ -116,7 +117,8 @@ pub async fn hydrate_goal_spent(gcx: Arc<GlobalContext>, mut goal: ConductorGoal
         goal.spent.no_progress_wakes = goal.ledger.no_progress_wakes;
         return goal;
     }
-    if let Ok(spent) = aggregate_goal_spent(gcx, &goal).await {
+    if let Ok(mut spent) = aggregate_goal_spent(gcx, &goal).await {
+        spent.no_progress_wakes = goal.ledger.no_progress_wakes;
         goal.spent = spent;
     } else {
         goal.spent.no_progress_wakes = goal.ledger.no_progress_wakes;
@@ -240,14 +242,17 @@ async fn add_trajectory_usage(
     gcx: Arc<GlobalContext>,
     pricing_cache: &mut HashMap<String, Option<ModelPricing>>,
     accumulator: &mut UsageAccumulator,
-    seen_message_ids: &mut HashSet<String>,
+    seen_message_keys: &mut HashSet<(String, String)>,
+    trajectory_key: &str,
     trajectory: &BudgetTrajectory,
 ) {
     for message in &trajectory.messages {
         let Some(usage) = message.usage.as_ref() else {
             continue;
         };
-        if !message.message_id.is_empty() && !seen_message_ids.insert(message.message_id.clone()) {
+        if !message.message_id.is_empty()
+            && !seen_message_keys.insert((trajectory_key.to_string(), message.message_id.clone()))
+        {
             continue;
         }
         add_usage_tokens(accumulator, usage);
@@ -566,7 +571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_trajectory_and_message_references_are_deduplicated() {
+    async fn duplicate_messages_within_same_trajectory_are_deduplicated() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = test_gcx(dir.path()).await;
         seed_pricing(&gcx, "test/priced", test_pricing()).await;
@@ -578,17 +583,10 @@ mod tests {
             None,
             "planner-dedupe",
             "test/priced",
-            vec![usage_message("same-message", 10, 5, 15, None)],
-        )
-        .await;
-        write_trajectory(
-            dir.path(),
-            "task-1",
-            "agents",
-            Some("agent-1"),
-            "agent-dedupe",
-            "test/priced",
-            vec![usage_message("same-message", 10, 5, 15, None)],
+            vec![
+                usage_message("same-message", 10, 5, 15, None),
+                usage_message("same-message", 10, 5, 15, None),
+            ],
         )
         .await;
 
@@ -602,6 +600,42 @@ mod tests {
         assert_eq!(spent.prompt_tokens, 10);
         assert_eq!(spent.completion_tokens, 5);
         assert_eq!(spent.total_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn same_message_id_in_different_trajectories_is_counted_per_trajectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        seed_pricing(&gcx, "test/priced", test_pricing()).await;
+        write_task_meta(dir.path(), "task-1", Some("goal-1")).await;
+        write_trajectory(
+            dir.path(),
+            "task-1",
+            "planner",
+            None,
+            "planner-same-message",
+            "test/priced",
+            vec![usage_message("same-message", 10, 5, 15, None)],
+        )
+        .await;
+        write_trajectory(
+            dir.path(),
+            "task-1",
+            "agents",
+            Some("agent-1"),
+            "agent-same-message",
+            "test/priced",
+            vec![usage_message("same-message", 20, 7, 27, None)],
+        )
+        .await;
+
+        let spent = aggregate_goal_spent(gcx, &goal("goal-1", vec!["task-1"], vec![]))
+            .await
+            .unwrap();
+
+        assert_eq!(spent.prompt_tokens, 30);
+        assert_eq!(spent.completion_tokens, 12);
+        assert_eq!(spent.total_tokens, 42);
     }
 
     #[tokio::test]
