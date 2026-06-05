@@ -1,9 +1,12 @@
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
-use tracing::info;
 use tokio::sync::Mutex as AMutex;
+use tracing::info;
 
 use crate::app_state::AppState;
 use super::actor::redact_sensitive;
@@ -28,6 +31,8 @@ fn extract_tool_text(out: Vec<ContextEnum>, fallback: &str) -> String {
 const RATE_LIMIT_SECS: u64 = 3600;
 const DEDUP_SECS: i64 = 86400;
 const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+const ISSUE_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const ISSUE_CLI_ERROR_MAX_CHARS: usize = 1200;
 
 fn trusted_issue_binary(binary: &str) -> PathBuf {
     for dir in TRUSTED_COMMAND_PATH.split(':') {
@@ -653,13 +658,48 @@ pub(crate) fn issue_title_and_body(ctx: &DiagnosticContext) -> (String, String) 
 }
 
 fn redact_issue_text(text: &str) -> String {
-    let mut result = redact_sensitive(text);
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
-            result = result.replace(&home, "~");
+            let text = text.replace(&home, "~");
+            return redact_sensitive(&text);
         }
     }
+    let mut result = redact_sensitive(text);
+    result = result.replace("/home/", "~/");
+    result = result.replace("/Users/", "~/");
     result
+}
+
+fn sanitize_issue_cli_error(provider: &str, stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
+    let raw = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "issue CLI exited without an error message".to_string()
+    };
+    let mut redacted = redact_issue_text(&raw);
+    if redacted.chars().count() > ISSUE_CLI_ERROR_MAX_CHARS {
+        redacted = redacted.chars().take(ISSUE_CLI_ERROR_MAX_CHARS).collect();
+    }
+    let detail = redacted.trim();
+    if detail.is_empty() {
+        format!("{provider} failed: issue CLI exited without an error message")
+    } else {
+        format!("{provider} failed: {detail}")
+    }
+}
+
+async fn with_issue_cli_timeout<F>(provider: &'static str, output: F) -> Result<Output, String>
+where
+    F: Future<Output = std::io::Result<Output>>,
+{
+    tokio::time::timeout(ISSUE_CLI_TIMEOUT, output)
+        .await
+        .map_err(|_| format!("{provider} timed out after 30s"))?
+        .map_err(|e| format!("{provider} failed: {}", redact_issue_text(&e.to_string())))
 }
 
 fn sanitize_issue_title(raw: &str) -> String {
@@ -820,7 +860,8 @@ async fn run_issue_create(
     let repo_name = repo.full_name();
     match provider {
         IssueProvider::GitHub { binary, token } => {
-            let out = Command::new(trusted_issue_binary(&binary))
+            let mut command = Command::new(trusted_issue_binary(&binary));
+            command
                 .args([
                     "issue", "create", "-R", &repo_name, "--title", title, "--body", body,
                 ])
@@ -829,17 +870,17 @@ async fn run_issue_create(
                 .env("GH_TOKEN", &token)
                 .env("GITHUB_TOKEN", &token)
                 .stdin(std::process::Stdio::null())
-                .output()
-                .await
-                .map_err(|e| format!("gh failed: {}", e))?;
+                .kill_on_drop(true);
+            let out = with_issue_cli_timeout("gh", command.output()).await?;
             if out.status.success() {
                 Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
             } else {
-                Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+                Err(sanitize_issue_cli_error("gh", &out.stdout, &out.stderr))
             }
         }
         IssueProvider::GitLab { binary, token } => {
-            let out = Command::new(trusted_issue_binary(&binary))
+            let mut command = Command::new(trusted_issue_binary(&binary));
+            command
                 .args([
                     "issue",
                     "create",
@@ -854,14 +895,66 @@ async fn run_issue_create(
                 .env("PATH", TRUSTED_COMMAND_PATH)
                 .env("GITLAB_TOKEN", &token)
                 .stdin(std::process::Stdio::null())
-                .output()
-                .await
-                .map_err(|e| format!("glab failed: {}", e))?;
+                .kill_on_drop(true);
+            let out = with_issue_cli_timeout("glab", command.output()).await?;
             if out.status.success() {
                 Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
             } else {
-                Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+                Err(sanitize_issue_cli_error("glab", &out.stdout, &out.stderr))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{sleep, Duration};
+
+    #[test]
+    fn issue_cli_error_prefers_stderr_and_redacts_secrets_and_home() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let err = format!("failed at {home}/repo with Authorization: Bearer ghp_secret123456789");
+        let text = sanitize_issue_cli_error("gh", b"https://example.com/issue/1", err.as_bytes());
+
+        assert!(text.starts_with("gh failed: "));
+        assert!(text.contains("~/repo") || text.contains("[REDACTED_PATH]"));
+        assert!(text.contains("Authorization: [REDACTED]"));
+        assert!(!text.contains(&home));
+        assert!(!text.contains("ghp_secret123456789"));
+        assert!(!text.contains("https://example.com/issue/1"));
+    }
+
+    #[test]
+    fn issue_cli_error_uses_stdout_when_stderr_empty() {
+        let text = sanitize_issue_cli_error("glab", b"api_key=secret-token failed", b"");
+
+        assert_eq!(text, "glab failed: api_key=[REDACTED] failed");
+    }
+
+    #[test]
+    fn issue_cli_error_uses_generic_message_when_output_empty() {
+        let text = sanitize_issue_cli_error("gh", b"", b"");
+
+        assert_eq!(text, "gh failed: issue CLI exited without an error message");
+    }
+
+    #[test]
+    fn issue_cli_error_is_capped() {
+        let text = sanitize_issue_cli_error("gh", b"", "x".repeat(2000).as_bytes());
+        let detail = text.strip_prefix("gh failed: ").unwrap();
+
+        assert_eq!(detail.chars().count(), ISSUE_CLI_ERROR_MAX_CHARS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn issue_cli_timeout_returns_provider_prefixed_error() {
+        let result = with_issue_cli_timeout("gh", async {
+            sleep(ISSUE_CLI_TIMEOUT + Duration::from_secs(1)).await;
+            std::future::pending::<std::io::Result<Output>>().await
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err(), "gh timed out after 30s");
     }
 }
