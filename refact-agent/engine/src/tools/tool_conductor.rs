@@ -169,26 +169,27 @@ async fn context_goal_id(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
 ) -> Result<String, String> {
-    if let Some(goal_id) = optional_string(args, "goal_id") {
-        return Ok(goal_id);
-    }
     let (chat_id, chat_facade) = {
         let lock = ccx.lock().await;
         (lock.chat_id.clone(), lock.app.chat.facade.clone())
     };
     let snapshot = chat_facade.session_snapshot(&chat_id).await?;
     if !context_allowed_from_snapshot(&snapshot.thread) {
-        return Err(
-            "conductor tools require a conductor Buddy chat or an explicit goal_id".to_string(),
-        );
+        return Err("conductor tools require a conductor Buddy chat".to_string());
     }
-    snapshot
+    let context_goal_id = snapshot
         .thread
         .buddy_meta
         .and_then(|meta| meta.goal_id)
         .map(|goal_id| goal_id.trim().to_string())
         .filter(|goal_id| !goal_id.is_empty())
-        .ok_or_else(|| "conductor Buddy chat is missing goal_id".to_string())
+        .ok_or_else(|| "conductor Buddy chat is missing goal_id".to_string())?;
+    if let Some(explicit_goal_id) = optional_string(args, "goal_id") {
+        if explicit_goal_id != context_goal_id {
+            return Err("explicit goal_id must match the conductor Buddy chat goal_id".to_string());
+        }
+    }
+    Ok(context_goal_id)
 }
 
 async fn goal_context(
@@ -730,6 +731,7 @@ mod tests {
         pushed: StdMutex<Vec<(String, ChatCommand)>>,
         updates: StdMutex<usize>,
         thread: StdMutex<refact_chat_api::ThreadParams>,
+        snapshots: StdMutex<HashMap<String, refact_chat_api::ThreadParams>>,
     }
 
     impl MockChatFacade {
@@ -738,7 +740,15 @@ mod tests {
                 pushed: StdMutex::new(Vec::new()),
                 updates: StdMutex::new(0),
                 thread: StdMutex::new(thread),
+                snapshots: StdMutex::new(HashMap::new()),
             }
+        }
+
+        fn insert_thread(&self, chat_id: &str, thread: refact_chat_api::ThreadParams) {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .insert(chat_id.to_string(), thread);
         }
 
         fn pushed_commands(&self) -> Vec<(String, ChatCommand)> {
@@ -752,10 +762,16 @@ mod tests {
 
     #[async_trait]
     impl ChatSessionFacade for MockChatFacade {
-        async fn session_snapshot(&self, _chat_id: &str) -> Result<ChatSessionSnapshot, String> {
+        async fn session_snapshot(&self, chat_id: &str) -> Result<ChatSessionSnapshot, String> {
             Ok(ChatSessionSnapshot {
                 messages: vec![],
-                thread: self.thread.lock().unwrap().clone(),
+                thread: self
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .get(chat_id)
+                    .cloned()
+                    .unwrap_or_else(|| self.thread.lock().unwrap().clone()),
                 session_state: SessionState::Idle,
                 pause_reasons: vec![],
             })
@@ -1064,6 +1080,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conductor_context_rejects_explicit_goal_from_non_conductor_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-explicit", &GoalLedger::default())
+            .await
+            .unwrap();
+        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mut tool = ToolConductorMemo::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-explicit")),
+                    ("content", json!("must not save")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("conductor Buddy chat"), "{error}");
+        let ledger = load_goal_ledger(dir.path(), "goal-explicit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ledger.memos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn conductor_context_rejects_cross_goal_explicit_goal_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-a", &GoalLedger::default())
+            .await
+            .unwrap();
+        save_goal_ledger(dir.path(), "goal-b", &GoalLedger::default())
+            .await
+            .unwrap();
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-a")));
+        let mut tool = ToolConductorMemo::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-b")),
+                    ("content", json!("must not save")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("must match"), "{error}");
+        let ledger = load_goal_ledger(dir.path(), "goal-b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ledger.memos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn conductor_context_accepts_matching_goal_with_and_without_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(dir.path(), "goal-context", &GoalLedger::default())
+            .await
+            .unwrap();
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-context")));
+
+        let mut explicit = ToolConductorMemo::new();
+        explicit
+            .tool_execute(
+                ccx(gcx.clone(), mock.clone()).await,
+                &"explicit".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-context")),
+                    ("content", json!("explicit match")),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        let mut implicit = ToolConductorMemo::new();
+        implicit
+            .tool_execute(
+                ccx(gcx, mock).await,
+                &"implicit".to_string(),
+                &args(&[("content", json!("implicit context"))]),
+            )
+            .await
+            .unwrap();
+
+        let ledger = load_goal_ledger(dir.path(), "goal-context")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ledger
+            .memos
+            .iter()
+            .any(|memo| memo.content == "explicit match"));
+        assert!(ledger
+            .memos
+            .iter()
+            .any(|memo| memo.content == "implicit context"));
+    }
+
+    #[tokio::test]
     async fn conductor_steer_chat_rejects_unowned_chat() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
@@ -1075,7 +1200,7 @@ mod tests {
         save_goal_ledger(dir.path(), "goal-unowned", &original)
             .await
             .unwrap();
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-unowned")));
         let mut tool = ToolConductorSteerChat::new();
 
         let error = tool
@@ -1115,7 +1240,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let mock = Arc::new(MockChatFacade::new(task_thread("task-owned")));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-task-owned")));
+        mock.insert_thread("agent-chat-task", task_thread("task-owned"));
         let mut tool = ToolConductorSteerChat::new();
 
         tool.tool_execute(
@@ -1158,7 +1284,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-done")));
         let mut tool = ToolConductorGoalStatus::new();
 
         tool.tool_execute(
@@ -1185,7 +1311,7 @@ mod tests {
         save_goal_ledger(dir.path(), "goal-escalated", &GoalLedger::default())
             .await
             .unwrap();
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-escalated")));
         let mut tool = ToolConductorGoalStatus::new();
 
         tool.tool_execute(
@@ -1235,7 +1361,7 @@ mod tests {
             )
             .await
         );
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-terminal-wake")));
         let mut tool = ToolConductorGoalStatus::new();
 
         tool.tool_execute(
@@ -1276,7 +1402,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-read-only")));
         let mut tool = ToolConductorSteerChat::new();
 
         let error = tool
@@ -1311,7 +1437,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-full-auto")));
         let mut steer = ToolConductorSteerChat::new();
         steer
             .tool_execute(
@@ -1330,7 +1456,11 @@ mod tests {
         let mut spawn = ToolConductorSpawnPlanner::new();
         spawn
             .tool_execute(
-                ccx(gcx.clone(), Arc::new(MockChatFacade::new(normal_thread()))).await,
+                ccx(
+                    gcx.clone(),
+                    Arc::new(MockChatFacade::new(conductor_thread("goal-full-auto"))),
+                )
+                .await,
                 &"spawn".to_string(),
                 &args(&[
                     ("goal_id", json!("goal-full-auto")),
@@ -1428,7 +1558,7 @@ mod tests {
     async fn tool_conductor_mutation_rejects_missing_goal_without_creating_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("missing-goal")));
         let mut tool = ToolConductorMemo::new();
 
         let error = tool
@@ -1515,7 +1645,7 @@ mod tests {
             .await
             .unwrap();
         let mut rx = gcx.buddy_events_tx.as_ref().unwrap().subscribe();
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-rich")));
         let mut tool = ToolConductorMemo::new();
 
         tool.tool_execute(
@@ -1574,7 +1704,7 @@ mod tests {
         .await
         .unwrap();
         let mut rx = gcx.buddy_events_tx.as_ref().unwrap().subscribe();
-        let mock = Arc::new(MockChatFacade::new(normal_thread()));
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-event-spent")));
         let mut tool = ToolConductorMemo::new();
 
         tool.tool_execute(
