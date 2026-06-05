@@ -368,12 +368,6 @@ async fn apply_surgery(
     validate_pairing(&snapshot.messages).map_err(|error| error.to_string())?;
     let messages = build_messages(&snapshot.messages)?;
     validate_pairing(&messages).map_err(|error| error.to_string())?;
-    mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
-        ensure_owned_snapshot(ledger, &chat_id, &snapshot)?;
-        push_surgery_memo(ledger, &chat_id, action, detail, Some(source_chat_id));
-        Ok(())
-    })
-    .await?;
     chat_facade
         .update_session(
             &chat_id,
@@ -386,6 +380,12 @@ async fn apply_surgery(
     if optional_bool(args, "save") {
         chat_facade.maybe_save_session(&chat_id).await?;
     }
+    mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
+        ensure_owned_snapshot(ledger, &chat_id, &snapshot)?;
+        push_surgery_memo(ledger, &chat_id, action, detail, Some(source_chat_id));
+        Ok(())
+    })
+    .await?;
     Ok(chat_id)
 }
 
@@ -715,6 +715,8 @@ mod tests {
         snapshots: StdMutex<HashMap<String, ChatSessionSnapshot>>,
         updates: StdMutex<Vec<(String, ChatSessionUpdate)>>,
         saves: StdMutex<Vec<String>>,
+        update_error: StdMutex<Option<String>>,
+        save_error: StdMutex<Option<String>>,
     }
 
     impl MockChatFacade {
@@ -723,6 +725,8 @@ mod tests {
                 snapshots: StdMutex::new(HashMap::new()),
                 updates: StdMutex::new(Vec::new()),
                 saves: StdMutex::new(Vec::new()),
+                update_error: StdMutex::new(None),
+                save_error: StdMutex::new(None),
             }
         }
 
@@ -735,6 +739,18 @@ mod tests {
 
         fn updates(&self) -> Vec<(String, ChatSessionUpdate)> {
             self.updates.lock().unwrap().clone()
+        }
+
+        fn saves(&self) -> Vec<String> {
+            self.saves.lock().unwrap().clone()
+        }
+
+        fn fail_update(&self, error: &str) {
+            *self.update_error.lock().unwrap() = Some(error.to_string());
+        }
+
+        fn fail_save(&self, error: &str) {
+            *self.save_error.lock().unwrap() = Some(error.to_string());
         }
     }
 
@@ -754,6 +770,9 @@ mod tests {
             chat_id: &str,
             update: ChatSessionUpdate,
         ) -> Result<(), String> {
+            if let Some(error) = self.update_error.lock().unwrap().clone() {
+                return Err(error);
+            }
             if let Some(snapshot) = self.snapshots.lock().unwrap().get_mut(chat_id) {
                 snapshot.messages = update.messages.clone();
             }
@@ -787,6 +806,9 @@ mod tests {
 
         async fn maybe_save_session(&self, chat_id: &str) -> Result<(), String> {
             self.saves.lock().unwrap().push(chat_id.to_string());
+            if let Some(error) = self.save_error.lock().unwrap().clone() {
+                return Err(error);
+            }
             Ok(())
         }
 
@@ -1351,6 +1373,109 @@ mod tests {
         assert!(error.contains("has no tool result"), "{error}");
         assert!(mock.updates().is_empty());
         let ledger = load_goal_ledger(dir.path(), "goal-pairing")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ledger.memos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_conductor_trajectory_update_failure_does_not_record_memo() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-update-failure",
+            &GoalLedger {
+                task_ids: vec!["task-1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mock = Arc::new(MockChatFacade::new());
+        insert_conductor_context(&mock, "goal-update-failure");
+        mock.insert_snapshot(
+            "agent-chat",
+            snapshot(SessionState::Paused, vec![user("user-1", "old")]),
+        );
+        mock.fail_update("injected update failure");
+        let mut tool = ToolConductorTrajectoryEdit::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock.clone()).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-update-failure")),
+                    ("chat_id", json!("agent-chat")),
+                    ("message_id", json!("user-1")),
+                    (
+                        "message",
+                        json!({"message_id":"user-1","role":"user","content":"new"}),
+                    ),
+                    ("reason", json!("test update failure")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("injected update failure"), "{error}");
+        assert!(mock.updates().is_empty());
+        assert!(mock.saves().is_empty());
+        let ledger = load_goal_ledger(dir.path(), "goal-update-failure")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ledger.memos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_conductor_trajectory_save_failure_does_not_record_memo() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-save-failure",
+            &GoalLedger {
+                task_ids: vec!["task-1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mock = Arc::new(MockChatFacade::new());
+        insert_conductor_context(&mock, "goal-save-failure");
+        mock.insert_snapshot(
+            "agent-chat",
+            snapshot(SessionState::Paused, vec![user("user-1", "old")]),
+        );
+        mock.fail_save("injected save failure");
+        let mut tool = ToolConductorTrajectoryEdit::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock.clone()).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-save-failure")),
+                    ("chat_id", json!("agent-chat")),
+                    ("message_id", json!("user-1")),
+                    (
+                        "message",
+                        json!({"message_id":"user-1","role":"user","content":"new"}),
+                    ),
+                    ("reason", json!("test save failure")),
+                    ("save", json!(true)),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("injected save failure"), "{error}");
+        assert_eq!(mock.updates().len(), 1);
+        assert_eq!(mock.saves(), vec!["agent-chat".to_string()]);
+        let ledger = load_goal_ledger(dir.path(), "goal-save-failure")
             .await
             .unwrap()
             .unwrap();
