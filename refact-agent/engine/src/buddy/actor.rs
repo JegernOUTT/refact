@@ -2273,4 +2273,67 @@ mod tests {
                 if sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && message_first_line == "new commit"
         )));
     }
+
+    #[tokio::test]
+    async fn workflow_failure_transcript_redacts_sensitive_fields_before_persisting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workflow.json");
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/test-user".to_string());
+        let report = crate::buddy::workflows::WorkflowFailureReport {
+            workflow_id: "buddy_dependency_radar".to_string(),
+            category: crate::buddy::workflows::WorkflowFailureCategory::AuthenticationFailed,
+            summary: format!(
+                "Authentication failed Bearer raw-bearer-token api_key=raw-api-key password=raw-password at {home}/project"
+            ),
+            detail: format!(
+                "tool output\nAuthorization: raw-auth-token\nsecret=raw-secret-token\nstack trace at {home}/project/src/main.rs"
+            ),
+            chat_id: None,
+        };
+
+        BuddyService::append_workflow_failure_transcript(&path, &report).await;
+
+        let text = tokio::fs::read_to_string(path).await.unwrap();
+        for raw in [
+            "raw-bearer-token",
+            "raw-api-key",
+            "raw-password",
+            "raw-auth-token",
+            "raw-secret-token",
+            home.as_str(),
+        ] {
+            assert!(!text.contains(raw), "raw value leaked: {raw}\n{text}");
+        }
+        assert!(text.contains("[REDACTED]"));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let entry = &value["entries"][0];
+        assert_eq!(entry["success"], false);
+        assert_eq!(entry["failure_category"], "authentication_failed");
+    }
+
+    #[tokio::test]
+    async fn workflow_failure_transcript_caps_large_detail_before_persisting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workflow.json");
+        let report = crate::buddy::workflows::WorkflowFailureReport {
+            workflow_id: "buddy_dependency_radar".to_string(),
+            category: crate::buddy::workflows::WorkflowFailureCategory::ToolFailed,
+            summary: format!("short summary password={}", "p".repeat(64)),
+            detail: format!("tool failed {} token=tail-secret", "x".repeat(20_000)),
+            chat_id: None,
+        };
+
+        BuddyService::append_workflow_failure_transcript(&path, &report).await;
+
+        let text = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(!text.contains("tail-secret"));
+        assert!(!text.contains(&"p".repeat(64)));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let entry = &value["entries"][0];
+        let output = entry["output_summary"].as_str().unwrap();
+        let summary = entry["failure_summary"].as_str().unwrap();
+        assert!(output.chars().count() <= 1_000);
+        assert!(summary.chars().count() <= 600);
+        assert!(output.contains("...[truncated]"));
+    }
 }
