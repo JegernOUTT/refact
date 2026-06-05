@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { useAppDispatch } from "../../../hooks";
 import { push } from "../../Pages/pagesSlice";
 import { navigateFromBuddyPage, routeDraftByKind } from "../executeBuddyAction";
+import { validateBuddyDraftAction } from "../buddyActionValidation";
 import {
   useAcceptOpportunityMutation,
   useDismissOpportunityMutation,
@@ -76,6 +77,11 @@ export function useExecuteBuddyAction() {
           throw new Error(formatOpportunityActionError(error));
         }
         return;
+      }
+
+      const validationError = validateBuddyDraftAction(action);
+      if (validationError) {
+        throw new Error(validationError);
       }
 
       let response: BuddyOpportunityAcceptResponse;
