@@ -3196,6 +3196,39 @@ fn make_opportunity(id: &str, cooldown_key: &str) -> BuddyOpportunity {
     }
 }
 
+fn assert_no_placeholder_opportunity_actions(opps: &[(BuddyOpportunity, u64)]) {
+    for (opp, _) in opps {
+        for action in &opp.proposed_actions {
+            match action {
+                BuddyAction::DraftAgentsMdPatch { content } => {
+                    assert!(
+                        !content.trim().is_empty(),
+                        "empty AGENTS.md draft in {}",
+                        opp.summary
+                    );
+                }
+                BuddyAction::DraftDefaultsChange { patch, .. }
+                | BuddyAction::DraftCustomizationChange { patch, .. } => {
+                    assert_ne!(
+                        patch,
+                        &serde_json::json!({}),
+                        "empty patch in {}",
+                        opp.summary
+                    );
+                    let serialized = serde_json::to_string(patch).unwrap();
+                    assert!(
+                        !serialized.contains("your-provider/model-name"),
+                        "placeholder model in {}: {}",
+                        opp.summary,
+                        serialized
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn push_opportunity(queue: &mut super::opportunities::OpportunityQueue, opp: BuddyOpportunity) {
     queue.push_with_cooldown(
         opp,
@@ -6909,21 +6942,16 @@ fn mode_overlap_payload_keys_match_detector() {
         "cooldown_key must include real mode_id, got: {}",
         opp.cooldown_key
     );
-    let has_customization_action = opp
+    assert!(opp.proposed_actions.iter().any(|a| matches!(
+        a,
+        BuddyAction::OpenPage {
+            page: BuddyPage::Customization
+        }
+    )));
+    assert!(opp
         .proposed_actions
         .iter()
-        .any(|a| matches!(a, BuddyAction::DraftCustomizationChange { .. }));
-    assert!(
-        has_customization_action,
-        "opp must have DraftCustomizationChange action"
-    );
-    if let Some(BuddyAction::DraftCustomizationChange { id, .. }) = opp
-        .proposed_actions
-        .iter()
-        .find(|a| matches!(a, BuddyAction::DraftCustomizationChange { .. }))
-    {
-        assert_eq!(id, "beta", "action id must match mode_id from payload");
-    }
+        .all(|a| !matches!(a, BuddyAction::DraftCustomizationChange { .. })));
 }
 
 #[tokio::test]
@@ -7504,7 +7532,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
             .get("chat_buddy")
             .and_then(|v| v.get("model"))
             .and_then(|v| v.as_str()),
-        Some("your-provider/model-name")
+        None
     );
 
     assert!(
@@ -8305,7 +8333,92 @@ fn restart_preserves_per_rule_cooldown() {
 }
 
 #[test]
-fn provider_tuning_uses_field_specific_defaults_kind() {
+fn surfaced_opportunities_do_not_emit_placeholder_drafts() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::DefaultModelMissing,
+        key: "provider:default_missing:chat_model".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "field": "chat_model", "model_id": serde_json::Value::Null }),
+        seen_at: now,
+        confidence: 0.95,
+    });
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::ModePromptOverlap,
+        key: "customization:mode_overlap:alpha:beta".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "mode_id": "beta", "peer_id": "alpha" }),
+        seen_at: now,
+        confidence: 0.8,
+    });
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::SkillTriggerWeak,
+        key: "customization:skill_trigger:skill-a".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "skill_id": "skill-a" }),
+        seen_at: now,
+        confidence: 0.8,
+    });
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::AgentsMdGapDetected,
+        key: "agents_md:gap".to_string(),
+        source: "test",
+        payload: serde_json::json!({}),
+        seen_at: now,
+        confidence: 0.8,
+    });
+
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
+
+    assert_no_placeholder_opportunity_actions(&opps);
+}
+
+#[test]
+fn provider_tuning_missing_without_candidate_has_navigation_only() {
+    use super::facts::FactStore;
+    use super::opportunities::{OpportunityDetector, OpportunityQueue};
+    let now = chrono::Utc::now();
+    let mut store = FactStore::new();
+    store.ingest(BuddyFact {
+        kind: BuddyFactKind::DefaultModelMissing,
+        key: "provider:default_missing:chat_model".to_string(),
+        source: "test",
+        payload: serde_json::json!({ "field": "chat_model", "model_id": serde_json::Value::Null }),
+        seen_at: now,
+        confidence: 0.95,
+    });
+
+    let opps =
+        OpportunityDetector::new().detect(&store, &BuddyPulse::default(), &OpportunityQueue::new());
+    let (opp, cooldown_secs) = opps
+        .iter()
+        .find(|(o, _)| o.kind == BuddyOpportunityKind::ProviderTuning)
+        .expect("must emit provider tuning opportunity");
+
+    assert_eq!(*cooldown_secs, 7200);
+    assert_eq!(opp.cooldown_secs, 7200);
+    assert!(opp.proposed_actions.iter().any(|a| matches!(
+        a,
+        BuddyAction::OpenPage {
+            page: BuddyPage::DefaultModels
+        }
+    )));
+    assert!(opp
+        .proposed_actions
+        .iter()
+        .any(|a| matches!(a, BuddyAction::Dismiss)));
+    assert!(opp
+        .proposed_actions
+        .iter()
+        .all(|a| !matches!(a, BuddyAction::DraftDefaultsChange { .. })));
+}
+
+#[test]
+fn provider_tuning_uses_field_specific_defaults_kind_with_candidate() {
     use super::facts::FactStore;
     use super::opportunities::{OpportunityDetector, OpportunityQueue};
     let now = chrono::Utc::now();
@@ -8328,12 +8441,17 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
     ];
 
     for (field, patch_key, expected_kind_str) in cases {
+        let candidate_model = format!("openai/{}", field.replace('_', "-"));
         let mut store = FactStore::new();
         store.ingest(BuddyFact {
             kind: BuddyFactKind::DefaultModelMissing,
             key: format!("provider:default_missing:{}", field),
             source: "test",
-            payload: serde_json::json!({ "field": field, "model_id": serde_json::Value::Null }),
+            payload: serde_json::json!({
+                "field": field,
+                "model_id": serde_json::Value::Null,
+                "candidate_model_id": candidate_model,
+            }),
             seen_at: now,
             confidence: 0.95,
         });
@@ -8370,7 +8488,7 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
                     .get(*patch_key)
                     .and_then(|v| v.get("model"))
                     .and_then(|v| v.as_str()),
-                Some("your-provider/model-name"),
+                Some(candidate_model.as_str()),
                 "field={} patch must contain ProviderDefaults key '{}', got: {}",
                 field,
                 patch_key,

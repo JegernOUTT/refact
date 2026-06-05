@@ -9,8 +9,8 @@ pub use refact_buddy_core::queue::{
 
 use crate::buddy::types::{
     BuddyAction, BuddyFactKind, BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks,
-    BuddyPage, BuddyPriority, BuddyPulse, CustomizationKind, DefaultsKind, InvestigationContext,
-    OpportunityStatus, PulseScope,
+    BuddyPage, BuddyPriority, BuddyPulse, DefaultsKind, InvestigationContext, OpportunityStatus,
+    PulseScope,
 };
 
 struct Rule {
@@ -329,34 +329,62 @@ mod rules {
             .collect()
     }
 
-    fn provider_defaults_patch(field: &str) -> Option<(DefaultsKind, serde_json::Value)> {
+    fn provider_defaults_kind(field: &str) -> Option<DefaultsKind> {
+        match field {
+            "chat_model" => Some(DefaultsKind::ChatModel),
+            "chat_model_2" => Some(DefaultsKind::ChatModel2),
+            "task_planner_agent_model" => Some(DefaultsKind::TaskPlannerAgentModel),
+            "chat_light_model" => Some(DefaultsKind::ChatLightModel),
+            "chat_thinking_model" => Some(DefaultsKind::ChatThinkingModel),
+            "chat_buddy_model" => Some(DefaultsKind::ChatBuddyModel),
+            _ => None,
+        }
+    }
+
+    fn provider_defaults_patch(
+        field: &str,
+        model: &str,
+    ) -> Option<(DefaultsKind, serde_json::Value)> {
+        if model.trim().is_empty() || model == "your-provider/model-name" {
+            return None;
+        }
         match field {
             "chat_model" => Some((
                 DefaultsKind::ChatModel,
-                serde_json::json!({ "chat": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat": { "model": model } }),
             )),
             "chat_model_2" => Some((
                 DefaultsKind::ChatModel2,
-                serde_json::json!({ "chat_model_2": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_model_2": { "model": model } }),
             )),
             "task_planner_agent_model" => Some((
                 DefaultsKind::TaskPlannerAgentModel,
-                serde_json::json!({ "task_planner_agent_model": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "task_planner_agent_model": { "model": model } }),
             )),
             "chat_light_model" => Some((
                 DefaultsKind::ChatLightModel,
-                serde_json::json!({ "chat_light": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_light": { "model": model } }),
             )),
             "chat_thinking_model" => Some((
                 DefaultsKind::ChatThinkingModel,
-                serde_json::json!({ "chat_thinking": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_thinking": { "model": model } }),
             )),
             "chat_buddy_model" => Some((
                 DefaultsKind::ChatBuddyModel,
-                serde_json::json!({ "chat_buddy": { "model": "your-provider/model-name" } }),
+                serde_json::json!({ "chat_buddy": { "model": model } }),
             )),
             _ => None,
         }
+    }
+
+    fn payload_candidate_model(fact: &crate::buddy::types::BuddyFact) -> Option<String> {
+        fact.payload
+            .get("candidate_model_id")
+            .or_else(|| fact.payload.get("candidate_model"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "your-provider/model-name")
+            .map(String::from)
     }
 
     fn is_chat_default_field(field: &str) -> bool {
@@ -390,9 +418,28 @@ mod rules {
                     .get("field")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let Some((defaults_kind, patch)) = provider_defaults_patch(field) else {
+                if provider_defaults_kind(field).is_none() {
                     return None;
-                };
+                }
+                let mut actions = vec![
+                    BuddyAction::OpenPage {
+                        page: BuddyPage::DefaultModels,
+                    },
+                    BuddyAction::Dismiss,
+                ];
+                if let Some(candidate_model) = payload_candidate_model(fact) {
+                    if let Some((defaults_kind, patch)) =
+                        provider_defaults_patch(field, &candidate_model)
+                    {
+                        actions.insert(
+                            1,
+                            BuddyAction::DraftDefaultsChange {
+                                defaults_kind,
+                                patch,
+                            },
+                        );
+                    }
+                }
                 let mut o = opp(
                     BuddyOpportunityKind::ProviderTuning,
                     "Default model not configured",
@@ -400,16 +447,7 @@ mod rules {
                     fact.confidence,
                     vec![fact.key.clone()],
                     format!("provider:default_model_missing:{}", field),
-                    vec![
-                        BuddyAction::OpenPage {
-                            page: BuddyPage::DefaultModels,
-                        },
-                        BuddyAction::DraftDefaultsChange {
-                            defaults_kind,
-                            patch,
-                        },
-                        BuddyAction::Dismiss,
-                    ],
+                    actions,
                     now,
                 );
                 o.related = related_with_config_paths(vec!["providers/defaults".to_string()]);
@@ -769,11 +807,6 @@ mod rules {
                         BuddyAction::OpenPage {
                             page: BuddyPage::Customization,
                         },
-                        BuddyAction::DraftCustomizationChange {
-                            customization_kind: CustomizationKind::Mode,
-                            id: id.clone(),
-                            patch: serde_json::json!({}),
-                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -812,11 +845,6 @@ mod rules {
                         BuddyAction::OpenPage {
                             page: BuddyPage::Customization,
                         },
-                        BuddyAction::DraftCustomizationChange {
-                            customization_kind: CustomizationKind::Skill,
-                            id: id.clone(),
-                            patch: serde_json::json!({}),
-                        },
                         BuddyAction::Dismiss,
                     ],
                     now,
@@ -846,8 +874,8 @@ mod rules {
                     vec![fact.key.clone()],
                     "agents_md:gap:global",
                     vec![
-                        BuddyAction::DraftAgentsMdPatch {
-                            content: String::new(),
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::Customization,
                         },
                         BuddyAction::Dismiss,
                     ],
@@ -1005,6 +1033,8 @@ impl OpportunityDetector {
                     continue;
                 }
                 seen.insert(opp.cooldown_key.clone());
+                let mut opp = opp;
+                opp.cooldown_secs = rule.cooldown_secs;
                 result.push((opp, rule.cooldown_secs));
             }
         }
