@@ -200,6 +200,7 @@ mod tests {
                 chat_id: None,
                 collected_at: collected_at.clone(),
                 severity: DiagnosticSeverity::High,
+                occurrence_count: 1,
             })
             .collect();
         BuddyJobContext {

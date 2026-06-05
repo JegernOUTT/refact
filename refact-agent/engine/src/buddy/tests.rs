@@ -955,6 +955,23 @@ fn test_classification_case_insensitive() {
 }
 
 #[test]
+fn legacy_diagnostic_deserializes_occurrence_count_as_one() {
+    let json = r#"{
+        "error_type":"timeout",
+        "error_message":"connection timeout",
+        "source_file":null,
+        "tool_name":null,
+        "chat_id":null,
+        "collected_at":"2026-06-05T00:00:00Z",
+        "severity":"high"
+    }"#;
+
+    let ctx: DiagnosticContext = serde_json::from_str(json).unwrap();
+
+    assert_eq!(ctx.occurrence_count, 1);
+}
+
+#[test]
 fn test_classify_timeout() {
     assert_eq!(classify_error("connection timeout after 30s"), "timeout");
     assert_eq!(classify_error("request timed out"), "generic");
@@ -1032,6 +1049,7 @@ fn make_issue_ctx(message: &str) -> DiagnosticContext {
         chat_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     }
 }
 
@@ -1414,6 +1432,7 @@ async fn test_diagnostic_cap() {
             chat_id: None,
             collected_at: chrono::Utc::now().to_rfc3339(),
             severity: DiagnosticSeverity::Low,
+            occurrence_count: 1,
         };
         svc.add_diagnostic(ctx);
     }
@@ -1434,6 +1453,7 @@ async fn test_diagnostic_history_persists_and_loads() {
         chat_id: Some("chat-1".to_string()),
         collected_at: "2026-04-27T10:00:00Z".to_string(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     };
     let ctx2 = DiagnosticContext {
         error_type: "test".to_string(),
@@ -1443,6 +1463,7 @@ async fn test_diagnostic_history_persists_and_loads() {
         chat_id: Some("chat-2".to_string()),
         collected_at: "2026-04-27T10:01:00Z".to_string(),
         severity: DiagnosticSeverity::Low,
+        occurrence_count: 1,
     };
 
     super::storage::append_diagnostic(root, &ctx1)
@@ -1821,6 +1842,7 @@ fn make_job_context(
             chat_id: None,
             collected_at: chrono::Utc::now().to_rfc3339(),
             severity: DiagnosticSeverity::High,
+            occurrence_count: 1,
         });
     }
     BuddyJobContext {
@@ -2185,6 +2207,7 @@ async fn diagnostic_metadata_is_redacted_before_storage() {
         chat_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     });
 
     let stored = svc.recent_diagnostics.first().unwrap();
@@ -2206,6 +2229,7 @@ async fn duplicate_diagnostic_coalesces_without_history_spam() {
         chat_id: Some("chat-1".to_string()),
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     };
     let mut later = ctx.clone();
     later.collected_at = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
@@ -2216,8 +2240,44 @@ async fn duplicate_diagnostic_coalesces_without_history_spam() {
     svc.add_diagnostic(later);
 
     assert_eq!(svc.recent_diagnostics.len(), 1);
+    assert_eq!(svc.recent_diagnostics[0].occurrence_count, 2);
     assert_eq!(svc.runtime_queue.items.len(), 1);
     assert!(svc.runtime_queue.items.front().unwrap().dismissed);
+}
+
+#[tokio::test]
+async fn duplicate_diagnostic_occurrence_increment_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    super::storage::bootstrap_buddy_storage(&root)
+        .await
+        .unwrap();
+    let mut svc = make_service();
+    svc.project_root = root.clone();
+    let ctx = DiagnosticContext {
+        error_type: "frontend".to_string(),
+        error_message: "Repeated render error".to_string(),
+        source_file: Some("frontend/window_error".to_string()),
+        tool_name: Some("frontend".to_string()),
+        chat_id: Some("chat-1".to_string()),
+        collected_at: chrono::Utc::now().to_rfc3339(),
+        severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
+    };
+
+    svc.add_diagnostic(ctx.clone());
+    let mut later = ctx.clone();
+    later.collected_at = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    svc.add_diagnostic(later);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(svc.recent_diagnostics.len(), 1);
+    assert_eq!(svc.recent_diagnostics[0].occurrence_count, 2);
+    let loaded = super::storage::load_recent_diagnostics(&root, 100)
+        .await
+        .unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].occurrence_count, 2);
 }
 
 #[test]
@@ -4790,6 +4850,7 @@ fn diagnostic_cluster_threshold() {
             chat_id: None,
             collected_at: ts.clone(),
             severity: DiagnosticSeverity::High,
+            occurrence_count: 1,
         })
         .collect();
     let facts = detect_diagnostic_cluster_facts(&diags, now);
@@ -4815,6 +4876,7 @@ fn frontend_error_burst() {
             chat_id: None,
             collected_at: ts.clone(),
             severity: DiagnosticSeverity::Medium,
+            occurrence_count: 1,
         })
         .collect();
     let facts = detect_diagnostic_cluster_facts(&diags, now);
@@ -4824,6 +4886,54 @@ fn frontend_error_burst() {
             .any(|f| f.kind == BuddyFactKind::FrontendErrorBurst),
         "frontend burst fact must be emitted for 5 frontend diagnostics"
     );
+}
+
+#[test]
+fn diagnostic_cluster_counts_occurrences() {
+    use super::observers::diagnostic_cluster::detect_diagnostic_cluster_facts;
+    let now = chrono::Utc::now();
+    let diags = vec![DiagnosticContext {
+        error_type: "timeout".to_string(),
+        error_message: "same timeout".to_string(),
+        source_file: None,
+        tool_name: None,
+        chat_id: None,
+        collected_at: (now - Duration::minutes(5)).to_rfc3339(),
+        severity: DiagnosticSeverity::High,
+        occurrence_count: 3,
+    }];
+
+    let facts = detect_diagnostic_cluster_facts(&diags, now);
+    let fact = facts
+        .iter()
+        .find(|f| f.kind == BuddyFactKind::DiagnosticCluster)
+        .expect("occurrences should satisfy cluster threshold");
+    assert_eq!(fact.payload["count"].as_u64(), Some(3));
+    assert_eq!(fact.payload["diagnostic_ids"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn frontend_error_burst_counts_occurrences() {
+    use super::observers::diagnostic_cluster::detect_diagnostic_cluster_facts;
+    let now = chrono::Utc::now();
+    let diags = vec![DiagnosticContext {
+        error_type: "js_error".to_string(),
+        error_message: "same frontend error".to_string(),
+        source_file: None,
+        tool_name: Some("frontend".to_string()),
+        chat_id: None,
+        collected_at: (now - Duration::minutes(2)).to_rfc3339(),
+        severity: DiagnosticSeverity::Medium,
+        occurrence_count: 5,
+    }];
+
+    let facts = detect_diagnostic_cluster_facts(&diags, now);
+    let fact = facts
+        .iter()
+        .find(|f| f.kind == BuddyFactKind::FrontendErrorBurst)
+        .expect("frontend occurrences should satisfy burst threshold");
+    assert_eq!(fact.payload["count"].as_u64(), Some(5));
+    assert_eq!(fact.payload["diagnostic_ids"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -9103,6 +9213,7 @@ fn investigation_diagnostic_cluster_payload_has_diagnostic_ids_not_collected_at(
             chat_id: None,
             collected_at: (now - Duration::minutes(i + 1)).to_rfc3339(),
             severity: DiagnosticSeverity::High,
+            occurrence_count: 1,
         })
         .collect();
 
@@ -10356,6 +10467,7 @@ async fn investigation_enrich_context_resolves_diagnostic_ids() {
         chat_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity: DiagnosticSeverity::High,
+        occurrence_count: 1,
     };
     let id = diagnostic_id(&diag);
     let mut svc = make_service();

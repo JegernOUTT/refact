@@ -1299,15 +1299,39 @@ impl BuddyService {
             .tool_name
             .as_deref()
             .and_then(redact_diagnostic_metadata);
+        ctx.occurrence_count = ctx.occurrence_count.max(1);
         let signature = super::diagnostics::diagnostic_signature(&ctx);
-        let duplicate = self
+        let duplicate_index = self
             .recent_diagnostics
             .iter()
             .rev()
             .take(20)
-            .any(|existing| super::diagnostics::diagnostic_signature(existing) == signature);
-        if duplicate {
-            self.enqueue_diagnostic_runtime_event(&ctx);
+            .position(|existing| super::diagnostics::diagnostic_signature(existing) == signature)
+            .map(|rev_index| self.recent_diagnostics.len() - 1 - rev_index);
+        if let Some(index) = duplicate_index {
+            let updated = {
+                let existing = &mut self.recent_diagnostics[index];
+                existing.occurrence_count = existing
+                    .occurrence_count
+                    .max(1)
+                    .saturating_add(ctx.occurrence_count);
+                existing.collected_at = ctx.collected_at.clone();
+                existing.severity = ctx.severity.clone();
+                existing.clone()
+            };
+            let project_root = self.project_root.clone();
+            let ctx_for_disk = ctx.clone();
+            tokio::spawn(async move {
+                if let Err(err) =
+                    super::storage::append_diagnostic(&project_root, &ctx_for_disk).await
+                {
+                    warn!("buddy: failed to persist diagnostic history: {}", err);
+                }
+            });
+            let _ = self.events_tx.send(BuddyEvent::DiagnosticAdded {
+                diagnostic: updated.clone(),
+            });
+            self.enqueue_diagnostic_runtime_event(&updated);
             return;
         }
         self.recent_diagnostics.push(ctx.clone());
@@ -1492,6 +1516,7 @@ impl BuddyService {
             chat_id: chat_id.map(|s| s.to_string()),
             collected_at: Utc::now().to_rfc3339(),
             severity,
+            occurrence_count: 1,
         };
         self.add_diagnostic(ctx);
         let redacted = redact_sensitive(error_msg);

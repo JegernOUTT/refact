@@ -86,6 +86,7 @@ pub async fn handle_v1_buddy_frontend_error(
         chat_id: None,
         collected_at: chrono::Utc::now().to_rfc3339(),
         severity,
+        occurrence_count: 1,
     };
 
     let buddy_arc = gcx.buddy.clone();

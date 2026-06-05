@@ -9,7 +9,7 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
-use super::diagnostics::DiagnosticContext;
+use super::diagnostics::{diagnostic_signature, DiagnosticContext};
 use super::memory_lifecycle::{
     apply_memory_lifecycle_op_status, memory_op_duplicate_should_replace, MemoryLifecycleOp,
     MemoryOpStatus, MemoryOpsRecord, MemoryOpsState, MemorySource,
@@ -658,7 +658,20 @@ async fn load_diagnostics_inner(
 
         match serde_json::from_str::<DiagnosticContext>(line) {
             Ok(ctx) => {
-                out.push_back(ctx);
+                let signature = diagnostic_signature(&ctx);
+                if let Some(existing) = out
+                    .iter_mut()
+                    .find(|existing| diagnostic_signature(existing) == signature)
+                {
+                    existing.occurrence_count = existing
+                        .occurrence_count
+                        .max(1)
+                        .saturating_add(ctx.occurrence_count.max(1));
+                    existing.collected_at = ctx.collected_at;
+                    existing.severity = ctx.severity;
+                } else {
+                    out.push_back(ctx);
+                }
                 if let Some(limit) = limit {
                     while out.len() > limit {
                         out.pop_front();
