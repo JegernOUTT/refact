@@ -119,6 +119,15 @@ pub struct GoalBudgetSpent {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct GoalBudgetWakeBuckets {
+    pub wall_clock_secs: u8,
+    pub no_progress_wakes: u8,
+    pub total_tokens: u8,
+    pub usd: u8,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct LearningBudgetSnapshot {
     pub elapsed_secs: u64,
     pub prompt_tokens: u64,
@@ -291,6 +300,17 @@ pub struct GoalLedger {
     pub last_progress_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_reason: Option<ConductorWakeReason>,
+    #[serde(default, skip_serializing_if = "GoalBudgetWakeBuckets::is_empty")]
+    pub budget_wake_buckets: GoalBudgetWakeBuckets,
+}
+
+impl GoalBudgetWakeBuckets {
+    pub fn is_empty(&self) -> bool {
+        self.wall_clock_secs == 0
+            && self.no_progress_wakes == 0
+            && self.total_tokens == 0
+            && self.usd == 0
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

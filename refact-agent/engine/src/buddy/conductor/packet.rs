@@ -1087,6 +1087,7 @@ mod tests {
                 last_wake_at: Some("2026-06-03T00:05:00Z".to_string()),
                 last_progress_at: Some("2026-06-03T00:04:00Z".to_string()),
                 last_wake_reason: Some(ConductorWakeReason::TaskBoard),
+                ..Default::default()
             },
             created_at: Some("2026-06-03T00:00:00Z".to_string()),
             updated_at: Some("2026-06-03T00:04:00Z".to_string()),

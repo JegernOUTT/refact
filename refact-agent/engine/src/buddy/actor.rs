@@ -10,7 +10,6 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::app_state::AppState;
-use refact_buddy_core::conductor::ConductorWakeReason;
 use refact_buddy_core::user_action::UserAction;
 use super::drafts::{
     validate_draft_payload, DraftCreateError, DraftStore, DraftTarget, DraftValidationError,
@@ -2131,9 +2130,14 @@ pub async fn buddy_background_task(gcx: AppState) {
                 }
                 let new_pulse =
                     super::pulse::build_pulse(gcx.clone(), &project_root, &tmp_store).await;
-                super::conductor::wake::enqueue_all_wake(
+                super::conductor::wake::refresh_conductor_wake_targets_for_project(
                     gcx.gcx.clone(),
-                    ConductorWakeReason::Budget,
+                    &project_root,
+                )
+                .await;
+                super::conductor::wake::enqueue_budget_threshold_wakes_for_project(
+                    gcx.gcx.clone(),
+                    &project_root,
                 )
                 .await;
                 let mut buddy = buddy_arc.lock().await;
@@ -2347,6 +2351,14 @@ pub async fn buddy_background_task(gcx: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actor_refresh_path_no_longer_uses_unconditional_budget_fanout() {
+        let source = include_str!("actor.rs");
+
+        assert!(!source.contains("enqueue_all_wake(\n                    gcx.gcx.clone(),\n                    ConductorWakeReason::Budget"));
+        assert!(source.contains("enqueue_budget_threshold_wakes_for_project"));
+    }
 
     #[test]
     fn commit_made_poller_pushes_new_shas() {

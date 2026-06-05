@@ -2,11 +2,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
-use refact_buddy_core::conductor::{ConductorWakeReason, GoalLedger, GoalStatus};
-use refact_buddy_core::conductor_store::list_goal_ledgers;
+use refact_buddy_core::conductor::{
+    ConductorGoal, ConductorWakeReason, GoalBudgetSpent, GoalBudgetWakeBuckets, GoalLedger,
+    GoalStatus,
+};
+use refact_buddy_core::conductor_store::{list_goal_ledgers, mutate_goal_ledger, MissingGoalBehavior};
 use refact_chat_api::MessageOrigin;
 
 use crate::global_context::SharedGlobalContext;
+
+use super::budget::aggregate_goal_spent;
 
 pub const DEFAULT_WAKE_DEBOUNCE_SECS: i64 = 5;
 pub const DEFAULT_HUMAN_YIELD_GRACE_SECS: i64 = 30;
@@ -392,6 +397,61 @@ pub async fn enqueue_all_wake(gcx: SharedGlobalContext, reason: ConductorWakeRea
     enqueue_target_goals(gcx, targets.goal_ids(), reason).await
 }
 
+pub async fn enqueue_budget_threshold_wakes_for_project(
+    gcx: SharedGlobalContext,
+    project_root: &Path,
+) -> bool {
+    let ledgers = match list_goal_ledgers(project_root).await {
+        Ok(ledgers) => ledgers,
+        Err(error) => {
+            tracing::warn!(
+                "conductor budget wake refresh failed for {}: {}",
+                project_root.display(),
+                error
+            );
+            return false;
+        }
+    };
+    let mut enqueued = false;
+    for stored in ledgers {
+        if stored.ledger.status.unwrap_or_default().is_terminal()
+            || stored.ledger.status == Some(GoalStatus::Paused)
+        {
+            continue;
+        }
+        let mut goal = ConductorGoal::from_ledger(stored.goal_id.clone(), stored.ledger.clone());
+        let spent = aggregate_goal_spent(gcx.clone(), &goal)
+            .await
+            .unwrap_or_else(|_| goal.spent.clone());
+        goal.spent = GoalBudgetSpent {
+            no_progress_wakes: goal.ledger.no_progress_wakes,
+            ..spent
+        };
+        let current = budget_wake_buckets(&goal);
+        if current == goal.ledger.budget_wake_buckets {
+            continue;
+        }
+        let crossed = budget_bucket_crossed(&goal.ledger.budget_wake_buckets, &current);
+        match persist_budget_wake_buckets(project_root, &goal.id, current).await {
+            Ok(()) if crossed => {
+                enqueued |= enqueue_goal_wake_after_target_refresh(
+                    gcx.clone(),
+                    &goal.id,
+                    ConductorWakeReason::Budget,
+                )
+                .await;
+            }
+            Ok(()) => {}
+            Err(error) => tracing::warn!(
+                "conductor budget wake bucket persist failed for {}: {}",
+                goal.id,
+                error
+            ),
+        }
+    }
+    enqueued
+}
+
 pub async fn enqueue_goal_wake(
     gcx: SharedGlobalContext,
     goal_id: &str,
@@ -541,6 +601,77 @@ async fn enqueue_target_goals(
     enqueued
 }
 
+async fn persist_budget_wake_buckets(
+    project_root: &Path,
+    goal_id: &str,
+    buckets: GoalBudgetWakeBuckets,
+) -> Result<(), String> {
+    mutate_goal_ledger(
+        project_root,
+        goal_id,
+        MissingGoalBehavior::RequireExisting,
+        |ledger| {
+            ledger.budget_wake_buckets = buckets;
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn budget_bucket_crossed(
+    previous: &GoalBudgetWakeBuckets,
+    current: &GoalBudgetWakeBuckets,
+) -> bool {
+    current.wall_clock_secs > previous.wall_clock_secs
+        || current.no_progress_wakes > previous.no_progress_wakes
+        || current.total_tokens > previous.total_tokens
+        || current.usd > previous.usd
+}
+
+fn budget_wake_buckets(goal: &ConductorGoal) -> GoalBudgetWakeBuckets {
+    GoalBudgetWakeBuckets {
+        wall_clock_secs: bucket_u64(goal.spent.elapsed_secs, goal.budget.wall_clock_secs),
+        no_progress_wakes: bucket_u32(goal.spent.no_progress_wakes, goal.budget.no_progress_wakes),
+        total_tokens: bucket_u64(goal.spent.total_tokens, goal.budget.total_tokens),
+        usd: bucket_f64(goal.spent.usd, goal.budget.usd),
+    }
+}
+
+fn bucket_u32(spent: u32, limit: Option<u32>) -> u8 {
+    bucket_u64(u64::from(spent), limit.map(u64::from))
+}
+
+fn bucket_u64(spent: u64, limit: Option<u64>) -> u8 {
+    let Some(limit) = limit.filter(|limit| *limit > 0) else {
+        return 0;
+    };
+    bucket_percent((spent as f64 / limit as f64) * 100.0)
+}
+
+fn bucket_f64(spent: Option<f64>, limit: Option<f64>) -> u8 {
+    let (Some(spent), Some(limit)) = (spent, limit) else {
+        return 0;
+    };
+    if limit <= 0.0 {
+        return 0;
+    }
+    bucket_percent((spent / limit) * 100.0)
+}
+
+fn bucket_percent(percent: f64) -> u8 {
+    if percent >= 100.0 {
+        100
+    } else if percent >= 90.0 {
+        90
+    } else if percent >= 80.0 {
+        80
+    } else {
+        0
+    }
+}
+
 fn normalized_lookup(map: &HashMap<String, Vec<String>>, key: &str) -> Vec<String> {
     let key = normalized_goal_id(key.to_string());
     if key.is_empty() {
@@ -570,6 +701,24 @@ mod tests {
 
     fn test_bus() -> ConductorWakeBus {
         ConductorWakeBus::with_limits(Duration::seconds(5), Duration::seconds(30), 2)
+    }
+
+    fn test_goal(no_progress_wakes: u32, stored_bucket: u8) -> GoalLedger {
+        GoalLedger {
+            budget: Some(refact_buddy_core::conductor::GoalBudget {
+                wall_clock_secs: Some(3600),
+                no_progress_wakes: Some(10),
+                total_tokens: Some(100),
+                ..Default::default()
+            }),
+            budget_wake_buckets: GoalBudgetWakeBuckets {
+                no_progress_wakes: stored_bucket,
+                ..Default::default()
+            },
+            no_progress_wakes,
+            task_ids: vec!["task-1".to_string()],
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -776,6 +925,86 @@ mod tests {
         let bus = gcx.conductor_wake_bus.lock().await;
         let mailbox = bus.mailbox("goal-1").unwrap();
         assert_eq!(mailbox.reasons, vec![ConductorWakeReason::TaskBoard]);
+    }
+
+    #[tokio::test]
+    async fn idle_active_goal_does_not_receive_budget_wake_below_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-idle",
+            &test_goal(0, 0),
+        )
+        .await
+        .unwrap();
+
+        refresh_conductor_wake_targets_for_project(gcx.clone(), dir.path()).await;
+        assert!(!enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+
+        let bus = gcx.conductor_wake_bus.lock().await;
+        assert!(bus.mailbox("goal-idle").is_none());
+    }
+
+    #[tokio::test]
+    async fn budget_threshold_crossing_enqueues_exactly_one_budget_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-budget",
+            &test_goal(8, 0),
+        )
+        .await
+        .unwrap();
+
+        refresh_conductor_wake_targets_for_project(gcx.clone(), dir.path()).await;
+        assert!(enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+        assert!(!enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-budget").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::Budget]);
+        let ledger =
+            refact_buddy_core::conductor_store::load_goal_ledger(dir.path(), "goal-budget")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(ledger.budget_wake_buckets.no_progress_wakes, 80);
+    }
+
+    #[tokio::test]
+    async fn restart_does_not_reenqueue_unchanged_budget_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().to_path_buf(),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-restart",
+            &test_goal(8, 80),
+        )
+        .await
+        .unwrap();
+
+        refresh_conductor_wake_targets_for_project(gcx.clone(), dir.path()).await;
+        assert!(!enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+
+        let bus = gcx.conductor_wake_bus.lock().await;
+        assert!(bus.mailbox("goal-restart").is_none());
     }
 
     #[tokio::test]
