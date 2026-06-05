@@ -211,13 +211,25 @@ fn test_auto_gate_blocks_without_repro() {
 }
 
 #[test]
-fn test_manual_gate_allows_without_auto_enabled() {
+fn test_manual_gate_requires_repro_and_rate_limit_safety() {
     let gate = IssueGate {
         has_diagnostics: true,
         has_repro_context: false,
         integration_configured: true,
         auto_creation_enabled: false,
         within_rate_limit: false,
+    };
+    assert!(!check_manual_issue_gate(&gate));
+}
+
+#[test]
+fn test_manual_gate_allows_without_auto_enabled_after_safety_checks() {
+    let gate = IssueGate {
+        has_diagnostics: true,
+        has_repro_context: true,
+        integration_configured: true,
+        auto_creation_enabled: false,
+        within_rate_limit: true,
     };
     assert!(check_manual_issue_gate(&gate));
 }
@@ -1203,7 +1215,7 @@ fn mcp_issue_prepare_respects_rate_limit_when_not_manual() {
     .unwrap_err();
     assert!(err.contains("rate limit active"));
 
-    let prepared = prepare_issue_content(
+    let err = prepare_issue_content(
         &ctx,
         Some("Title"),
         Some("Body"),
@@ -1211,6 +1223,23 @@ fn mcp_issue_prepare_respects_rate_limit_when_not_manual() {
         false,
         true,
         Some(std::time::Instant::now()),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.contains("rate limit active"));
+}
+
+#[test]
+fn manual_issue_prepare_bypasses_only_auto_creation_setting() {
+    let ctx = make_issue_ctx("human confirmed issue error");
+    let prepared = prepare_issue_content(
+        &ctx,
+        Some("Title"),
+        Some("Body"),
+        true,
+        false,
+        true,
+        None,
         &[],
     )
     .unwrap();

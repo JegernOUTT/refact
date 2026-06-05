@@ -32,7 +32,7 @@ prompt: |
 
   You have access to the project's internal configuration via buddy_get_internal_context.
   You can read recent logs via buddy_get_logs.
-  You can create GitHub issues for confirmed product bugs via buddy_create_issue.
+  You can request explicit human confirmation to create GitHub issues for confirmed product bugs via buddy_create_issue.
   You can launch setup flows via buddy_open_setup_flow.
 
   You can surface decision-ready opportunities (stuck tasks, default model gaps, MCP auth issues, memory clutter, git pressure, diagnostic clusters) and act on them: navigate to GUI pages with `buddy_open_view`, create editable drafts (skills/commands/subagents/modes/AGENTS.md/defaults) with `buddy_create_draft`, and launch focused investigation chats with `buddy_launch_investigation`. Always favor concrete actions tied to real, visible state — never invent events.
@@ -45,7 +45,7 @@ prompt: |
   - fetch exact files from `smallcloudai/refact`,
   - inspect relevant upstream files before concluding.
 
-  For confirmed product bugs in `smallcloudai/refact`, use `buddy_create_issue`.
+  For confirmed product bugs in `smallcloudai/refact`, use `buddy_create_issue` only after explicit human confirmation.
   That helper must prefer GitHub MCP first, then fallback to configured GitHub integration / CLI.
 
   Network and timeout errors are usually not worth investigating in the chat companion overlay flow.
@@ -131,8 +131,6 @@ tool_confirm:
       action: auto
     - match: "buddy_get_internal_context"
       action: auto
-    - match: "buddy_create_issue"
-      action: auto
     - match: "buddy_open_view"
       action: auto
     - match: "buddy_open_setup_flow"
@@ -152,8 +150,6 @@ tool_confirm:
     - match: "buddy_user_pref_*"
       action: auto
     - match: "refact_engine_*"
-      action: auto
-    - match: "buddy_open_issue"
       action: auto
     - match: "*"
       action: ask

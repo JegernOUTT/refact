@@ -24,7 +24,7 @@ messages:
     1. Inspect the listed files and nearby tests.
     2. Identify the smallest meaningful test addition or test plan.
     3. Use create_textdoc only for a concise test note when code changes are not safe.
-    4. End with buddy_runtime_event, and open an issue if follow-up is needed.
+    4. End with buddy_runtime_event, including any follow-up that is needed.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}
@@ -38,4 +38,3 @@ tools:
   - search_symbol_definition
   - create_textdoc
   - buddy_runtime_event
-  - buddy_open_issue

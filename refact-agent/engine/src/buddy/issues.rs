@@ -57,14 +57,17 @@ pub fn check_issue_gate(gate: &IssueGate) -> bool {
 }
 
 pub fn check_manual_issue_gate(gate: &IssueGate) -> bool {
-    gate.has_diagnostics && gate.integration_configured
+    gate.has_diagnostics
+        && gate.has_repro_context
+        && gate.integration_configured
+        && gate.within_rate_limit
 }
 
 fn gate_error(gate: &IssueGate, manual: bool) -> String {
     if !gate.has_diagnostics {
         return "gate blocked: no diagnostic information (need non-empty error with source file or tool name)".to_string();
     }
-    if !manual && !gate.has_repro_context {
+    if !gate.has_repro_context {
         return "gate blocked: no reproduction context (source file or tool name required)"
             .to_string();
     }
@@ -74,7 +77,7 @@ fn gate_error(gate: &IssueGate, manual: bool) -> String {
     if !manual && !gate.auto_creation_enabled {
         return "gate blocked: automatic issue creation is disabled in settings".to_string();
     }
-    if !manual && !gate.within_rate_limit {
+    if !gate.within_rate_limit {
         return "gate blocked: rate limit active (one issue per hour)".to_string();
     }
     "gate blocked: unknown condition".to_string()
@@ -548,6 +551,7 @@ pub async fn create_issue_via_native(
     diagnostic_id: Option<String>,
     collected_at: Option<String>,
     error: Option<String>,
+    manual: bool,
 ) -> Result<BuddyIssueCreateResult, String> {
     let ctx = resolve_issue_context(
         gcx.clone(),
@@ -564,7 +568,7 @@ pub async fn create_issue_via_native(
         gcx.clone(),
         &ctx,
         auto_enabled,
-        false,
+        manual,
         last_issue_at,
         &recent_errors,
     )

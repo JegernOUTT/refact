@@ -27,7 +27,7 @@ messages:
     Steps:
     1. Review the task and evidence to identify the failing component.
     2. Inspect relevant local or mirrored Refact engine files and definitions.
-    3. Open an issue, memory, or runtime event only when the evidence supports it.
+    3. Create memory or runtime events only when the evidence supports it.
     4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
     If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
   user_template: |
@@ -52,5 +52,4 @@ tools:
   - refact_engine_cat
   - buddy_runtime_event
   - buddy_runtime_event
-  - buddy_open_issue
   - buddy_memory_create
