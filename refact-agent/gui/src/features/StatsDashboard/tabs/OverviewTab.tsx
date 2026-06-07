@@ -1,5 +1,20 @@
 import React, { useMemo } from "react";
-import { Box, Flex, Text, Badge } from "@radix-ui/themes";
+import { Badge, Card, Icon, StatusDot, Surface } from "../../../components/ui";
+import {
+  Bot,
+  CalendarClock,
+  CheckCircle2,
+  Clock3,
+  Coins,
+  Gauge,
+  Hash,
+  MessageSquareText,
+  PiggyBank,
+  RefreshCw,
+  ServerCog,
+  Sparkles,
+  Zap,
+} from "lucide-react";
 import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import {
   useGetClaudeCodeUsageQuery,
@@ -30,37 +45,78 @@ const formatResetAt = (resetAt: string | null | undefined): string | null => {
   })}`;
 };
 
+type UsageTone = "danger" | "warning" | "success";
+
+const usageTone = (pct: number): UsageTone => {
+  if (pct >= 90) return "danger";
+  if (pct >= 70) return "warning";
+  return "success";
+};
+
+const usageStatus: Record<UsageTone, "error" | "warning" | "success"> = {
+  danger: "error",
+  warning: "warning",
+  success: "success",
+};
+
 const UsageBar: React.FC<{ pct: number }> = ({ pct }) => {
   const clamped = Math.max(0, Math.min(pct, 100));
+  const tone = usageTone(clamped);
   const color =
-    clamped >= 90
+    tone === "danger"
       ? "var(--rf-color-danger)"
-      : clamped >= 70
+      : tone === "warning"
         ? "var(--rf-color-warning)"
         : "var(--rf-color-success)";
+
   return (
     <div
-      style={{
-        height: "4px",
-        width: "100%",
-        borderRadius: "2px",
-        background: "var(--rf-surface-3)",
-        overflow: "hidden",
-        marginTop: "4px",
-      }}
+      aria-label={`${Math.round(clamped)}% used`}
+      className={styles.usageBar}
+      role="meter"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={clamped}
     >
       <div
-        style={{
-          height: "100%",
-          width: `${clamped}%`,
-          borderRadius: "2px",
-          background: color,
-          transition: "width 0.3s ease",
-        }}
+        className={styles.usageBarFill}
+        style={
+          {
+            "--usage-pct": `${clamped}%`,
+            "--usage-color": color,
+          } as React.CSSProperties
+        }
       />
     </div>
   );
 };
+
+const QuotaLine: React.FC<{
+  label: string;
+  pct: number;
+  resetAt?: string | null;
+  limitReached?: boolean;
+}> = ({ label, pct, resetAt, limitReached = false }) => {
+  const clamped = Math.max(0, Math.min(pct, 100));
+  const reset = formatResetAt(resetAt);
+
+  return (
+    <div className={styles.quotaLine}>
+      <div className={styles.quotaLabel}>
+        <StatusDot
+          status={limitReached ? "error" : usageStatus[usageTone(clamped)]}
+          pulse={limitReached}
+        />
+        <span className={styles.quotaMeta}>{label}</span>
+        {limitReached && <Badge tone="danger">Limit reached</Badge>}
+      </div>
+      <span className={styles.quotaMeta}>
+        {Math.round(clamped)}%{reset ? ` · ${reset}` : ""}
+      </span>
+    </div>
+  );
+};
+
 const ClaudeCodeInstanceCard: React.FC<{
   providerName: string;
   displayName: string;
@@ -74,73 +130,44 @@ const ClaudeCodeInstanceCard: React.FC<{
   if (!data.five_hour && !data.seven_day) return null;
 
   return (
-    <Box
-      style={{
-        flex: "1 1 200px",
-        minWidth: 0,
-        background: "var(--rf-surface-1)",
-        borderRadius: "var(--rf-radius-card)",
-        padding: "var(--rf-space-3)",
-      }}
-    >
-      <Flex align="center" gap="2" mb="2">
-        <Text size="2" weight="medium">
-          {displayName}
-        </Text>
-        <Text size="1" color="gray">
-          ({providerName})
-        </Text>
-      </Flex>
-      {data.five_hour &&
-        (() => {
-          const pct = Math.max(0, Math.min(data.five_hour.percent_used, 100));
-          return (
-            <Box mb="3">
-              <Flex justify="between">
-                <Text size="1" color="gray">
-                  Session (5h)
-                </Text>
-                <Text size="1" color="gray">
-                  {Math.round(pct)}%
-                  {formatResetAt(data.five_hour.resets_at)
-                    ? ` · ${formatResetAt(data.five_hour.resets_at)}`
-                    : ""}
-                </Text>
-              </Flex>
-              <UsageBar pct={pct} />
-            </Box>
-          );
-        })()}
-      {data.seven_day &&
-        (() => {
-          const pct = Math.max(0, Math.min(data.seven_day.percent_used, 100));
-          return (
-            <Box mb="2">
-              <Flex justify="between">
-                <Text size="1" color="gray">
-                  Weekly
-                </Text>
-                <Text size="1" color="gray">
-                  {Math.round(pct)}%
-                  {formatResetAt(data.seven_day.resets_at)
-                    ? ` · ${formatResetAt(data.seven_day.resets_at)}`
-                    : ""}
-                </Text>
-              </Flex>
-              <UsageBar pct={pct} />
-            </Box>
-          );
-        })()}
+    <Card animated="rise" className={styles.quotaCard} interactive>
+      <div className={styles.quotaHeader}>
+        <div className={styles.quotaLabel}>
+          <Icon icon={ServerCog} size="md" tone="accent" />
+          <span className={styles.quotaName}>{displayName}</span>
+        </div>
+        <span className={styles.quotaProvider}>{providerName}</span>
+      </div>
+      {data.five_hour && (
+        <div>
+          <QuotaLine
+            label="Session (5h)"
+            pct={data.five_hour.percent_used}
+            resetAt={data.five_hour.resets_at}
+          />
+          <UsageBar pct={data.five_hour.percent_used} />
+        </div>
+      )}
+      {data.seven_day && (
+        <div>
+          <QuotaLine
+            label="Weekly"
+            pct={data.seven_day.percent_used}
+            resetAt={data.seven_day.resets_at}
+          />
+          <UsageBar pct={data.seven_day.percent_used} />
+        </div>
+      )}
       {data.extra_usage && (
-        <Text size="1" color="gray">
+        <span className={styles.quotaExtra}>
           Extra: {data.extra_usage.is_enabled ? "on" : "off"} · $
           {data.extra_usage.used_credits.toFixed(2)} spent
           {typeof data.extra_usage.monthly_limit === "number"
             ? ` / $${data.extra_usage.monthly_limit.toFixed(0)}`
             : ""}
-        </Text>
+        </span>
       )}
-    </Box>
+    </Card>
   );
 };
 
@@ -156,126 +183,59 @@ const OpenAICodexInstanceCard: React.FC<{
   if (!data?.rate_limit) return null;
 
   return (
-    <Box
-      style={{
-        flex: "1 1 200px",
-        minWidth: 0,
-        background: "var(--rf-surface-1)",
-        borderRadius: "var(--rf-radius-card)",
-        padding: "var(--rf-space-3)",
-      }}
-    >
-      <Flex align="center" gap="2" mb="2">
-        <Text size="2" weight="medium">
-          {displayName}
-        </Text>
-        <Text size="1" color="gray">
-          ({providerName})
-        </Text>
-        {data.plan_type && (
-          <Badge color="blue" size="1">
-            {data.plan_type}
-          </Badge>
-        )}
-      </Flex>
-      {data.rate_limit.primary_window &&
-        (() => {
-          const pct = Math.max(
-            0,
-            Math.min(data.rate_limit.primary_window.used_percent, 100),
-          );
-          return (
-            <Box mb="3">
-              <Flex justify="between" align="center">
-                <Flex align="center" gap="1">
-                  <Text size="1" color="gray">
-                    Session (5h)
-                  </Text>
-                  {data.rate_limit.limit_reached && (
-                    <Badge color="red" size="1">
-                      Limit reached
-                    </Badge>
-                  )}
-                </Flex>
-                <Text size="1" color="gray">
-                  {Math.round(pct)}%
-                  {formatResetAt(data.rate_limit.primary_window.reset_at)
-                    ? ` · ${formatResetAt(
-                        data.rate_limit.primary_window.reset_at,
-                      )}`
-                    : ""}
-                </Text>
-              </Flex>
-              <UsageBar pct={pct} />
-            </Box>
-          );
-        })()}
-      {data.rate_limit.secondary_window &&
-        (() => {
-          const pct = Math.max(
-            0,
-            Math.min(data.rate_limit.secondary_window.used_percent, 100),
-          );
-          return (
-            <Box mb="2">
-              <Flex justify="between">
-                <Text size="1" color="gray">
-                  Weekly
-                </Text>
-                <Text size="1" color="gray">
-                  {Math.round(pct)}%
-                  {formatResetAt(data.rate_limit.secondary_window.reset_at)
-                    ? ` · ${formatResetAt(
-                        data.rate_limit.secondary_window.reset_at,
-                      )}`
-                    : ""}
-                </Text>
-              </Flex>
-              <UsageBar pct={pct} />
-            </Box>
-          );
-        })()}
-      {data.code_review_rate_limit?.primary_window &&
-        (() => {
-          const pct = Math.max(
-            0,
-            Math.min(
-              data.code_review_rate_limit.primary_window.used_percent,
-              100,
-            ),
-          );
-          return (
-            <Box mb="2">
-              <Flex justify="between" align="center">
-                <Flex align="center" gap="1">
-                  <Text size="1" color="gray">
-                    Code review
-                  </Text>
-                  {data.code_review_rate_limit.limit_reached && (
-                    <Badge color="red" size="1">
-                      Limit reached
-                    </Badge>
-                  )}
-                </Flex>
-                <Text size="1" color="gray">
-                  {Math.round(pct)}%
-                </Text>
-              </Flex>
-              <UsageBar pct={pct} />
-            </Box>
-          );
-        })()}
+    <Card animated="rise" className={styles.quotaCard} interactive>
+      <div className={styles.quotaHeader}>
+        <div className={styles.quotaLabel}>
+          <Icon icon={Bot} size="md" tone="accent" />
+          <span className={styles.quotaName}>{displayName}</span>
+          {data.plan_type && <Badge tone="accent">{data.plan_type}</Badge>}
+        </div>
+        <span className={styles.quotaProvider}>{providerName}</span>
+      </div>
+      {data.rate_limit.primary_window && (
+        <div>
+          <QuotaLine
+            label="Session (5h)"
+            pct={data.rate_limit.primary_window.used_percent}
+            resetAt={data.rate_limit.primary_window.reset_at}
+            limitReached={data.rate_limit.limit_reached}
+          />
+          <UsageBar pct={data.rate_limit.primary_window.used_percent} />
+        </div>
+      )}
+      {data.rate_limit.secondary_window && (
+        <div>
+          <QuotaLine
+            label="Weekly"
+            pct={data.rate_limit.secondary_window.used_percent}
+            resetAt={data.rate_limit.secondary_window.reset_at}
+          />
+          <UsageBar pct={data.rate_limit.secondary_window.used_percent} />
+        </div>
+      )}
+      {data.code_review_rate_limit?.primary_window && (
+        <div>
+          <QuotaLine
+            label="Code review"
+            pct={data.code_review_rate_limit.primary_window.used_percent}
+            limitReached={data.code_review_rate_limit.limit_reached}
+          />
+          <UsageBar
+            pct={data.code_review_rate_limit.primary_window.used_percent}
+          />
+        </div>
+      )}
       {data.credits && (
-        <Text size="1" color="gray">
+        <span className={styles.quotaExtra}>
           Credits:{" "}
           {data.credits.unlimited
             ? "unlimited"
             : data.credits.has_credits
               ? `${data.credits.balance} remaining`
               : "none"}
-        </Text>
+        </span>
       )}
-    </Box>
+    </Card>
   );
 };
 
@@ -300,17 +260,12 @@ const ProviderQuotaSection: React.FC = () => {
   if (claudeInstances.length === 0 && codexInstances.length === 0) return null;
 
   return (
-    <Box>
-      <Text
-        size="3"
-        weight="medium"
-        className={styles.sectionTitle}
-        mb="3"
-        as="p"
-      >
+    <section className={styles.root}>
+      <h3 className={styles.sectionTitle}>
+        <Icon icon={Gauge} size="md" tone="accent" />
         Provider Quotas
-      </Text>
-      <Flex gap="3" wrap="wrap">
+      </h3>
+      <div className={styles.quotaGrid}>
         {claudeInstances.map((p) => (
           <ClaudeCodeInstanceCard
             key={`claude:${p.name}`}
@@ -325,8 +280,8 @@ const ProviderQuotaSection: React.FC = () => {
             displayName={p.display_name}
           />
         ))}
-      </Flex>
-    </Box>
+      </div>
+    </section>
   );
 };
 
@@ -367,17 +322,18 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
   const topConversations = data?.top_conversations ?? [];
 
   return (
-    <Flex direction="column" gap="4">
+    <div className={styles.root}>
       <ProviderQuotaSection />
       {!hasStats && (
-        <Text className={styles.emptyText}>
+        <p className={styles.emptyText}>
           No usage data yet. Start chatting to see stats!
-        </Text>
+        </p>
       )}
       {hasStats && (
         <>
-          <Flex className={styles.cardsRow}>
+          <div className={`${styles.cardsRow} rf-stagger`}>
             <StatCard
+              icon={Zap}
               title="Total Usage"
               value={formatTokenCount(t.total_tokens)}
               subtitle={`${formatTokenCount(
@@ -385,6 +341,7 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
               )} read + ${formatTokenCount(t.total_completion_tokens)} written`}
             />
             <StatCard
+              icon={MessageSquareText}
               title="Conversations"
               value={t.total_conversations.toString()}
               subtitle={`Each one used ~${formatTokenCount(
@@ -392,6 +349,7 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
               )} tokens on average`}
             />
             <StatCard
+              icon={Hash}
               title="Messages Sent"
               value={t.total_messages_sent.toString()}
               subtitle={`Each message cost ~${formatTokenCount(
@@ -399,26 +357,34 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
               )} tokens on average`}
             />
             <StatCard
+              icon={Sparkles}
               title="AI Wrote"
               value={formatTokenCount(t.total_completion_tokens)}
               subtitle={`${completionPct}% of total — most usage is from reading context`}
             />
             <StatCard
+              icon={CheckCircle2}
+              tone="success"
               title="Success Rate"
               value={`${successRate}%`}
               subtitle={`${t.successful_calls} of ${t.total_calls} calls succeeded`}
             />
             <StatCard
+              icon={Coins}
+              tone="warning"
               title="Total Cost"
               value={formatCostDisplay(t.total_cost_usd)}
               subtitle="across all providers"
             />
             <StatCard
+              icon={Clock3}
               title="Avg Duration"
               value={formatDuration(t.avg_duration_ms)}
               subtitle="average per LLM call"
             />
             <StatCard
+              icon={PiggyBank}
+              tone="success"
               title="Cache Efficiency"
               value={`${cacheEfficiency}%`}
               subtitle={`${formatTokenCount(
@@ -426,24 +392,20 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
               )} tokens read from cache`}
             />
             <StatCard
+              icon={RefreshCw}
               title="Cache Created"
               value={formatTokenCount(t.total_cache_creation_tokens)}
               subtitle="tokens written to cache for future reuse"
             />
-          </Flex>
+          </div>
 
           {topConversations.length > 0 && (
-            <Box>
-              <Text
-                size="3"
-                weight="medium"
-                className={styles.sectionTitle}
-                mb="2"
-                as="p"
-              >
+            <section className={styles.root}>
+              <h3 className={styles.sectionTitle}>
+                <Icon icon={CalendarClock} size="md" tone="accent" />
                 Top Conversations by Token Usage
-              </Text>
-              <Box className={styles.tableWrapper}>
+              </h3>
+              <Surface className={styles.tableWrapper} variant="plain">
                 <table className={styles.table}>
                   <thead>
                     <tr>
@@ -474,11 +436,11 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
                     ))}
                   </tbody>
                 </table>
-              </Box>
-            </Box>
+              </Surface>
+            </section>
           )}
         </>
       )}
-    </Flex>
+    </div>
   );
 };

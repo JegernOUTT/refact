@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
+import { Surface } from "../../../components/ui";
 import { useListTrajectoriesPaginatedQuery } from "../../../services/refact/trajectories";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
@@ -79,9 +79,9 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
 
   if (!trajData || items.length === 0) {
     return (
-      <Text className={styles.emptyText}>
+      <p className={styles.emptyText}>
         No threads yet. Start chatting to see stats!
-      </Text>
+      </p>
     );
   }
 
@@ -97,7 +97,7 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
   }
 
   return (
-    <Flex direction="column" gap="3">
+    <div className={styles.root}>
       <input
         className={styles.searchInput}
         placeholder="Search by title, model, mode…"
@@ -106,9 +106,9 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
       />
 
       {items.length === 0 ? (
-        <Text className={styles.emptyText}>No matching threads.</Text>
+        <p className={styles.emptyText}>No matching threads.</p>
       ) : (
-        <Box className={styles.tableWrapper}>
+        <Surface className={styles.tableWrapper} variant="plain">
           <table className={styles.table}>
             <thead>
               <tr>
@@ -181,8 +181,8 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
               ))}
             </tbody>
           </table>
-        </Box>
+        </Surface>
       )}
-    </Flex>
+    </div>
   );
 };

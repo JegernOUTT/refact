@@ -1,17 +1,28 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
 .searchInput {
-  width: 100%;
-  max-width: 320px;
-  padding: var(--rf-space-2) var(--rf-space-3);
-  border: 1px solid var(--rf-border-strong);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-overlay);
+  width: min(100%, 320px);
+  min-height: var(--rf-control-h);
+  padding: 0 var(--rf-space-3);
   color: var(--rf-color-fg);
-  font-size: var(--rf-text-2);
+  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-ctl);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.searchInput::placeholder {
+  color: var(--rf-color-faint);
 }
 
 .searchInput:focus {
-  outline: 2px solid var(--rf-focus-ring);
-  outline-offset: -1px;
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
 }
 
 .tableWrapper {
@@ -20,15 +31,17 @@
 
 .table {
   width: 100%;
+  min-width: 900px;
   border-collapse: collapse;
 }
 
 .th {
   text-align: left;
   padding: var(--rf-space-2) var(--rf-space-3);
-  border-bottom: 1px solid var(--rf-border-strong);
+  border-bottom: var(--rf-hairline) solid var(--rf-border-strong);
   color: var(--rf-color-muted);
   cursor: pointer;
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   user-select: none;
   white-space: nowrap;
 }
@@ -39,29 +52,31 @@
 
 .td {
   padding: var(--rf-space-2) var(--rf-space-3);
-  border-bottom: 1px solid var(--rf-border);
-  white-space: nowrap;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
   color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  white-space: nowrap;
 }
 
 .titleCell {
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .emptyText {
+  margin: 0;
   color: var(--rf-color-muted);
+  font: var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
 .sortButton {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-  padding: 0;
   width: 100%;
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
   text-align: left;
 }

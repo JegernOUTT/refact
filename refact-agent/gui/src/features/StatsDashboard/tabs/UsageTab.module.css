@@ -1,12 +1,35 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-5);
+  min-width: 0;
+}
+
 .chartsRow {
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: var(--rf-space-4);
+  min-width: 0;
 }
 
 .chartBox {
-  flex: 1 1 280px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
   min-width: 0;
   overflow: hidden;
+  background: transparent;
+  border-color: transparent;
+}
+
+.chartCanvas {
+  width: 100%;
+  height: 220px;
+}
+
+.chartCanvasTall {
+  width: 100%;
+  height: 280px;
 }
 
 .tableWrapper {
@@ -15,15 +38,17 @@
 
 .table {
   width: 100%;
+  min-width: 760px;
   border-collapse: collapse;
 }
 
 .th {
   text-align: left;
   padding: var(--rf-space-2) var(--rf-space-3);
-  border-bottom: 1px solid var(--rf-border-strong);
+  border-bottom: var(--rf-hairline) solid var(--rf-border-strong);
   color: var(--rf-color-muted);
   cursor: pointer;
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   user-select: none;
   white-space: nowrap;
 }
@@ -34,25 +59,36 @@
 
 .td {
   padding: var(--rf-space-2) var(--rf-space-3);
-  border-bottom: 1px solid var(--rf-border);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
   color: var(--rf-color-fg);
+  font: var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.emptyText,
+.sectionTitle {
+  margin: 0;
 }
 
 .emptyText {
   color: var(--rf-color-muted);
+  font: var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
 .sectionTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
   color: var(--rf-color-fg);
+  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
 .sortButton {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-  padding: 0;
   width: 100%;
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
   text-align: left;
 }

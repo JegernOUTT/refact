@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Flex, Text } from "@radix-ui/themes";
+import { Surface } from "../../../components/ui";
 import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
@@ -21,12 +21,12 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
   const allModes = data?.by_mode ?? [];
 
   if (!data || allModes.length === 0) {
-    return <Text className={styles.emptyText}>No usage data by mode yet.</Text>;
+    return <p className={styles.emptyText}>No usage data by mode yet.</p>;
   }
 
   return (
-    <Flex direction="column" gap="3">
-      <Box className={styles.tableWrapper}>
+    <div className={styles.root}>
+      <Surface className={styles.tableWrapper} variant="plain">
         <table className={styles.table}>
           <thead>
             <tr>
@@ -51,7 +51,7 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
             ))}
           </tbody>
         </table>
-      </Box>
-    </Flex>
+      </Surface>
+    </div>
   );
 };

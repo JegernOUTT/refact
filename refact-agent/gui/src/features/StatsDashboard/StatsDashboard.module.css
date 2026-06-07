@@ -1,26 +1,71 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-4);
+  height: 100%;
+  min-width: 0;
+}
+
+.header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--rf-space-3);
+}
+
+.backButton {
+  justify-self: start;
+}
+
+.title {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: 720 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
+  text-align: center;
+}
+
+.rangeControls {
+  justify-self: end;
+}
+
 .tabsRoot {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+}
+
+.tabsList {
+  align-self: flex-start;
+  max-width: 100%;
 }
 
 .tabContent {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-top: var(--rf-space-3);
+  padding-top: var(--rf-space-4);
 }
 
-.presetButton {
-  cursor: pointer;
-}
+@media (width <= 640px) {
+  .header {
+    grid-template-columns: 1fr;
+    justify-items: stretch;
+  }
 
-.presetButtonActive {
-  font-weight: bold;
-}
+  .backButton,
+  .rangeControls {
+    justify-self: stretch;
+  }
 
-.placeholderText {
-  color: var(--rf-color-muted);
+  .title {
+    text-align: left;
+  }
+
+  .tabsList {
+    align-self: stretch;
+  }
 }
