@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { IconButton, Flex, Text, Box } from "@radix-ui/themes";
+import { Flex, Text, Box } from "@radix-ui/themes";
 import { useAppearance, useShiki } from "../../../hooks";
 import { DiffChunk } from "../../../services/refact/types";
 import { basename } from "./utils";
@@ -415,12 +415,9 @@ export const DiffBlock: React.FC<{
         {actions.length > 0 && (
           <Flex gap="1" className={styles.hunkActions}>
             {actions.map((action) => (
-              <IconButton
+              <button
                 key={action.label}
                 type="button"
-                size="1"
-                variant="ghost"
-                color="gray"
                 className={styles.hunkActionButton}
                 onClick={action.onClick}
                 disabled={action.disabled}
@@ -428,7 +425,7 @@ export const DiffBlock: React.FC<{
                 aria-label={action.label}
               >
                 {action.icon}
-              </IconButton>
+              </button>
             ))}
           </Flex>
         )}

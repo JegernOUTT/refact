@@ -1,6 +1,7 @@
+import { Check, Copy } from "lucide-react";
 import React, { useCallback, useState } from "react";
-import { Button, Flex } from "@radix-ui/themes";
-import { CheckIcon, CopyIcon } from "@radix-ui/react-icons";
+import { Flex } from "@radix-ui/themes";
+import { Button } from "../../ui";
 
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import styles from "./ExecToolCard.module.css";
@@ -34,16 +35,15 @@ const CopyButton: React.FC<CopyButtonProps> = ({
   return (
     <Button
       type="button"
-      size="1"
+      size="sm"
       variant="soft"
-      color={copied ? "green" : "gray"}
+      leftIcon={copied ? Check : Copy}
       className={styles.copyButton}
       onClick={(event) => {
         event.stopPropagation();
         onCopy(target, value);
       }}
     >
-      {copied ? <CheckIcon /> : <CopyIcon />}
       {copied ? "Copied" : label}
     </Button>
   );

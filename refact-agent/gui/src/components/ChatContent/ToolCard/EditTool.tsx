@@ -1,5 +1,5 @@
+import { CircleCheck, RotateCcw } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
-import { CheckCircledIcon, ResetIcon } from "@radix-ui/react-icons";
 import { Flex, Box, Spinner } from "@radix-ui/themes";
 import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
 import {
@@ -184,7 +184,7 @@ export const EditTool: React.FC<EditToolProps> = ({
         icon: dryRunResult.isLoading ? (
           <Spinner size="1" />
         ) : (
-          <CheckCircledIcon />
+          <CircleCheck />
         ),
         onClick: handleApplyDiff,
         disabled: dryRunResult.isLoading || !parsedToolCall,
@@ -194,7 +194,7 @@ export const EditTool: React.FC<EditToolProps> = ({
     if (replaceContent !== null && hasSelection) {
       actions.push({
         label: "Replace selection",
-        icon: <ResetIcon />,
+        icon: <RotateCcw />,
         onClick: handleReplace,
         disabled: !canPaste,
       });

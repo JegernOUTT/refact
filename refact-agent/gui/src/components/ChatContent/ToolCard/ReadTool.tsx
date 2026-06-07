@@ -1,5 +1,5 @@
+import { FileText } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
-import { FileTextIcon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -108,7 +108,7 @@ export const ReadTool: React.FC<ReadToolProps> = ({
 
   return (
     <ToolCard
-      icon={<FileTextIcon />}
+      icon={<FileText />}
       summary={summary}
       status={status}
       isOpen={isOpen}

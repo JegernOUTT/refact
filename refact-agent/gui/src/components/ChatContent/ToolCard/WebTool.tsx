@@ -1,5 +1,5 @@
+import { Globe, Search } from "lucide-react";
 import React, { useMemo } from "react";
-import { GlobeIcon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { Box, Flex, Text } from "@radix-ui/themes";
 
 import { ToolCard, ToolStatus } from "./ToolCard";
@@ -223,7 +223,7 @@ export const WebTool: React.FC<WebToolProps> = ({
 
   return (
     <ToolCard
-      icon={toolType === "web_search" ? <MagnifyingGlassIcon /> : <GlobeIcon />}
+      icon={toolType === "web_search" ? <Search /> : <Globe />}
       summary={summary}
       meta={meta}
       status={status}

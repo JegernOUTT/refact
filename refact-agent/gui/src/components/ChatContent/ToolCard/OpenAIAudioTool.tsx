@@ -1,5 +1,5 @@
+import { Volume2 } from "lucide-react";
 import React, { useMemo } from "react";
-import { SpeakerLoudIcon } from "@radix-ui/react-icons";
 import { Box, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -37,7 +37,7 @@ export const OpenAIAudioTool: React.FC<Props> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={<SpeakerLoudIcon />}
+      icon={<Volume2 />}
       summary={summary}
       status={state.status}
       isOpen={state.isOpen}

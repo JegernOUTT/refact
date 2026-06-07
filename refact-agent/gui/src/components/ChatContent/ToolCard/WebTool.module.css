@@ -1,30 +1,30 @@
 .url {
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: 0.95em;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .inlineCode {
-  font-family: var(--code-font-family);
-  color: var(--gray-12);
+  font-family: var(--rf-font-mono);
+  color: var(--rf-color-fg);
 }
 
 .query {
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .resultList {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 300px;
   overflow-y: auto;
-  margin-top: var(--space-1);
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
+  margin-top: var(--rf-space-1);
+  border-radius: var(--rf-radius-ctl);
+  border: 1px solid var(--rf-border);
 }
 
 .resultItem {
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--gray-a4);
+  padding: var(--rf-space-2);
+  border-bottom: 1px solid var(--rf-border);
 }
 
 .resultItem:last-child {

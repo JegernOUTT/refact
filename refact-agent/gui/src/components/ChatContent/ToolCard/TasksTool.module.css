@@ -1,17 +1,17 @@
 .stats {
-  color: var(--gray-11);
-  font-family: var(--code-font-family);
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
 }
 
 .taskList {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-1) 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) 0;
 }
 
 .taskItem {
-  padding: var(--space-1) var(--space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
 }
 
 .taskItem svg {
@@ -21,20 +21,20 @@
 }
 
 .pending {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .inProgress {
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
   animation: spin 1s linear infinite;
 }
 
 .completed {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .failed {
-  color: var(--red-11);
+  color: var(--rf-color-danger);
 }
 
 @keyframes spin {

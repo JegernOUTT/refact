@@ -1,5 +1,5 @@
+import { Box } from "lucide-react";
 import React, { useMemo } from "react";
-import { CubeIcon } from "@radix-ui/react-icons";
 import { Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -32,7 +32,7 @@ export const OpenAIMcpCallTool: React.FC<Props> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={<CubeIcon />}
+      icon={<Box />}
       summary={summary}
       status={state.status}
       isOpen={state.isOpen}

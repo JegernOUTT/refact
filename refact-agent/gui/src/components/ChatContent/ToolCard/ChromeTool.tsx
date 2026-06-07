@@ -1,5 +1,5 @@
+import { Monitor, Image } from "lucide-react";
 import React, { useMemo } from "react";
-import { DesktopIcon, ImageIcon } from "@radix-ui/react-icons";
 import { Box, Flex } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -320,7 +320,7 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     );
   }, [typedArgs, stats, maybeResult, images]);
 
-  const icon = images.length > 0 ? <ImageIcon /> : <DesktopIcon />;
+  const icon = images.length > 0 ? <Image /> : <Monitor />;
 
   const typedStepsBlock = useMemo(() => {
     if (!typedArgs) return null;

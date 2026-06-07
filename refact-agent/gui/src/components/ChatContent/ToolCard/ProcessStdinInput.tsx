@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from "react";
-import { Box, Button, Flex, Text, TextField } from "@radix-ui/themes";
+import { Box, Flex, Text, TextField } from "@radix-ui/themes";
+import { Button } from "../../ui";
 
 import { useAppSelector } from "../../../hooks";
 import {
@@ -69,7 +70,8 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
           </Box>
           <Button
             type="submit"
-            size="1"
+
+            size="sm"
             disabled={!canSend}
             onClick={(event) => event.stopPropagation()}
           >
@@ -77,9 +79,8 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
           </Button>
           <Button
             type="button"
-            size="1"
+            size="sm"
             variant="soft"
-            color="gray"
             disabled={isSending || !hasEngineEndpoint}
             onClick={(event) => {
               event.stopPropagation();

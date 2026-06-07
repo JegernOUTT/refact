@@ -1,21 +1,21 @@
 .sleepCard {
-  border-left: 2px solid var(--accent-9);
-  padding-left: var(--space-2);
+  border-left: 2px solid var(--rf-color-accent);
+  padding-left: var(--rf-space-2);
 }
 
 .summarySuccess {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .summaryInterrupted {
-  color: var(--amber-11);
+  color: var(--rf-color-warning);
 }
 
 .countdown {
-  padding: var(--space-3);
-  border: 1px solid var(--gray-a4);
+  padding: var(--rf-space-3);
+  border: 1px solid var(--rf-border);
   border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  background: var(--rf-surface-1);
 }
 
 .countdownText {
@@ -24,19 +24,19 @@
 }
 
 .description {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .tickStream {
   min-height: 22px;
-  padding-top: var(--space-1);
+  padding-top: var(--rf-space-1);
 }
 
 .tickDot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent-9);
+  background: var(--rf-color-accent);
   animation: tickBlip 1.4s ease-in-out infinite;
 }
 

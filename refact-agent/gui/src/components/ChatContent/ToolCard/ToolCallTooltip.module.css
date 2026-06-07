@@ -3,13 +3,13 @@
   position: fixed;
   z-index: 9999;
   background: var(--color-panel-solid);
-  border: 1px solid var(--gray-a6);
-  border-radius: var(--radius-2);
-  padding: var(--space-3);
-  font-family: var(--code-font-family);
-  font-size: var(--font-size-1);
+  border: 1px solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-ctl);
+  padding: var(--rf-space-3);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
   line-height: 1.5;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
   max-width: 600px;
   min-width: 200px;
   max-height: 400px;
@@ -19,20 +19,20 @@
 
 .toolName {
   font-weight: 600;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
   white-space: nowrap;
 }
 
 .separator {
   height: 1px;
-  background: var(--gray-a5);
-  margin: var(--space-2) 0;
+  background: var(--rf-border-strong);
+  margin: var(--rf-space-2) 0;
 }
 
 .args {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
 }
 
 .argRow {
@@ -42,13 +42,13 @@
 }
 
 .argKey {
-  color: var(--gray-a11);
-  font-size: var(--font-size-1);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
   flex-shrink: 0;
 }
 
 .argValue {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
   white-space: pre-wrap;
   word-break: break-word;
 }

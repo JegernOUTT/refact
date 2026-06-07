@@ -1,14 +1,5 @@
+import { Cuboid, FileText, Search, Timer, Monitor, Volume2, Image, TriangleAlert } from "lucide-react";
 import React, { useMemo } from "react";
-import {
-  CubeIcon,
-  FileTextIcon,
-  MagnifyingGlassIcon,
-  LapTimerIcon,
-  DesktopIcon,
-  SpeakerLoudIcon,
-  ImageIcon,
-  ExclamationTriangleIcon,
-} from "@radix-ui/react-icons";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -39,22 +30,22 @@ function parseJsonOrNull(text: string): unknown {
 function getToolIcon(toolName: string): React.ReactNode {
   switch (toolName) {
     case "openai_web_search_call":
-      return <MagnifyingGlassIcon />;
+      return <Search />;
     case "openai_file_search_call":
-      return <FileTextIcon />;
+      return <FileText />;
     case "openai_code_interpreter_call":
-      return <LapTimerIcon />;
+      return <Timer />;
     case "openai_computer_call":
     case "openai_computer_call_output":
-      return <DesktopIcon />;
+      return <Monitor />;
     case "openai_audio":
-      return <SpeakerLoudIcon />;
+      return <Volume2 />;
     case "openai_image_generation_call":
-      return <ImageIcon />;
+      return <Image />;
     case "openai_refusal":
-      return <ExclamationTriangleIcon />;
+      return <TriangleAlert />;
     default:
-      return <CubeIcon />;
+      return <Cuboid />;
   }
 }
 

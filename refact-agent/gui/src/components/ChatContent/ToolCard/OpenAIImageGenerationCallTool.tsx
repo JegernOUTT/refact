@@ -1,5 +1,5 @@
+import { Image } from "lucide-react";
 import React, { useMemo } from "react";
-import { ImageIcon } from "@radix-ui/react-icons";
 import { Flex, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -37,7 +37,7 @@ export const OpenAIImageGenerationCallTool: React.FC<Props> = ({
 
   return (
     <ToolCard
-      icon={<ImageIcon />}
+      icon={<Image />}
       summary={"Image Generation"}
       status={state.status}
       isOpen={state.isOpen}

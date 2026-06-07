@@ -1,3 +1,4 @@
+import { CircleCheck, CircleX, File, Settings, Rows3 } from "lucide-react";
 import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { Container, Flex, Text, Box, Spinner } from "@radix-ui/themes";
@@ -38,13 +39,6 @@ import {
   formatToolDisplayName,
 } from "../../utils/toolNameAliases";
 import { useCollapsibleStore, useStoredOpen } from "./useStoredOpen";
-import {
-  CheckCircledIcon,
-  CrossCircledIcon,
-  FileIcon,
-  GearIcon,
-  RowsIcon,
-} from "@radix-ui/react-icons";
 import { AnimatedText } from "../Text";
 import { toolCallArgsToString } from "./toolCallArgs";
 import {
@@ -118,9 +112,9 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
   const status = isError ? "error" : "success";
   const statusIcon =
     status === "error" ? (
-      <CrossCircledIcon data-testid="final-report-tool-error-icon" />
+      <CircleX data-testid="final-report-tool-error-icon" />
     ) : (
-      <CheckCircledIcon data-testid="final-report-tool-success-icon" />
+      <CircleCheck data-testid="final-report-tool-success-icon" />
     );
 
   return (
@@ -1705,9 +1699,9 @@ type ToolUsageSummaryProps = {
   waiting: boolean;
 };
 
-function getFileIcon(path: string): React.ReactNode {
-  if (path.endsWith("/") || !path.includes(".")) return <RowsIcon />;
-  return <FileIcon />;
+function getFile(path: string): React.ReactNode {
+  if (path.endsWith("/") || !path.includes(".")) return <Rows3 />;
+  return <File />;
 }
 
 function truncatePath(path: string, maxLen = 50): string {
@@ -1746,7 +1740,7 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
             style={{ cursor: "pointer" }}
           >
             <Flex gap="2" align="center" justify="center">
-              {waiting ? <Spinner /> : <GearIcon />}
+              {waiting ? <Spinner /> : <Settings />}
               {toolUsageAmount.map(({ functionName, amountOfCalls }, index) => (
                 <span key={functionName}>
                   <ToolUsageDisplay
@@ -1765,7 +1759,7 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
             )}
             {shownAttachedFiles?.map((file, index) => (
               <Text weight="light" size="1" key={index} ml="4" as="div">
-                {getFileIcon(file)} {truncatePath(file)}
+                {getFile(file)} {truncatePath(file)}
               </Text>
             ))}
             {currentStep &&

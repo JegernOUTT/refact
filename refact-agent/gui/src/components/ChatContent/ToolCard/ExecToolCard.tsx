@@ -1,6 +1,6 @@
+import { Code, Timer, Rows3 } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Box, Flex, Text } from "@radix-ui/themes";
-import { CodeIcon, LapTimerIcon, RowsIcon } from "@radix-ui/react-icons";
+import { Box, Flex, Text } from "@radix-ui/themes";
 import { FileText } from "lucide-react";
 import classNames from "classnames";
 
@@ -20,7 +20,7 @@ import {
 } from "../../../services/refact/types";
 import { ideOpenFile } from "../../../hooks/useEventBusForIDE";
 import { usePostMessage } from "../../../hooks/usePostMessage";
-import { Button } from "../../ui";
+import { Badge, Button } from "../../ui";
 import { ToolCard } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
@@ -434,9 +434,9 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
       <span className={styles.spinnerDot} />
     </span>
   ) : toolName === "process_list" ? (
-    <RowsIcon />
+    <Rows3 />
   ) : (
-    <CodeIcon />
+    <Code />
   );
 
   const summary = (
@@ -447,8 +447,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
         <ProcessStatusBadge status={status} />
         {metadata?.tty === true && (
           <Badge
-            size="1"
-            variant="soft"
+            tone="accent"
             className={styles.ptyChip}
             data-testid="exec-pty-chip"
           >
@@ -456,7 +455,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
           </Badge>
         )}
         {process.processId && (
-          <Badge size="1" variant="surface" className={styles.processChip}>
+          <Badge tone="muted" className={styles.processChip}>
             {process.processId}
           </Badge>
         )}
@@ -577,7 +576,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
 
           {!metadata && (
             <Flex align="center" gap="1" mt="2">
-              <LapTimerIcon />
+              <Timer />
               <Text size="1" color="gray">
                 Plain text result; structured process metadata was not available.
               </Text>

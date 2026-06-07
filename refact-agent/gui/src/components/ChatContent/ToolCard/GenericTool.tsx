@@ -1,5 +1,5 @@
+import { Settings } from "lucide-react";
 import React, { useMemo } from "react";
-import { GearIcon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -97,7 +97,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
     <>
       <span data-testid="generic-tool" hidden />
       <ToolCard
-        icon={<GearIcon />}
+        icon={<Settings />}
         summary={summary}
         status={status}
         isOpen={isOpen}

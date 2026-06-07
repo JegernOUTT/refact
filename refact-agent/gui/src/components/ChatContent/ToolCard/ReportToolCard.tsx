@@ -1,3 +1,4 @@
+import { Copy, Check, FileText, BookOpen } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -6,12 +7,6 @@ import React, {
   useState,
 } from "react";
 import { Flex, Text, Box, Spinner } from "@radix-ui/themes";
-import {
-  CopyIcon,
-  CheckIcon,
-  FileTextIcon,
-  ReaderIcon,
-} from "@radix-ui/react-icons";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
@@ -310,7 +305,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
             onClick={handleCopy}
             title="Copy report"
           >
-            {copied ? <CheckIcon /> : <CopyIcon />}
+            {copied ? <Check /> : <Copy />}
           </button>
           {showSaveButton && (
             <button
@@ -318,7 +313,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
               onClick={handleSave}
               title="Save as file"
             >
-              <FileTextIcon />
+              <FileText />
             </button>
           )}
         </span>
@@ -397,7 +392,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
                 style={{ padding: "0 var(--space-1)" }}
               >
                 <Flex as="span" align="center" gap="1">
-                  <ReaderIcon />
+                  <BookOpen />
                   Saved to knowledge
                 </Flex>
               </Text>

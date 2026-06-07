@@ -1,5 +1,5 @@
+import { TriangleAlert } from "lucide-react";
 import React, { useMemo } from "react";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import { Box, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -25,7 +25,7 @@ export const OpenAIRefusalTool: React.FC<Props> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={<ExclamationTriangleIcon />}
+      icon={<TriangleAlert />}
       summary={"Refusal"}
       status={state.status}
       isOpen={state.isOpen}

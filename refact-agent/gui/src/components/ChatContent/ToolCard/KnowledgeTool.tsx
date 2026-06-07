@@ -1,5 +1,5 @@
+import { BookOpen, MessageCircle, Pencil } from "lucide-react";
 import React, { useMemo } from "react";
-import { ReaderIcon, ChatBubbleIcon, Pencil2Icon } from "@radix-ui/react-icons";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
@@ -110,11 +110,11 @@ export const KnowledgeTool: React.FC<KnowledgeToolProps> = ({
 
   const icon =
     toolType === "create_knowledge" ? (
-      <Pencil2Icon />
+      <Pencil />
     ) : toolType === "knowledge" ? (
-      <ReaderIcon />
+      <BookOpen />
     ) : (
-      <ChatBubbleIcon />
+      <MessageCircle />
     );
 
   return (

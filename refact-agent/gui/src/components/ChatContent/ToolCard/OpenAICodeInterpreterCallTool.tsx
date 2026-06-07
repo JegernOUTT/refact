@@ -1,5 +1,5 @@
+import { Timer } from "lucide-react";
 import React, { useMemo } from "react";
-import { LapTimerIcon } from "@radix-ui/react-icons";
 import { Box, Flex, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -57,7 +57,7 @@ export const OpenAICodeInterpreterCallTool: React.FC<Props> = ({
 
   return (
     <ToolCard
-      icon={<LapTimerIcon />}
+      icon={<Timer />}
       summary={summary}
       status={state.status}
       isOpen={state.isOpen}

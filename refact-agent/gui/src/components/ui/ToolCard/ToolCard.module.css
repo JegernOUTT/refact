@@ -95,31 +95,18 @@
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
-  background: var(--rf-surface-1);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   opacity: 0;
   transform: translateY(calc(-1 * var(--rf-space-1)));
   transition:
     opacity var(--rf-dur-med) var(--rf-ease-standard),
     transform var(--rf-dur-med) var(--rf-ease-standard);
-}
-
-.status-running .body,
-.status-streaming .body {
-  border-color: var(--rf-color-accent-soft);
-}
-
-.status-success .body {
-  border-color: var(--rf-color-success);
-}
-
-.status-error .body {
-  border-color: var(--rf-color-danger);
 }
 
 .root[data-open="true"] .body {

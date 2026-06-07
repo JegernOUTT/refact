@@ -1,3 +1,4 @@
+import { CircleHelp, CircleCheck } from "lucide-react";
 import React, {
   useMemo,
   useState,
@@ -6,19 +7,15 @@ import React, {
   useRef,
 } from "react";
 import {
-  QuestionMarkCircledIcon,
-  CheckCircledIcon,
-} from "@radix-ui/react-icons";
-import {
   Box,
   Flex,
   Text,
-  Button,
   TextArea,
   RadioGroup,
   Checkbox,
 } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
+import { Button } from "../../ui";
 import { useStoredOpen } from "../useStoredOpen";
 import { Markdown } from "../../Markdown";
 import { useAppSelector, useChatActions } from "../../../hooks";
@@ -346,7 +343,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   if (!hasNextMessage && data) {
     return (
       <ToolCard
-        icon={<QuestionMarkCircledIcon />}
+        icon={<CircleHelp />}
         summary="Questions for you"
         status={status}
         isOpen={isOpen}
@@ -377,7 +374,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
               />
             </Box>
 
-            <Button onClick={handleSubmit} size="2">
+            <Button onClick={handleSubmit}>
               Submit Answers
             </Button>
           </Flex>
@@ -389,7 +386,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   if (answeredViaForm && data && parsedAnswers) {
     return (
       <ToolCard
-        icon={<CheckCircledIcon />}
+        icon={<CircleCheck />}
         summary="Questions answered"
         status="success"
         isOpen={isOpen}
@@ -421,7 +418,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
 
   return (
     <ToolCard
-      icon={<QuestionMarkCircledIcon />}
+      icon={<CircleHelp />}
       summary="Questions (answered manually)"
       status="success"
       isOpen={isOpen}

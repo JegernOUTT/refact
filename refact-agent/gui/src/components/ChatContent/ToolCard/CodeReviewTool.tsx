@@ -1,5 +1,5 @@
+import { Search } from "lucide-react";
 import React from "react";
-import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard } from "./ReportToolCard";
 
@@ -11,7 +11,7 @@ export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
   return (
     <ReportToolCard
       toolCall={toolCall}
-      icon={<MagnifyingGlassIcon />}
+      icon={<Search />}
       defaultSummary="Review code"
       unboundedContent
     />

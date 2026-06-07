@@ -1,5 +1,5 @@
+import { FileText } from "lucide-react";
 import React, { useState, useCallback } from "react";
-import { FileTextIcon } from "@radix-ui/react-icons";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import classNames from "classnames";
 import { ChatContextFile } from "../../../services/refact/types";
@@ -65,7 +65,7 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
         gap="2"
         onClick={handleToggle}
       >
-        <FileTextIcon className={styles.icon} />
+        <FileText className={styles.icon} />
         <Text size="1" className={styles.filename} onClick={handleFileClick}>
           {displayName}
         </Text>

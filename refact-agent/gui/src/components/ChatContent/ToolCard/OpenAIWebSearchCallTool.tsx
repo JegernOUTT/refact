@@ -1,5 +1,5 @@
+import { Search } from "lucide-react";
 import React, { useMemo } from "react";
-import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { Box, Flex, Link, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -52,7 +52,7 @@ export const OpenAIWebSearchCallTool: React.FC<Props> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={<MagnifyingGlassIcon />}
+      icon={<Search />}
       summary={summary}
       status={state.status}
       isOpen={state.isOpen}

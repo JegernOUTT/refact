@@ -1,6 +1,6 @@
 .args {
-  color: var(--gray-11);
-  font-family: var(--code-font-family);
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
   font-size: inherit;
 }
 
@@ -11,6 +11,6 @@
 }
 
 .markdownContent {
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   font-size: var(--font-size-1);
 }

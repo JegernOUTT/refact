@@ -1,5 +1,5 @@
+import { BarChart3, Archive } from "lucide-react";
 import React from "react";
-import { BarChartIcon, ArchiveIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
 
@@ -153,7 +153,7 @@ export const CompressReportTool: React.FC<CompressReportToolProps> = ({
   return (
     <ReportToolCard
       toolCall={toolCall}
-      icon={isProbe ? <BarChartIcon /> : <ArchiveIcon />}
+      icon={isProbe ? <BarChart3 /> : <Archive />}
       defaultSummary={isProbe ? "Analyze chat" : "Compress chat"}
       extractReport={isProbe ? extractProbeReport : extractApplyReport}
     />

@@ -1,5 +1,5 @@
+import { User } from "lucide-react";
 import React, { useMemo } from "react";
-import { PersonIcon } from "@radix-ui/react-icons";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
 
@@ -53,7 +53,7 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
   return (
     <ReportToolCard
       toolCall={toolCall}
-      icon={<PersonIcon />}
+      icon={<User />}
       defaultSummary={summary}
       meta={meta}
       extractReport={extractSubagentReport}

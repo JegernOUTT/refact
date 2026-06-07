@@ -1,10 +1,7 @@
+import { CircleCheck, TriangleAlert, Timer } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Flex, Text } from "@radix-ui/themes";
-import {
-  CheckCircledIcon,
-  ExclamationTriangleIcon,
-  LapTimerIcon,
-} from "@radix-ui/react-icons";
+import { Flex, Text } from "@radix-ui/themes";
+import { Button } from "../../ui";
 
 import { ToolCard } from "./ToolCard";
 import type { ToolStatus } from "./ToolCard";
@@ -222,11 +219,11 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
 
   const icon = sleepResult?.interrupted ? (
     <span className={styles.summaryInterrupted}>
-      <ExclamationTriangleIcon />
+      <TriangleAlert />
     </span>
   ) : (
     <span className={styles.summarySuccess}>
-      <CheckCircledIcon />
+      <CircleCheck />
     </span>
   );
 
@@ -257,11 +254,10 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
               </Flex>
               <Button
                 type="button"
-                size="2"
-                color="amber"
+                variant="soft"
                 onClick={handleWakeUp}
               >
-                <LapTimerIcon />
+                <Timer />
                 Wake up
               </Button>
             </Flex>

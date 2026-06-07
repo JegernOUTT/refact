@@ -1,5 +1,5 @@
+import { FileText } from "lucide-react";
 import React, { useMemo } from "react";
-import { FileTextIcon } from "@radix-ui/react-icons";
 import { Box, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -43,7 +43,7 @@ export const OpenAIFileSearchCallTool: React.FC<Props> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={<FileTextIcon />}
+      icon={<FileText />}
       summary={summary}
       status={state.status}
       isOpen={state.isOpen}

@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge } from "@radix-ui/themes";
+import { Badge } from "../../ui";
 import classNames from "classnames";
 
 import type { ExecProcessStatus } from "../../../services/refact/types";
@@ -37,8 +37,6 @@ export const ProcessStatusBadge: React.FC<ProcessStatusBadgeProps> = ({
 
   return (
     <Badge
-      size="1"
-      variant="soft"
       className={classNames(styles.statusBadge, className)}
       data-testid={`exec-status-${status}`}
     >

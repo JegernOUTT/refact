@@ -1,8 +1,8 @@
 .list {
-  margin-top: var(--space-2);
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--gray-a3);
-  padding-left: var(--space-3);
+  margin-top: var(--rf-space-2);
+  padding-top: var(--rf-space-2);
+  border-top: 1px solid var(--rf-border);
+  padding-left: var(--rf-space-3);
 }
 
 .item {
@@ -10,7 +10,7 @@
 }
 
 .header {
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   cursor: pointer;
   user-select: none;
   min-height: 24px;
@@ -24,13 +24,13 @@
 .icon {
   width: 12px;
   height: 12px;
-  color: var(--gray-9);
+  color: var(--rf-color-faint);
   flex-shrink: 0;
 }
 
 .filename {
-  color: var(--accent-11);
-  font-family: var(--code-font-family);
+  color: var(--rf-color-accent);
+  font-family: var(--rf-font-mono);
   font-size: 0.9em;
   cursor: pointer;
 }
@@ -61,8 +61,8 @@
 
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  padding: var(--space-1) 0;
-  padding-left: var(--space-3);
+  padding: var(--rf-space-1) 0;
+  padding-left: var(--rf-space-3);
   max-height: 200px;
   overflow-y: auto;
 }

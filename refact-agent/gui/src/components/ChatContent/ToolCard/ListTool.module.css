@@ -1,7 +1,7 @@
 .path {
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
   font-size: 0.95em;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
   cursor: pointer;
 }
 

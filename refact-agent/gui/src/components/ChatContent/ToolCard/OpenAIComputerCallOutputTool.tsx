@@ -1,5 +1,5 @@
+import { Monitor, Image } from "lucide-react";
 import React, { useMemo } from "react";
-import { DesktopIcon, ImageIcon } from "@radix-ui/react-icons";
 import { Flex, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
@@ -33,7 +33,7 @@ export const OpenAIComputerCallOutputTool: React.FC<Props> = ({ toolCall }) => {
 
   return (
     <ToolCard
-      icon={imageUrls.length > 0 ? <ImageIcon /> : <DesktopIcon />}
+      icon={imageUrls.length > 0 ? <Image /> : <Monitor />}
       summary={"Computer Output"}
       status={state.status}
       isOpen={state.isOpen}

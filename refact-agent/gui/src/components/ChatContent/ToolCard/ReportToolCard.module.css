@@ -1,17 +1,17 @@
 /* Variant borders */
 .variantTaskDone {
-  border-left: 2px solid var(--green-9);
-  padding-left: var(--space-2);
+  border-left: 2px solid var(--rf-color-success);
+  padding-left: var(--rf-space-2);
 }
 
 .variantPlan {
-  border-left: 2px solid var(--red-9);
-  padding-left: var(--space-2);
+  border-left: 2px solid var(--rf-color-danger);
+  padding-left: var(--rf-space-2);
 }
 
 .variantReport {
-  border-left: 2px solid var(--blue-9);
-  padding-left: var(--space-2);
+  border-left: 2px solid var(--rf-color-info);
+  padding-left: var(--rf-space-2);
 }
 
 .card {
@@ -20,7 +20,7 @@
 
 .header {
   cursor: pointer;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   transition: filter 0.15s ease;
 }
 
@@ -52,7 +52,7 @@
 }
 
 .summaryTaskDone {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .meta {
@@ -75,12 +75,12 @@
 }
 
 .running {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   animation: subtlePulse 2s ease-in-out infinite;
 }
 
 .error {
-  color: var(--red-11);
+  color: var(--rf-color-danger);
 }
 
 .errorBadge {
@@ -104,15 +104,15 @@
   justify-content: center;
   width: 22px;
   height: 22px;
-  border-radius: var(--radius-1);
-  color: var(--gray-11);
+  border-radius: var(--rf-radius-chip);
+  color: var(--rf-color-muted);
   transition:
     background-color 0.1s,
     color 0.1s;
 }
 
 .actionButton:hover {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .actionButton svg {
@@ -121,7 +121,7 @@
 }
 
 .copiedButton {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 /* Entertainment (streaming progress) */
@@ -135,7 +135,7 @@
 }
 
 .entertainmentMarkdown {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -148,7 +148,7 @@
 .entertainmentMarkdown :global(p + p),
 .entertainmentMarkdown :global(p + pre),
 .entertainmentMarkdown :global(pre + p) {
-  margin-top: var(--space-1);
+  margin-top: var(--rf-space-1);
 }
 
 .entertainmentText {
@@ -184,7 +184,7 @@
 
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  padding: var(--space-2) 0 var(--space-1);
+  padding: var(--rf-space-2) 0 var(--rf-space-1);
   max-height: 400px;
   overflow-y: auto;
 }
@@ -196,13 +196,13 @@
 
 /* File links in footer */
 .fileLink {
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
   cursor: pointer;
   text-decoration: underline;
 }
 
 .fileLink:hover {
-  color: var(--accent-12);
+  color: var(--rf-color-accent);
 }
 
 @media (prefers-reduced-motion: reduce) {
