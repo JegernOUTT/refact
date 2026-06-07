@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use refact_buddy_core::conductor::{
-    ConductorGoal, ConductorLearningRecord, GoalLedger, LearningBudgetSnapshot, LearningOutcome,
-    MemoKind,
+    ConductorGoal, ConductorLearningRecord, GoalLedger, GoalStatus, LearningBudgetSnapshot,
+    LearningOutcome, MemoKind,
 };
 use refact_buddy_core::conductor_store::{list_goal_ledgers, mutate_goal_ledger, MissingGoalBehavior};
 use uuid::Uuid;
@@ -28,6 +28,30 @@ pub struct PriorConductorLesson {
     pub useful_tools_or_strategies: Vec<String>,
     pub future_tunables: Vec<String>,
     pub created_at: String,
+}
+
+pub fn apply_terminal_outcome(
+    goal_id: &str,
+    ledger: &mut GoalLedger,
+    status: GoalStatus,
+    reason: Option<&str>,
+    source_chat_id: Option<String>,
+) -> bool {
+    ledger.status = Some(status);
+    if status.is_terminal() && ledger.completed_at.is_none() {
+        ledger.completed_at = Some(Utc::now().to_rfc3339());
+    }
+    let outcome = match status {
+        GoalStatus::Done => LearningOutcome::Done,
+        GoalStatus::Escalated => LearningOutcome::Escalated,
+        _ => return false,
+    };
+    let mut goal = ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone());
+    let inserted = append_learning_record(&mut goal, outcome, reason, source_chat_id);
+    if inserted {
+        ledger.learning_records = goal.ledger.learning_records;
+    }
+    inserted
 }
 
 pub async fn record_goal_learning(

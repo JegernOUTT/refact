@@ -24,8 +24,16 @@ pub async fn service_recurring_goals(
     now: DateTime<Utc>,
 ) -> RecurringRunReport {
     let mut report = RecurringRunReport::default();
-    let Ok(stored_ledgers) = list_goal_ledgers(project_root).await else {
-        return report;
+    let stored_ledgers = match list_goal_ledgers(project_root).await {
+        Ok(stored_ledgers) => stored_ledgers,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                project_root = %project_root.display(),
+                "conductor recurring: failed to list goal ledgers"
+            );
+            return report;
+        }
     };
     for stored in stored_ledgers {
         let ledger = stored.ledger;
@@ -82,24 +90,44 @@ async fn maybe_enqueue_due_cron(
         Some(recurring) => recurring_due_at(recurring, ledger.created_at.as_deref(), now),
         None => return false,
     };
-    if due != Ok(true) {
-        return false;
+    match due {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(error) => {
+            tracing::warn!(goal_id, error = %error, "conductor recurring: cron due calculation failed");
+            return false;
+        }
     }
     if !super::wake::enqueue_goal_wake(gcx.clone(), goal_id, ConductorWakeReason::Cron).await {
         return false;
     }
-    let Ok(Some(ledger)) = mutate_and_emit(gcx, project_root, goal_id, |ledger| {
+    let mutation = mutate_and_emit(gcx, project_root, goal_id, |ledger| {
+        if terminal_or_paused(ledger) {
+            return Ok(false);
+        }
+        let Some(recurring) = ledger.recurring.as_ref() else {
+            return Ok(false);
+        };
+        match recurring_due_at(recurring, ledger.created_at.as_deref(), now) {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => return Err(error),
+        }
         if let Some(recurring) = ledger.recurring.as_mut() {
             recurring.last_enqueued_at = Some(now.to_rfc3339());
         }
         ledger.last_wake_reason = Some(ConductorWakeReason::Cron);
         Ok(true)
     })
-    .await
-    else {
-        return false;
-    };
-    ledger.recurring.is_some()
+    .await;
+    match mutation {
+        Ok(Some(ledger)) => ledger.recurring.is_some(),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(goal_id, error = %error, "conductor recurring: failed to persist cron wake mutation");
+            false
+        }
+    }
 }
 
 async fn maybe_escalate_stale(
@@ -109,31 +137,62 @@ async fn maybe_escalate_stale(
     ledger: &GoalLedger,
     now: DateTime<Utc>,
 ) -> bool {
-    let Some(stale_after_secs) = ledger
+    let Some(recurring) = ledger
         .recurring
         .as_ref()
-        .and_then(|recurring| recurring.stale_after_secs)
+        .filter(|recurring| recurring.enabled)
     else {
+        return false;
+    };
+    let Some(stale_after_secs) = recurring.stale_after_secs else {
         return false;
     };
     let Some(anchor) = latest_activity(ledger) else {
         return false;
     };
-    if now.signed_duration_since(anchor).num_seconds() < stale_after_secs as i64 {
+    if !stale_at(anchor, stale_after_secs, now) {
         return false;
     }
-    mutate_and_emit(gcx, project_root, goal_id, move |ledger| {
-        apply_terminal_status(ledger, GoalStatus::Escalated);
-        push_escalation(
+    let reason = format!("Conductor goal went stale for at least {stale_after_secs} seconds.");
+    let mutation = mutate_and_emit(gcx, project_root, goal_id, move |ledger| {
+        if terminal_or_paused(ledger) {
+            return Ok(false);
+        }
+        let Some(recurring) = ledger
+            .recurring
+            .as_ref()
+            .filter(|recurring| recurring.enabled)
+        else {
+            return Ok(false);
+        };
+        if recurring.stale_after_secs != Some(stale_after_secs) {
+            return Ok(false);
+        }
+        let Some(anchor) = latest_activity(ledger) else {
+            return Ok(false);
+        };
+        if !stale_at(anchor, stale_after_secs, now) {
+            return Ok(false);
+        }
+        super::learn::apply_terminal_outcome(
+            goal_id,
             ledger,
-            format!("Conductor goal went stale for at least {stale_after_secs} seconds."),
+            GoalStatus::Escalated,
+            Some(&reason),
+            None,
         );
+        push_escalation(ledger, reason);
         Ok(true)
     })
-    .await
-    .ok()
-    .flatten()
-    .is_some()
+    .await;
+    match mutation {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(goal_id, error = %error, "conductor recurring: failed to persist stale escalation");
+            false
+        }
+    }
 }
 
 async fn maybe_escalate_invalid_cron(
@@ -151,15 +210,39 @@ async fn maybe_escalate_invalid_cron(
     if crate::scheduler::parse_cron(&recurring.cron).is_ok() {
         return false;
     }
-    mutate_and_emit(gcx, project_root, goal_id, |ledger| {
-        apply_terminal_status(ledger, GoalStatus::Escalated);
-        push_escalation(ledger, "Recurring conductor cron is invalid.".to_string());
+    let mutation = mutate_and_emit(gcx, project_root, goal_id, |ledger| {
+        if terminal_or_paused(ledger) {
+            return Ok(false);
+        }
+        let Some(recurring) = ledger.recurring.as_ref() else {
+            return Ok(false);
+        };
+        if !recurring.enabled || recurring.cron.trim().is_empty() {
+            return Ok(false);
+        }
+        if crate::scheduler::parse_cron(&recurring.cron).is_ok() {
+            return Ok(false);
+        }
+        let reason = "Recurring conductor cron is invalid.".to_string();
+        super::learn::apply_terminal_outcome(
+            goal_id,
+            ledger,
+            GoalStatus::Escalated,
+            Some(&reason),
+            None,
+        );
+        push_escalation(ledger, reason);
         Ok(true)
     })
-    .await
-    .ok()
-    .flatten()
-    .is_some()
+    .await;
+    match mutation {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(goal_id, error = %error, "conductor recurring: failed to persist invalid cron escalation");
+            false
+        }
+    }
 }
 
 async fn mutate_and_emit(
@@ -191,13 +274,6 @@ async fn mutate_and_emit(
     Ok(Some(ledger))
 }
 
-fn apply_terminal_status(ledger: &mut GoalLedger, status: GoalStatus) {
-    ledger.status = Some(status);
-    if status.is_terminal() && ledger.completed_at.is_none() {
-        ledger.completed_at = Some(Utc::now().to_rfc3339());
-    }
-}
-
 fn terminal_or_paused(ledger: &GoalLedger) -> bool {
     let status = ledger.status.unwrap_or_default();
     status.is_terminal() || status == GoalStatus::Paused
@@ -213,6 +289,10 @@ fn latest_activity(ledger: &GoalLedger) -> Option<DateTime<Utc>> {
     .flatten()
     .filter_map(parse_dt)
     .max()
+}
+
+fn stale_at(anchor: DateTime<Utc>, stale_after_secs: u64, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(anchor).num_seconds() >= stale_after_secs as i64
 }
 
 fn parse_ms(value: &str) -> Option<u64> {
@@ -348,6 +428,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_recurring_escalation_records_learning() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-stale-learning",
+            &GoalLedger {
+                title: Some("Stale learning goal".to_string()),
+                last_progress_at: Some("2026-01-01T00:00:00Z".to_string()),
+                recurring: Some(ConductorRecurring {
+                    enabled: true,
+                    cron: "0 * * * *".to_string(),
+                    last_enqueued_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    stale_after_secs: Some(60),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = service_recurring_goals(gcx, dir.path(), ts(1767225661)).await;
+
+        assert_eq!(
+            report.stale_escalated,
+            vec!["goal-stale-learning".to_string()]
+        );
+        let ledger = load_goal_ledger(dir.path(), "goal-stale-learning")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.learning_records.len(), 1);
+        assert_eq!(
+            ledger.learning_records[0].outcome,
+            refact_buddy_core::conductor::LearningOutcome::Escalated
+        );
+        assert!(ledger.learning_records[0].summary.contains("escalated"));
+    }
+
+    #[tokio::test]
     async fn stale_recurring_escalation_refreshes_active_wake_targets() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = test_gcx(dir.path()).await;
@@ -427,6 +547,126 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(ledger.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn invalid_recurring_cron_escalation_records_learning() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-invalid-learning",
+            &GoalLedger {
+                title: Some("Invalid learning goal".to_string()),
+                recurring: Some(ConductorRecurring {
+                    enabled: true,
+                    cron: "not a cron".to_string(),
+                    last_enqueued_at: None,
+                    stale_after_secs: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = service_recurring_goals(gcx, dir.path(), ts(1767225661)).await;
+
+        assert_eq!(
+            report.invalid_cron_escalated,
+            vec!["goal-invalid-learning".to_string()]
+        );
+        let ledger = load_goal_ledger(dir.path(), "goal-invalid-learning")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.learning_records.len(), 1);
+        assert_eq!(
+            ledger.learning_records[0].outcome,
+            refact_buddy_core::conductor::LearningOutcome::Escalated
+        );
+        assert!(ledger.learning_records[0]
+            .failures
+            .iter()
+            .any(|failure| failure.contains("invalid")));
+    }
+
+    #[tokio::test]
+    async fn paused_done_or_fixed_goals_are_not_overwritten_by_recurring_revalidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = test_gcx(dir.path()).await;
+        for (goal_id, ledger) in [
+            (
+                "goal-paused-stale",
+                GoalLedger {
+                    status: Some(GoalStatus::Paused),
+                    last_progress_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    recurring: Some(ConductorRecurring {
+                        enabled: true,
+                        cron: "0 * * * *".to_string(),
+                        last_enqueued_at: Some("2026-01-01T00:00:00Z".to_string()),
+                        stale_after_secs: Some(60),
+                    }),
+                    ..Default::default()
+                },
+            ),
+            (
+                "goal-done-stale",
+                GoalLedger {
+                    status: Some(GoalStatus::Done),
+                    last_progress_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    recurring: Some(ConductorRecurring {
+                        enabled: true,
+                        cron: "0 * * * *".to_string(),
+                        last_enqueued_at: Some("2026-01-01T00:00:00Z".to_string()),
+                        stale_after_secs: Some(60),
+                    }),
+                    ..Default::default()
+                },
+            ),
+            (
+                "goal-fixed-cron",
+                GoalLedger {
+                    recurring: Some(ConductorRecurring {
+                        enabled: true,
+                        cron: "0 * * * *".to_string(),
+                        last_enqueued_at: None,
+                        stale_after_secs: None,
+                    }),
+                    ..Default::default()
+                },
+            ),
+            (
+                "goal-removed-recurring",
+                GoalLedger {
+                    last_progress_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    recurring: None,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            save_goal_ledger(dir.path(), goal_id, &ledger)
+                .await
+                .unwrap();
+        }
+
+        let report = service_recurring_goals(gcx, dir.path(), ts(1767225661)).await;
+
+        assert!(report.stale_escalated.is_empty());
+        assert!(report.invalid_cron_escalated.is_empty());
+        for goal_id in [
+            "goal-paused-stale",
+            "goal-done-stale",
+            "goal-fixed-cron",
+            "goal-removed-recurring",
+        ] {
+            let ledger = load_goal_ledger(dir.path(), goal_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(ledger.status, Some(GoalStatus::Escalated));
+            assert!(ledger.learning_records.is_empty());
+        }
     }
 
     #[tokio::test]

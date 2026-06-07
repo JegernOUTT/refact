@@ -2069,6 +2069,21 @@ pub async fn buddy_apply(gcx: AppState, m: BuddyMutation) {
     }
 }
 
+pub async fn run_conductor_periodic_maintenance(gcx: AppState, project_root: &Path) {
+    let now = Utc::now();
+    super::conductor::wake::refresh_conductor_wake_targets_for_project(
+        gcx.gcx.clone(),
+        project_root,
+    )
+    .await;
+    super::conductor::wake::enqueue_budget_threshold_wakes_for_project(
+        gcx.gcx.clone(),
+        project_root,
+    )
+    .await;
+    super::conductor::recurring::service_recurring_goals(gcx.gcx.clone(), project_root, now).await;
+}
+
 pub async fn buddy_background_task(gcx: AppState) {
     let project_root = loop {
         if gcx.runtime.shutdown_flag.load(Ordering::SeqCst) {
@@ -2243,16 +2258,7 @@ pub async fn buddy_background_task(gcx: AppState) {
                 }
                 let new_pulse =
                     super::pulse::build_pulse(gcx.clone(), &project_root, &tmp_store).await;
-                super::conductor::wake::refresh_conductor_wake_targets_for_project(
-                    gcx.gcx.clone(),
-                    &project_root,
-                )
-                .await;
-                super::conductor::wake::enqueue_budget_threshold_wakes_for_project(
-                    gcx.gcx.clone(),
-                    &project_root,
-                )
-                .await;
+                run_conductor_periodic_maintenance(gcx.clone(), &project_root).await;
                 let mut buddy = buddy_arc.lock().await;
                 if let Some(svc) = buddy.as_mut() {
                     svc.set_pulse(new_pulse);
@@ -2472,6 +2478,38 @@ mod tests {
 
         assert!(!source.contains("enqueue_all_wake(\n                    gcx.gcx.clone(),\n                    ConductorWakeReason::Budget"));
         assert!(source.contains("enqueue_budget_threshold_wakes_for_project"));
+    }
+
+    #[tokio::test]
+    async fn periodic_maintenance_services_recurring_goals() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        refact_buddy_core::conductor_store::save_goal_ledger(
+            dir.path(),
+            "goal-actor-recurring",
+            &refact_buddy_core::conductor::GoalLedger {
+                created_at: Some("2026-01-01T00:00:00Z".to_string()),
+                recurring: Some(refact_buddy_core::conductor::ConductorRecurring {
+                    enabled: true,
+                    cron: "*/5 * * * *".to_string(),
+                    last_enqueued_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    stale_after_secs: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let app = AppState::from_gcx(gcx.clone()).await;
+
+        run_conductor_periodic_maintenance(app, dir.path()).await;
+
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-actor-recurring").unwrap();
+        assert!(mailbox
+            .reasons
+            .contains(&refact_buddy_core::conductor::ConductorWakeReason::Cron));
     }
 
     #[test]
