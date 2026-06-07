@@ -74,10 +74,7 @@ pub fn decide_wake_action(
     if human_steered {
         return WakeAction::SkipHumanWins;
     }
-    if matches!(
-        goal.status,
-        GoalStatus::Escalated | GoalStatus::Abandoned | GoalStatus::Failed | GoalStatus::Cancelled
-    ) {
+    if matches!(goal.status, GoalStatus::Escalated | GoalStatus::Abandoned) {
         return WakeAction::Wait;
     }
     if reasons.is_empty() && !board_has_work(board) {
@@ -575,10 +572,10 @@ async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal: &ConductorGoal) {
         "conductor",
         &format!("conductor_goal:{}", goal.id),
         match goal.status {
-            GoalStatus::WaitingForHuman => "paused",
+            GoalStatus::Paused => "paused",
             GoalStatus::Done => "completed",
             GoalStatus::Escalated => "escalated",
-            GoalStatus::Abandoned | GoalStatus::Failed | GoalStatus::Cancelled => "failed",
+            GoalStatus::Abandoned => "failed",
             _ => "running",
         },
         Some("normal"),

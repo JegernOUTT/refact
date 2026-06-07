@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -44,32 +44,79 @@ impl Default for ConductorGoal {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatus {
-    Planned,
-    Running,
-    WaitingForHuman,
+    Proposed,
+    Active,
     Paused,
-    Done,
     Escalated,
+    Done,
     Abandoned,
-    Failed,
-    Cancelled,
+}
+
+impl GoalStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Escalated => "escalated",
+            Self::Done => "done",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "proposed" | "planned" => Some(Self::Proposed),
+            "active" | "running" => Some(Self::Active),
+            "paused" | "waiting_for_human" => Some(Self::Paused),
+            "escalated" | "failed" => Some(Self::Escalated),
+            "done" => Some(Self::Done),
+            "abandoned" | "cancelled" => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Escalated | Self::Abandoned)
+    }
 }
 
 impl Default for GoalStatus {
     fn default() -> Self {
-        Self::Running
+        Self::Active
     }
 }
 
-impl GoalStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Done | Self::Escalated | Self::Abandoned | Self::Failed | Self::Cancelled
-        )
+impl Serialize for GoalStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GoalStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).ok_or_else(|| {
+            de::Error::unknown_variant(
+                &value,
+                &[
+                    "proposed",
+                    "active",
+                    "paused",
+                    "escalated",
+                    "done",
+                    "abandoned",
+                ],
+            )
+        })
     }
 }
 
@@ -562,7 +609,7 @@ mod tests {
                 summary: "All conductor cards are done".to_string(),
                 checklist: vec!["tests pass".to_string()],
             },
-            status: GoalStatus::Running,
+            status: GoalStatus::Active,
             autonomy: GoalAutonomy::FullAuto,
             budget: GoalBudget {
                 wall_clock_secs: Some(7200),
@@ -596,7 +643,7 @@ mod tests {
                 created_at: Some("2026-06-03T00:00:00Z".to_string()),
                 updated_at: Some("2026-06-03T00:00:03Z".to_string()),
                 completed_at: None,
-                status: Some(GoalStatus::Running),
+                status: Some(GoalStatus::Active),
                 autonomy: Some(GoalAutonomy::FullAuto),
                 planner_task_id: Some("task-1".to_string()),
                 task_ids: vec!["task-1".to_string()],
@@ -626,6 +673,7 @@ mod tests {
                 last_wake_at: Some("2026-06-03T00:00:04Z".to_string()),
                 last_progress_at: Some("2026-06-03T00:00:03Z".to_string()),
                 last_wake_reason: Some(ConductorWakeReason::Heartbeat),
+                ..Default::default()
             },
             created_at: Some("2026-06-03T00:00:00Z".to_string()),
             updated_at: Some("2026-06-03T00:00:03Z".to_string()),
@@ -656,7 +704,7 @@ mod tests {
 
         let goal: ConductorGoal = serde_json::from_value(json).unwrap();
 
-        assert_eq!(goal.status, GoalStatus::Running);
+        assert_eq!(goal.status, GoalStatus::Active);
         assert_eq!(goal.autonomy, GoalAutonomy::FullAuto);
         assert_eq!(goal.done_when, DoneWhen::default());
         assert_eq!(goal.spent.elapsed_secs, 0);
@@ -735,19 +783,54 @@ budget:
     #[test]
     fn goal_status_deserializes_approved_and_legacy_states() {
         for (raw, expected) in [
-            ("planned", GoalStatus::Planned),
-            ("running", GoalStatus::Running),
-            ("waiting_for_human", GoalStatus::WaitingForHuman),
+            ("planned", GoalStatus::Proposed),
+            ("running", GoalStatus::Active),
+            ("waiting_for_human", GoalStatus::Paused),
             ("paused", GoalStatus::Paused),
             ("done", GoalStatus::Done),
             ("escalated", GoalStatus::Escalated),
             ("abandoned", GoalStatus::Abandoned),
-            ("failed", GoalStatus::Failed),
-            ("cancelled", GoalStatus::Cancelled),
+            ("failed", GoalStatus::Escalated),
+            ("cancelled", GoalStatus::Abandoned),
         ] {
             let status: GoalStatus = serde_json::from_value(serde_json::json!(raw)).unwrap();
             assert_eq!(status, expected);
         }
+    }
+
+    #[test]
+    fn goal_status_serializes_only_canonical_states() {
+        for (status, expected) in [
+            (GoalStatus::Proposed, "proposed"),
+            (GoalStatus::Active, "active"),
+            (GoalStatus::Paused, "paused"),
+            (GoalStatus::Escalated, "escalated"),
+            (GoalStatus::Done, "done"),
+            (GoalStatus::Abandoned, "abandoned"),
+        ] {
+            let encoded = serde_json::to_value(status).unwrap();
+            assert_eq!(encoded, serde_json::json!(expected));
+        }
+    }
+
+    #[test]
+    fn legacy_running_round_trips_as_active() {
+        let status: GoalStatus = serde_json::from_value(serde_json::json!("running")).unwrap();
+        assert_eq!(status, GoalStatus::Active);
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!("active")
+        );
+    }
+
+    #[test]
+    fn goal_status_terminal_semantics_include_escalated_and_abandoned() {
+        assert!(!GoalStatus::Proposed.is_terminal());
+        assert!(!GoalStatus::Active.is_terminal());
+        assert!(!GoalStatus::Paused.is_terminal());
+        assert!(GoalStatus::Done.is_terminal());
+        assert!(GoalStatus::Escalated.is_terminal());
+        assert!(GoalStatus::Abandoned.is_terminal());
     }
 
     #[test]

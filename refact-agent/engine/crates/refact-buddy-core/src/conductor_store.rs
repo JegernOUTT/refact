@@ -270,7 +270,7 @@ mod tests {
             created_at: Some("2026-06-03T00:00:00Z".to_string()),
             updated_at: Some("2026-06-03T00:00:03Z".to_string()),
             completed_at: None,
-            status: Some(crate::conductor::GoalStatus::Running),
+            status: Some(crate::conductor::GoalStatus::Active),
             autonomy: Some(crate::conductor::GoalAutonomy::FullAuto),
             planner_task_id: Some("planner-task".to_string()),
             task_ids: vec!["task-a".to_string(), "task-b".to_string()],
@@ -300,6 +300,7 @@ mod tests {
             last_wake_at: Some("2026-06-03T00:00:04Z".to_string()),
             last_progress_at: Some("2026-06-03T00:00:03Z".to_string()),
             last_wake_reason: Some(ConductorWakeReason::Heartbeat),
+            ..Default::default()
         }
     }
 

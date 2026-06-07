@@ -1010,7 +1010,7 @@ mod tests {
                 summary: "All conductor cards are done".to_string(),
                 checklist: vec!["packet exists".to_string(), "tests pass".to_string()],
             },
-            status: GoalStatus::Running,
+            status: GoalStatus::Active,
             autonomy: GoalAutonomy::FullAuto,
             budget: GoalBudget {
                 wall_clock_secs: Some(7200),
@@ -1044,7 +1044,7 @@ mod tests {
                 created_at: Some("2026-06-03T00:00:00Z".to_string()),
                 updated_at: Some("2026-06-03T00:04:00Z".to_string()),
                 completed_at: None,
-                status: Some(GoalStatus::Running),
+                status: Some(GoalStatus::Active),
                 autonomy: Some(GoalAutonomy::FullAuto),
                 planner_task_id: Some("task-1".to_string()),
                 task_ids: vec!["task-1".to_string()],

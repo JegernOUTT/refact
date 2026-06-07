@@ -127,7 +127,7 @@ fn parse_autonomy(value: &str) -> Result<GoalAutonomy, String> {
 fn parse_status(value: &str) -> Result<GoalStatus, String> {
     serde_json::from_value(json!(value)).map_err(|_| {
         format!(
-            "Invalid status '{value}', must be one of: planned, running, waiting_for_human, paused, done, escalated, abandoned, failed, cancelled"
+            "Invalid status '{value}', must be one of: proposed, active, paused, escalated, done, abandoned"
         )
     })
 }
@@ -311,10 +311,10 @@ async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: &Goal
         let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
     }
     let status = match goal.status {
-        GoalStatus::WaitingForHuman | GoalStatus::Paused => "paused",
+        GoalStatus::Paused => "paused",
         GoalStatus::Done => "completed",
         GoalStatus::Escalated => "escalated",
-        GoalStatus::Abandoned | GoalStatus::Failed | GoalStatus::Cancelled => "failed",
+        GoalStatus::Abandoned => "failed",
         _ => "running",
     };
     let event = make_runtime_event(
@@ -573,7 +573,7 @@ impl Tool for ToolConductorGoalStatus {
             "conductor_goal_status",
             "Conductor Goal Status",
             "Set conductor goal status. Setting done is always allowed and does not run creation validation.",
-            json!({"type":"object","properties":{"goal_id":{"type":"string"},"status":{"type":"string","enum":["planned","running","waiting_for_human","paused","done","escalated","abandoned","failed","cancelled"]},"reason":{"type":"string"}},"required":["status"]}),
+            json!({"type":"object","properties":{"goal_id":{"type":"string"},"status":{"type":"string","enum":["proposed","active","paused","escalated","done","abandoned"]},"reason":{"type":"string"}},"required":["status"]}),
         )
     }
 
@@ -894,7 +894,7 @@ mod tests {
                 total_tokens: Some(50_000),
                 usd: Some(2.5),
             }),
-            status: Some(GoalStatus::Running),
+            status: Some(GoalStatus::Active),
             autonomy: Some(GoalAutonomy::FullAuto),
             created_at: Some("2026-06-03T00:00:00Z".to_string()),
             updated_at: Some("2026-06-03T00:00:01Z".to_string()),
@@ -1626,7 +1626,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(ledger.status, Some(GoalStatus::Running));
+        assert_eq!(ledger.status, Some(GoalStatus::Active));
         assert!(ledger
             .memos
             .iter()

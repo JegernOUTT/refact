@@ -1343,7 +1343,7 @@ mod tests {
             (
                 "goal-running",
                 GoalLedger {
-                    status: Some(GoalStatus::Running),
+                    status: Some(GoalStatus::Active),
                     ..Default::default()
                 },
             ),

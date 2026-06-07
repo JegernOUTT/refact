@@ -448,7 +448,7 @@ mod tests {
                 summary: "All conductor cards are complete".to_string(),
                 checklist: vec!["tests pass".to_string()],
             },
-            status: GoalStatus::Running,
+            status: GoalStatus::Active,
             budget: GoalBudget {
                 wall_clock_secs: Some(7200),
                 no_progress_wakes: Some(4),

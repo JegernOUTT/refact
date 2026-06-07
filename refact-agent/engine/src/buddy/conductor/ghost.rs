@@ -401,7 +401,7 @@ mod tests {
     async fn conductor_ghost_answer_active_goal_enqueues_ghost_answer() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
-        save_answerable_goal(dir.path(), "goal-answer-active", GoalStatus::Running).await;
+        save_answerable_goal(dir.path(), "goal-answer-active", GoalStatus::Active).await;
         let app = AppState::from_gcx(gcx.clone()).await;
 
         let result =

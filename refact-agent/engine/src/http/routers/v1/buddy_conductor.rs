@@ -125,7 +125,7 @@ pub async fn handle_v1_buddy_conductor_goal_create(
         plan_doc_slug: req.plan_doc_slug.and_then(non_empty),
         plan_markdown: req.plan_markdown,
         done_when: req.done_when,
-        status: GoalStatus::Running,
+        status: GoalStatus::Active,
         autonomy: req.autonomy,
         budget: req.budget,
         created_at: Some(now.clone()),
@@ -211,14 +211,14 @@ pub async fn handle_v1_buddy_conductor_goal_resume(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
 ) -> Result<axum::Json<ConductorGoal>, ScratchError> {
-    set_goal_status(app, goal_id, GoalStatus::Running).await
+    set_goal_status(app, goal_id, GoalStatus::Active).await
 }
 
 pub async fn handle_v1_buddy_conductor_goal_stop(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
 ) -> Result<axum::Json<ConductorGoal>, ScratchError> {
-    set_goal_status(app, goal_id, GoalStatus::Cancelled).await
+    set_goal_status(app, goal_id, GoalStatus::Abandoned).await
 }
 
 pub async fn handle_v1_buddy_conductor_goal_autonomy(
@@ -673,12 +673,12 @@ mod tests {
                 .await
                 .unwrap()
                 .0;
-        assert_eq!(resumed.status, GoalStatus::Running);
+        assert_eq!(resumed.status, GoalStatus::Active);
         let ledger = load_goal_ledger(dir.path(), "goal-pause")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(ledger.status, Some(GoalStatus::Running));
+        assert_eq!(ledger.status, Some(GoalStatus::Active));
     }
 
     #[tokio::test]
@@ -877,14 +877,14 @@ mod tests {
                 .await
                 .unwrap()
                 .0;
-        assert_eq!(stopped.status, GoalStatus::Cancelled);
+        assert_eq!(stopped.status, GoalStatus::Abandoned);
         assert!(stopped.completed_at.is_some());
         let ledger = load_goal_ledger(dir.path(), "goal-control")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(ledger.autonomy, Some(GoalAutonomy::ReadOnly));
-        assert_eq!(ledger.status, Some(GoalStatus::Cancelled));
+        assert_eq!(ledger.status, Some(GoalStatus::Abandoned));
         assert!(ledger.completed_at.is_some());
     }
 }
