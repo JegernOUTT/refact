@@ -1,14 +1,7 @@
-import { TextField, HoverCard, Text, Badge } from "@radix-ui/themes";
+import { TextField } from "@radix-ui/themes";
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
-import {
-  Cross1Icon,
-  PlusIcon,
-  CheckboxIcon,
-  MoonIcon,
-  SunIcon,
-} from "@radix-ui/react-icons";
+import { CheckSquare, Moon, Plus, Sun, X, Home } from "lucide-react";
 import classNames from "classnames";
-import { RefactIcon } from "../../images";
 import { newChatAction } from "../../events";
 import {
   getStatusFromSessionState,
@@ -27,6 +20,7 @@ import {
 } from "../../features/Tasks";
 import {
   ChangeEvent,
+  ComponentProps,
   KeyboardEvent,
   MouseEvent,
   useCallback,
@@ -46,7 +40,14 @@ import {
   clearThreadPauseReasons,
   setThreadConfirmationStatus,
 } from "../../features/Chat";
-import { StatusDot } from "../StatusDot";
+import {
+  Badge,
+  Icon,
+  IconButton,
+  StatusDot,
+  Tabs as KitTabs,
+  Tooltip,
+} from "../ui";
 import {
   useAppDispatch,
   useAppSelector,
@@ -63,7 +64,6 @@ import {
 
 import styles from "./Toolbar.module.css";
 import { ConnectionStatusIndicator } from "../ConnectionStatus";
-import { getModeColor } from "../../utils/modeColors";
 
 export type DashboardTab = {
   type: "dashboard";
@@ -97,7 +97,7 @@ export type ToolbarProps = {
 type ToolbarIconButtonProps = {
   label: string;
   onClick: () => void;
-  children: React.ReactNode;
+  icon: ComponentProps<typeof IconButton>["icon"];
   className?: string;
   disabled?: boolean;
 };
@@ -105,29 +105,45 @@ type ToolbarIconButtonProps = {
 const ToolbarIconButton = ({
   label,
   onClick,
-  children,
+  icon,
   className,
   disabled,
 }: ToolbarIconButtonProps) => (
-  <HoverCard.Root>
-    <HoverCard.Trigger>
-      <button
-        type="button"
-        className={classNames(styles.iconButton, className)}
-        onClick={onClick}
+  <Tooltip>
+    <Tooltip.Trigger asChild>
+      <IconButton
         aria-label={label}
+        className={classNames(styles.iconButton, className)}
         disabled={disabled}
-      >
-        {children}
-      </button>
-    </HoverCard.Trigger>
-    <HoverCard.Content size="1" side="bottom">
-      <Text as="p" size="2">
-        {label}
-      </Text>
-    </HoverCard.Content>
-  </HoverCard.Root>
+        icon={icon}
+        onClick={onClick}
+        size="sm"
+        variant="plain"
+      />
+    </Tooltip.Trigger>
+    <Tooltip.Content side="bottom">{label}</Tooltip.Content>
+  </Tooltip>
 );
+
+function taskStatusLabel(status: ComponentProps<typeof StatusDot>["status"]): string {
+  if (status === "in_progress" || status === "running") {
+    return "In progress...";
+  }
+
+  if (status === "needs_attention" || status === "paused") {
+    return "Needs your attention";
+  }
+
+  if (status === "error") {
+    return "An error occurred";
+  }
+
+  if (status === "completed") {
+    return "Completed";
+  }
+
+  return "Idle";
+}
 
 function isUsableHttpUrl(value: string | undefined): value is string {
   if (!value) return false;
@@ -191,7 +207,6 @@ function resolveBrowserEngineUrl(config: EngineApiConfig): string {
 
 export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const dispatch = useAppDispatch();
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const activeTabRef = useRef<HTMLDivElement | null>(null);
   const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
   const config = useConfig();
@@ -414,37 +429,39 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [dispatch, activeTab, tabs, goToTab],
   );
 
-  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    if (container.scrollWidth <= container.clientWidth) return;
-    event.preventDefault();
-    container.scrollLeft += event.deltaY || event.deltaX;
-  }, []);
-
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarSection}>
         <ToolbarIconButton
           label="Home"
           className={styles.homeButton}
+          icon={Home}
           onClick={() => {
             setRenameState(null);
             goToTab({ type: "dashboard" });
           }}
-        >
-          <RefactIcon style={{ color: "#E7150D" }} />
-        </ToolbarIconButton>
+        />
       </div>
 
       <div className={styles.toolbarDivider} />
 
-      <div
-        ref={scrollContainerRef}
+      <KitTabs
         className={styles.tabsContainer}
-        onWheel={handleWheel}
+        onWheel={(event) => {
+          const container = event.currentTarget;
+          if (container.scrollWidth <= container.clientWidth) return;
+          event.preventDefault();
+          container.scrollLeft += event.deltaY || event.deltaX;
+        }}
+        value={
+          isChatTab(activeTab)
+            ? activeTab.id
+            : isTaskTab(activeTab)
+              ? activeTab.taskId
+              : "dashboard"
+        }
       >
-        <div role="tablist" className={styles.tabList}>
+        <KitTabs.List className={styles.tabList}>
           {openTasks.map((task) => {
             const isActive =
               isTaskTab(activeTab) && activeTab.taskId === task.id;
@@ -470,6 +487,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             }
 
             const taskMeta = tasksList.find((t) => t.id === task.id);
+            const taskStatus = taskMeta ? getTaskStatusDotState(taskMeta) : "idle";
 
             return (
               <div
@@ -477,36 +495,36 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                 className={styles.tabWrap}
                 ref={isActive ? activeTabRef : undefined}
               >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  className={`${styles.tabButton} ${
-                    isActive ? styles.tabButtonActive : ""
-                  }`}
-                  onClick={() =>
-                    goToTab({ type: "task", taskId: task.id, taskName })
-                  }
-                  onDoubleClick={() => handleTaskRenaming(task.id, taskName)}
-                  title={taskName}
-                >
-                  <span className={styles.tabStatus}>
-                    <StatusDot
-                      state={
-                        taskMeta ? getTaskStatusDotState(taskMeta) : "idle"
-                      }
-                      size="small"
-                    />
-                  </span>
-                  <span className={styles.tabTitle}>{taskName}</span>
-                </button>
+                <KitTabs.Trigger value={task.id} asChild>
+                  <button
+                    type="button"
+                    aria-selected={isActive}
+                    className={`${styles.tabButton} ${
+                      isActive ? styles.tabButtonActive : ""
+                    }`}
+                    onClick={() =>
+                      goToTab({ type: "task", taskId: task.id, taskName })
+                    }
+                    onDoubleClick={() => handleTaskRenaming(task.id, taskName)}
+                    title={taskName}
+                  >
+                    <span className={styles.tabStatus}>
+                      <StatusDot
+                        aria-label={taskStatusLabel(taskStatus)}
+                        status={taskStatus}
+                        size="small"
+                      />
+                    </span>
+                    <span className={styles.tabTitle}>{taskName}</span>
+                  </button>
+                </KitTabs.Trigger>
                 <button
                   type="button"
                   className={styles.tabClose}
                   title="Close task tab"
                   onClick={(e) => handleCloseTaskTab(e, task.id)}
                 >
-                  <Cross1Icon width={10} height={10} />
+                  <Icon icon={X} size="sm" tone="muted" />
                 </button>
               </div>
             );
@@ -535,7 +553,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             }
 
             const statusState = getStatusFromSessionState(tab.session_state);
-
             const modeInfo = modesData?.modes.find((m) => m.id === tab.mode);
             const modeLabel = modeInfo?.title ?? tab.mode;
 
@@ -545,57 +562,57 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                 className={styles.tabWrap}
                 ref={isActive ? activeTabRef : undefined}
               >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  className={`${styles.tabButton} ${
-                    isActive ? styles.tabButtonActive : ""
-                  }`}
-                  onClick={() => goToTab({ type: "chat", id: tab.id })}
-                  onDoubleClick={() =>
-                    handleChatThreadRenaming(tab.id, tab.title)
-                  }
-                  title={tab.title}
-                >
-                  <span className={styles.tabStatus}>
-                    <StatusDot state={statusState} size="small" />
-                  </span>
-                  <span className={styles.tabTitle}>{tab.title}</span>
-                  {tab.unreadNotificationCount > 0 && (
-                    <span
-                      className={styles.tabNotificationBadge}
-                      aria-label={`${tab.unreadNotificationCount} unread process notifications`}
-                    >
-                      {tab.unreadNotificationCount > 9
-                        ? "9+"
-                        : tab.unreadNotificationCount}
+                <KitTabs.Trigger value={tab.id} asChild>
+                  <button
+                    type="button"
+                    aria-selected={isActive}
+                    className={`${styles.tabButton} ${
+                      isActive ? styles.tabButtonActive : ""
+                    }`}
+                    onClick={() => goToTab({ type: "chat", id: tab.id })}
+                    onDoubleClick={() =>
+                      handleChatThreadRenaming(tab.id, tab.title)
+                    }
+                    title={tab.title}
+                  >
+                    <span className={styles.tabStatus}>
+                      <StatusDot
+                        aria-label={taskStatusLabel(statusState)}
+                        status={statusState}
+                        size="small"
+                      />
                     </span>
-                  )}
-                  {!tab.is_buddy_chat && modeLabel && (
-                    <Badge
-                      size="1"
-                      color={getModeColor(tab.mode)}
-                      variant="soft"
-                      className={styles.tabModeBadge}
-                    >
-                      {modeLabel}
-                    </Badge>
-                  )}
-                </button>
+                    <span className={styles.tabTitle}>{tab.title}</span>
+                    {tab.unreadNotificationCount > 0 && (
+                      <span
+                        className={styles.tabNotificationBadge}
+                        aria-label={`${tab.unreadNotificationCount} unread process notifications`}
+                      >
+                        {tab.unreadNotificationCount > 9
+                          ? "9+"
+                          : tab.unreadNotificationCount}
+                      </span>
+                    )}
+                    {!tab.is_buddy_chat && modeLabel && (
+                      <Badge tone="muted" className={styles.tabModeBadge}>
+                        {modeLabel}
+                      </Badge>
+                    )}
+                  </button>
+                </KitTabs.Trigger>
                 <button
                   type="button"
                   className={styles.tabClose}
                   title="Close tab"
                   onClick={(e) => handleCloseTab(e, tab.id)}
                 >
-                  <Cross1Icon width={10} height={10} />
+                  <Icon icon={X} size="sm" tone="muted" />
                 </button>
               </div>
             );
           })}
-        </div>
-      </div>
+        </KitTabs.List>
+      </KitTabs>
 
       <div className={styles.toolbarDivider} />
 
@@ -618,22 +635,24 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div className={styles.toolbarDivider} />
 
       <div className={styles.toolbarSection}>
-        <ToolbarIconButton label="New Chat" onClick={onCreateNewChat}>
-          <PlusIcon />
-        </ToolbarIconButton>
+        <ToolbarIconButton label="New Chat" icon={Plus} onClick={onCreateNewChat} />
 
-        <ToolbarIconButton label="New Task" onClick={onCreateNewTask}>
-          <CheckboxIcon />
-        </ToolbarIconButton>
+        <ToolbarIconButton
+          label="New Task"
+          icon={CheckSquare}
+          onClick={onCreateNewTask}
+        />
       </div>
 
       <div className={styles.toolbarDivider} />
 
       <div className={styles.toolbarSection}>
         {host === "web" && (
-          <ToolbarIconButton label="Toggle Dark Mode" onClick={toggleDarkMode}>
-            {isDarkMode ? <MoonIcon /> : <SunIcon />}
-          </ToolbarIconButton>
+          <ToolbarIconButton
+            label="Toggle Dark Mode"
+            icon={isDarkMode ? Moon : Sun}
+            onClick={toggleDarkMode}
+          />
         )}
 
         <Dropdown handleNavigation={handleNavigation} useGhostTrigger />

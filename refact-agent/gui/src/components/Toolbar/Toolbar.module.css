@@ -1,28 +1,31 @@
 .toolbar {
   display: flex;
   align-items: center;
-  background: transparent;
+  min-width: 0;
   height: 36px;
-  padding: 0 var(--space-2);
+  padding: 0 var(--rf-space-2);
   gap: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: transparent;
 }
 
 .toolbarSection {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  min-width: 0;
   height: 100%;
-  gap: 2px;
+  gap: var(--rf-space-1);
 }
 
 .engineUrl {
   display: inline-block;
   max-width: 180px;
   overflow: hidden;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   cursor: pointer;
-  font-size: 11px;
-  line-height: 1;
+  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
   text-align: left;
   text-decoration: none;
   text-overflow: ellipsis;
@@ -30,65 +33,42 @@
 }
 
 .engineUrl:hover {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .engineUrl:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: 2px;
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .iconButton {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--gray-11);
-  cursor: pointer;
-  transition: filter 0.15s ease;
   flex-shrink: 0;
-}
-
-.iconButton svg {
-  width: 15px;
-  height: 15px;
+  border-color: transparent;
+  color: var(--rf-color-muted);
 }
 
 .iconButton:hover:not(:disabled) {
-  filter: brightness(1.5);
+  color: var(--rf-color-fg);
+  border-color: transparent;
+  background: var(--rf-surface-1);
 }
 
-.iconButton:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.iconButton:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: -2px;
-  box-shadow: none;
-}
-
-.homeButton:hover {
-  filter: brightness(1.2);
+.homeButton {
+  color: var(--rf-color-accent);
 }
 
 .toolbarDivider {
-  width: 1px;
+  width: var(--rf-hairline);
   height: 16px;
-  background: var(--gray-a5);
-  margin: 0 var(--space-2);
+  margin: 0 var(--rf-space-2);
   flex-shrink: 0;
+  background: var(--rf-border);
 }
 
 .tabsContainer {
   display: flex;
   align-items: center;
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   height: 100%;
   overflow-x: auto;
@@ -104,16 +84,25 @@
 .tabList {
   display: flex;
   align-items: center;
+  width: max-content;
+  min-width: min-content;
   height: 100%;
-  width: 100%;
-  min-width: 0;
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.tabList > span[aria-hidden="true"] {
+  display: none;
 }
 
 .tabWrap {
   position: relative;
   display: flex;
   align-items: center;
-  flex: 1 1 180px;
+  flex: 0 1 180px;
   min-width: 48px;
   max-width: 240px;
   height: 100%;
@@ -123,38 +112,45 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   width: 100%;
-  height: calc(100% - 8px);
-  padding: 0 var(--space-2);
+  min-width: 0;
+  height: calc(100% - var(--rf-space-2));
+  padding: 0 var(--rf-space-2);
   padding-right: 26px;
-  margin: 4px 1px;
-  background: var(--gray-a3);
-  border: none;
-  border-radius: var(--radius-2);
+  margin: var(--rf-space-1) var(--rf-hairline);
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
   cursor: pointer;
-  transition: background-color 0.15s ease;
-  color: var(--gray-11);
-  font-size: 12px;
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   text-align: left;
+  transition:
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .tabButton:hover {
-  background: var(--gray-a4);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
 }
 
 .tabButton:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: -2px;
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
 }
 
-.tabButtonActive {
-  background: transparent;
-  color: var(--gray-12);
+.tabButtonActive,
+.tabButton[data-state="active"] {
+  color: var(--rf-color-fg);
+  background: var(--rf-color-accent-soft);
 }
 
-.tabButtonActive:hover {
-  background: transparent;
+.tabButtonActive:hover,
+.tabButton[data-state="active"]:hover {
+  background: var(--rf-color-accent-soft);
 }
 
 .tabStatus {
@@ -174,28 +170,33 @@
 
 .tabModeBadge {
   flex-shrink: 0;
-  font-size: 9px;
+  min-height: 16px;
+  padding: 0 var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
   text-transform: lowercase;
   white-space: nowrap;
 }
 
 .tabNotificationBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   min-width: 16px;
   height: 16px;
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-full);
-  background: var(--red-9);
-  color: var(--red-contrast);
-  font-size: 10px;
-  line-height: 16px;
+  padding: 0 var(--rf-space-1);
+  color: var(--rf-color-danger);
+  background: transparent;
+  border: var(--rf-hairline) solid currentColor;
+  border-radius: var(--rf-radius-pill);
+  font: 650 var(--rf-text-1) / 16px var(--rf-font-ui);
   text-align: center;
-  font-weight: 600;
 }
 
 .tabClose {
   position: absolute;
-  right: 8px;
+  right: var(--rf-space-2);
   top: 50%;
   transform: translateY(-50%);
   display: flex;
@@ -204,15 +205,16 @@
   width: 16px;
   height: 16px;
   padding: 0;
-  border: none;
-  border-radius: var(--radius-1);
+  color: var(--rf-color-muted);
   background: transparent;
-  color: var(--gray-10);
+  border: 0;
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
   opacity: 0;
   transition:
-    opacity 0.15s ease,
-    background-color 0.15s ease;
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .tabWrap:hover .tabClose {
@@ -220,28 +222,63 @@
 }
 
 .tabClose:hover {
-  background: var(--gray-a5);
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
 }
 
-.tabButtonActive ~ .tabClose {
-  opacity: 0.7;
+.tabButtonActive ~ .tabClose,
+.tabButton[data-state="active"] ~ .tabClose {
+  opacity: 0.72;
 }
 
-.tabButtonActive ~ .tabClose:hover {
+.tabButtonActive ~ .tabClose:hover,
+.tabButton[data-state="active"] ~ .tabClose:hover {
   opacity: 1;
 }
 
 .RenameInput {
   flex: 1;
   min-width: 0;
-  height: calc(100% - 6px);
-  margin: 3px 2px;
+  height: calc(100% - var(--rf-space-2));
+  margin: var(--rf-space-1) var(--rf-hairline);
 }
 
 @media (hover: none) {
   .tabClose {
     opacity: 1;
+  }
+}
+
+@media (max-width: 360px) {
+  .toolbar {
+    padding: 0 var(--rf-space-1);
+  }
+
+  .engineUrl {
+    max-width: 0;
+  }
+
+  .toolbarDivider {
+    margin: 0 var(--rf-space-1);
+  }
+
+  .tabWrap {
+    flex-basis: 128px;
+  }
+
+  .tabModeBadge {
+    display: none;
+  }
+}
+
+@media (max-width: 240px) {
+  .tabWrap {
+    flex-basis: 96px;
+  }
+
+  .tabStatus,
+  .tabNotificationBadge {
+    display: none;
   }
 }
 
