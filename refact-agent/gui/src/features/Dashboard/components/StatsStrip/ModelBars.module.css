@@ -22,5 +22,5 @@
 .barLabel {
   max-width: 60px;
   font-size: 10px;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }

@@ -1,6 +1,11 @@
 import React, { useMemo } from "react";
-import { Badge, Flex, HoverCard, Text } from "@radix-ui/themes";
-import { getModeColor } from "../../../../utils/modeColors";
+import {
+  DashboardBadge as Badge,
+  DashboardFlex as Flex,
+  DashboardHoverCard as HoverCard,
+  DashboardText as Text,
+  dashboardToneFromMode,
+} from "../DashboardPrimitives";
 import type { HistoryTreeNode } from "../../../History/historySlice";
 import type { DashboardBreakpoint } from "../../types";
 import { buildDotTrail, type TrailDot } from "./buildDotTrail";
@@ -37,14 +42,14 @@ function DotHoverContent({
 }) {
   const messageCount = node.message_count ?? 0;
   return (
-    <Flex direction="column" gap="2" style={{ maxWidth: 260 }}>
+    <Flex direction="column" gap="2">
       <Text size="2" weight="bold" truncate>
         {node.title || "New Chat"}
       </Text>
 
       {dot.label && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Type:
           </Text>
           <Text size="1">{dot.label}</Text>
@@ -53,7 +58,7 @@ function DotHoverContent({
 
       {node.model && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Model:
           </Text>
           <Text size="1">{node.model}</Text>
@@ -62,10 +67,10 @@ function DotHoverContent({
 
       {node.mode && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Mode:
           </Text>
-          <Badge size="1" color={getModeColor(node.mode)} variant="soft">
+          <Badge size="1" tone={dashboardToneFromMode(node.mode)}>
             {node.mode}
           </Badge>
         </Flex>
@@ -73,7 +78,7 @@ function DotHoverContent({
 
       {messageCount > 0 && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Messages:
           </Text>
           <Text size="1">{messageCount}</Text>
@@ -83,16 +88,16 @@ function DotHoverContent({
       {((node.total_lines_added ?? 0) > 0 ||
         (node.total_lines_removed ?? 0) > 0) && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Changes:
           </Text>
           {(node.total_lines_added ?? 0) > 0 && (
-            <Text size="1" style={{ color: "var(--green-9)" }}>
+            <Text size="1" tone="success">
               +{node.total_lines_added}
             </Text>
           )}
           {(node.total_lines_removed ?? 0) > 0 && (
-            <Text size="1" style={{ color: "var(--red-9)" }}>
+            <Text size="1" tone="danger">
               −{node.total_lines_removed}
             </Text>
           )}
@@ -101,14 +106,14 @@ function DotHoverContent({
 
       {node.session_state && node.session_state !== "idle" && (
         <Flex gap="1" align="center">
-          <Text size="1" color="gray">
+          <Text size="1" tone="muted">
             Status:
           </Text>
           <Text size="1">{node.session_state}</Text>
         </Flex>
       )}
 
-      <Text size="1" color="gray">
+      <Text size="1" tone="muted">
         {new Date(node.createdAt).toLocaleString()}
       </Text>
     </Flex>
@@ -152,11 +157,11 @@ export const DotTrail: React.FC<DotTrailProps> = ({
             {i > 0 && breakpoint !== "narrow" && (
               <div className={styles.connector} />
             )}
-            <HoverCard.Root openDelay={300} closeDelay={100}>
+            <HoverCard.Root>
               <HoverCard.Trigger>
                 <span
                   role={onDotClick ? "button" : undefined}
-                  className={`${styles.dot} ${styles[dot.type]}`}
+                  className={`  rf-pressable`}
                   style={{
                     width: size,
                     height: size,
@@ -186,11 +191,7 @@ export const DotTrail: React.FC<DotTrailProps> = ({
                 />
               </HoverCard.Trigger>
               <HoverCard.Content
-                size="1"
-                side="top"
-                align="center"
                 className={styles.hoverCard}
-                avoidCollisions
               >
                 <DotHoverContent dot={dot} node={dotNode} />
               </HoverCard.Content>

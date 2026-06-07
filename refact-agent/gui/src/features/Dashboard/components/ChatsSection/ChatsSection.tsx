@@ -5,7 +5,12 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Flex, Spinner, Text, TextField } from "@radix-ui/themes";
+import {
+  DashboardFlex,
+  DashboardSpinner,
+  DashboardText,
+  DashboardTextField,
+} from "../DashboardPrimitives";
 import { ChevronDown, ChevronUp, MessageSquarePlus, Search } from "lucide-react";
 import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import {
@@ -222,28 +227,28 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
             aria-expanded={!collapsed}
             rightIcon={collapsed ? ChevronDown : ChevronUp}
           >
-            <Text size="1" weight="bold" color="gray" className={styles.label}>
+            <DashboardText size="1" weight="bold" tone="muted" className={styles.label}>
               CHATS
-            </Text>
+            </DashboardText>
           </Button>
           {!collapsed && (
-            <TextField.Root
+            <DashboardTextField.Root
               size="1"
               placeholder="Search..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className={styles.searchField}
             >
-              <TextField.Slot>
+              <DashboardTextField.Slot>
                 <Icon icon={Search} size="sm" tone="muted" />
-              </TextField.Slot>
-            </TextField.Root>
+              </DashboardTextField.Slot>
+            </DashboardTextField.Root>
           )}
         </div>
         <div className={styles.headerActions}>
-          <Text size="1" color="gray">
+          <DashboardText size="1" tone="muted">
             {totalLabel}
-          </Text>
+          </DashboardText>
           <Button
             variant="ghost"
             size="sm"
@@ -281,13 +286,13 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
                 if (item.type === "header") {
                   return (
                     <div className={styles.groupLabel}>
-                      <Text
+                      <DashboardText
                         size="1"
-                        color="gray"
+                        tone="muted"
                         className={styles.groupLabelText}
                       >
                         {item.label}
-                      </Text>
+                      </DashboardText>
                       <div className={styles.groupDivider} />
                     </div>
                   );
@@ -309,21 +314,21 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
                 Footer: () => (
                   <>
                     {isLoadingMore && (
-                      <Flex justify="center" py="2">
-                        <Spinner size="2" />
-                      </Flex>
+                      <DashboardFlex justify="center" py="2">
+                        <DashboardSpinner />
+                      </DashboardFlex>
                     )}
                     {loadMoreError && (
-                      <Flex justify="center" py="2">
-                        <Text
+                      <DashboardFlex justify="center" py="2">
+                        <DashboardText
                           size="1"
-                          color="red"
+                          tone="danger"
                           style={{ cursor: "pointer" }}
                           onClick={retryLoadMore}
                         >
                           Load failed — click to retry
-                        </Text>
-                      </Flex>
+                        </DashboardText>
+                      </DashboardFlex>
                     )}
                   </>
                 ),

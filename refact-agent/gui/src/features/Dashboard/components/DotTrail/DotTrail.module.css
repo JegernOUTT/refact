@@ -11,8 +11,8 @@
   padding: 0;
   flex-shrink: 0;
   transition:
-    opacity 0.15s ease,
-    transform 0.15s ease;
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .dot:hover {
@@ -28,50 +28,35 @@
 .connector {
   width: 6px;
   height: 1px;
-  background: var(--gray-6);
+  background: var(--rf-border);
   flex-shrink: 0;
 }
 
 .user {
-  background: var(--blue-8);
+  background: var(--rf-color-accent);
 }
 
 .assistant {
-  background: var(--green-8);
+  background: var(--rf-color-success);
 }
 
 .subagent {
-  background: var(--purple-8);
+  background: var(--rf-color-accent-soft);
 }
 
 .fork {
-  background: var(--amber-8);
+  background: var(--rf-color-warning);
 }
 
 .active {
   background: var(--rf-color-accent);
-  animation: dotPulse 1.5s ease-in-out infinite;
+
 }
 
 .completed {
   background: var(--rf-color-success);
 }
 
-@keyframes dotPulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .active {
-    animation: none;
-  }
-}
 
 .hoverCard {
   max-width: 280px;

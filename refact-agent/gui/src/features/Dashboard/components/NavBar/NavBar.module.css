@@ -36,6 +36,6 @@
 }
 
 .label {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   white-space: nowrap;
 }

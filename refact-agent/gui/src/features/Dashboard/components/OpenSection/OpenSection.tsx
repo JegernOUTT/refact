@@ -1,6 +1,7 @@
 import React, { useCallback } from "react";
-import { Text } from "@radix-ui/themes";
-import { ChevronDownIcon, ChevronUpIcon } from "@radix-ui/react-icons";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { Button } from "../../../../components/ui";
+import { DashboardText } from "../DashboardPrimitives";
 import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import { useAppDispatch } from "../../../../hooks";
 import { switchToThread } from "../../../Chat/Thread";
@@ -39,24 +40,21 @@ export const OpenSection: React.FC<OpenSectionProps> = ({
 
   return (
     <div className={styles.section} data-collapsed={collapsed || undefined}>
-      <button
-        type="button"
+      <Button
+        variant="plain"
+        size="sm"
         className={styles.headerToggle}
         onClick={onToggleCollapsed}
         aria-expanded={!collapsed}
+        rightIcon={collapsed ? ChevronDown : ChevronUp}
       >
-        <Text size="1" weight="bold" color="gray" className={styles.label}>
+        <DashboardText size="1" weight="bold" tone="muted" className={styles.label}>
           OPEN
-        </Text>
-        <Text size="1" color="gray">
+        </DashboardText>
+        <DashboardText size="1" tone="muted">
           {tabs.length} open
-        </Text>
-        {collapsed ? (
-          <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
-        ) : (
-          <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
-        )}
-      </button>
+        </DashboardText>
+      </Button>
       <CollapsePanel collapsed={collapsed}>
         <div className={styles.scrollWrapper} data-breakpoint={breakpoint}>
           <div className={styles.grid} data-breakpoint={breakpoint}>

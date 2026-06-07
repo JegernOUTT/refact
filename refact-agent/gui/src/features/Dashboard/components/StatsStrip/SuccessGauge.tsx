@@ -1,5 +1,5 @@
 import React from "react";
-import { Text } from "@radix-ui/themes";
+import { DashboardText as Text } from "../DashboardPrimitives";
 import styles from "./SuccessGauge.module.css";
 
 type SuccessGaugeProps = {
@@ -14,13 +14,13 @@ export const SuccessGauge: React.FC<SuccessGaugeProps> = ({
   if (total === 0) {
     return (
       <div className={styles.gauge}>
-        <Text size="2" color="gray">
+        <Text size="2" tone="muted">
           —
         </Text>
         <div className={styles.bar}>
           <div
             className={styles.fill}
-            style={{ width: "0%", background: "var(--gray-7)" }}
+            style={{ width: "0%", background: "var(--rf-border-strong)" }}
           />
         </div>
       </div>
@@ -30,10 +30,10 @@ export const SuccessGauge: React.FC<SuccessGaugeProps> = ({
   const rate = Math.round((successful / total) * 100);
   const color =
     rate >= 95
-      ? "var(--green-9)"
+      ? "var(--rf-color-success)"
       : rate >= 80
-        ? "var(--amber-9)"
-        : "var(--red-9)";
+        ? "var(--rf-color-warning)"
+        : "var(--rf-color-danger)";
 
   return (
     <div className={styles.gauge}>

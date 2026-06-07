@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge, Text } from "@radix-ui/themes";
+import { DashboardBadge as Badge, DashboardText as Text } from "../DashboardPrimitives";
 import { StatusDot } from "../../../../components/StatusDot";
 import { getStatusFromSessionState } from "../../../../utils/sessionStatus";
 import { getModeColor } from "../../../../utils/modeColors";

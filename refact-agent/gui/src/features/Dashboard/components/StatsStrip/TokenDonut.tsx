@@ -1,5 +1,5 @@
 import React from "react";
-import { Text } from "@radix-ui/themes";
+import { DashboardText as Text } from "../DashboardPrimitives";
 import { formatTokenCount } from "../../../StatsDashboard/utils/formatters";
 
 type TokenDonutProps = {
@@ -16,7 +16,7 @@ export const TokenDonut: React.FC<TokenDonutProps> = ({
   const total = prompt + completion + cache;
   if (total === 0) {
     return (
-      <Text size="2" weight="bold" color="gray">
+      <Text size="2" weight="bold" tone="muted">
         0
       </Text>
     );
@@ -45,7 +45,7 @@ export const TokenDonut: React.FC<TokenDonutProps> = ({
           cy={cy}
           r={radius}
           fill="none"
-          stroke="var(--blue-8)"
+          stroke="var(--rf-color-accent)"
           strokeWidth={strokeWidth}
           strokeDasharray={`${promptFraction * circumference} ${circumference}`}
           strokeDashoffset={-promptOffset}
@@ -58,7 +58,7 @@ export const TokenDonut: React.FC<TokenDonutProps> = ({
           cy={cy}
           r={radius}
           fill="none"
-          stroke="var(--green-8)"
+          stroke="var(--rf-color-success)"
           strokeWidth={strokeWidth}
           strokeDasharray={`${
             completionFraction * circumference
@@ -74,7 +74,7 @@ export const TokenDonut: React.FC<TokenDonutProps> = ({
             cy={cy}
             r={radius}
             fill="none"
-            stroke="var(--amber-8)"
+            stroke="var(--rf-color-warning)"
             strokeWidth={strokeWidth}
             strokeDasharray={`${
               cacheFraction * circumference

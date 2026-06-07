@@ -1,59 +1,58 @@
 import React, { useCallback } from "react";
-import { Text } from "@radix-ui/themes";
 import {
-  BarChartIcon,
-  MixerHorizontalIcon,
-  GearIcon,
-  LightningBoltIcon,
-  CubeIcon,
-  RocketIcon,
-  StopwatchIcon,
-} from "@radix-ui/react-icons";
+  BarChart3,
+  Box,
+  Gauge,
+  Plug,
+  Rocket,
+  Settings,
+  Timer,
+} from "lucide-react";
+import { Icon } from "../../../../components/ui";
+import { DashboardText as Text } from "../DashboardPrimitives";
 import { useAppDispatch } from "../../../../hooks";
 import { push, type Page } from "../../../Pages/pagesSlice";
 import styles from "./NavBar.module.css";
 
 type NavItem = {
-  icon: React.ReactNode;
+  icon: React.ComponentProps<typeof Icon>["icon"];
   label: string;
   page: Page;
 };
 
-const ICON_SIZE = 15;
-
 const NAV_ITEMS: NavItem[] = [
   {
-    icon: <BarChartIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: BarChart3,
     label: "Stats",
     page: { name: "stats dashboard" },
   },
   {
-    icon: <MixerHorizontalIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: Plug,
     label: "Integrations",
     page: { name: "integrations page" },
   },
   {
-    icon: <GearIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: Settings,
     label: "Providers",
     page: { name: "providers page" },
   },
   {
-    icon: <RocketIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: Rocket,
     label: "Modes",
     page: { name: "customization" },
   },
   {
-    icon: <StopwatchIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: Timer,
     label: "Scheduler",
     page: { name: "scheduler" },
   },
   {
-    icon: <LightningBoltIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: Gauge,
     label: "Extensions",
     page: { name: "extensions", tab: "skills" },
   },
   {
-    icon: <CubeIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: Box,
     label: "Marketplace",
     page: { name: "marketplace hub" },
   },
@@ -70,17 +69,19 @@ export const NavBar: React.FC = () => {
   );
 
   return (
-    <nav className={styles.nav}>
+    <nav className={`${styles.nav} rf-enter-rise rf-stagger`}>
       {NAV_ITEMS.map((item) => (
         <button
           key={item.label}
           type="button"
-          className={styles.navButton}
+          className={`${styles.navButton} rf-pressable`}
           onClick={() => handleClick(item.page)}
           aria-label={item.label}
         >
-          <span className={styles.icon}>{item.icon}</span>
-          <Text size="1" className={styles.label}>
+          <span className={styles.icon}>
+            <Icon icon={item.icon} size="md" tone="muted" />
+          </span>
+          <Text size="1" tone="muted" className={styles.label}>
             {item.label}
           </Text>
         </button>

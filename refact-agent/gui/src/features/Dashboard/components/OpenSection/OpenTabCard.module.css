@@ -53,7 +53,7 @@
   padding: 0 var(--rf-space-1);
   border-radius: var(--radius-full);
   background: var(--rf-color-danger);
-  color: var(--red-contrast);
+  color: var(--rf-color-bg);
   font-size: 10px;
   line-height: 18px;
   text-align: center;

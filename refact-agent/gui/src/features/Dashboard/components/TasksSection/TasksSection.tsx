@@ -1,8 +1,6 @@
 import React, { useCallback, useDeferredValue, useMemo, useState } from "react";
-import { Badge, Text, TextField } from "@radix-ui/themes";
-import { ChevronDown, ChevronUp, ListPlus, Search } from "lucide-react";
-import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import {
+  Badge,
   Button,
   EmptyState,
   ErrorState,
@@ -10,6 +8,13 @@ import {
   LoadingState,
   StatusDot,
 } from "../../../../components/ui";
+import {
+  DashboardText,
+  DashboardTextField,
+  dashboardToneFromTaskStatus,
+} from "../DashboardPrimitives";
+import { ChevronDown, ChevronUp, ListPlus, Search } from "lucide-react";
+import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import { Virtuoso } from "react-virtuoso";
 import { useAppDispatch, useAppSelector } from "../../../../hooks";
 import { push } from "../../../Pages/pagesSlice";
@@ -55,25 +60,6 @@ function getDateGroup(dateStr: string): string {
   if (diffDay === 0) return "Today";
   if (diffDay === 1) return "Yesterday";
   return "Earlier";
-}
-
-function getStatusColor(
-  status: string,
-): "blue" | "purple" | "amber" | "green" | "red" | "gray" {
-  switch (status) {
-    case "active":
-      return "blue";
-    case "planning":
-      return "purple";
-    case "paused":
-      return "amber";
-    case "completed":
-      return "green";
-    case "abandoned":
-      return "red";
-    default:
-      return "gray";
-  }
 }
 
 const GROUP_ORDER = ["Today", "Yesterday", "Earlier"] as const;
@@ -193,37 +179,37 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
           aria-expanded={!collapsed}
           rightIcon={collapsed ? ChevronDown : ChevronUp}
         >
-          <Text size="1" weight="bold" color="gray" className={styles.label}>
+          <DashboardText size="1" weight="bold" tone="muted" className={styles.label}>
             TASKS
-          </Text>
+          </DashboardText>
         </Button>
         {showSearch && !collapsed && (
-          <TextField.Root
+          <DashboardTextField.Root
             size="1"
             placeholder="Search..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className={styles.searchField}
           >
-            <TextField.Slot>
+            <DashboardTextField.Slot>
               <Icon icon={Search} size="sm" tone="muted" />
-            </TextField.Slot>
-          </TextField.Root>
+            </DashboardTextField.Slot>
+          </DashboardTextField.Root>
         )}
       </div>
       <div className={styles.headerActions}>
         {activeCount > 0 && (
-          <Text size="1" color="gray">
+          <DashboardText size="1" tone="muted">
             {activeCount} active
-          </Text>
+          </DashboardText>
         )}
-        <Text size="1" color={showTaskError ? "red" : "gray"}>
+        <DashboardText size="1" tone={showTaskError ? "danger" : "muted"}>
           {tasksLoading
             ? "Loading"
             : showTaskError
               ? "Error"
               : `${filteredTasks.length} total`}
-        </Text>
+        </DashboardText>
         {children}
       </div>
     </div>
@@ -284,13 +270,13 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
               if (item.type === "header") {
                 return (
                   <div className={styles.groupLabel}>
-                    <Text
+                    <DashboardText
                       size="1"
-                      color="gray"
+                      tone="muted"
                       className={styles.groupLabelText}
                     >
                       {item.label}
-                    </Text>
+                    </DashboardText>
                     <div className={styles.groupDivider} />
                   </div>
                 );
@@ -317,33 +303,31 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
                       size="small"
                       pulse={dotStatus === "in_progress"}
                     />
-                    <Text size="2" truncate className={styles.taskName}>
+                    <DashboardText size="2" truncate className={styles.taskName}>
                       {task.name}
-                    </Text>
+                    </DashboardText>
                   </div>
                   <div className={styles.taskRight}>
                     {task.cards_total > 0 && (
-                      <Text size="1" color="gray">
+                      <DashboardText size="1" tone="muted">
                         {task.cards_done}/{task.cards_total}
-                      </Text>
+                      </DashboardText>
                     )}
                     {breakpoint !== "narrow" && task.cards_failed > 0 && (
-                      <Text size="1" color="red">
+                      <DashboardText size="1" tone="danger">
                         {task.cards_failed} failed
-                      </Text>
+                      </DashboardText>
                     )}
                     {breakpoint !== "narrow" && (
                       <Badge
-                        size="1"
-                        variant="soft"
-                        color={getStatusColor(task.status)}
+                        tone={dashboardToneFromTaskStatus(task.status)}
                       >
                         {task.status}
                       </Badge>
                     )}
-                    <Text size="1" color="gray" className={styles.taskTime}>
+                    <DashboardText size="1" tone="muted" className={styles.taskTime}>
                       {formatTaskTime(task.updated_at)}
-                    </Text>
+                    </DashboardText>
                   </div>
                 </div>
               );
