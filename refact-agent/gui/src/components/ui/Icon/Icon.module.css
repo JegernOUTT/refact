@@ -1,0 +1,49 @@
+.icon {
+  display: inline-block;
+  flex-shrink: 0;
+  color: var(--rf-color-fg);
+  vertical-align: middle;
+}
+
+.size-sm {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+}
+
+.size-md {
+  width: var(--rf-icon);
+  height: var(--rf-icon);
+}
+
+.size-lg {
+  width: var(--rf-icon-lg);
+  height: var(--rf-icon-lg);
+}
+
+.tone-default {
+  color: var(--rf-color-fg);
+}
+
+.tone-muted {
+  color: var(--rf-color-muted);
+}
+
+.tone-faint {
+  color: var(--rf-color-faint);
+}
+
+.tone-accent {
+  color: var(--rf-color-accent);
+}
+
+.tone-success {
+  color: var(--rf-color-success);
+}
+
+.tone-warning {
+  color: var(--rf-color-warning);
+}
+
+.tone-danger {
+  color: var(--rf-color-danger);
+}
