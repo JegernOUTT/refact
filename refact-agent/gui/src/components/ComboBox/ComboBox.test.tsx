@@ -678,6 +678,19 @@ describe("ComboBox slash commands", () => {
     });
   });
 
+  test("pressing Space accepts the active slash completion without auto-submitting", async () => {
+    const onSubmitSpy = vi.fn();
+    const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
+    const textarea = app.getByRole("combobox") as HTMLTextAreaElement;
+    await user.type(textarea, "/opt");
+    await user.keyboard(" ");
+
+    await waitFor(() => {
+      expect(textarea.textContent).toEqual("/optimize");
+    });
+    expect(onSubmitSpy).not.toHaveBeenCalled();
+  });
+
   test("selecting slash command with argument_hint via Enter does not auto-submit", async () => {
     const onSubmitSpy = vi.fn();
     const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);
