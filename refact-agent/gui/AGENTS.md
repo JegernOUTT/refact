@@ -318,6 +318,8 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 ### Model selector
 
 - `ModelSelector` in `src/components/ui/ModelSelector` is the reusable presentational selector for model picking. It accepts only prop data and callbacks: `models`, `value`, `onSelect`, optional `groups`, `allowUnset`, `disabled`, `onAddNewModel`, and `variant: "popover" | "inline"`.
+- `unsetLabel?: string` customizes the empty-state row and trigger label when `allowUnset` is enabled; it defaults to `No model selected`.
+- `triggerSize?: "sm" | "md" | "lg"` lets connected compact wrappers keep small triggers while the selector internals stay shared.
 - `ModelOption` carries render-ready fields only: `value`, `displayName`, optional `group`, `disabled`, `pricing: { prompt, output }`, `contextWindow`, `badges: Array<"default" | "reasoning" | "light" | "buddy" | "task-agent" | "chat2">`, and `capabilities: ReactNode`.
 - The kit selector must stay pure: no caps hooks, Redux, RTK Query, services, provider utilities, or feature imports. Connected feature code owns enrichment, grouping, pricing formatting, capability icons, and persistence.
 - Use `variant="popover"` for compact pickers backed by the kit `Popover` responsive Sheet behavior, and `variant="inline"` for settings surfaces that render the searchable list directly.

@@ -82,9 +82,14 @@ describe("model selector caps pipeline", () => {
       "Anthropic",
       "Google",
     ]);
-    expect(groups.some((group) => group.models.some((model) => model.value === "refact/legacy-model"))).toBe(false);
+    expect(
+      groups.some((group) =>
+        group.models.some((model) => model.value === "refact/legacy-model"),
+      ),
+    ).toBe(false);
 
-    const openAIModels = groups.find((group) => group.provider === "openai")?.models;
+    const openAIModels = groups.find((group) => group.provider === "openai")
+      ?.models;
     expect(openAIModels?.map((model) => model.value).slice(0, 5)).toEqual([
       "openai/gpt-4o",
       "openai/o3-mini",
@@ -123,20 +128,24 @@ describe("model selector caps pipeline", () => {
       { preloadedState: { config } },
     );
 
-    await user.click(await screen.findByRole("combobox"));
+    await user.click(
+      await screen.findByRole("button", { name: "Select model" }),
+    );
 
     expect(
-      await screen.findByRole("option", { name: /Unavailable: missing\/model/ }),
-    ).toHaveAttribute("aria-disabled", "true");
+      await screen.findByRole("option", { name: /missing\/model/ }),
+    ).toBeDisabled();
 
-    await user.click(screen.getByRole("option", { name: /None None/ }));
+    await user.click(screen.getByRole("option", { name: "None" }));
     expect(onValueChange).toHaveBeenCalledWith("");
 
-    await user.click(screen.getByRole("combobox"));
-    expect(screen.queryByRole("option", { name: /refact\/legacy-model/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select model" }));
+    expect(
+      screen.queryByRole("option", { name: /refact\/legacy-model/ }),
+    ).not.toBeInTheDocument();
 
     const defaultOption = await screen.findByRole("option", {
-      name: /openai\/gpt-4o.*Default.*\$2\.50\/\$10\.00.*128K/s,
+      name: /openai\/gpt-4o.*Default.*\$2\.50 \/ \$10\.00.*128K/s,
     });
     expect(defaultOption).toBeInTheDocument();
     expect(
@@ -156,6 +165,7 @@ describe("model selector caps pipeline", () => {
         name: /openai\/claude-3-5-haiku.*Companion/s,
       }),
     ).toBeInTheDocument();
+    expect(screen.getAllByTitle("Supports tools").length).toBeGreaterThan(0);
   });
 
   test("selecting an enabled model calls onValueChange, while unavailable selected model is disabled", async () => {
@@ -170,12 +180,14 @@ describe("model selector caps pipeline", () => {
       { preloadedState: { config } },
     );
 
-    await user.click(await screen.findByRole("combobox"));
+    await user.click(
+      await screen.findByRole("button", { name: "Select model" }),
+    );
 
     const listbox = await screen.findByRole("listbox");
     expect(
-      within(listbox).getByRole("option", { name: /Unavailable: missing\/model/ }),
-    ).toHaveAttribute("aria-disabled", "true");
+      within(listbox).getByRole("option", { name: /missing\/model/ }),
+    ).toBeDisabled();
 
     await user.click(
       within(listbox).getByRole("option", { name: /openai\/gpt-4o-mini/ }),

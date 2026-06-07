@@ -106,10 +106,20 @@ const baseArgs = {
   onSelect: () => undefined,
 };
 
-function StatefulSelector(props: Omit<React.ComponentProps<typeof ModelSelector>, "value" | "onSelect">) {
-  const [value, setValue] = React.useState<string | null>(models[0]?.value ?? null);
+function StatefulSelector(
+  props: Omit<React.ComponentProps<typeof ModelSelector>, "value" | "onSelect">,
+) {
+  const [value, setValue] = React.useState<string | null>(
+    models[0]?.value ?? null,
+  );
 
-  return <ModelSelector {...props} value={value} onSelect={(nextValue) => setValue(nextValue || null)} />;
+  return (
+    <ModelSelector
+      {...props}
+      value={value}
+      onSelect={(nextValue) => setValue(nextValue || null)}
+    />
+  );
 }
 
 export const PopoverGrouped: Story = {
@@ -118,8 +128,15 @@ export const PopoverGrouped: Story = {
     <div className={styles.storyShell}>
       <section className={styles.panel}>
         <h2 className={styles.title}>Grouped popover</h2>
-        <p className={styles.description}>Search, grouped rows, selected highlight, pricing, context and capability content.</p>
-        <StatefulSelector groups={groups} models={models} onAddNewModel={() => undefined} />
+        <p className={styles.description}>
+          Search, grouped rows, selected highlight, pricing, context and
+          capability content.
+        </p>
+        <StatefulSelector
+          groups={groups}
+          models={models}
+          onAddNewModel={() => undefined}
+        />
       </section>
     </div>
   ),
@@ -131,8 +148,36 @@ export const InlineWithUnset: Story = {
     <div className={styles.storyShell}>
       <section className={styles.panel}>
         <h2 className={styles.title}>Inline settings list</h2>
-        <p className={styles.description}>Inline variant with unset and add-new actions for settings surfaces.</p>
-        <StatefulSelector allowUnset groups={groups} models={models} variant="inline" onAddNewModel={() => undefined} />
+        <p className={styles.description}>
+          Inline variant with unset and add-new actions for settings surfaces.
+        </p>
+        <StatefulSelector
+          allowUnset
+          groups={groups}
+          models={models}
+          variant="inline"
+          onAddNewModel={() => undefined}
+        />
+      </section>
+    </div>
+  ),
+};
+
+export const CustomUnsetLabel: Story = {
+  args: baseArgs,
+  render: () => (
+    <div className={styles.storyShell}>
+      <section className={styles.panel}>
+        <h2 className={styles.title}>Custom unset label</h2>
+        <p className={styles.description}>
+          Callers can rename the empty model row for settings forms.
+        </p>
+        <StatefulSelector
+          allowUnset
+          groups={groups}
+          models={models}
+          unsetLabel="None"
+        />
       </section>
     </div>
   ),
@@ -177,8 +222,15 @@ export const NarrowPopoverSheet: Story = {
     <div className={styles.storyShell}>
       <section className={`${styles.panel} ${styles.narrowPanel}`}>
         <h2 className={styles.title}>Narrow popover</h2>
-        <p className={styles.description}>The kit Popover can become a Sheet on narrow screens.</p>
-        <StatefulSelector allowUnset groups={groups} models={models} onAddNewModel={() => undefined} />
+        <p className={styles.description}>
+          The kit Popover can become a Sheet on narrow screens.
+        </p>
+        <StatefulSelector
+          allowUnset
+          groups={groups}
+          models={models}
+          onAddNewModel={() => undefined}
+        />
       </section>
     </div>
   ),

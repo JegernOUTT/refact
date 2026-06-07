@@ -1,10 +1,20 @@
 import React, { useCallback, useMemo } from "react";
-import { Select, Text, Flex } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
+
 import { useGetCapsQuery } from "../../hooks";
-import { RichModelSelectItem } from "../Select/RichModelSelectItem";
+import { CapabilityIcons } from "../../features/Providers/ProviderForm/ProviderModelsList/components";
+import {
+  formatContextWindow,
+  formatPricing,
+} from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { isLegacyRefactModel } from "../../utils/modelProviders";
-import styles from "../Select/select.module.css";
+import {
+  ModelSelector as KitModelSelector,
+  type ModelOption,
+  type ModelSelectorBadge,
+  type ModelSelectorGroup,
+} from "../ui";
 
 export type ModelSelectorProps = {
   disabled?: boolean;
@@ -18,7 +28,26 @@ export type ModelSelectorProps = {
   unsetLabel?: string;
 };
 
-const UNSET_MODEL_VALUE = "__refact_unset_model__";
+function modelBadges(
+  model: ReturnType<typeof enrichAndGroupModels>[number]["models"][number],
+) {
+  const badges: ModelSelectorBadge[] = [];
+  if (model.isDefault) badges.push("default");
+  if (model.isThinking) badges.push("reasoning");
+  if (model.isLight) badges.push("light");
+  if (model.isBuddy) badges.push("buddy");
+  if (model.isTaskPlannerAgent) badges.push("task-agent");
+  if (model.isChat2) badges.push("chat2");
+  return badges;
+}
+
+function pricingOption(
+  model: ReturnType<typeof enrichAndGroupModels>[number]["models"][number],
+) {
+  if (!model.pricing) return undefined;
+  const [prompt, output] = formatPricing(model.pricing, true).split("/");
+  return { prompt, output };
+}
 
 export const ModelSelector: React.FC<ModelSelectorProps> = ({
   disabled,
@@ -50,227 +79,89 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   const defaultModel = defaultValue ?? caps?.chat_default_model ?? "";
   const effectiveValue = value ?? defaultModel;
-  const firstModelValue = groupedModels[0]?.models[0]?.value ?? "";
-  const selectValue =
-    allowUnset && !effectiveValue
-      ? UNSET_MODEL_VALUE
-      : effectiveValue || firstModelValue;
-  const currentModelName = effectiveValue;
-  const triggerLabel =
-    allowUnset && !effectiveValue ? unsetLabel : currentModelName;
   const hasEffectiveValueInList = groupedModels.some((group) =>
     group.models.some((model) => model.value === effectiveValue),
   );
-  const showUnavailableValue = Boolean(
-    effectiveValue && !hasEffectiveValueInList,
-  );
-  const handleValueChange = useCallback(
+
+  const groups = useMemo<ModelSelectorGroup[]>(() => {
+    return groupedModels.map((group) => ({
+      id: group.provider,
+      label: group.displayName,
+    }));
+  }, [groupedModels]);
+
+  const models = useMemo<ModelOption[]>(() => {
+    const mappedModels = groupedModels.flatMap((group) =>
+      group.models.map((model) => ({
+        value: model.value,
+        displayName: model.value,
+        group: group.provider,
+        disabled: model.disabled,
+        pricing: pricingOption(model),
+        contextWindow: model.nCtx ? formatContextWindow(model.nCtx) : undefined,
+        badges: modelBadges(model),
+        capabilities: model.capabilities ? (
+          <CapabilityIcons capabilities={model.capabilities} />
+        ) : undefined,
+      })),
+    );
+
+    if (effectiveValue && !hasEffectiveValueInList) {
+      return [
+        {
+          value: effectiveValue,
+          displayName: effectiveValue,
+          disabled: true,
+        },
+        ...mappedModels,
+      ];
+    }
+
+    return mappedModels;
+  }, [effectiveValue, groupedModels, hasEffectiveValueInList]);
+
+  const handleSelect = useCallback(
     (nextValue: string) => {
-      onValueChange(nextValue === UNSET_MODEL_VALUE ? "" : nextValue);
+      onValueChange(nextValue === "" ? "" : nextValue);
     },
     [onValueChange],
   );
 
-  if (!caps || groupedModels.length === 0) {
-    if (allowUnset) {
-      return (
-        <Flex
-          direction={compact ? "row" : "column"}
-          align={compact ? "center" : undefined}
-          gap="1"
-        >
-          {showLabel && (
-            <Text size="1" color="gray">
-              {label}
-            </Text>
-          )}
-          <Select.Root
-            value={showUnavailableValue ? effectiveValue : UNSET_MODEL_VALUE}
-            onValueChange={handleValueChange}
-            disabled={disabled}
-            size={compact ? "1" : "2"}
-          >
-            <Select.Trigger
-              variant={compact ? "ghost" : undefined}
-              className={compact ? styles.compactTrigger : undefined}
-              style={compact ? undefined : { width: "100%" }}
-            />
-            <Select.Content position="popper">
-              {showUnavailableValue && (
-                <Select.Item
-                  value={effectiveValue}
-                  disabled
-                  textValue={effectiveValue}
-                >
-                  <span className={styles.trigger_only}>{effectiveValue}</span>
-                  <span className={styles.dropdown_only}>
-                    Unavailable: {effectiveValue}
-                  </span>
-                </Select.Item>
-              )}
-              <Select.Item value={UNSET_MODEL_VALUE} textValue={unsetLabel}>
-                <span className={styles.trigger_only}>{unsetLabel}</span>
-                <span className={styles.dropdown_only}>{unsetLabel}</span>
-              </Select.Item>
-            </Select.Content>
-          </Select.Root>
-        </Flex>
-      );
-    }
+  const triggerSize = compact ? "sm" : "md";
 
+  if (!caps && models.length === 0) {
     return (
-      <Text size="1" color="gray" style={{ lineHeight: 1 }}>
+      <Text size="1" color="gray">
         {showLabel ? `${label} ` : ""}
-        {triggerLabel || "No models"}
+        {allowUnset && !effectiveValue
+          ? unsetLabel
+          : effectiveValue || "No models"}
       </Text>
     );
   }
 
-  if (compact) {
-    return (
-      <Flex align="center" gap="1">
-        {showLabel && (
-          <Text size="1" color="gray" style={{ lineHeight: 1 }}>
-            {label}
-          </Text>
-        )}
-        <Select.Root
-          value={selectValue}
-          onValueChange={handleValueChange}
-          disabled={disabled}
-          size="1"
-        >
-          <Select.Trigger
-            variant="ghost"
-            className={styles.compactTrigger}
-            title={
-              disabled
-                ? "Cannot change model while streaming"
-                : "Click to change model"
-            }
-            style={{
-              cursor: disabled ? "not-allowed" : "pointer",
-              opacity: disabled ? 0.5 : 1,
-            }}
-          />
-          <Select.Content position="popper">
-            {showUnavailableValue && (
-              <Select.Item
-                value={effectiveValue}
-                disabled
-                textValue={effectiveValue}
-              >
-                <span className={styles.trigger_only}>{effectiveValue}</span>
-                <span className={styles.dropdown_only}>
-                  Unavailable: {effectiveValue}
-                </span>
-              </Select.Item>
-            )}
-            {allowUnset && (
-              <Select.Item value={UNSET_MODEL_VALUE} textValue={unsetLabel}>
-                <span className={styles.trigger_only}>{unsetLabel}</span>
-                <span className={styles.dropdown_only}>{unsetLabel}</span>
-              </Select.Item>
-            )}
-            {groupedModels.map((group) => (
-              <Select.Group key={group.provider}>
-                <Select.Label>{group.displayName}</Select.Label>
-                {group.models.map((model) => (
-                  <Select.Item
-                    key={model.value}
-                    value={model.value}
-                    disabled={model.disabled}
-                    textValue={model.value}
-                  >
-                    <span className={styles.trigger_only}>{model.value}</span>
-                    <span className={styles.dropdown_only}>
-                      <RichModelSelectItem
-                        displayName={model.value}
-                        pricing={model.pricing}
-                        nCtx={model.nCtx}
-                        capabilities={model.capabilities}
-                        isDefault={model.isDefault}
-                        isChat2={model.isChat2}
-                        isTaskPlannerAgent={model.isTaskPlannerAgent}
-                        isThinking={model.isThinking}
-                        isLight={model.isLight}
-                        isBuddy={model.isBuddy}
-                      />
-                    </span>
-                  </Select.Item>
-                ))}
-              </Select.Group>
-            ))}
-          </Select.Content>
-        </Select.Root>
-      </Flex>
-    );
-  }
-
   return (
-    <Flex direction="column" gap="1">
+    <Flex
+      direction={compact ? "row" : "column"}
+      align={compact ? "center" : undefined}
+      gap="1"
+      width="100%"
+    >
       {showLabel && (
         <Text size="1" color="gray">
           {label}
         </Text>
       )}
-      <Select.Root
-        value={selectValue}
-        onValueChange={handleValueChange}
+      <KitModelSelector
+        allowUnset={allowUnset}
         disabled={disabled}
-        size="2"
-      >
-        <Select.Trigger style={{ width: "100%" }} />
-        <Select.Content position="popper">
-          {showUnavailableValue && (
-            <Select.Item
-              value={effectiveValue}
-              disabled
-              textValue={effectiveValue}
-            >
-              <span className={styles.trigger_only}>{effectiveValue}</span>
-              <span className={styles.dropdown_only}>
-                Unavailable: {effectiveValue}
-              </span>
-            </Select.Item>
-          )}
-          {allowUnset && (
-            <Select.Item value={UNSET_MODEL_VALUE} textValue={unsetLabel}>
-              <span className={styles.trigger_only}>{unsetLabel}</span>
-              <span className={styles.dropdown_only}>{unsetLabel}</span>
-            </Select.Item>
-          )}
-          {groupedModels.map((group) => (
-            <Select.Group key={group.provider}>
-              <Select.Label>{group.displayName}</Select.Label>
-              {group.models.map((model) => (
-                <Select.Item
-                  key={model.value}
-                  value={model.value}
-                  disabled={model.disabled}
-                  textValue={model.value}
-                >
-                  <span className={styles.trigger_only}>{model.value}</span>
-                  <span className={styles.dropdown_only}>
-                    <RichModelSelectItem
-                      displayName={model.value}
-                      pricing={model.pricing}
-                      nCtx={model.nCtx}
-                      capabilities={model.capabilities}
-                      isDefault={model.isDefault}
-                      isChat2={model.isChat2}
-                      isTaskPlannerAgent={model.isTaskPlannerAgent}
-                      isThinking={model.isThinking}
-                      isLight={model.isLight}
-                      isBuddy={model.isBuddy}
-                    />
-                  </span>
-                </Select.Item>
-              ))}
-            </Select.Group>
-          ))}
-        </Select.Content>
-      </Select.Root>
+        groups={groups}
+        models={models}
+        unsetLabel={unsetLabel}
+        triggerSize={triggerSize}
+        value={allowUnset && !effectiveValue ? null : effectiveValue || null}
+        onSelect={handleSelect}
+      />
     </Flex>
   );
 };

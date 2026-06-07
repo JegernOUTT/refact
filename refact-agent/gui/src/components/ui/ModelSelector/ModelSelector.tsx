@@ -40,8 +40,10 @@ export interface ModelSelectorProps {
   onSelect: (value: string) => void;
   groups?: ModelSelectorGroup[];
   allowUnset?: boolean;
+  unsetLabel?: string;
   disabled?: boolean;
   onAddNewModel?: () => void;
+  triggerSize?: React.ComponentProps<typeof Button>["size"];
   variant?: "popover" | "inline";
 }
 
@@ -56,7 +58,10 @@ const badgeLabel: Record<ModelSelectorBadge, string> = {
   "task-agent": "Task Agent",
 };
 
-const badgeTone: Record<ModelSelectorBadge, React.ComponentProps<typeof Badge>["tone"]> = {
+const badgeTone: Record<
+  ModelSelectorBadge,
+  React.ComponentProps<typeof Badge>["tone"]
+> = {
   buddy: "warning",
   chat2: "accent",
   default: "accent",
@@ -65,7 +70,12 @@ const badgeTone: Record<ModelSelectorBadge, React.ComponentProps<typeof Badge>["
   "task-agent": "accent",
 };
 
-interface ModelSelectorListProps extends ModelSelectorProps {
+type ModelSelectorListPropsBase = Omit<
+  ModelSelectorProps,
+  "triggerSize" | "variant"
+>;
+
+interface ModelSelectorListProps extends ModelSelectorListPropsBase {
   onRequestClose?: () => void;
 }
 
@@ -79,12 +89,21 @@ function normalize(text: string) {
   return text.trim().toLocaleLowerCase();
 }
 
-function getCurrentLabel(models: ModelOption[], value: string | null, allowUnset?: boolean) {
+function getCurrentLabel(
+  models: ModelOption[],
+  value: string | null,
+  allowUnset?: boolean,
+  unsetLabel = "No model selected",
+) {
   if (value === null && allowUnset) {
-    return "No model selected";
+    return unsetLabel;
   }
 
-  return models.find((model) => model.value === value)?.displayName ?? value ?? "Select model";
+  return (
+    models.find((model) => model.value === value)?.displayName ??
+    value ??
+    "Select model"
+  );
 }
 
 function buildGroups(models: ModelOption[], groups?: ModelSelectorGroup[]) {
@@ -94,7 +113,9 @@ function buildGroups(models: ModelOption[], groups?: ModelSelectorGroup[]) {
     ...group,
     models: models.filter((model) => model.group === group.id),
   }));
-  const ungrouped = models.filter((model) => !model.group || !knownGroups.has(model.group));
+  const ungrouped = models.filter(
+    (model) => !model.group || !knownGroups.has(model.group),
+  );
 
   if (ungrouped.length > 0) {
     rendered.push({
@@ -115,8 +136,10 @@ function ModelSelectorList({
   onAddNewModel,
   onRequestClose,
   onSelect,
+  unsetLabel,
   value,
 }: ModelSelectorListProps) {
+  const emptyLabel = unsetLabel ?? "No model selected";
   const [query, setQuery] = React.useState("");
   const selectedRef = React.useRef<HTMLButtonElement>(null);
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -176,7 +199,7 @@ function ModelSelectorList({
       <div className={styles.scrollArea} role="listbox" aria-label="Models">
         {allowUnset ? (
           <ModelRow
-            model={{ value: unsetValue, displayName: "No model selected" }}
+            model={{ value: unsetValue, displayName: emptyLabel }}
             selected={value === null}
             selectedRef={value === null ? selectedRef : undefined}
             onSelect={() => handleSelect("")}
@@ -193,7 +216,9 @@ function ModelSelectorList({
                     key={model.value}
                     model={model}
                     selected={model.value === value}
-                    selectedRef={model.value === value ? selectedRef : undefined}
+                    selectedRef={
+                      model.value === value ? selectedRef : undefined
+                    }
                     onSelect={() => handleSelect(model.value)}
                   />
                 ))}
@@ -251,7 +276,11 @@ function ModelRow({ model, onSelect, selected, selectedRef }: ModelRowProps) {
           {model.badges?.length ? (
             <span className={styles.badgeGroup}>
               {model.badges.map((badge) => (
-                <Badge key={badge} className={styles.badge} tone={badgeTone[badge]}>
+                <Badge
+                  key={badge}
+                  className={styles.badge}
+                  tone={badgeTone[badge]}
+                >
                   {badgeLabel[badge]}
                 </Badge>
               ))}
@@ -260,7 +289,10 @@ function ModelRow({ model, onSelect, selected, selectedRef }: ModelRowProps) {
         </span>
         <span className={styles.metaRow}>
           {model.pricing ? (
-            <span className={styles.metaItem} title="Price per 1M tokens, prompt/output">
+            <span
+              className={styles.metaItem}
+              title="Price per 1M tokens, prompt/output"
+            >
               {model.pricing.prompt} / {model.pricing.output}
             </span>
           ) : null}
@@ -269,7 +301,9 @@ function ModelRow({ model, onSelect, selected, selectedRef }: ModelRowProps) {
               {model.contextWindow}
             </span>
           ) : null}
-          {model.capabilities ? <span className={styles.capabilities}>{model.capabilities}</span> : null}
+          {model.capabilities ? (
+            <span className={styles.capabilities}>{model.capabilities}</span>
+          ) : null}
         </span>
       </span>
       {selected ? <Icon icon={Check} size="sm" tone="accent" /> : null}
@@ -282,12 +316,14 @@ export function ModelSelector({
   disabled = false,
   models,
   onSelect,
+  triggerSize = "md",
+  unsetLabel,
   value,
   variant = "popover",
   ...props
 }: ModelSelectorProps) {
   const [open, setOpen] = React.useState(false);
-  const currentLabel = getCurrentLabel(models, value, allowUnset);
+  const currentLabel = getCurrentLabel(models, value, allowUnset, unsetLabel);
   const handleSelect = React.useCallback(
     (nextValue: string) => {
       if (nextValue === "" && allowUnset) {
@@ -307,6 +343,7 @@ export function ModelSelector({
         allowUnset={allowUnset}
         disabled={disabled}
         models={models}
+        unsetLabel={unsetLabel}
         value={value}
         onSelect={handleSelect}
       />
@@ -320,8 +357,10 @@ export function ModelSelector({
           aria-label="Select model"
           className={styles.trigger}
           disabled={disabled}
+          title={currentLabel}
           rightIcon={open ? X : ChevronDown}
           variant="soft"
+          size={triggerSize}
         >
           <span className={styles.triggerText}>{currentLabel}</span>
         </Button>
@@ -337,6 +376,7 @@ export function ModelSelector({
           allowUnset={allowUnset}
           disabled={disabled}
           models={models}
+          unsetLabel={unsetLabel}
           value={value}
           onRequestClose={() => setOpen(false)}
           onSelect={handleSelect}
