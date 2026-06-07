@@ -9,7 +9,7 @@
 .bar {
   width: 100%;
   height: 3px;
-  background: var(--gray-a4);
+  background: var(--rf-border);
   border-radius: 2px;
   overflow: hidden;
 }

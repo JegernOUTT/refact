@@ -5,14 +5,16 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Flex, Skeleton, Spinner, Text, TextField } from "@radix-ui/themes";
-import {
-  MagnifyingGlassIcon,
-  ChevronDownIcon,
-  ChevronUpIcon,
-  PlusIcon,
-} from "@radix-ui/react-icons";
+import { Flex, Spinner, Text, TextField } from "@radix-ui/themes";
+import { ChevronDown, ChevronUp, MessageSquarePlus, Search } from "lucide-react";
 import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  Icon,
+  LoadingState,
+} from "../../../../components/ui";
 import { Virtuoso } from "react-virtuoso";
 import {
   useAppDispatch,
@@ -212,21 +214,18 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
     <div className={styles.section} data-collapsed={collapsed || undefined}>
       <div className={styles.header}>
         <div className={styles.headerMain}>
-          <button
-            type="button"
+          <Button
+            variant="plain"
+            size="sm"
             className={styles.headerToggle}
             onClick={onToggleCollapsed}
             aria-expanded={!collapsed}
+            rightIcon={collapsed ? ChevronDown : ChevronUp}
           >
             <Text size="1" weight="bold" color="gray" className={styles.label}>
               CHATS
             </Text>
-            {collapsed ? (
-              <ChevronDownIcon width={12} height={12} color="var(--gray-9)" />
-            ) : (
-              <ChevronUpIcon width={12} height={12} color="var(--gray-9)" />
-            )}
-          </button>
+          </Button>
           {!collapsed && (
             <TextField.Root
               size="1"
@@ -236,7 +235,7 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
               className={styles.searchField}
             >
               <TextField.Slot>
-                <MagnifyingGlassIcon width={12} height={12} />
+                <Icon icon={Search} size="sm" tone="muted" />
               </TextField.Slot>
             </TextField.Root>
           )}
@@ -245,49 +244,32 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
           <Text size="1" color="gray">
             {totalLabel}
           </Text>
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             className={styles.newChatButton}
             onClick={handleNewChat}
+            leftIcon={MessageSquarePlus}
           >
-            <PlusIcon width={12} height={12} />
-            <Text size="1">New Chat</Text>
-          </button>
+            New Chat
+          </Button>
         </div>
       </div>
 
       <CollapsePanel collapsed={collapsed} className={styles.bodyPanel}>
         <div className={styles.list}>
           {showLoadError ? (
-            <Flex direction="column" align="center" gap="2" p="4">
-              <Text size="2" color="red">
-                Failed to load chats
-              </Text>
-              <Text size="1" color="gray" align="center">
-                {loadError ?? "Refact could not load chat history."}
-              </Text>
-            </Flex>
+            <ErrorState
+              title="Failed to load chats"
+              error={loadError ?? "Refact could not load chat history."}
+              className={styles.stateBlock}
+            />
           ) : showLoading ? (
-            <Flex direction="column" gap="1" p="1">
-              {Array.from({ length: 8 }, (_, i) => (
-                <Flex key={i} align="center" gap="2" py="1" px="2">
-                  <Skeleton>
-                    <div style={{ width: 8, height: 8, borderRadius: "50%" }} />
-                  </Skeleton>
-                  <Skeleton>
-                    <Text size="2" style={{ width: `${120 + (i % 3) * 40}px` }}>
-                      &nbsp;
-                    </Text>
-                  </Skeleton>
-                  <div style={{ flex: 1 }} />
-                  <Skeleton>
-                    <Text size="1" style={{ width: 40 }}>
-                      &nbsp;
-                    </Text>
-                  </Skeleton>
-                </Flex>
-              ))}
-            </Flex>
+            <LoadingState
+              label="Loading chats"
+              kind="skeleton"
+              className={styles.stateBlock}
+            />
           ) : (
             <Virtuoso
               data={flatItems}
@@ -349,15 +331,25 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
             />
           )}
           {!showLoadError && !showLoading && filteredTree.length === 0 && (
-            <Text
-              size="2"
-              color="gray"
-              style={{ padding: "var(--space-4)", textAlign: "center" }}
-            >
-              {searchQuery
-                ? "No matching chats"
-                : "No chats yet — start a new one!"}
-            </Text>
+            <EmptyState
+              title={searchQuery ? "No matching chats" : "No chats yet"}
+              description={
+                searchQuery ? undefined : "Start a new one when you are ready."
+              }
+              action={
+                searchQuery ? undefined : (
+                  <Button
+                    variant="soft"
+                    size="sm"
+                    onClick={handleNewChat}
+                    leftIcon={MessageSquarePlus}
+                  >
+                    New Chat
+                  </Button>
+                )
+              }
+              className={styles.stateBlock}
+            />
           )}
         </div>
       </CollapsePanel>

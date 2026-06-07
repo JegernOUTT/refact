@@ -8,7 +8,7 @@
 .barRow {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   cursor: default;
 }
 

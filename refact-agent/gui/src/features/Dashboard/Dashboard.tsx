@@ -1,5 +1,4 @@
 import React, { useRef } from "react";
-import { Flex, Text } from "@radix-ui/themes";
 import { TasksSection } from "./components/TasksSection/TasksSection";
 import { ChatsSection } from "./components/ChatsSection/ChatsSection";
 import { NavBar } from "./components/NavBar/NavBar";
@@ -9,7 +8,7 @@ import { useDashboardCollapseState } from "./hooks/useDashboardCollapseState";
 import { useDashboardResize } from "./hooks/useDashboardResize";
 import { BuddyDashboardScene } from "../Buddy/BuddyDashboardScene";
 import styles from "./Dashboard.module.css";
-import { ChatLoading } from "../../components/ChatContent/ChatLoading";
+import { LoadingState, Surface } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { selectBackendStatus } from "../Connection";
 import {
@@ -27,18 +26,11 @@ const OfflineState: React.FC = () => {
         : "Reconnecting to Refact…";
 
   return (
-    <Flex
-      direction="column"
-      align="center"
-      justify="center"
-      gap="3"
+    <LoadingState
+      label={message}
+      variant="full"
       className={styles.offlineState}
-    >
-      <ChatLoading />
-      <Text size="1" color="gray">
-        {message}
-      </Text>
-    </Flex>
+    />
   );
 };
 
@@ -83,7 +75,8 @@ export const Dashboard: React.FC = () => {
           <div className={styles.sectionDivider} />
 
           <div ref={splitRef} className={styles.splitContainer}>
-            <div
+            <Surface
+              variant="plain"
               className={styles.chatsWrapper}
               style={chatsFlexStyle}
               data-collapsed={collapsed.chats || undefined}
@@ -94,7 +87,7 @@ export const Dashboard: React.FC = () => {
                 projectLoading={chatsLoading}
                 onToggleCollapsed={() => toggle("chats")}
               />
-            </div>
+            </Surface>
 
             {showResizeDivider ? (
               <ResizeDivider onDrag={handleDrag} onReset={resetSplit} />
@@ -102,7 +95,8 @@ export const Dashboard: React.FC = () => {
               <div className={styles.splitDivider} />
             )}
 
-            <div
+            <Surface
+              variant="plain"
               className={styles.tasksWrapper}
               data-collapsed={collapsed.tasks || undefined}
             >
@@ -113,7 +107,7 @@ export const Dashboard: React.FC = () => {
                 loadError={tasksSection.error}
                 onToggleCollapsed={() => toggle("tasks")}
               />
-            </div>
+            </Surface>
           </div>
         </>
       )}

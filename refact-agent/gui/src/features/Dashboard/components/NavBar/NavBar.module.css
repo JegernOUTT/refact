@@ -1,8 +1,8 @@
 .nav {
   display: flex;
-  gap: var(--space-1);
-  padding: var(--space-1) 0;
-  border-top: 1px solid var(--gray-a4);
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) 0;
+  border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
 .navButton {
@@ -11,20 +11,20 @@
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: var(--space-1) var(--space-1);
-  border-radius: var(--radius-2);
+  padding: var(--rf-space-1) var(--rf-space-1);
+  border-radius: var(--rf-radius-ctl);
   border: none;
   background: transparent;
   cursor: pointer;
-  transition: background var(--motion-fast) ease;
+  transition: background var(--rf-dur-fast) ease;
 }
 
 .navButton:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
 }
 
 .navButton:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: 1px;
 }
 
@@ -32,7 +32,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--gray-11);
+  color: var(--rf-color-fg);
 }
 
 .label {

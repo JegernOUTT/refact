@@ -21,7 +21,7 @@
 }
 
 .dot:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: 1px;
 }
 
@@ -49,12 +49,12 @@
 }
 
 .active {
-  background: var(--blue-9);
+  background: var(--rf-color-accent);
   animation: dotPulse 1.5s ease-in-out infinite;
 }
 
 .completed {
-  background: var(--green-9);
+  background: var(--rf-color-success);
 }
 
 @keyframes dotPulse {
