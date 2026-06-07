@@ -2,115 +2,74 @@
   overflow: visible;
 }
 
-.header {
-  padding: var(--space-1) 0;
-  cursor: pointer;
-  user-select: none;
-  min-height: 24px;
-  transition: filter 0.15s ease;
-}
-
-.header:hover {
-  filter: brightness(1.3);
+.titleRow {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
 }
 
 .iconWrapper {
   display: flex;
+  flex: 0 0 auto;
+  width: var(--rf-icon);
+  min-width: var(--rf-icon);
   align-items: center;
   justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 16px;
-  flex-shrink: 0;
+  color: var(--rf-color-muted);
 }
 
 .iconWrapper svg {
-  width: 14px;
-  height: 14px;
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
 }
 
 .summary {
-  color: inherit;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .meta {
   flex: 0 10 auto;
   min-width: 0;
   overflow: hidden;
+  color: var(--rf-color-muted);
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: right;
-}
-
-.contentWrapper {
-  overflow: hidden;
-  /* CSS-based collapse animation using grid */
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition:
-    grid-template-rows 0.2s ease-out,
-    opacity 0.15s ease-out;
-}
-
-.contentWrapperOpen {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-
-.noTransition {
-  transition: none !important;
-}
-
-.contentInner {
-  overflow: hidden;
 }
 
 .content {
-  padding: var(--space-2) 0 var(--space-1);
-  padding-left: var(--space-4);
+  min-width: 0;
 }
 
-/* Running state - subtle text fade */
+.running .summary {
+  color: var(--rf-color-muted);
+  animation: subtlePulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
+}
+
+.error .summary {
+  color: var(--rf-color-danger);
+}
+
 @keyframes subtlePulse {
   0%,
   100% {
     opacity: 0.9;
   }
+
   50% {
     opacity: 0.6;
   }
 }
 
-.running .summary {
-  color: var(--gray-11);
-  animation: subtlePulse 2s ease-in-out infinite;
-}
-
-/* Completion - no animation, just ensure normal state */
-.completed {
-  /* Intentionally no animation - completion is implicit */
-}
-
-/* Error - subtle color change, no shake */
-.error .summary {
-  color: var(--red-11);
-}
-
-/* Respect reduced motion preference */
 @media (prefers-reduced-motion: reduce) {
-  .running .summary,
-  .completed,
-  .error {
+  .running .summary {
     animation: none;
-  }
-
-  .contentWrapper {
-    transition: none;
   }
 }

@@ -1,5 +1,5 @@
 .diffContent {
-  overflow-x: visible;
+  min-width: 0;
   padding-left: var(--space-2);
   font-family: var(--code-font-family);
   font-size: 12px;
@@ -164,5 +164,5 @@
 }
 
 .fileItem {
-  overflow: visible;
+  min-width: 0;
 }

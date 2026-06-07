@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Box, Button, Flex, Spinner, Text } from "@radix-ui/themes";
+import { Badge, Box, Flex, Text } from "@radix-ui/themes";
 import { CodeIcon, LapTimerIcon, RowsIcon } from "@radix-ui/react-icons";
+import { FileText } from "lucide-react";
 import classNames from "classnames";
 
 import { useAppSelector } from "../../../hooks";
@@ -19,8 +20,8 @@ import {
 } from "../../../services/refact/types";
 import { ideOpenFile } from "../../../hooks/useEventBusForIDE";
 import { usePostMessage } from "../../../hooks/usePostMessage";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
-import { ToolCallTooltip } from "./ToolCallTooltip";
+import { Button } from "../../ui";
+import { ToolCard } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
 import { ProcessControls } from "./ProcessControls";
@@ -411,11 +412,6 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     0,
     (metadata?.processes?.length ?? 0) - listedProcesses.length,
   );
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
-    isOpen,
-    200,
-    true,
-  );
   const details = detailRows(process);
   const showStdinInput = Boolean(
     process.processId && metadata?.tty === true && !isTerminalStatus(status),
@@ -433,35 +429,21 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     [host, logPath, postMessage],
   );
 
-  const header = (
-    <Flex
-      className={styles.header}
-      align="center"
-      gap="2"
-      onClick={handleToggle}
-    >
-      <span className={styles.icon}>
-        {isBusy ? (
-          <Spinner size="1" />
-        ) : toolName === "process_list" ? (
-          <RowsIcon />
-        ) : (
-          <CodeIcon />
-        )}
-      </span>
-      <Text
-        size="1"
-        className={styles.summary}
-        title={process.shortDescription}
-      >
-        {process.shortDescription}
-      </Text>
-      <Flex className={styles.meta} align="center" gap="2">
-        {meta && (
-          <Text size="1" color="gray">
-            {meta}
-          </Text>
-        )}
+  const icon = isBusy ? (
+    <span className={styles.iconSpinner}>
+      <span className={styles.spinnerDot} />
+    </span>
+  ) : toolName === "process_list" ? (
+    <RowsIcon />
+  ) : (
+    <CodeIcon />
+  );
+
+  const summary = (
+    <span className={styles.execTitle} title={process.shortDescription}>
+      <span className={styles.summary}>{process.shortDescription}</span>
+      <span className={styles.meta}>
+        {meta && <span className={styles.metaText}>{meta}</span>}
         <ProcessStatusBadge status={status} />
         {metadata?.tty === true && (
           <Badge
@@ -478,19 +460,13 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
             {process.processId}
           </Badge>
         )}
-      </Flex>
-    </Flex>
+      </span>
+    </span>
   );
 
   return (
-    <div
-      className={styles.card}
-      data-testid="exec-tool-card"
-      data-exec-process-id={process.processId}
-    >
+    <div data-testid="exec-tool-card" data-exec-process-id={process.processId}>
       <span data-testid={`exec-tool-${toolName}`} hidden />
-      <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
-
       {isBusy && (
         <Text
           size="1"
@@ -503,120 +479,116 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
         </Text>
       )}
 
-      {shouldRender && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
+      <ToolCard
+        className={styles.card}
+        icon={icon}
+        summary={summary}
+        status={isBusy ? "running" : maybeResult?.tool_failed ? "error" : "success"}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        <Box className={styles.content}>
+          {details.length > 0 && (
+            <Box className={styles.detailsGrid}>
+              {details.map((row) => (
+                <React.Fragment key={row.label}>
+                  <Text size="1" className={styles.detailLabel}>
+                    {row.label}
+                  </Text>
+                  <Text
+                    size="1"
+                    className={classNames(
+                      styles.detailValue,
+                      row.code && styles.codeValue,
+                    )}
+                    title={row.value}
+                  >
+                    {row.value}
+                  </Text>
+                </React.Fragment>
+              ))}
+            </Box>
           )}
-        >
-          <div className={styles.contentInner}>
-            <Box className={styles.content}>
-              {details.length > 0 && (
-                <Box className={styles.detailsGrid}>
-                  {details.map((row) => (
-                    <React.Fragment key={row.label}>
-                      <Text size="1" className={styles.detailLabel}>
-                        {row.label}
-                      </Text>
+
+          <ProcessControls
+            command={process.command}
+            output={copyableOutput}
+            processId={process.processId}
+          />
+
+          {logPath && (
+            <Flex gap="2" wrap="wrap" className={styles.controls}>
+              <Button
+                type="button"
+                size="sm"
+                variant="soft"
+                className={styles.logButton}
+                onClick={handleOpenLog}
+                leftIcon={FileText}
+              >
+                Open log
+              </Button>
+            </Flex>
+          )}
+
+          <ProcessOutputView
+            content={content}
+            transcript={metadata?.transcript}
+          />
+
+          {listedProcesses.length > 0 && (
+            <Box
+              className={styles.processList}
+              data-testid="exec-process-list"
+            >
+              {listedProcesses.map((item) => (
+                <Flex
+                  key={item.process_id}
+                  className={styles.processListItem}
+                  align="center"
+                  justify="between"
+                  gap="2"
+                >
+                  <Flex direction="column" gap="1">
+                    <Text size="1" weight="medium">
+                      {processItemLabel(item)}
+                    </Text>
+                    {item.process_id && (
                       <Text
                         size="1"
-                        className={classNames(
-                          styles.detailValue,
-                          row.code && styles.codeValue,
-                        )}
-                        title={row.value}
+                        color="gray"
+                        className={styles.codeValue}
                       >
-                        {row.value}
+                        {item.process_id}
                       </Text>
-                    </React.Fragment>
-                  ))}
-                </Box>
-              )}
-
-              <ProcessControls
-                command={process.command}
-                output={copyableOutput}
-                processId={process.processId}
-              />
-
-              {logPath && (
-                <Flex gap="2" wrap="wrap" className={styles.controls}>
-                  <Button
-                    type="button"
-                    size="1"
-                    variant="soft"
-                    color="gray"
-                    className={styles.logButton}
-                    onClick={handleOpenLog}
-                  >
-                    📄 Open log
-                  </Button>
+                    )}
+                  </Flex>
+                  <ProcessStatusBadge status={processListItemStatus(item)} />
                 </Flex>
-              )}
-
-              <ProcessOutputView
-                content={content}
-                transcript={metadata?.transcript}
-              />
-
-              {listedProcesses.length > 0 && (
-                <Box
-                  className={styles.processList}
-                  data-testid="exec-process-list"
-                >
-                  {listedProcesses.map((item) => (
-                    <Flex
-                      key={item.process_id}
-                      className={styles.processListItem}
-                      align="center"
-                      justify="between"
-                      gap="2"
-                    >
-                      <Flex direction="column" gap="1">
-                        <Text size="1" weight="medium">
-                          {processItemLabel(item)}
-                        </Text>
-                        {item.process_id && (
-                          <Text
-                            size="1"
-                            color="gray"
-                            className={styles.codeValue}
-                          >
-                            {item.process_id}
-                          </Text>
-                        )}
-                      </Flex>
-                      <ProcessStatusBadge
-                        status={processListItemStatus(item)}
-                      />
-                    </Flex>
-                  ))}
-                  {hiddenProcesses > 0 && (
-                    <Text size="1" color="gray">
-                      {hiddenProcesses} more processes hidden
-                    </Text>
-                  )}
-                </Box>
-              )}
-
-              {!metadata && (
-                <Flex align="center" gap="1" mt="2">
-                  <LapTimerIcon />
-                  <Text size="1" color="gray">
-                    Plain text result; structured process metadata was not
-                    available.
-                  </Text>
-                </Flex>
-              )}
-
-              {showStdinInput && process.processId && (
-                <ProcessStdinInput processId={process.processId} />
+              ))}
+              {hiddenProcesses > 0 && (
+                <Text size="1" color="gray">
+                  {hiddenProcesses} more processes hidden
+                </Text>
               )}
             </Box>
-          </div>
-        </div>
-      )}
+          )}
+
+          {!metadata && (
+            <Flex align="center" gap="1" mt="2">
+              <LapTimerIcon />
+              <Text size="1" color="gray">
+                Plain text result; structured process metadata was not available.
+              </Text>
+            </Flex>
+          )}
+
+          {showStdinInput && process.processId && (
+            <ProcessStdinInput processId={process.processId} />
+          )}
+        </Box>
+      </ToolCard>
     </div>
   );
 };

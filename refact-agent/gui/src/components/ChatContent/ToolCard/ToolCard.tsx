@@ -1,6 +1,7 @@
 import React from "react";
-import { Flex, Text, Spinner } from "@radix-ui/themes";
+import { Spinner } from "@radix-ui/themes";
 import classNames from "classnames";
+import { ToolCard as KitToolCard } from "../../ui";
 import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
 import { ToolCall } from "../../../services/refact/types";
@@ -38,27 +39,20 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
     200,
     animate,
   );
+  const renderedOpen = animate ? isAnimatingOpen : isOpen;
 
-  const header = (
-    <Flex className={styles.header} align="center" gap="2" onClick={onToggle}>
+  const title = (
+    <span className={styles.titleRow}>
       <span className={styles.iconWrapper}>
         {status === "running" ? <Spinner size="1" /> : icon}
       </span>
-
-      <Text size="1" className={styles.summary}>
-        {summary}
-      </Text>
-
-      {meta && (
-        <Text size="1" color="gray" className={styles.meta}>
-          {meta}
-        </Text>
-      )}
-    </Flex>
+      <span className={styles.summary}>{summary}</span>
+      {meta && <span className={styles.meta}>{meta}</span>}
+    </span>
   );
 
-  return (
-    <div
+  const card = (
+    <KitToolCard
       className={classNames(
         styles.card,
         status === "running" && styles.running,
@@ -66,27 +60,19 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
         status === "error" && styles.error,
         className,
       )}
+      open={renderedOpen}
+      onOpenChange={onToggle}
+      status={status}
+      title={title}
     >
-      {toolCall ? (
-        <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
-      ) : (
-        header
-      )}
+      {shouldRender ? <div className={styles.content}>{children}</div> : null}
+    </KitToolCard>
+  );
 
-      {shouldRender && children && (
-        <div
-          className={classNames(
-            styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
-            !animate && styles.noTransition,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <div className={styles.content}>{children}</div>
-          </div>
-        </div>
-      )}
-    </div>
+  return toolCall ? (
+    <ToolCallTooltip toolCall={toolCall}>{card}</ToolCallTooltip>
+  ) : (
+    card
   );
 };
 
