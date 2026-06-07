@@ -1,0 +1,69 @@
+.surface {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.plain {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.surface1,
+.surface2,
+.surface3,
+.overlay,
+.selected {
+  border: var(--rf-hairline) solid var(--rf-border);
+}
+
+.surface1 {
+  background: var(--rf-surface-1);
+}
+
+.surface2 {
+  background: var(--rf-surface-2);
+}
+
+.surface3 {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-3);
+}
+
+.overlay {
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.selected {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+
+.radiusNone {
+  border-radius: 0;
+}
+
+.radiusChip {
+  border-radius: var(--rf-radius-chip);
+}
+
+.radiusControl {
+  border-radius: var(--rf-radius-ctl);
+}
+
+.radiusCard {
+  border-radius: var(--rf-radius-card);
+}
+
+.radiusPill {
+  border-radius: var(--rf-radius-pill);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .overlay {
+    backdrop-filter: none;
+  }
+}

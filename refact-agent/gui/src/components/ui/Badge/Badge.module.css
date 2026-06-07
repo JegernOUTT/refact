@@ -1,0 +1,40 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 18px;
+  padding: 0 var(--rf-space-2);
+  border: var(--rf-hairline) solid currentColor;
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-1);
+  font-weight: 650;
+  line-height: 1.45;
+  vertical-align: middle;
+}
+
+.default {
+  color: var(--rf-color-fg);
+}
+
+.accent {
+  color: var(--rf-color-accent);
+}
+
+.success {
+  color: var(--rf-color-success);
+}
+
+.warning {
+  color: var(--rf-color-warning);
+}
+
+.danger {
+  color: var(--rf-color-danger);
+}
+
+.muted {
+  color: var(--rf-color-muted);
+}

@@ -1,0 +1,44 @@
+.dot {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  border-radius: var(--rf-radius-pill);
+  background: currentColor;
+  color: var(--rf-color-muted);
+  vertical-align: middle;
+}
+
+.small {
+  width: var(--rf-space-2);
+  height: var(--rf-space-2);
+}
+
+.medium {
+  width: 10px;
+  height: 10px;
+}
+
+.large {
+  width: var(--rf-space-3);
+  height: var(--rf-space-3);
+}
+
+.muted {
+  color: var(--rf-color-muted);
+}
+
+.accent {
+  color: var(--rf-color-accent);
+}
+
+.success {
+  color: var(--rf-color-success);
+}
+
+.warning {
+  color: var(--rf-color-warning);
+}
+
+.danger {
+  color: var(--rf-color-danger);
+}

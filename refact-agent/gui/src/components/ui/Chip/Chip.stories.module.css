@@ -1,0 +1,23 @@
+.gallery {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-5);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--rf-text-5);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.narrow {
+  width: min(180px, 100%);
+}

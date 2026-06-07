@@ -260,6 +260,7 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 - Reusable kit code lives in `src/components/ui/*`; design tokens and shared global utilities live in `src/styles/*`.
 - `src/components/ui/**` and `src/styles/**` MUST NOT import from `features`, `services`, or `app`. This is enforced by `npm run lint:boundaries` through the scoped ESLint override in `.eslintrc.cjs`.
 - Connected widgets must split into presentational kit pieces in `src/components/ui/*` and feature-connected wrappers in the owning feature folder.
+- Core presentational primitives live in `src/components/ui/*`: `Surface` is panel-less by default, `Card` is reserved for restrained containment/selected/overlay use, and `Badge`/`Chip`/`StatusDot` provide the shared label/status language.
 - Redesign the skin, keep the behavior: do not rewrite Redux selectors, RTK Query services, SSE contracts, virtualization, backend contracts, or tool execution logic as part of visual migration. Risky surfaces migrate only after characterization/parity tests pass.
 
 ### Tokens are the only visual truth
