@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 
 use crate::caps::{
     BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord,
-    EmbeddingModelRecord, HasBaseModelRecord, strip_model_from_finetune,
+    EmbeddingEndpointStyle, EmbeddingModelRecord, HasBaseModelRecord, strip_model_from_finetune,
 };
 use crate::custom_error::YamlError;
 
@@ -356,7 +356,11 @@ pub fn add_models_to_caps(
     ) {
         base_model_rec.api_key = provider.api_key.clone();
         base_model_rec.tokenizer_api_key = provider.tokenizer_api_key.clone();
-        base_model_rec.endpoint = endpoint.replace("$MODEL", model_name);
+        base_model_rec.endpoint = if endpoint.is_empty() {
+            base_model_rec.endpoint.clone()
+        } else {
+            endpoint.replace("$MODEL", model_name)
+        };
         base_model_rec.endpoint_style = provider.endpoint_style.clone();
         base_model_rec.wire_format = provider.wire_format;
         base_model_rec.extra_headers = provider.extra_headers.clone();
@@ -365,27 +369,62 @@ pub fn add_models_to_caps(
     }
 
     for mut provider in providers {
+        if !provider.enabled {
+            continue;
+        }
+
         let completion_models = std::mem::take(&mut provider.completion_models);
         for (model_name, mut model_rec) in completion_models {
+            let style = if model_rec.base.completion_endpoint_style.is_empty() {
+                provider.effective_completion_endpoint_style()
+            } else {
+                model_rec.base.effective_completion_endpoint_style()
+            };
+            let Ok(style) = style else {
+                tracing::warn!(
+                    "Skipping completion model '{}/{}': invalid completion_endpoint_style",
+                    provider.name,
+                    model_name
+                );
+                continue;
+            };
+            if !style.is_supported() {
+                tracing::warn!(
+                    "Skipping completion model '{}/{}': completion_endpoint_style '{}' is not supported yet",
+                    provider.name,
+                    model_name,
+                    style
+                );
+                continue;
+            }
+            let endpoint = if model_rec.base.endpoint.is_empty() {
+                provider.completion_endpoint.clone()
+            } else {
+                model_rec.base.endpoint.clone()
+            };
+            if endpoint.is_empty() {
+                tracing::warn!(
+                    "Skipping completion model '{}/{}': completion endpoint is not configured",
+                    provider.name,
+                    model_name
+                );
+                continue;
+            }
             model_rec.base.supports_cache_control =
                 model_rec.base.supports_cache_control && provider.supports_cache_control;
-            if model_rec.base.endpoint.is_empty() {
-                add_provider_details_to_model(
-                    &mut model_rec.base,
-                    &provider,
-                    &model_name,
-                    &provider.completion_endpoint,
-                );
+            add_provider_details_to_model(&mut model_rec.base, &provider, &model_name, &endpoint);
 
-                if provider.code_completion_n_ctx > 0 {
-                    if model_rec.base.n_ctx == 0
-                        || provider.code_completion_n_ctx < model_rec.base.n_ctx
-                    {
-                        model_rec.base.n_ctx = provider.code_completion_n_ctx;
-                    }
+            if provider.code_completion_n_ctx > 0 {
+                if model_rec.base.n_ctx == 0
+                    || provider.code_completion_n_ctx < model_rec.base.n_ctx
+                {
+                    model_rec.base.n_ctx = provider.code_completion_n_ctx;
                 }
             }
-            if !provider.completion_endpoint_style.is_empty() {
+
+            if model_rec.base.completion_endpoint_style.is_empty()
+                && !provider.completion_endpoint_style.is_empty()
+            {
                 model_rec.base.completion_endpoint_style =
                     provider.completion_endpoint_style.clone();
             }
@@ -413,31 +452,119 @@ pub fn add_models_to_caps(
 
         if provider.embedding_model.is_configured() && provider.embedding_model.base.enabled {
             let mut embedding_model = std::mem::take(&mut provider.embedding_model);
+            let style = if embedding_model.base.embedding_endpoint_style.is_empty()
+                && embedding_model.base.endpoint_style.is_empty()
+            {
+                provider.effective_embedding_endpoint_style()
+            } else {
+                embedding_model.base.effective_embedding_endpoint_style()
+            };
+            let Ok(style) = style else {
+                tracing::warn!(
+                    "Skipping embedding model '{}/{}': invalid embedding_endpoint_style",
+                    provider.name,
+                    embedding_model.base.name
+                );
+                caps.defaults
+                    .apply_override(&provider.defaults(), Some(&provider.name));
+                continue;
+            };
+            if !style.is_supported() {
+                tracing::warn!(
+                    "Skipping embedding model '{}/{}': embedding_endpoint_style '{}' is not supported yet",
+                    provider.name,
+                    embedding_model.base.name,
+                    style
+                );
+                caps.defaults
+                    .apply_override(&provider.defaults(), Some(&provider.name));
+                continue;
+            }
+            let endpoint = if embedding_model.base.endpoint.is_empty() {
+                provider.embedding_endpoint.clone()
+            } else {
+                embedding_model.base.endpoint.clone()
+            };
+            if endpoint.is_empty() && style != EmbeddingEndpointStyle::OllamaNative {
+                tracing::warn!(
+                    "Skipping embedding model '{}/{}': embedding endpoint is not configured",
+                    provider.name,
+                    embedding_model.base.name
+                );
+                caps.defaults
+                    .apply_override(&provider.defaults(), Some(&provider.name));
+                continue;
+            }
             embedding_model.base.supports_cache_control =
                 embedding_model.base.supports_cache_control && provider.supports_cache_control;
 
-            if embedding_model.base.endpoint.is_empty() {
-                let model_name = embedding_model.base.name.clone();
-                add_provider_details_to_model(
-                    &mut embedding_model.base,
-                    &provider,
-                    &model_name,
-                    &provider.embedding_endpoint,
-                );
-            }
-            if !provider.embedding_endpoint_style.is_empty() {
+            let model_name = embedding_model.base.name.clone();
+            add_provider_details_to_model(
+                &mut embedding_model.base,
+                &provider,
+                &model_name,
+                &endpoint,
+            );
+            if embedding_model.base.embedding_endpoint_style.is_empty()
+                && !provider.embedding_endpoint_style.is_empty()
+            {
                 embedding_model.base.embedding_endpoint_style =
                     provider.embedding_endpoint_style.clone();
             }
+            if provider.embedding_default_model.is_empty() {
+                tracing::info!(
+                    "Embedding provider '{}' has no embedding_default_model; deterministic selection may use sorted fallback",
+                    provider.name
+                );
+            }
             embedding_models.push(embedding_model.clone());
-            caps.embedding_model = embedding_model;
         }
 
         caps.defaults
             .apply_override(&provider.defaults(), Some(&provider.name));
     }
 
+    select_embedding_model(caps, &embedding_models);
+
     embedding_models
+}
+
+fn select_embedding_model(caps: &mut CodeAssistantCaps, embedding_models: &[EmbeddingModelRecord]) {
+    if embedding_models.is_empty() {
+        caps.embedding_model = EmbeddingModelRecord::default();
+        return;
+    }
+
+    if !caps.defaults.embedding_default_model.is_empty() {
+        if let Some(model) = embedding_models
+            .iter()
+            .find(|model| model.base.id == caps.defaults.embedding_default_model)
+            .or_else(|| {
+                embedding_models
+                    .iter()
+                    .find(|model| model.base.name == caps.defaults.embedding_default_model)
+            })
+        {
+            caps.embedding_model = model.clone();
+            caps.defaults.embedding_default_model = model.base.id.clone();
+            return;
+        }
+        tracing::warn!(
+            "Embedding default model '{}' was not found in available embedding models; using deterministic fallback",
+            caps.defaults.embedding_default_model
+        );
+    }
+
+    let mut candidates: Vec<&EmbeddingModelRecord> = embedding_models.iter().collect();
+    candidates.sort_by(|a, b| a.base.id.cmp(&b.base.id));
+    if let Some(model) = candidates.first() {
+        tracing::info!(
+            "Auto-selecting embedding model by deterministic fallback: {}",
+            model.base.id
+        );
+        caps.embedding_model = (*model).clone();
+        caps.defaults.embedding_default_model = model.base.id.clone();
+    }
 }
 
 fn add_name_and_id_to_model_records(provider: &mut CapsProvider) {
@@ -782,6 +909,7 @@ pub async fn get_provider_from_template_and_config_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_parse_provider_templates() {
@@ -896,6 +1024,9 @@ mod tests {
                 embedding_size: 0,
                 rejection_threshold: 0.0,
                 embedding_batch: 0,
+                dimensions: None,
+                query_prefix: String::new(),
+                document_prefix: String::new(),
             },
             ..Default::default()
         };
@@ -934,6 +1065,257 @@ mod tests {
         assert!(
             !provider.chat_models.is_empty(),
             "chat models should still be populated regardless of supports_completion"
+        );
+    }
+
+    #[test]
+    fn disabled_provider_contributes_no_role_models_or_defaults() {
+        let provider = CapsProvider {
+            name: "disabled".to_string(),
+            enabled: false,
+            completion_default_model: "coder".to_string(),
+            embedding_default_model: "embed".to_string(),
+            completion_endpoint: "https://example.com/v1/completions".to_string(),
+            embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
+            completion_models: IndexMap::from([(
+                "coder".to_string(),
+                CompletionModelRecord::default(),
+            )]),
+            embedding_model: EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    name: "embed".to_string(),
+                    id: "disabled/embed".to_string(),
+                    n_ctx: 8192,
+                    enabled: true,
+                    ..Default::default()
+                },
+                embedding_size: 1536,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut caps = CodeAssistantCaps::default();
+        let embedding_models = add_models_to_caps(&mut caps, vec![provider]);
+
+        assert!(caps.completion_models.is_empty());
+        assert!(caps.chat_models.is_empty());
+        assert!(embedding_models.is_empty());
+        assert!(caps.embedding_model.base.id.is_empty());
+        assert!(caps.defaults.completion_default_model.is_empty());
+        assert!(caps.defaults.embedding_default_model.is_empty());
+    }
+
+    #[test]
+    fn invalid_role_endpoints_are_omitted_from_caps() {
+        let provider = CapsProvider {
+            name: "custom".to_string(),
+            completion_default_model: "coder".to_string(),
+            embedding_default_model: "embed".to_string(),
+            completion_endpoint_style: "openai_responses".to_string(),
+            embedding_endpoint_style: "cohere_v2".to_string(),
+            completion_endpoint: "https://example.com/v1/responses".to_string(),
+            embedding_endpoint: "https://example.com/v1/embed".to_string(),
+            completion_models: IndexMap::from([(
+                "coder".to_string(),
+                CompletionModelRecord::default(),
+            )]),
+            embedding_model: EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    name: "embed".to_string(),
+                    id: "custom/embed".to_string(),
+                    n_ctx: 8192,
+                    enabled: true,
+                    ..Default::default()
+                },
+                embedding_size: 1536,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut caps = CodeAssistantCaps::default();
+        let embedding_models = add_models_to_caps(&mut caps, vec![provider]);
+
+        assert!(caps.completion_models.is_empty());
+        assert!(embedding_models.is_empty());
+        assert!(caps.embedding_model.base.id.is_empty());
+    }
+
+    #[test]
+    fn multiple_embedding_providers_use_default_or_sorted_fallback() {
+        let first = CapsProvider {
+            name: "z_provider".to_string(),
+            embedding_default_model: "z_provider/embed-z".to_string(),
+            embedding_endpoint: "https://z.example/v1/embeddings".to_string(),
+            embedding_model: EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    name: "embed-z".to_string(),
+                    id: "z_provider/embed-z".to_string(),
+                    n_ctx: 8192,
+                    enabled: true,
+                    ..Default::default()
+                },
+                embedding_size: 1024,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let second = CapsProvider {
+            name: "a_provider".to_string(),
+            embedding_endpoint: "https://a.example/v1/embeddings".to_string(),
+            embedding_model: EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    name: "embed-a".to_string(),
+                    id: "a_provider/embed-a".to_string(),
+                    n_ctx: 8192,
+                    enabled: true,
+                    ..Default::default()
+                },
+                embedding_size: 2048,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut caps = CodeAssistantCaps::default();
+        add_models_to_caps(&mut caps, vec![second.clone(), first.clone()]);
+        assert_eq!(caps.embedding_model.base.id, "z_provider/embed-z");
+
+        let mut fallback_caps = CodeAssistantCaps::default();
+        let mut no_default_first = first;
+        no_default_first.embedding_default_model.clear();
+        add_models_to_caps(&mut fallback_caps, vec![no_default_first, second]);
+        assert_eq!(fallback_caps.embedding_model.base.id, "a_provider/embed-a");
+    }
+
+    #[test]
+    fn provider_details_propagate_to_role_models_with_endpoint_overrides() {
+        let provider = CapsProvider {
+            name: "custom".to_string(),
+            endpoint_style: "openai".to_string(),
+            completion_endpoint_style: "openai_chat_completions".to_string(),
+            embedding_endpoint_style: "openai".to_string(),
+            api_key: "sk-role".to_string(),
+            tokenizer_api_key: "tok-role".to_string(),
+            extra_headers: HashMap::from([("X-Role".to_string(), "secret".to_string())]),
+            supports_cache_control: false,
+            completion_models: IndexMap::from([(
+                "coder".to_string(),
+                CompletionModelRecord {
+                    base: BaseModelRecord {
+                        id: "custom/coder".to_string(),
+                        endpoint: "https://model.example/v1/chat/completions".to_string(),
+                        supports_cache_control: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]),
+            embedding_endpoint: "https://provider.example/v1/embeddings".to_string(),
+            embedding_model: EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    name: "embed".to_string(),
+                    id: "custom/embed".to_string(),
+                    endpoint: "https://embed.example/v1/embeddings".to_string(),
+                    n_ctx: 8192,
+                    enabled: true,
+                    supports_cache_control: true,
+                    ..Default::default()
+                },
+                embedding_size: 1536,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut caps = CodeAssistantCaps::default();
+        add_models_to_caps(&mut caps, vec![provider]);
+
+        let completion = caps.completion_models.get("custom/coder").unwrap();
+        assert_eq!(
+            completion.base.endpoint,
+            "https://model.example/v1/chat/completions"
+        );
+        assert_eq!(completion.base.api_key, "sk-role");
+        assert_eq!(completion.base.tokenizer_api_key, "tok-role");
+        assert_eq!(
+            completion
+                .base
+                .extra_headers
+                .get("X-Role")
+                .map(String::as_str),
+            Some("secret")
+        );
+        assert_eq!(
+            completion.base.completion_endpoint_style,
+            "openai_chat_completions"
+        );
+        assert!(!completion.base.supports_cache_control);
+
+        assert_eq!(
+            caps.embedding_model.base.endpoint,
+            "https://embed.example/v1/embeddings"
+        );
+        assert_eq!(caps.embedding_model.base.api_key, "sk-role");
+        assert_eq!(caps.embedding_model.base.tokenizer_api_key, "tok-role");
+        assert_eq!(
+            caps.embedding_model
+                .base
+                .extra_headers
+                .get("X-Role")
+                .map(String::as_str),
+            Some("secret")
+        );
+        assert_eq!(caps.embedding_model.base.embedding_endpoint_style, "openai");
+        assert!(!caps.embedding_model.base.supports_cache_control);
+    }
+
+    #[test]
+    fn explicit_custom_role_config_exposes_completion_and_embedding_defaults() {
+        let provider = CapsProvider {
+            name: "custom".to_string(),
+            completion_default_model: "qwen-coder".to_string(),
+            embedding_default_model: "text-embedding-3-small".to_string(),
+            completion_endpoint: "https://completion.example/v1/chat/completions".to_string(),
+            embedding_endpoint: "https://embedding.example/v1/embeddings".to_string(),
+            completion_endpoint_style: "openai_chat_completions".to_string(),
+            completion_models: IndexMap::from([(
+                "qwen-coder".to_string(),
+                CompletionModelRecord {
+                    base: BaseModelRecord {
+                        id: "custom/qwen-coder".to_string(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]),
+            embedding_model: EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    name: "text-embedding-3-small".to_string(),
+                    id: "custom/text-embedding-3-small".to_string(),
+                    n_ctx: 8191,
+                    enabled: true,
+                    ..Default::default()
+                },
+                embedding_size: 1536,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut caps = CodeAssistantCaps::default();
+        add_models_to_caps(&mut caps, vec![provider]);
+
+        assert!(caps.completion_models.contains_key("custom/qwen-coder"));
+        assert_eq!(caps.defaults.completion_default_model, "custom/qwen-coder");
+        assert_eq!(
+            caps.embedding_model.base.id,
+            "custom/text-embedding-3-small"
+        );
+        assert_eq!(
+            caps.defaults.embedding_default_model,
+            "custom/text-embedding-3-small"
         );
     }
 
@@ -1213,6 +1595,7 @@ extra_headers: |
         let mut defaults = DefaultModels::default();
         let other = DefaultModels {
             completion_default_model: "Qwen/Qwen2.5-Coder-1.5B".to_string(),
+            embedding_default_model: String::new(),
             chat_default_model: "gpt-4.1".to_string(),
             chat_thinking_model: "custom/o3-mini".to_string(),
             chat_light_model: "".to_string(),

@@ -20,8 +20,8 @@ use refact_core::provider_types::AvailableModel;
 const PROVIDER_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub use refact_core::llm_types::{
-    BaseModelRecord, EmbeddingModelRecord, HasBaseModelRecord, WireFormat, default_embedding_batch,
-    default_rejection_threshold, default_true,
+    BaseModelRecord, EmbeddingEndpointStyle, EmbeddingModelRecord, HasBaseModelRecord, WireFormat,
+    default_embedding_batch, default_rejection_threshold, default_true,
 };
 
 pub use refact_caps_core::model_records::{
@@ -621,6 +621,25 @@ fn resolve_user_default_embedding_model(
     matches.first().map(|record| (*record).clone())
 }
 
+fn resolve_unqualified_embedding_model_default(
+    caps: &CodeAssistantCaps,
+    model: &str,
+) -> Option<String> {
+    if model.is_empty() {
+        return None;
+    }
+    if model.contains('/') {
+        return Some(model.to_string());
+    }
+    if caps.embedding_model.base.id.is_empty() {
+        return None;
+    }
+    if caps.embedding_model.base.name == model {
+        return Some(caps.embedding_model.base.id.clone());
+    }
+    None
+}
+
 fn apply_user_default_embedding_model(
     target: &mut EmbeddingModelRecord,
     model: Option<&str>,
@@ -732,6 +751,18 @@ fn remove_legacy_refact_models_from_caps(caps: &mut CodeAssistantCaps) {
             );
             caps.defaults.completion_default_model = (*first_model_id).clone();
         }
+    }
+
+    if is_legacy_refact_model(&caps.defaults.embedding_default_model) {
+        warn!(
+            "Embedding default model '{}' was reset to none because it is legacy",
+            caps.defaults.embedding_default_model
+        );
+        caps.defaults.embedding_default_model.clear();
+    } else if let Some(resolved) =
+        resolve_unqualified_embedding_model_default(caps, &caps.defaults.embedding_default_model)
+    {
+        caps.defaults.embedding_default_model = resolved;
     }
 }
 
