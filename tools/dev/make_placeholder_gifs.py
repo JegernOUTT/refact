@@ -18,6 +18,7 @@ GIFS = [
     "auto-apply",
     "browser-tool",
     "memory",
+    "buddy",
     "mcp-skills",
     "any-device",
 ]
