@@ -1,24 +1,181 @@
-.button {
-  transition: all 0.1s ease-in-out;
+.providerForm {
+  min-width: 0;
+  width: 100%;
+  padding-block: var(--rf-space-2) var(--rf-space-4);
+}
+
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.providerDescription {
+  min-width: min(100%, 16rem);
+  flex: 1 1 16rem;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  overflow-wrap: anywhere;
+}
+
+.usagePanel,
+.defaultsPanel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.usagePanel {
+  padding-block: var(--rf-space-2);
+}
+
+.defaultsPanel {
+  padding: var(--rf-space-3);
+}
+
+.usageHeader,
+.defaultHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  flex-wrap: wrap;
+}
+
+.usageTitle,
+.defaultTitle {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 600;
+}
+
+.defaultDescription,
+.usageMeta,
+.errorText {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
+}
+
+.errorText {
+  color: var(--rf-color-danger);
+}
+
+.usageRows,
+.defaultRows,
+.formFields {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.usageRow {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.usageRowHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+}
+
+.usageLabelGroup {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
+  flex-wrap: wrap;
+}
+
+.usageBar {
+  height: 4px;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-2);
+}
+
+.usageBarFill {
+  height: 100%;
+  width: var(--provider-usage-pct, 0%);
+  border-radius: var(--rf-radius-pill);
+  background: var(--provider-usage-color, var(--rf-color-success));
+  transition: width var(--rf-dur-med) var(--rf-ease-standard);
+}
+
+.formSection {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.advancedToggleWrap {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
 }
 
 .extraButton {
   width: 100%;
-  padding: 5px 0;
 }
 
-.defaultsCard {
-  flex-shrink: 0;
+.fieldControlStack {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  flex-direction: column;
+  gap: var(--rf-space-2);
 }
 
-.disabledSwitch {
-  span {
-    background-color: rgba(255, 255, 255, 0.3);
-  }
+.fieldControlRow {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  gap: var(--rf-space-1);
 }
 
-.disabledField {
-  input {
-    cursor: not-allowed;
-  }
+.fieldGrow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fieldActions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
+  flex-wrap: wrap;
+}
+
+.smartlink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  border-radius: var(--rf-radius-ctl);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-control-h-sm);
+  text-decoration: none;
+}
+
+.smartlink:hover {
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
 }
