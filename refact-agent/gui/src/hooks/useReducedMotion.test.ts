@@ -50,7 +50,9 @@ const createMatchMediaMock = () => {
     listeners.forEach((listener) => listener(event));
   };
 
-  return { matchMedia, setReducedMotion };
+  const getListenerCount = () => listeners.size;
+
+  return { matchMedia, setReducedMotion, getListenerCount };
 };
 
 describe("useReducedMotion", () => {
@@ -99,6 +101,22 @@ describe("useReducedMotion", () => {
 
     act(() => {
       mock.setReducedMotion(false);
+    });
+
+    expect(result.current).toBe(false);
+  });
+
+  it("removes the media query listener on unmount", () => {
+    const { result, unmount } = renderHook(() => useReducedMotion());
+
+    expect(mock.getListenerCount()).toBe(1);
+
+    unmount();
+
+    expect(mock.getListenerCount()).toBe(0);
+
+    act(() => {
+      mock.setReducedMotion(true);
     });
 
     expect(result.current).toBe(false);

@@ -43,11 +43,27 @@ function scheduleChange(): void {
 }
 
 function addMediaListener(query: MediaQueryList): void {
-  query.addEventListener("change", scheduleChange);
+  if (typeof query.addEventListener === "function") {
+    query.addEventListener("change", scheduleChange);
+    return;
+  }
+
+  const legacyQuery = query as Partial<Pick<MediaQueryList, "addListener">>;
+  if (typeof legacyQuery.addListener === "function") {
+    legacyQuery.addListener(scheduleChange);
+  }
 }
 
 function removeMediaListener(query: MediaQueryList): void {
-  query.removeEventListener("change", scheduleChange);
+  if (typeof query.removeEventListener === "function") {
+    query.removeEventListener("change", scheduleChange);
+    return;
+  }
+
+  const legacyQuery = query as Partial<Pick<MediaQueryList, "removeListener">>;
+  if (typeof legacyQuery.removeListener === "function") {
+    legacyQuery.removeListener(scheduleChange);
+  }
 }
 
 function startTokenWatch(): void {
