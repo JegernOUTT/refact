@@ -1,0 +1,68 @@
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-ui);
+  text-align: center;
+}
+
+.compact {
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-4);
+}
+
+.full {
+  min-height: 320px;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-6) var(--rf-space-4);
+}
+
+.iconWrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--rf-control-h-lg);
+  height: var(--rf-control-h-lg);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-1);
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  max-width: min(44ch, 100%);
+  min-width: 0;
+}
+
+.title,
+.description {
+  margin: 0;
+}
+
+.title {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-4);
+  font-weight: 650;
+  line-height: var(--rf-line);
+}
+
+.description {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
+}
+
+.full .title {
+  font-size: var(--rf-text-5);
+}
+
+.action {
+  display: flex;
+  justify-content: center;
+  max-width: 100%;
+  min-width: 0;
+}

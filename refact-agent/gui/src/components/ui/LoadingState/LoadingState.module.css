@@ -1,0 +1,57 @@
+.loadingState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-ui);
+  text-align: center;
+}
+
+.compact {
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-4);
+}
+
+.full {
+  min-height: 320px;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-6) var(--rf-space-4);
+}
+
+.spinner {
+  width: var(--rf-icon-lg);
+  height: var(--rf-icon-lg);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-top-color: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+}
+
+.label {
+  max-width: min(38ch, 100%);
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
+}
+
+.skeletonStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  width: min(360px, 100%);
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .spinner {
+    animation: rf-loading-spin var(--rf-dur-slow) linear infinite;
+  }
+}
+
+@keyframes rf-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
