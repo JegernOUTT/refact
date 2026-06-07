@@ -1,16 +1,12 @@
-import { Box, Flex } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { FC } from "react";
-import {
-  CustomBoolField,
-  CustomDescriptionField,
-  CustomInputField,
-  CustomLabel,
-} from "../../components/IntegrationsView/CustomFieldsAndWidgets";
+import { CustomBoolField, CustomInputField } from "../../components/IntegrationsView/CustomFieldsAndWidgets";
 import { SmartLink } from "../../components/SmartLink";
 import { ParametersTable } from "../../components/IntegrationsView/IntegrationsTable/ParametersTable";
 import { Markdown } from "../../components/Markdown";
 import { toPascalCase } from "../../utils/toPascalCase";
 import styles from "./IntegrationFormField.module.css";
+import { FieldRow } from "../../components/ui";
 
 import {
   areToolParameters,
@@ -35,7 +31,6 @@ const getDefaultValue = ({
   fieldKey: string;
   f_type_raw: string;
 }): string | number | boolean | Record<string, string> | undefined => {
-  // First check if we have a value in the current values
   if (values && fieldKey in values) {
     return values[fieldKey]?.toString();
   }
@@ -57,7 +52,6 @@ const getDefaultValue = ({
   }
 };
 
-// Component types
 type IntegrationFormFieldProps = {
   field: IntegrationField<NonNullable<IntegrationPrimitive>>;
   values: Integration["integr_values"];
@@ -76,7 +70,6 @@ type CommonFieldProps = {
   placeholder?: string;
 };
 
-// Components
 const FieldContent: FC<{
   f_type: string;
   commonProps: CommonFieldProps;
@@ -98,30 +91,23 @@ const FieldContent: FC<{
       const valuesForTable = values?.[fieldKey] ?? [];
       if (areToolParameters(valuesForTable)) {
         return (
-          <ParametersTable
-            initialData={valuesForTable}
-            onToolParameters={(data) => onChange(fieldKey, data)}
-          />
+          <ParametersTable initialData={valuesForTable} onToolParameters={(data) => onChange(fieldKey, data)} />
         );
       }
       break;
     }
     case "output_filter": {
       return (
-        <Box>
+        <div className={styles.scrollX}>
           <Markdown>
-            {"```json\n" +
-              JSON.stringify(values ? values[fieldKey] : {}, null, 2) +
-              "\n```"}
+            {"```json\n" + JSON.stringify(values ? values[fieldKey] : {}, null, 2) + "\n```"}
           </Markdown>
-        </Box>
+        </div>
       );
     }
     case "string_array": {
       const valuesForTable = values?.[fieldKey];
-      const tableData = isMCPArgumentsArray(valuesForTable)
-        ? valuesForTable
-        : [];
+      const tableData = isMCPArgumentsArray(valuesForTable) ? valuesForTable : [];
 
       return (
         <KeyValueTable
@@ -156,8 +142,8 @@ const FieldContent: FC<{
       return (
         <CustomInputField
           {...commonProps}
-          type={"text"}
-          size={"short"}
+          type="text"
+          size="short"
           value={commonProps.value?.toString()}
           onChange={(value) => onChange(fieldKey, value)}
         />
@@ -167,8 +153,8 @@ const FieldContent: FC<{
       return (
         <CustomInputField
           {...commonProps}
-          type={"text"}
-          size={"long"}
+          type="text"
+          size="long"
           value={commonProps.value?.toString()}
           onChange={(value) => onChange(fieldKey, value)}
         />
@@ -179,7 +165,7 @@ const FieldContent: FC<{
         <CustomInputField
           {...commonProps}
           type="text"
-          size={"short"}
+          size="short"
           value={commonProps.value?.toString()}
           onChange={(value) => onChange(fieldKey, value)}
         />
@@ -194,15 +180,12 @@ const SmartLinks: FC<{
   integrationPath: string;
   integrationProject: string;
 }> = ({ smartlinks, integrationName, integrationPath, integrationProject }) => {
-  if (
-    !smartlinks ||
-    smartlinks.every((link) => link.sl_goto?.startsWith("EDITOR"))
-  ) {
+  if (!smartlinks || smartlinks.every((link) => link.sl_goto?.startsWith("EDITOR"))) {
     return null;
   }
 
   return (
-    <Flex align="center">
+    <Flex align="center" className={styles.smartLinks}>
       {smartlinks.map((smartlink, index) => (
         <SmartLink
           isSmall
@@ -243,28 +226,15 @@ export const IntegrationFormField: FC<IntegrationFormFieldProps> = ({
   };
 
   return (
-    <Flex
-      direction="column"
+    <FieldRow
       key={fieldKey}
-      style={{
-        width: "100%",
-        opacity: isFieldVisible ? 1 : 0,
-        height: isFieldVisible ? "auto" : 0,
-        visibility: isFieldVisible ? "visible" : "hidden",
-        position: isFieldVisible ? "inherit" : "absolute",
-        transition: "opacity 0.3s ease-in-out",
-      }}
-      className={styles.flexField}
+      className={styles.field}
+      data-hidden={!isFieldVisible ? true : undefined}
+      helper={field.f_desc ? <Markdown>{field.f_desc}</Markdown> : undefined}
+      htmlFor={fieldKey}
+      label={field.f_label ?? toPascalCase(fieldKey)}
     >
-      <Flex direction="column" width="100%" mb="2" className={styles.flexLabel}>
-        <CustomLabel
-          htmlFor={fieldKey}
-          label={field.f_label ?? toPascalCase(fieldKey)}
-          mt="2"
-        />
-      </Flex>
-
-      <Flex direction="column" gap="2" align="start" width="100%">
+      <div className={styles.controlStack}>
         <FieldContent
           f_type={f_type_raw}
           commonProps={commonProps}
@@ -273,17 +243,13 @@ export const IntegrationFormField: FC<IntegrationFormFieldProps> = ({
           onChange={onChange}
         />
 
-        {field.f_desc && (
-          <CustomDescriptionField>{field.f_desc}</CustomDescriptionField>
-        )}
-
         <SmartLinks
           smartlinks={field.smartlinks}
           integrationName={integrationName}
           integrationPath={integrationPath}
           integrationProject={integrationProject}
         />
-      </Flex>
-    </Flex>
+      </div>
+    </FieldRow>
   );
 };

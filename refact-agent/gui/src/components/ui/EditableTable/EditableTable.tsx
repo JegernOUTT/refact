@@ -14,6 +14,7 @@ export interface EditableTableColumn<T extends EditableTableRow> {
   placeholder?: string;
   inputType?: React.ComponentProps<"input">["type"];
   width?: string;
+  getInputProps?: (params: { row: T; rowIndex: number }) => Record<string, unknown>;
 }
 
 export type EditableTableValidate<T extends EditableTableRow> = (params: {
@@ -155,12 +156,18 @@ export function EditableTable<T extends EditableTableRow>({
                   {columns.map((column) => {
                     const error = errors[rowIndex]?.[column.id];
 
+                    const inputProps =
+                      (column.getInputProps?.({ row: row.value, rowIndex }) ?? {}) as Partial<
+                        React.ComponentProps<"input">
+                      >;
+
                     return (
                       <td className={styles.cell} key={column.id}>
                         <label className={styles.stackedLabel} htmlFor={inputKey(rowIndex, column.id)}>
                           {column.header}
                         </label>
                         <FieldText
+                          {...inputProps}
                           aria-invalid={error ? true : undefined}
                           id={inputKey(rowIndex, column.id)}
                           ref={(node) => {
@@ -189,7 +196,7 @@ export function EditableTable<T extends EditableTableRow>({
                   })}
                   <td className={styles.actionCell}>
                     <IconButton
-                      aria-label={`${removeLabel} ${rowIndex + 1}`}
+                      aria-label={removeLabel}
                       icon={Trash2}
                       size="sm"
                       type="button"

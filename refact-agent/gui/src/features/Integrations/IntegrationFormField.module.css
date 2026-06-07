@@ -1,9 +1,34 @@
-@media screen and (min-width: 424px) {
-  .flexField {
-    flex-direction: row;
-    /* margin-bottom: 15px; */
-  }
-  .flexLabel {
-    width: 200px;
-  }
+.field {
+  width: 100%;
+  opacity: 1;
+  transition: opacity var(--rf-dur-base) var(--rf-ease-standard);
+}
+
+.field[data-hidden="true"] {
+  position: absolute;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  opacity: 0;
+}
+
+.controlStack {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+}
+
+.smartLinks {
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+}
+
+.scrollX {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }

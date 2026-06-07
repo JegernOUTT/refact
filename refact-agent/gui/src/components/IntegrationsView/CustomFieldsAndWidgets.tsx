@@ -1,8 +1,8 @@
-import { Box, TextField, TextArea, Text, Switch } from "@radix-ui/themes";
+import { Box, Text } from "@radix-ui/themes";
 import { Markdown } from "../Markdown";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { FieldSwitch, FieldText, FieldTextarea } from "../ui";
 
-// Custom Input Field
 export const CustomInputField = ({
   value,
   placeholder,
@@ -10,9 +10,9 @@ export const CustomInputField = ({
   id,
   name,
   size = "long",
-  color = "gray",
   onChange,
   wasInteracted = false,
+
 }: {
   id?: string;
   wasInteracted?: boolean;
@@ -35,11 +35,11 @@ export const CustomInputField = ({
   placeholder?: string;
   size?: string;
   width?: string;
-  color?: TextField.RootProps["color"];
+  color?: string;
   onChange?: (value: string) => void;
 }) => {
   const wasInitialized = useRef(wasInteracted);
-  // a little hacky, but in this way we avoid of use of formData
+
   useEffect(() => {
     if (!wasInitialized.current && onChange) {
       onChange(value ?? "");
@@ -50,27 +50,22 @@ export const CustomInputField = ({
   return (
     <Box width="100%">
       {size !== "multiline" ? (
-        <TextField.Root
+        <FieldText
           id={id}
           name={name}
           type={type}
-          size="2"
-          value={value}
-          variant="soft"
-          color={color}
+          value={value ?? ""}
           placeholder={placeholder}
-          onChange={(e) => onChange?.(e.target.value)}
+          onChange={(nextValue) => onChange?.(nextValue)}
         />
       ) : (
-        <TextArea
+        <FieldTextarea
           id={id}
           name={name}
-          size="2"
           rows={3}
-          value={value}
-          variant="soft"
-          color="gray"
+          value={value ?? ""}
           placeholder={placeholder}
+          onChange={(nextValue) => onChange?.(nextValue)}
         />
       )}
     </Box>
@@ -146,14 +141,7 @@ export const CustomBoolField = ({
 
   return (
     <Box>
-      <Switch
-        name={name}
-        id={id}
-        size="2"
-        checked={checked}
-        defaultChecked={value}
-        onCheckedChange={onCheckedChange}
-      />
+      <FieldSwitch name={name} id={id} checked={checked} onChange={onCheckedChange} />
       <input type="hidden" name={name} value={checked ? "on" : "off"} />
     </Box>
   );
