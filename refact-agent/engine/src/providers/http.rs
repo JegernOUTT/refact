@@ -405,6 +405,29 @@ async fn read_existing_provider_settings(
     Ok(Some(value))
 }
 
+fn read_existing_provider_settings_sync(
+    config_dir: &std::path::Path,
+    instance_id: &str,
+) -> Result<Option<serde_yaml::Value>, ScratchError> {
+    let config_path = provider_file_path(config_dir, instance_id);
+    if !provider_file_exists(config_dir, instance_id) {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&config_path).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read config: {e}"),
+        )
+    })?;
+    let value = serde_yaml::from_str(&content).map_err(|e| {
+        ScratchError::new(
+            StatusCode::CONFLICT,
+            format!("Existing config is invalid YAML: {e}. Fix manually or delete the file."),
+        )
+    })?;
+    Ok(Some(value))
+}
+
 fn provider_config_store_error(error: String) -> ScratchError {
     let status = if error.contains("invalid YAML") || error.contains("root is not a YAML mapping") {
         StatusCode::CONFLICT
@@ -752,8 +775,14 @@ pub async fn handle_v1_provider_update(
         } else {
             None
         };
-        let registry_model_config =
-            registry_provider.map(ProviderModelConfigSnapshot::from_provider);
+        let registry_model_config = registry_provider
+            .map(ProviderModelConfigSnapshot::from_provider)
+            .or_else(|| {
+                read_existing_provider_settings_sync(&gcx.config_dir, &params.name)
+                    .ok()
+                    .flatten()
+                    .map(|settings| ProviderModelConfigSnapshot::from_settings(&settings))
+            });
         (
             gcx.config_dir.clone(),
             registry_identity,
@@ -1877,9 +1906,13 @@ fn merge_yaml_preserving_secrets_for_provider(
             for (key, new_value) in new_map {
                 let replace_custom_extra_headers =
                     provider_name == "custom" && key.as_str() == Some("extra_headers");
+                let replace_custom_completion_models =
+                    provider_name == "custom" && key.as_str() == Some("completion_models");
                 let existing_value = existing_map.remove(&key);
                 let merged_value = if replace_custom_extra_headers {
                     merge_custom_extra_headers_replace(existing_value.as_ref(), &new_value)?
+                } else if replace_custom_completion_models {
+                    strip_masked_secrets(new_value)
                 } else if let Some(existing_value) = existing_value {
                     merge_yaml_preserving_secrets_for_provider(
                         provider_name,
@@ -1967,6 +2000,12 @@ struct ProviderModelConfigFields {
     disabled_models: bool,
     custom_models: bool,
     selected_providers: bool,
+    completion_endpoint: bool,
+    completion_endpoint_style: bool,
+    completion_models: bool,
+    embedding_endpoint: bool,
+    embedding_endpoint_style: bool,
+    embedding_model: bool,
 }
 
 impl ProviderModelConfigFields {
@@ -1979,6 +2018,12 @@ impl ProviderModelConfigFields {
             disabled_models: yaml_map_contains_key(map, "disabled_models"),
             custom_models: yaml_map_contains_key(map, "custom_models"),
             selected_providers: yaml_map_contains_key(map, "selected_providers"),
+            completion_endpoint: yaml_map_contains_key(map, "completion_endpoint"),
+            completion_endpoint_style: yaml_map_contains_key(map, "completion_endpoint_style"),
+            completion_models: yaml_map_contains_key(map, "completion_models"),
+            embedding_endpoint: yaml_map_contains_key(map, "embedding_endpoint"),
+            embedding_endpoint_style: yaml_map_contains_key(map, "embedding_endpoint_style"),
+            embedding_model: yaml_map_contains_key(map, "embedding_model"),
         }
     }
 }
@@ -1988,16 +2033,68 @@ struct ProviderModelConfigSnapshot {
     disabled_models: Vec<String>,
     custom_models: HashMap<String, CustomModelConfig>,
     selected_providers: HashMap<String, String>,
+    completion_endpoint: Option<String>,
+    completion_endpoint_style: Option<String>,
+    completion_models: Option<serde_yaml::Value>,
+    embedding_endpoint: Option<String>,
+    embedding_endpoint_style: Option<String>,
+    embedding_model: Option<serde_yaml::Value>,
 }
 
 impl ProviderModelConfigSnapshot {
     fn from_provider(provider: &dyn ProviderTrait) -> Self {
+        let settings = provider.provider_settings_as_json();
+        let settings = serde_yaml::to_value(settings).unwrap_or(serde_yaml::Value::Null);
+        let role_snapshot = Self::from_settings(&settings);
         Self {
             enabled_models: provider.enabled_models().to_vec(),
             disabled_models: provider.disabled_models().to_vec(),
             custom_models: provider.custom_models().clone(),
             selected_providers: provider.selected_providers().clone(),
+            completion_endpoint: role_snapshot.completion_endpoint,
+            completion_endpoint_style: role_snapshot.completion_endpoint_style,
+            completion_models: role_snapshot.completion_models,
+            embedding_endpoint: role_snapshot.embedding_endpoint,
+            embedding_endpoint_style: role_snapshot.embedding_endpoint_style,
+            embedding_model: role_snapshot.embedding_model,
         }
+    }
+
+    fn from_settings(settings: &serde_yaml::Value) -> Self {
+        let mut snapshot = Self {
+            enabled_models: Vec::new(),
+            disabled_models: Vec::new(),
+            custom_models: HashMap::new(),
+            selected_providers: HashMap::new(),
+            completion_endpoint: None,
+            completion_endpoint_style: None,
+            completion_models: None,
+            embedding_endpoint: None,
+            embedding_endpoint_style: None,
+            embedding_model: None,
+        };
+        let Some(map) = settings.as_mapping() else {
+            return snapshot;
+        };
+        snapshot.completion_endpoint = map
+            .get(&yaml_key("completion_endpoint"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        snapshot.completion_endpoint_style = map
+            .get(&yaml_key("completion_endpoint_style"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        snapshot.completion_models = map.get(&yaml_key("completion_models")).cloned();
+        snapshot.embedding_endpoint = map
+            .get(&yaml_key("embedding_endpoint"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        snapshot.embedding_endpoint_style = map
+            .get(&yaml_key("embedding_endpoint_style"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        snapshot.embedding_model = map.get(&yaml_key("embedding_model")).cloned();
+        snapshot
     }
 }
 
@@ -2067,8 +2164,70 @@ fn apply_model_config_snapshot_for_omitted_fields(
             )?;
         }
     }
+    if !present_fields.completion_endpoint {
+        preserve_optional_string_field(
+            &mut yaml_map,
+            "completion_endpoint",
+            snapshot.completion_endpoint.as_ref(),
+        );
+    }
+    if !present_fields.completion_endpoint_style {
+        preserve_optional_string_field(
+            &mut yaml_map,
+            "completion_endpoint_style",
+            snapshot.completion_endpoint_style.as_ref(),
+        );
+    }
+    if !present_fields.completion_models {
+        preserve_optional_value_field(
+            &mut yaml_map,
+            "completion_models",
+            snapshot.completion_models.as_ref(),
+        );
+    }
+    if !present_fields.embedding_endpoint {
+        preserve_optional_string_field(
+            &mut yaml_map,
+            "embedding_endpoint",
+            snapshot.embedding_endpoint.as_ref(),
+        );
+    }
+    if !present_fields.embedding_endpoint_style {
+        preserve_optional_string_field(
+            &mut yaml_map,
+            "embedding_endpoint_style",
+            snapshot.embedding_endpoint_style.as_ref(),
+        );
+    }
+    if !present_fields.embedding_model {
+        preserve_optional_value_field(
+            &mut yaml_map,
+            "embedding_model",
+            snapshot.embedding_model.as_ref(),
+        );
+    }
 
     Ok(serde_yaml::Value::Mapping(yaml_map))
+}
+
+fn preserve_optional_string_field(
+    yaml_map: &mut serde_yaml::Mapping,
+    key: &str,
+    value: Option<&String>,
+) {
+    if let Some(value) = value {
+        yaml_map.insert(yaml_key(key), serde_yaml::Value::String(value.clone()));
+    }
+}
+
+fn preserve_optional_value_field(
+    yaml_map: &mut serde_yaml::Mapping,
+    key: &str,
+    value: Option<&serde_yaml::Value>,
+) {
+    if let Some(value) = value {
+        yaml_map.insert(yaml_key(key), value.clone());
+    }
 }
 
 /// Helper function to patch provider config - only updates enabled_models/disabled_models and custom_models
@@ -2140,6 +2299,37 @@ async fn patch_provider_model_config(
                     &model_config.selected_providers,
                 )?;
             }
+
+            preserve_optional_string_field(
+                &mut yaml_map,
+                "completion_endpoint",
+                model_config.completion_endpoint.as_ref(),
+            );
+            preserve_optional_string_field(
+                &mut yaml_map,
+                "completion_endpoint_style",
+                model_config.completion_endpoint_style.as_ref(),
+            );
+            preserve_optional_value_field(
+                &mut yaml_map,
+                "completion_models",
+                model_config.completion_models.as_ref(),
+            );
+            preserve_optional_string_field(
+                &mut yaml_map,
+                "embedding_endpoint",
+                model_config.embedding_endpoint.as_ref(),
+            );
+            preserve_optional_string_field(
+                &mut yaml_map,
+                "embedding_endpoint_style",
+                model_config.embedding_endpoint_style.as_ref(),
+            );
+            preserve_optional_value_field(
+                &mut yaml_map,
+                "embedding_model",
+                model_config.embedding_model.as_ref(),
+            );
 
             Ok(serde_yaml::Value::Mapping(yaml_map))
         },
@@ -3931,6 +4121,245 @@ extra_headers:
                 "Work Codex".to_string()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn custom_provider_update_roundtrips_completion_and_embedding_sections() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        let payload = json!({
+            "base_provider": "custom",
+            "display_name": "Role Custom",
+            "api_key": "sk-role",
+            "enabled": true,
+            "chat_endpoint": "https://example.com/v1/chat/completions",
+            "enabled_models": ["chat-model"],
+            "custom_models": {"chat-model": {"n_ctx": 4096}},
+            "completion_endpoint": "https://example.com/v1/completions",
+            "completion_endpoint_style": "openai_completions",
+            "completion_models": {"complete-model": {"n_ctx": 2048}},
+            "embedding_endpoint": "https://example.com/v1/embeddings",
+            "embedding_endpoint_style": "ollama_native",
+            "embedding_model": "embed-model"
+        });
+
+        let response = handle_v1_provider_update(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "custom".to_string(),
+            }),
+            hyper::body::Bytes::from(serde_json::to_vec(&payload).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = handle_v1_provider_get(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "custom".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let body = response_json(response).await;
+        assert_eq!(
+            body["settings"]["completion_endpoint"],
+            payload["completion_endpoint"]
+        );
+        assert_eq!(
+            body["settings"]["completion_endpoint_style"],
+            "openai_completions"
+        );
+        assert_eq!(
+            body["settings"]["completion_models"]["complete-model"]["n_ctx"],
+            2048
+        );
+        assert_eq!(
+            body["settings"]["embedding_endpoint"],
+            payload["embedding_endpoint"]
+        );
+        assert_eq!(
+            body["settings"]["embedding_endpoint_style"],
+            "ollama_native"
+        );
+        assert_eq!(body["settings"]["embedding_model"], "embed-model");
+        let completion_model = body["runtime"]["completion_models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "complete-model")
+            .unwrap();
+        assert_eq!(completion_model["id"], "complete-model");
+        assert_eq!(body["runtime"]["embedding_model"]["id"], "embed-model");
+
+        let saved = provider_config_json(&config_dir, "custom").await;
+        assert_eq!(saved["completion_models"]["complete-model"]["n_ctx"], 2048);
+        assert_eq!(saved["embedding_model"], "embed-model");
+    }
+
+    #[tokio::test]
+    async fn custom_provider_partial_update_preserves_completion_and_embedding_sections() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        let providers_dir = config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("custom.yaml"),
+            r#"
+api_key: sk-old
+enabled: true
+chat_endpoint: https://example.com/v1/chat/completions
+enabled_models:
+  - chat-old
+custom_models:
+  chat-old:
+    n_ctx: 4096
+completion_endpoint: https://example.com/v1/completions
+completion_endpoint_style: openai_chat_completions
+completion_models:
+  complete-old:
+    n_ctx: 2048
+embedding_endpoint: https://example.com/v1/embeddings
+embedding_endpoint_style: openai
+embedding_model: embed-old
+"#,
+        )
+        .await
+        .unwrap();
+        reload_provider_from_disk(gcx.clone(), "custom", &config_dir)
+            .await
+            .unwrap();
+
+        handle_v1_provider_update(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "custom".to_string(),
+            }),
+            hyper::body::Bytes::from(
+                serde_json::to_vec(&json!({
+                    "api_key": "***",
+                    "chat_endpoint": "https://example.com/v1/chat-updated",
+                    "enabled_models": ["chat-new"],
+                    "custom_models": {"chat-new": {"n_ctx": 8192}}
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let saved = provider_config_json(&config_dir, "custom").await;
+        assert_eq!(saved["api_key"], "sk-old");
+        assert_eq!(saved["enabled_models"], json!(["chat-new"]));
+        assert_eq!(
+            saved["completion_endpoint"],
+            "https://example.com/v1/completions"
+        );
+        assert_eq!(
+            saved["completion_endpoint_style"],
+            "openai_chat_completions"
+        );
+        assert_eq!(saved["completion_models"]["complete-old"]["n_ctx"], 2048);
+        assert_eq!(
+            saved["embedding_endpoint"],
+            "https://example.com/v1/embeddings"
+        );
+        assert_eq!(saved["embedding_endpoint_style"], "openai");
+        assert_eq!(saved["embedding_model"], "embed-old");
+    }
+
+    #[tokio::test]
+    async fn custom_provider_remove_chat_model_preserves_role_specific_records() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        handle_v1_provider_update(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "custom".to_string(),
+            }),
+            hyper::body::Bytes::from(
+                serde_json::to_vec(&json!({
+                    "api_key": "sk-role",
+                    "enabled": true,
+                    "chat_endpoint": "https://example.com/v1/chat/completions",
+                    "enabled_models": ["chat-model"],
+                    "custom_models": {"chat-model": {"n_ctx": 4096}},
+                    "completion_endpoint": "https://example.com/v1/completions",
+                    "completion_models": {"complete-model": {"n_ctx": 2048}},
+                    "embedding_endpoint": "https://example.com/v1/embeddings",
+                    "embedding_model": "embed-model"
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        handle_v1_provider_remove_custom_model_impl(
+            gcx.clone(),
+            "custom",
+            hyper::body::Bytes::from(r#"{"model_id":"chat-model"}"#),
+        )
+        .await
+        .unwrap();
+
+        let saved = provider_config_json(&config_dir, "custom").await;
+        assert!(saved["custom_models"].as_object().unwrap().is_empty());
+        assert_eq!(saved["completion_models"]["complete-model"]["n_ctx"], 2048);
+        assert_eq!(saved["embedding_model"], "embed-model");
+    }
+
+    #[tokio::test]
+    async fn custom_provider_explicit_role_clear_uses_provider_update_payload() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        let providers_dir = config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("custom.yaml"),
+            r#"
+api_key: sk-old
+enabled: true
+completion_endpoint: https://example.com/v1/completions
+completion_models:
+  complete-old:
+    n_ctx: 2048
+embedding_endpoint: https://example.com/v1/embeddings
+embedding_model: embed-old
+"#,
+        )
+        .await
+        .unwrap();
+        reload_provider_from_disk(gcx.clone(), "custom", &config_dir)
+            .await
+            .unwrap();
+
+        handle_v1_provider_update(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "custom".to_string(),
+            }),
+            hyper::body::Bytes::from(
+                serde_json::to_vec(&json!({
+                    "completion_models": {},
+                    "embedding_model": null
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let saved = provider_config_json(&config_dir, "custom").await;
+        assert!(saved["completion_models"].as_object().unwrap().is_empty());
+        assert!(saved["embedding_model"].is_null());
+        let runtime = {
+            let registry = gcx.providers.read().await;
+            registry.get("custom").unwrap().build_runtime().unwrap()
+        };
+        assert!(runtime.completion_models.is_empty());
+        assert!(runtime.embedding_model.is_none());
     }
 
     #[tokio::test]

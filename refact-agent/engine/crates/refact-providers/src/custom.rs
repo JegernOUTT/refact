@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use refact_core::llm_types::{CompletionEndpointStyle, EmbeddingEndpointStyle, WireFormat};
+use refact_core::llm_types::{
+    CompletionEndpointStyle, EmbeddingEndpointStyle, EmbeddingModelRecord, WireFormat,
+};
 use crate::config::resolve_env_var;
 use crate::traits::{
     CustomModelConfig, ModelPricing, ModelSource, ProviderModel, ProviderRuntime, ProviderTrait,
@@ -34,9 +36,9 @@ pub struct CustomProvider {
     #[serde(default)]
     pub custom_models: HashMap<String, CustomModelConfig>,
     #[serde(default)]
-    pub completion_models: Vec<String>,
+    pub completion_models: HashMap<String, CustomModelConfig>,
     #[serde(default)]
-    pub embedding_model: String,
+    pub embedding_model: Option<String>,
 }
 
 impl CustomProvider {
@@ -49,25 +51,119 @@ impl CustomProvider {
     }
 
     fn has_embedding_role(&self) -> bool {
-        !self.embedding_endpoint.is_empty() && !self.embedding_model.is_empty()
+        !self.embedding_endpoint.is_empty() && self.embedding_model.is_some()
     }
 
     fn role_count(&self) -> usize {
         self.enabled_models.len()
             + self.completion_models.len()
-            + usize::from(!self.embedding_model.is_empty())
+            + usize::from(self.embedding_model.is_some())
     }
 
     fn runtime_completion_models(&self) -> Vec<ProviderModel> {
         self.completion_models
             .iter()
-            .map(|model_id| ProviderModel::custom_role(model_id, true, 4096))
+            .map(|(model_id, config)| custom_model_to_provider_model(model_id, config, true))
             .collect()
     }
 
     fn runtime_embedding_model(&self) -> Option<ProviderModel> {
-        (!self.embedding_model.is_empty())
-            .then(|| ProviderModel::custom_role(&self.embedding_model, true, 512))
+        self.embedding_model
+            .as_deref()
+            .map(embedding_model_to_provider_model)
+    }
+}
+
+fn parse_custom_models_from_key(
+    yaml: &serde_yaml::Value,
+    key: &str,
+    target: &mut HashMap<String, CustomModelConfig>,
+) -> Result<(), String> {
+    let Some(value) = yaml.get(key) else {
+        return Ok(());
+    };
+
+    target.clear();
+    if value.is_null() {
+        return Ok(());
+    }
+    if let Some(models) = value.as_sequence() {
+        for model in models.iter().filter_map(|v| v.as_str()) {
+            let model = model.trim();
+            if !model.is_empty() {
+                target.insert(model.to_string(), CustomModelConfig::default());
+            }
+        }
+        return Ok(());
+    }
+    if let Some(custom) = value.as_mapping() {
+        for (model_key, value) in custom {
+            if let Some(model_id) = model_key.as_str() {
+                let config: CustomModelConfig = serde_yaml::from_value(value.clone())
+                    .map_err(|e| format!("invalid {key} entry '{model_id}': {e}"))?;
+                target.insert(model_id.to_string(), config);
+            }
+        }
+        return Ok(());
+    }
+
+    Err(format!(
+        "invalid {key}: expected mapping, sequence, or null"
+    ))
+}
+
+fn parse_embedding_model_name(value: &serde_yaml::Value) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(name) = value.as_str() {
+        let name = name.trim();
+        return Ok((!name.is_empty()).then(|| name.to_string()));
+    }
+    let record: EmbeddingModelRecord = serde_yaml::from_value(value.clone())
+        .map_err(|e| format!("invalid embedding_model: {e}"))?;
+    let name = record.base.name.trim();
+    Ok((!name.is_empty()).then(|| name.to_string()))
+}
+
+fn custom_model_to_provider_model(
+    id: &str,
+    config: &CustomModelConfig,
+    enabled: bool,
+) -> ProviderModel {
+    ProviderModel {
+        id: id.to_string(),
+        base_name: id.to_string(),
+        enabled,
+        n_ctx: config.n_ctx.unwrap_or(4096),
+        supports_tools: config.supports_tools.unwrap_or(false),
+        supports_multimodality: config.supports_multimodality.unwrap_or(false),
+        supports_reasoning: config
+            .reasoning_effort_options
+            .as_ref()
+            .map(|options| options.join(",")),
+        supports_agent: config.supports_tools.unwrap_or(false),
+        wire_format_override: None,
+        endpoint_override: None,
+        user_configured: true,
+        removable: true,
+    }
+}
+
+fn embedding_model_to_provider_model(id: &str) -> ProviderModel {
+    ProviderModel {
+        id: id.to_string(),
+        base_name: id.to_string(),
+        enabled: true,
+        n_ctx: 8191,
+        supports_tools: false,
+        supports_multimodality: false,
+        supports_reasoning: None,
+        supports_agent: false,
+        wire_format_override: None,
+        endpoint_override: None,
+        user_configured: true,
+        removable: true,
     }
 }
 
@@ -201,28 +297,29 @@ available:
             .get("completion_endpoint_style")
             .and_then(|v| v.as_str())
         {
-            CompletionEndpointStyle::from_config(style, "completion_endpoint_style")?;
-            self.completion_endpoint_style = style.to_string();
+            if style.trim().is_empty() {
+                self.completion_endpoint_style.clear();
+            } else {
+                CompletionEndpointStyle::from_config(style, "completion_endpoint_style")?;
+                self.completion_endpoint_style = style.to_string();
+            }
         }
         if let Some(style) = yaml
             .get("embedding_endpoint_style")
             .and_then(|v| v.as_str())
         {
-            EmbeddingEndpointStyle::from_config(style, "embedding_endpoint_style")?;
-            self.embedding_endpoint_style = style.to_string();
+            if style.trim().is_empty() {
+                self.embedding_endpoint_style.clear();
+            } else {
+                EmbeddingEndpointStyle::from_config(style, "embedding_endpoint_style")?;
+                self.embedding_endpoint_style = style.to_string();
+            }
         }
-        if let Some(models) = yaml.get("completion_models").and_then(|v| v.as_sequence()) {
-            self.completion_models.clear();
-            self.completion_models.extend(
-                models
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .filter(|model_id| !model_id.trim().is_empty())
-                    .map(String::from),
-            );
+        if yaml.get("completion_models").is_some() {
+            parse_custom_models_from_key(&yaml, "completion_models", &mut self.completion_models)?;
         }
-        if let Some(model) = yaml.get("embedding_model").and_then(|v| v.as_str()) {
-            self.embedding_model = model.to_string();
+        if let Some(model) = yaml.get("embedding_model") {
+            self.embedding_model = parse_embedding_model_name(model)?;
         }
         if let Some(wire_format) = yaml.get("wire_format") {
             match serde_yaml::from_value(wire_format.clone()) {
@@ -570,7 +667,10 @@ extra_headers: |
             enabled: true,
             completion_endpoint: "https://example.com/v1/completions".to_string(),
             completion_endpoint_style: "openai_completions".to_string(),
-            completion_models: vec!["qwen-coder".to_string()],
+            completion_models: HashMap::from([(
+                "qwen-coder".to_string(),
+                CustomModelConfig::default(),
+            )]),
             ..Default::default()
         };
 
@@ -596,7 +696,7 @@ extra_headers: |
             enabled: true,
             embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
             embedding_endpoint_style: "openai".to_string(),
-            embedding_model: "text-embedding-3-small".to_string(),
+            embedding_model: Some("text-embedding-3-small".to_string()),
             ..Default::default()
         };
 
@@ -624,10 +724,13 @@ extra_headers: |
             enabled_models: vec!["chat-model".to_string()],
             completion_endpoint: "https://example.com/v1/completions".to_string(),
             completion_endpoint_style: "openai_chat_completions".to_string(),
-            completion_models: vec!["completion-model".to_string()],
+            completion_models: HashMap::from([(
+                "completion-model".to_string(),
+                CustomModelConfig::default(),
+            )]),
             embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
             embedding_endpoint_style: "ollama_native".to_string(),
-            embedding_model: "embedding-model".to_string(),
+            embedding_model: Some("embedding-model".to_string()),
             ..Default::default()
         };
 
@@ -654,7 +757,8 @@ enabled: true
 completion_endpoint: https://example.com/v1/completions
 completion_endpoint_style: openai_chat_completions
 completion_models:
-  - qwen-coder
+  qwen-coder:
+    n_ctx: 4096
 embedding_endpoint: https://example.com/v1/embeddings
 embedding_endpoint_style: openai
 embedding_model: text-embedding-3-small
@@ -677,7 +781,7 @@ extra_headers:
             settings["completion_endpoint_style"],
             "openai_chat_completions"
         );
-        assert_eq!(settings["completion_models"][0], "qwen-coder");
+        assert_eq!(settings["completion_models"]["qwen-coder"]["n_ctx"], 4096);
         assert_eq!(
             settings["embedding_endpoint"],
             "https://example.com/v1/embeddings"
