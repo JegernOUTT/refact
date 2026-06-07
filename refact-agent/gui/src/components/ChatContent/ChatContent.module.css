@@ -82,8 +82,9 @@
 }
 
 .diff {
-  background: var(--gray-2);
+  background: var(--rf-surface-1);
   max-width: unset;
+  min-width: min-content;
 }
 
 .diff pre {
@@ -95,7 +96,7 @@
 .diff_pre {
   margin: 0;
   line-height: normal;
-  font-size: var(--font-size-1);
+  font-size: var(--rf-text-1);
 }
 
 .diff_first:has(+ .diff_second) {
@@ -120,32 +121,74 @@
 }
 
 .diff_line > span {
-  font-family:
-    Consolas,
-    Monaco,
-    Lucida Console,
-    Liberation Mono,
-    DejaVu Sans Mono,
-    Bitstream Vera Sans Mono,
-    Courier New;
-  color: var(--gray-11);
+  font-family: var(--rf-font-mono);
+  color: var(--rf-color-fg);
+}
+
+.diff_line {
+  min-width: min-content;
+}
+
+.diff_line_remove .diff_line_number {
+  background: rgba(216, 115, 109, 0.24);
+  background: color-mix(in oklab, var(--rf-color-danger) 24%, var(--rf-bg));
+}
+
+.diff_line_remove .diff_sign,
+.diff_line_remove .diff_line_content {
+  background: rgba(216, 115, 109, 0.14);
+  background: color-mix(in oklab, var(--rf-color-danger) 14%, var(--rf-bg));
+}
+
+.diff_line_add .diff_line_number {
+  background: rgba(95, 174, 139, 0.24);
+  background: color-mix(in oklab, var(--rf-color-success) 24%, var(--rf-bg));
+}
+
+.diff_line_add .diff_sign,
+.diff_line_add .diff_line_content {
+  background: rgba(95, 174, 139, 0.14);
+  background: color-mix(in oklab, var(--rf-color-success) 14%, var(--rf-bg));
 }
 
 .diff_line_number {
-  min-width: 50px;
-  padding-right: 8px;
+  min-width: calc(var(--rf-space-6) + var(--rf-space-5));
+  padding-right: var(--rf-space-2);
   text-align: end;
   user-select: none;
+  color: var(--rf-color-muted);
 }
 
 .diff_sign {
-  padding-left: 6px;
-  padding-right: 6px;
+  padding-left: var(--rf-space-1);
+  padding-right: var(--rf-space-1);
   user-select: none;
+  color: var(--rf-color-muted);
 }
 
 .diff_line_content {
   flex: 1;
+  min-width: min-content;
+  white-space: pre;
+}
+
+.diff_highlight {
+  align-self: stretch;
+  width: 100%;
+  min-width: min-content;
+}
+
+.diff_scroll_inner {
+  min-width: 100%;
+  position: relative;
+}
+
+.diff_file_body {
+  min-width: min-content;
+  background: var(--rf-surface-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  overflow: hidden;
 }
 
 .tool_result {

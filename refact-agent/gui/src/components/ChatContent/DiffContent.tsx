@@ -1,7 +1,6 @@
 import React, { useCallback, useMemo, useRef } from "react";
 import { Text, Container, Box, Flex, Link } from "@radix-ui/themes";
 import { DiffMessage, type DiffChunk } from "../../services/refact";
-import { ScrollArea } from "../ScrollArea";
 import styles from "./ChatContent.module.css";
 import { filename } from "../../utils";
 import * as Collapsible from "@radix-ui/react-collapsible";
@@ -10,6 +9,7 @@ import groupBy from "lodash.groupby";
 import { TruncateLeft } from "../Text";
 import { useHideScroll, useEventsBusForIDE } from "../../hooks";
 import { FadedButton } from "../Buttons";
+import classNames from "classnames";
 
 type DiffType = "apply" | "unapply" | "error" | "can not apply";
 
@@ -18,30 +18,16 @@ const DiffLine: React.FC<{
   sign: string;
   line: string;
 }> = ({ lineNumber, sign, line }) => {
-  const backgroundColorLeft = sign === "-" ? "#592e30" : "#3b5840";
-  const backgroundColor = sign === "-" ? "#3e2628" : "#2c3e33";
+  const toneClass = sign === "-" ? styles.diff_line_remove : styles.diff_line_add;
   return (
-    <Flex className={styles.diff_line} style={{ minWidth: "min-content" }}>
-      <Text
-        size="2"
-        className={styles.diff_line_number}
-        style={{ backgroundColor: backgroundColorLeft }}
-      >
+    <Flex className={classNames(styles.diff_line, toneClass)}>
+      <Text size="2" className={styles.diff_line_number}>
         {lineNumber ?? ""}
       </Text>
-      <Text size="2" className={styles.diff_sign} style={{ backgroundColor }}>
+      <Text size="2" className={styles.diff_sign}>
         {sign}
       </Text>
-      <Text
-        size="2"
-        className={styles.diff_line_content}
-        style={{
-          backgroundColor,
-          whiteSpace: "pre",
-          whiteSpaceTrim: "none",
-          minWidth: "min-content",
-        }}
-      >
+      <Text size="2" className={styles.diff_line_content}>
         {line}
       </Text>
     </Flex>
@@ -68,10 +54,7 @@ const DiffHighlight: React.FC<{
 }> = ({ startLine, sign, text }) => {
   const lines = useMemo(() => splitDiffLines(text), [text]);
   return (
-    <Flex
-      direction="column"
-      style={{ minWidth: "min-content", alignSelf: "stretch", width: "100%" }}
-    >
+    <Flex direction="column" className={styles.diff_highlight}>
       {lines.map((line, index) => {
         return (
           <DiffLine
@@ -100,7 +83,6 @@ export const Diff: React.FC<DiffProps> = ({ diff }) => {
       className={styles.diff}
       py="2"
       direction="column"
-      style={{ minWidth: "min-content" }}
     >
       {isRename && (
         <Flex py="1" px="2">
@@ -298,20 +280,15 @@ export const DiffForm: React.FC<{
                 </Link>
               </TruncateLeft>
             </Flex>
-            <ScrollArea scrollbars="horizontal" asChild>
-              <Box style={{ minWidth: "100%", position: "relative" }}>
-                <Box
-                  style={{
-                    background: "rgb(51, 51, 51)",
-                    minWidth: "min-content",
-                  }}
-                >
+            <Box className="scrollX">
+              <Box className={styles.diff_scroll_inner}>
+                <Box className={styles.diff_file_body}>
                   {diffsForFile.map((diff, i) => (
                     <Diff key={`${fullFilePath}-${index}-${i}`} diff={diff} />
                   ))}
                 </Box>
               </Box>
-            </ScrollArea>
+            </Box>
           </Box>
         );
       })}

@@ -7,12 +7,15 @@ import rehypeKatex from "rehype-katex";
 import { ShikiCodeBlock, type ShikiCodeBlockProps } from "./ShikiCodeBlock";
 import toolStyles from "./ToolMarkdown.module.css";
 import "katex/dist/katex.min.css";
+import classNames from "classnames";
 
 export type ToolMarkdownProps = Pick<
   React.ComponentProps<typeof ReactMarkdown>,
   "children" | "allowedElements" | "unwrapDisallowed"
 > &
-  Pick<ShikiCodeBlockProps, "color">;
+  Pick<ShikiCodeBlockProps, "color"> & {
+    variant?: "chat" | "tool" | "terminal";
+  };
 
 /**
  * ToolMarkdown - A specialized markdown renderer for tool outputs
@@ -28,6 +31,7 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
   allowedElements,
   unwrapDisallowed,
   color,
+  variant = "tool",
 }) => {
   const components: Partial<Components> = useMemo(() => {
     return {
@@ -132,7 +136,7 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
 
   return (
     <ReactMarkdown
-      className={toolStyles.root}
+      className={classNames(toolStyles.root, toolStyles[`variant_${variant}`])}
       remarkPlugins={[remarkBreaks, remarkMath, remarkGfm]}
       rehypePlugins={[rehypeKatex]}
       allowedElements={allowedElements}

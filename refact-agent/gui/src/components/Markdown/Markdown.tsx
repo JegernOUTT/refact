@@ -49,6 +49,7 @@ export type MarkdownProps = Pick<
   Pick<ShikiCodeBlockProps, "showLineNumbers" | "color" | "isStreaming"> & {
     canHaveInteractiveElements?: boolean;
     wrap?: boolean;
+    variant?: "chat" | "tool" | "terminal";
   } & Partial<MarkdownControls>;
 
 const STREAMING_SAFE_FENCE_LANGUAGE = "text";
@@ -140,6 +141,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
   color,
   showLineNumbers,
   wrap,
+  variant = "chat",
   onCopyClick,
   isStreaming,
 }) => {
@@ -292,7 +294,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
 
   return (
     <ReactMarkdown
-      className={styles.markdown}
+      className={classNames(styles.markdown, styles[`variant_${variant}`])}
       remarkPlugins={REMARK_PLUGINS}
       rehypePlugins={REHYPE_PLUGINS}
       urlTransform={transformMarkdownUrl}

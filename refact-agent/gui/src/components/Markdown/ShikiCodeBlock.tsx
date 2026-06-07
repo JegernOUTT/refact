@@ -143,7 +143,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
   }
 
   return (
-    <Box className={styles.shiki_wrapper}>
+    <Box className={classNames("scrollX", styles.shiki_wrapper)}>
       <PreTag
         className={classNames({
           [styles.pre_width_max_content]: preOptions.widthMaxContent,
