@@ -1,5 +1,6 @@
 import React from "react";
 import { Text } from "@radix-ui/themes";
+import { Badge, Surface } from "../../components/ui";
 import { BuddyOpportunityCard } from "./BuddyOpportunityCard";
 import { useBuddyOpportunities } from "./hooks/useBuddyOpportunities";
 import { useAppSelector } from "../../hooks";
@@ -15,15 +16,20 @@ export const BuddyOpportunitiesFeed: React.FC = () => {
   const itemCount = unread.length + activeSuggestions.length;
 
   return (
-    <div className={styles.feed} data-testid="buddy-opportunities-feed">
+    <Surface
+      className={styles.feed}
+      data-testid="buddy-opportunities-feed"
+      radius="card"
+      variant="surface-1"
+    >
       <div className={styles.header}>
         <Text size="1" weight="bold" color="gray" className={styles.label}>
           OPPORTUNITIES
         </Text>
         {itemCount > 0 && (
-          <Text size="1" color="gray" className={styles.count}>
+          <Badge className={styles.count} tone="muted">
             {itemCount}
-          </Text>
+          </Badge>
         )}
       </div>
       {itemCount === 0 ? (
@@ -53,6 +59,6 @@ export const BuddyOpportunitiesFeed: React.FC = () => {
           ))}
         </div>
       )}
-    </div>
+    </Surface>
   );
 };

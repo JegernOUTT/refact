@@ -1,5 +1,6 @@
 import React from "react";
-import { SegmentedControl, Text, Tooltip } from "@radix-ui/themes";
+import { Text, Tooltip } from "@radix-ui/themes";
+import { SegmentedControl, Surface } from "../../components/ui";
 import classNames from "classnames";
 import type { BuddyActivityEntry } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
@@ -26,9 +27,11 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
   );
 
   return (
-    <div
+    <Surface
       className={classNames(styles.panel, styles.panelScroll)}
       data-testid="buddy-activity-panel"
+      radius="card"
+      variant="surface-1"
     >
       <div className={styles.panelHeader}>
         <Text
@@ -40,15 +43,16 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
           ACTIVITY
         </Text>
       </div>
-      <SegmentedControl.Root
-        size="1"
+      <SegmentedControl
+        size="sm"
         value={filter}
         onValueChange={(value) => setFilter(value as ActivityFilter)}
-      >
-        <SegmentedControl.Item value="all">All</SegmentedControl.Item>
-        <SegmentedControl.Item value="refact_">refact_*</SegmentedControl.Item>
-        <SegmentedControl.Item value="buddy_">buddy_*</SegmentedControl.Item>
-      </SegmentedControl.Root>
+        options={[
+          { value: "all", label: "All" },
+          { value: "refact_", label: "refact_*" },
+          { value: "buddy_", label: "buddy_*" },
+        ]}
+      />
       <div className={styles.scrollList}>
         {filteredActivities.length === 0 && (
           <Text size="1" className={styles.emptyText}>
@@ -108,6 +112,6 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
           );
         })}
       </div>
-    </div>
+    </Surface>
   );
 };

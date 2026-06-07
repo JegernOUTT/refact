@@ -23,6 +23,7 @@ import { drawBuddyHomeDoor, drawWorldObjects } from "./buddyWorldDrawObjects";
 import {
   safeDimension,
   safeFrame,
+  type BuddyWorldTokenPalette,
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
 
@@ -30,6 +31,7 @@ export interface DrawBuddyWorldArgs {
   ctx: CanvasRenderingContext2D;
   world: BuddyWorldState;
   palette: Palette;
+  tokenPalette?: BuddyWorldTokenPalette;
   frame: number;
   width: number;
   height: number;

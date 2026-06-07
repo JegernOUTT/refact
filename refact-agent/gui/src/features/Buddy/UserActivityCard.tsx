@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
-import { Card, Flex, Spinner, Text } from "@radix-ui/themes";
+import { Flex, Spinner, Text } from "@radix-ui/themes";
+import { Card, Chip } from "../../components/ui";
 import {
   useGetUserActivityQuery,
   type UserActivityResponse,
@@ -99,9 +100,13 @@ export const UserActivityCard: React.FC<UserActivityCardProps> = ({
           ) : (
             <div className={styles.typeList}>
               {leaders.map((leader) => (
-                <span key={leader.type} className={styles.typeChip}>
+                <Chip
+                  key={leader.type}
+                  className={styles.typeChip}
+                  radius="chip"
+                >
                   {leader.type.replace(/_/g, " ")} · {leader.count}
-                </span>
+                </Chip>
               ))}
             </div>
           )}

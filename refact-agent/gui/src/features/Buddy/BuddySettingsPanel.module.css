@@ -1,11 +1,11 @@
 .panel {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  padding: var(--space-3);
+  background: var(--rf-surface-1);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  padding: var(--rf-space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
 }
 
 .label {
@@ -17,60 +17,60 @@
 .section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .settingText {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
 }
 
 .settingDescription {
   font-size: var(--font-size-1);
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   line-height: var(--line-height-1);
 }
 
 .radioGroup {
   display: flex;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   flex-wrap: wrap;
 }
 
 .radioBtn {
   padding: 2px 8px;
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
+  border-radius: var(--rf-radius-chip);
+  border: 1px solid var(--rf-border);
   background: transparent;
   cursor: pointer;
   font-size: 11px;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   transition: background 0.12s;
 }
 
 .radioBtn:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-2);
 }
 
 .radioBtnActive {
-  background: var(--accent-a3);
-  border-color: var(--accent-a6);
-  color: var(--accent-11);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
+  color: var(--rf-color-accent);
   font-weight: 600;
 }
 
 .observersGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-1) var(--space-2);
+  gap: var(--rf-space-1) var(--rf-space-2);
 }
 
 @media (max-width: 400px) {
@@ -82,7 +82,7 @@
 .toggleRow {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   font-size: 11px;
 }
 
@@ -99,8 +99,8 @@
 .digestInput {
   width: 56px;
   padding: 2px 6px;
-  border-radius: var(--radius-2);
-  border: 1px solid var(--gray-a4);
+  border-radius: var(--rf-radius-chip);
+  border: 1px solid var(--rf-border);
   background: transparent;
   color: inherit;
   font-size: var(--font-size-1);
@@ -108,25 +108,25 @@
 }
 
 .digestInput:focus {
-  outline: 1px solid var(--accent-a6);
+  outline: 1px solid var(--rf-color-accent);
 }
 
 .diagnosticsGrid {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--space-1) var(--space-2);
+  gap: var(--rf-space-1) var(--rf-space-2);
   align-items: baseline;
 }
 
 .pathValue {
   overflow-wrap: anywhere;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
   font-size: var(--font-size-1);
   line-height: var(--line-height-1);
 }
 
 .footer {
   display: flex;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   justify-content: flex-end;
 }

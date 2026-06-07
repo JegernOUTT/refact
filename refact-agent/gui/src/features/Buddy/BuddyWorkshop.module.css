@@ -4,9 +4,9 @@
 
 .workshop {
   display: flex;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border-top: 1px solid var(--gray-a4);
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-top: 1px solid var(--rf-border);
   flex-shrink: 0;
   background: transparent;
 }
@@ -17,21 +17,21 @@
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: var(--space-1) var(--space-1);
-  border-radius: var(--radius-2);
+  padding: var(--rf-space-1) var(--rf-space-1);
+  border-radius: var(--rf-radius-chip);
   border: none;
   background: transparent;
   cursor: pointer;
-  transition: background var(--motion-fast) ease;
+  transition: background var(--rf-dur-fast) ease;
   min-width: 0;
 }
 
 .navButton:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-2);
 }
 
 .navButton:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: 2px solid var(--rf-color-accent);
   outline-offset: 1px;
 }
 
@@ -39,10 +39,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .label {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   white-space: nowrap;
 }

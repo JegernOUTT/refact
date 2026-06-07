@@ -1,5 +1,6 @@
 import React from "react";
 import { Text, Spinner } from "@radix-ui/themes";
+import { Surface } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { selectPulse } from "./buddySlice";
 import styles from "./BuddyPulseCard.module.css";
@@ -9,19 +10,24 @@ export const BuddyPulseCard: React.FC = () => {
 
   if (!pulse) {
     return (
-      <div className={styles.card}>
+      <Surface className={styles.card} radius="card" variant="surface-1">
         <Text size="1" weight="bold" color="gray" className={styles.label}>
           PULSE
         </Text>
         <div className={styles.loading}>
           <Spinner size="1" />
         </div>
-      </div>
+      </Surface>
     );
   }
 
   return (
-    <div className={styles.card} data-testid="buddy-pulse-card">
+    <Surface
+      className={styles.card}
+      data-testid="buddy-pulse-card"
+      radius="card"
+      variant="surface-1"
+    >
       {pulse.humor && (
         <div className={styles.humor}>
           <Text size="1">{pulse.humor}</Text>
@@ -116,6 +122,6 @@ export const BuddyPulseCard: React.FC = () => {
           </Text>
         </div>
       </div>
-    </div>
+    </Surface>
   );
 };

@@ -1,8 +1,8 @@
 .card {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  padding: var(--space-2) var(--space-3);
+  background: var(--rf-surface-1);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  padding: var(--rf-space-2) var(--rf-space-3);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -19,24 +19,24 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
 }
 
 .humor {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   font-style: italic;
 }
 
 .rows {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
 }
 
 .row {
   display: flex;
   align-items: baseline;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   min-width: 0;
 }
 

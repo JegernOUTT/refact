@@ -1,35 +1,35 @@
 .card {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
+  background: var(--rf-surface-1);
+  border: 1px solid var(--rf-border);
 }
 
 .heatmap {
   display: grid;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   grid-template-columns: repeat(24, minmax(0, 1fr));
 }
 
 .cell {
   aspect-ratio: 1;
-  background: var(--gray-a3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-1);
+  background: var(--rf-surface-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
 }
 
 .cell[data-level="1"] {
-  background: var(--accent-a3);
+  background: var(--rf-color-accent-soft);
 }
 
 .cell[data-level="2"] {
-  background: var(--accent-a5);
+  background: var(--rf-border-strong);
 }
 
 .cell[data-level="3"] {
-  background: var(--accent-a7);
+  background: var(--rf-color-accent);
 }
 
 .cell[data-level="4"] {
-  background: var(--accent-a9);
+  background: var(--rf-color-accent);
 }
 
 .label {
@@ -39,20 +39,20 @@
 .typeList {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
 }
 
 .typeChip {
-  background: var(--gray-a3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-2);
-  color: var(--gray-12);
+  background: var(--rf-surface-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  color: var(--rf-color-fg);
   font-size: 11px;
-  padding: 2px var(--space-2);
+  padding: 2px var(--rf-space-2);
   text-transform: capitalize;
 }
 
 .caption {
-  border-top: 1px solid var(--gray-a4);
-  padding-top: var(--space-2);
+  border-top: 1px solid var(--rf-border);
+  padding-top: var(--rf-space-2);
 }

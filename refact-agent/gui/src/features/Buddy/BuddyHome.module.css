@@ -33,9 +33,9 @@
   gap: 4px;
   padding: 4px 10px;
   border-radius: 9999px;
-  border: 1px solid var(--gray-a4);
-  background: var(--gray-a2);
-  color: var(--gray-12);
+  border: 1px solid var(--rf-border);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
   font-size: 11px;
   font-family: inherit;
   line-height: 1.4;
@@ -48,12 +48,12 @@
 }
 
 .chip:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a6);
+  background: var(--rf-surface-2);
+  border-color: var(--rf-border-strong);
 }
 
 .chip:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: 2px solid var(--rf-color-accent);
   outline-offset: 1px;
 }
 
@@ -63,34 +63,34 @@
 }
 
 .chipPrimary {
-  background: var(--accent-a3);
-  border-color: var(--accent-a6);
-  color: var(--accent-11);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
+  color: var(--rf-color-accent);
   font-weight: 600;
 }
 
 .chipPrimary:hover {
-  background: var(--accent-a4);
-  border-color: var(--accent-a7);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
 }
 
 .chipGhost {
   background: transparent;
   border-color: transparent;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .chipGhost:hover {
-  background: var(--gray-a3);
-  border-color: var(--gray-a4);
+  background: var(--rf-surface-2);
+  border-color: var(--rf-border);
 }
 
 .topBar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-a4);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
   flex-shrink: 0;
   background: transparent;
 }
@@ -112,7 +112,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: var(--space-1) var(--space-3) var(--space-2);
+  padding: var(--rf-space-1) var(--rf-space-3) var(--rf-space-2);
   gap: 4px;
   flex-shrink: 0;
 }
@@ -141,8 +141,8 @@
 .stageBadge {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  padding: 2px var(--space-2);
+  gap: var(--rf-space-1);
+  padding: 2px var(--rf-space-2);
   border-radius: 9999px;
   font-size: 11px;
   font-weight: 600;
@@ -150,14 +150,14 @@
 
 .statusText {
   font-size: 12px;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   text-align: center;
   min-height: 16px;
 }
 
 .setupChips {
   display: flex;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   align-items: center;
   justify-content: center;
   flex-wrap: wrap;
@@ -165,7 +165,7 @@
 
 .careBar {
   display: flex;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -183,9 +183,9 @@
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  background: var(--gray-a3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-2);
+  background: var(--rf-surface-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
   font-size: 11px;
   max-width: 320px;
   width: 100%;
@@ -208,12 +208,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .progressBar {
   height: 3px;
-  background: var(--gray-a4);
+  background: var(--rf-border);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -221,7 +221,7 @@
 .progressBar > div {
   height: 100%;
   border-radius: 2px;
-  background: var(--accent-9);
+  background: var(--rf-color-accent);
   transition: width 0.3s ease;
 }
 
@@ -231,13 +231,13 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--space-3);
-  row-gap: var(--space-1);
-  padding: 6px var(--space-3);
-  margin: 0 var(--space-3) var(--space-2);
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
+  gap: var(--rf-space-3);
+  row-gap: var(--rf-space-1);
+  padding: 6px var(--rf-space-3);
+  margin: 0 var(--rf-space-3) var(--rf-space-2);
+  background: var(--rf-surface-1);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
   flex-shrink: 0;
 }
 
@@ -258,7 +258,7 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   width: 100%;
 }
 
@@ -267,14 +267,14 @@
 .statItemValueRow {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   width: 100%;
 }
 
 .statItemDivider {
   width: 1px;
   align-self: stretch;
-  background: var(--gray-a4);
+  background: var(--rf-border);
   flex-shrink: 0;
 }
 
@@ -287,8 +287,8 @@
 .row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
-  gap: var(--space-2);
-  padding: 0 var(--space-3) var(--space-2);
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-3) var(--rf-space-2);
   min-height: 0;
   min-width: 0;
 }
@@ -313,12 +313,12 @@
 }
 
 .settingsSection {
-  padding: 0 var(--space-3) var(--space-3);
+  padding: 0 var(--rf-space-3) var(--rf-space-3);
 }
 
 .disabledState {
   min-height: 220px;
-  padding: var(--space-5) var(--space-3);
+  padding: var(--rf-space-5) var(--rf-space-3);
 }
 
 /* Slim chip strip used for project-setup quick actions placed inline
@@ -327,7 +327,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 0 var(--space-3) var(--space-2);
+  padding: 0 var(--rf-space-3) var(--rf-space-2);
   align-items: center;
   flex-shrink: 0;
 }
@@ -336,17 +336,17 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 10px;
-  color: var(--gray-10);
-  margin-right: var(--space-1);
+  color: var(--rf-color-muted);
+  margin-right: var(--rf-space-1);
 }
 
 /* ---------- Shared panel (used by every card on the page) ---------- */
 
 .panel {
-  background: var(--gray-a2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  padding: var(--space-2) var(--space-3);
+  background: var(--rf-surface-1);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  padding: var(--rf-space-2) var(--rf-space-3);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -410,7 +410,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .panelTitleGroup {
@@ -433,7 +433,7 @@
 .personaGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
   align-items: start;
 }
 
@@ -457,7 +457,7 @@
 }
 
 .personaPanel {
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 /* ---------- Care loop card content ---------- */
@@ -483,19 +483,23 @@
   display: flex;
   justify-content: space-between;
   font-size: 11px;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .needBar {
   height: 6px;
-  background: var(--gray-a4);
+  background: var(--rf-border);
   border-radius: 9999px;
   overflow: hidden;
 }
 
 .needFill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
+  background: linear-gradient(
+    90deg,
+    var(--rf-color-accent),
+    var(--rf-color-accent)
+  );
   border-radius: 9999px;
   transition: width 0.4s ease;
 }
@@ -511,21 +515,21 @@
 }
 
 .questCard {
-  margin-top: var(--space-2);
+  margin-top: var(--rf-space-2);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--accent-a5);
-  border-radius: var(--radius-3);
-  background: linear-gradient(180deg, var(--accent-a2), transparent);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border: 1px solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-card);
+  background: linear-gradient(180deg, var(--rf-color-accent-soft), transparent);
 }
 
 .questHeader {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .questDescription {
@@ -536,26 +540,30 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .questProgressBar {
   height: 6px;
   border-radius: 9999px;
   overflow: hidden;
-  background: var(--gray-a4);
+  background: var(--rf-border);
 }
 
 .questProgressFill {
   height: 100%;
   border-radius: 9999px;
-  background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
+  background: linear-gradient(
+    90deg,
+    var(--rf-color-accent),
+    var(--rf-color-accent)
+  );
   transition: width 0.35s ease;
 }
 
 .questControls {
   display: flex;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   flex-wrap: wrap;
 }
 
@@ -582,7 +590,7 @@
   display: flex;
   justify-content: space-between;
   font-size: 11px;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .traitName {
@@ -609,13 +617,13 @@
   gap: 3px;
   padding: 2px 8px;
   border-radius: 9999px;
-  background: var(--gray-a3);
+  background: var(--rf-surface-2);
   font-size: 11px;
 }
 
 .settingsRow {
   display: flex;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   flex-wrap: wrap;
 }
 
@@ -627,15 +635,15 @@
   flex-wrap: wrap;
   gap: 6px;
   margin-top: auto;
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--gray-a3);
+  padding-top: var(--rf-space-2);
+  border-top: 1px solid var(--rf-surface-2);
 }
 
 /* ---------- XP bar (used in summary strip) ---------- */
 
 .xpBar {
   height: 6px;
-  background: var(--gray-a4);
+  background: var(--rf-border);
   border-radius: 3px;
   overflow: hidden;
   width: 100%;
@@ -644,7 +652,11 @@
 .xpFill {
   height: 100%;
   border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent-9), var(--accent-11));
+  background: linear-gradient(
+    90deg,
+    var(--rf-color-accent),
+    var(--rf-color-accent)
+  );
   transition: width 0.5s ease;
 }
 
@@ -678,9 +690,9 @@
 .listRow {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   padding: 6px 8px;
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-chip);
   min-width: 0;
   background: transparent;
   transition: background 0.12s;
@@ -698,7 +710,7 @@
 
 .listRow:hover,
 .listRow:focus-visible {
-  background: var(--gray-a3);
+  background: var(--rf-surface-2);
   outline: none;
 }
 
@@ -719,7 +731,7 @@
 
 .listTitle {
   font-size: 12px;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -728,7 +740,7 @@
 
 .listSubtitle {
   font-size: 10px;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -737,14 +749,14 @@
 .listMeta {
   flex-shrink: 0;
   font-size: 10px;
-  color: var(--gray-9);
+  color: var(--rf-color-muted);
   white-space: nowrap;
 }
 
 .emptyText {
-  color: var(--gray-9);
+  color: var(--rf-color-muted);
   font-size: 11px;
-  padding: var(--space-2) var(--space-1);
+  padding: var(--rf-space-2) var(--rf-space-1);
 }
 
 /* Recent errors panel — extends .listRow with per-card actions and a muted
@@ -752,7 +764,7 @@
  * fade out visually. */
 .errorRow {
   align-items: flex-start;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   padding: 8px;
   flex-wrap: wrap;
 }
@@ -763,20 +775,20 @@
 
 .errorRowAcknowledged .listTitle,
 .errorRowAcknowledged .listSubtitle {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .ackBadge {
   display: inline-block;
-  margin-left: var(--space-2);
+  margin-left: var(--rf-space-2);
   padding: 0 6px;
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--gray-11);
-  background: var(--gray-a3);
-  border-radius: var(--radius-2);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-2);
+  border-radius: var(--rf-radius-chip);
   vertical-align: 1px;
 }
 
@@ -785,26 +797,26 @@
  * accent palette so the eye lands on the multiplier first. */
 .countBadge {
   display: inline-block;
-  margin-left: var(--space-2);
+  margin-left: var(--rf-space-2);
   padding: 0 6px;
   font-size: 10px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  color: var(--accent-11);
-  background: var(--accent-a3);
-  border-radius: var(--radius-2);
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  border-radius: var(--rf-radius-chip);
   vertical-align: 1px;
 }
 
 .errorActions {
   display: flex;
   flex-shrink: 0;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   align-items: center;
 }
 
 .draftPanel {
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
 }
 
 .draftMeta {
@@ -817,12 +829,12 @@
 .draftContent {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   margin: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  background: var(--gray-a3);
-  color: var(--gray-12);
-  font-family: var(--font-mono);
+  padding: var(--rf-space-3);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -833,7 +845,7 @@
 
 .draftActions {
   display: flex;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   flex-wrap: wrap;
 }
 

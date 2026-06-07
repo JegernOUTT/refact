@@ -1,9 +1,9 @@
 .cloud {
   position: relative;
-  background: var(--gray-1, #0d0d18);
-  border: 2px solid var(--gray-6);
+  background: var(--rf-surface-overlay);
+  border: 2px solid var(--rf-border-strong);
   border-radius: 3px;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--rf-space-2) var(--rf-space-3);
   max-height: 160px;
   overflow-y: auto;
   width: 100%;
@@ -27,20 +27,20 @@
 .text {
   font-size: 12px;
   font-family: "Courier New", Courier, monospace;
-  color: var(--gray-12);
-  margin: 0 0 var(--space-2) 0;
+  color: var(--rf-color-fg);
+  margin: 0 0 var(--rf-space-2) 0;
   line-height: 1.5;
   font-weight: 600;
 }
 
 .intentBadge {
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--rf-space-1);
   text-transform: capitalize;
 }
 
 .controls {
   display: flex;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   flex-wrap: wrap;
   align-items: center;
 }
@@ -54,7 +54,7 @@
   height: 0;
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
-  border-top: 9px solid var(--gray-6);
+  border-top: 9px solid var(--rf-border-strong);
 }
 
 .cloudOverlay {
@@ -65,9 +65,9 @@
   max-width: min(280px, 92vw);
   width: max-content;
   z-index: 20;
-  padding: var(--space-2) var(--space-3);
-  background: var(--gray-1, #0d0d18);
-  border: 2px solid var(--accent-8, var(--gray-7));
+  padding: var(--rf-space-2) var(--rf-space-3);
+  background: var(--rf-surface-overlay);
+  border: 2px solid var(--rf-color-accent);
   border-radius: 3px;
   box-shadow:
     3px 3px 0 rgba(0, 0, 0, 0.6),
@@ -89,9 +89,9 @@
 .overlayText {
   font-size: 11px;
   font-family: "Courier New", Courier, monospace;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
   line-height: 1.5;
-  margin: 0 0 var(--space-2) 0;
+  margin: 0 0 var(--rf-space-2) 0;
   display: -webkit-box;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
@@ -108,7 +108,7 @@
   height: 0;
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
-  border-top: 9px solid var(--accent-8, var(--gray-7));
+  border-top: 9px solid var(--rf-color-accent);
 }
 
 .tailRight {
@@ -120,5 +120,5 @@
   height: 0;
   border-top: 8px solid transparent;
   border-bottom: 8px solid transparent;
-  border-left: 9px solid var(--gray-6);
+  border-left: 9px solid var(--rf-border-strong);
 }

@@ -1,5 +1,6 @@
 import React from "react";
 import { Text } from "@radix-ui/themes";
+import { Button, Surface } from "../../components/ui";
 import classNames from "classnames";
 import { SKILLS } from "./constants";
 import type {
@@ -50,7 +51,11 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
     className={classNames(styles.row, styles.rowSingle)}
     data-testid="buddy-personality-panel"
   >
-    <div className={classNames(styles.panel, styles.personaPanel)}>
+    <Surface
+      className={classNames(styles.panel, styles.personaPanel)}
+      radius="card"
+      variant="surface-1"
+    >
       <div className={styles.panelHeader}>
         <div className={styles.panelTitleGroup}>
           <Text
@@ -211,41 +216,38 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
 
           <div className={styles.questControls}>
             {activeQuest.controls.map((ctrl) => (
-              <button
+              <Button
                 key={ctrl.id}
                 type="button"
-                className={classNames(styles.chip, {
-                  [styles.chipPrimary]: ctrl.style === "primary",
-                })}
+                size="sm"
+                variant={ctrl.style === "primary" ? "primary" : "ghost"}
                 onClick={() => onQuestControl(ctrl)}
               >
                 {ctrl.label}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
       )}
 
       <div className={styles.actionRow}>
-        <button type="button" className={styles.chip} onClick={onReroll}>
+        <Button type="button" size="sm" variant="ghost" onClick={onReroll}>
           Reroll personality
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className={classNames(styles.chip, {
-            [styles.chipPrimary]: settings?.proactive_enabled,
-          })}
+          size="sm"
+          variant={settings?.proactive_enabled ? "primary" : "ghost"}
           onClick={onToggleProactive}
           disabled={isSavingSettings}
           aria-pressed={settings?.proactive_enabled}
         >
           Proactive {settings?.proactive_enabled ? "on" : "off"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className={classNames(styles.chip, {
-            [styles.chipPrimary]: !!settings?.personality_prompt,
-          })}
+          size="sm"
+          variant={settings?.personality_prompt ? "primary" : "ghost"}
           onClick={() =>
             onPromptChange(
               settings?.personality_prompt ? null : personality?.prompt ?? null,
@@ -255,8 +257,8 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
           aria-pressed={!!settings?.personality_prompt}
         >
           Pin current vibe
-        </button>
+        </Button>
       </div>
-    </div>
+    </Surface>
   </div>
 );

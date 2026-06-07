@@ -36,6 +36,8 @@ import {
 } from "./buddyShowcase";
 import { drawShowcaseEvent } from "./buddyShowcaseDraw";
 import { drawBuddyWorld } from "./buddyWorldDraw";
+import type { BuddyWorldTokenPalette } from "./buddyWorldDrawHelpers";
+import { useTokens } from "../../components/ui";
 import {
   chooseBuddyWorldIntent,
   type BuddyWorldIntent,
@@ -101,6 +103,22 @@ const RANDOM_POSES = [
   "bounce",
   "look",
 ] as const satisfies readonly BuddyScenePose[];
+
+const WORLD_TOKEN_NAMES = [
+  "--rf-color-accent",
+  "--rf-color-accent-soft",
+  "--rf-color-success",
+  "--rf-color-warning",
+  "--rf-color-danger",
+  "--rf-color-fg",
+  "--rf-color-muted",
+  "--rf-surface-1",
+  "--rf-surface-2",
+  "--rf-surface-3",
+  "--rf-surface-overlay",
+  "--rf-border",
+  "--rf-border-strong",
+] as const;
 
 type BuddyRandomPose = (typeof RANDOM_POSES)[number];
 
@@ -232,6 +250,50 @@ function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+function tokenValue(
+  tokens: Record<string, string>,
+  name: (typeof WORLD_TOKEN_NAMES)[number],
+  fallback: string,
+): string {
+  return tokens[name] || fallback;
+}
+
+function buildWorldTokenPalette(
+  tokens: Record<string, string>,
+): BuddyWorldTokenPalette {
+  return {
+    accent: tokenValue(tokens, "--rf-color-accent", "#6f8bff"),
+    accentSoft: tokenValue(
+      tokens,
+      "--rf-color-accent-soft",
+      "rgba(111, 139, 255, 0.16)",
+    ),
+    success: tokenValue(tokens, "--rf-color-success", "#5fae8b"),
+    warning: tokenValue(tokens, "--rf-color-warning", "#cda04e"),
+    danger: tokenValue(tokens, "--rf-color-danger", "#d8736d"),
+    foreground: tokenValue(tokens, "--rf-color-fg", "#f7f7fb"),
+    muted: tokenValue(tokens, "--rf-color-muted", "rgba(255, 255, 255, 0.54)"),
+    surface1: tokenValue(
+      tokens,
+      "--rf-surface-1",
+      "rgba(255, 255, 255, 0.035)",
+    ),
+    surface2: tokenValue(tokens, "--rf-surface-2", "rgba(255, 255, 255, 0.06)"),
+    surface3: tokenValue(tokens, "--rf-surface-3", "rgba(255, 255, 255, 0.09)"),
+    overlay: tokenValue(
+      tokens,
+      "--rf-surface-overlay",
+      "rgba(18, 20, 25, 0.82)",
+    ),
+    border: tokenValue(tokens, "--rf-border", "rgba(255, 255, 255, 0.08)"),
+    borderStrong: tokenValue(
+      tokens,
+      "--rf-border-strong",
+      "rgba(255, 255, 255, 0.14)",
+    ),
+  };
+}
+
 function resolveBuddyWorldSpeechOverride(args: {
   activeSpeechText: string | null;
   showcaseActive: boolean;
@@ -293,6 +355,11 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     RecentDirectorIntent[]
   >([]);
   const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
+  const tokenValues = useTokens([...WORLD_TOKEN_NAMES]);
+  const tokenPalette = useMemo(
+    () => buildWorldTokenPalette(tokenValues),
+    [tokenValues],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -425,6 +492,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     palette,
     reducedMotion,
     showcaseRun,
+    tokenPalette,
     world,
   });
 
@@ -434,9 +502,10 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       palette,
       reducedMotion,
       showcaseRun,
+      tokenPalette,
       world,
     };
-  }, [compact, palette, reducedMotion, showcaseRun, world]);
+  }, [compact, palette, reducedMotion, showcaseRun, tokenPalette, world]);
 
   useEffect(() => {
     setActiveWaypointIndex(0);
@@ -713,8 +782,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
       animationStartMsRef.current ??= timestampMs;
       const frame = ((timestampMs - animationStartMsRef.current) / 1000) * 24;
-      const { compact, palette, reducedMotion, showcaseRun, world } =
-        renderStateRef.current;
+      const {
+        compact,
+        palette,
+        reducedMotion,
+        showcaseRun,
+        tokenPalette,
+        world,
+      } = renderStateRef.current;
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       if (canvas && ctx) {
@@ -736,6 +811,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
           ctx,
           world,
           palette,
+          tokenPalette,
           frame,
           width: cssWidth,
           height: cssHeight,

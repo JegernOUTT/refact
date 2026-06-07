@@ -18,15 +18,15 @@
 }
 
 .filterTab[data-active] {
-  background: var(--accent-a3);
-  border-color: var(--accent-a6);
-  color: var(--accent-11);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
+  color: var(--rf-color-accent);
   font-weight: 600;
 }
 
 .filterTab[data-active]:hover {
-  background: var(--accent-a4);
-  border-color: var(--accent-a7);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
 }
 
 /* Header chips: + New Chat, View All — same pill shape as everything
@@ -42,9 +42,9 @@
 .entryRow {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-2);
-  border-radius: var(--radius-2);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-2);
+  border-radius: var(--rf-radius-chip);
   border: none;
   background: transparent;
   width: 100%;
@@ -58,7 +58,7 @@
 }
 
 .entryRow[data-clickable]:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-2);
 }
 
 .entryIcon {
@@ -83,9 +83,9 @@
   display: inline-flex;
   align-items: center;
   padding: 1px 5px;
-  border-radius: var(--radius-1);
-  background: var(--accent-a3);
-  color: var(--accent-11);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
   font-size: 10px;
   font-weight: 500;
   flex-shrink: 0;
@@ -97,9 +97,9 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
-  padding: var(--space-4) var(--space-2);
-  color: var(--gray-9);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-4) var(--rf-space-2);
+  color: var(--rf-color-muted);
 }
 
 /* Scrollable entries area inside a panel. Header + filter row stay
@@ -116,7 +116,7 @@
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 @media (max-width: 520px) {

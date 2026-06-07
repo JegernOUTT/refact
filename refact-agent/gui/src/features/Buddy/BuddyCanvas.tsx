@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import { Badge } from "@radix-ui/themes";
+import { useTokens } from "../../components/ui";
 import { createInitialAnimState } from "./state";
 import { renderFrame } from "./canvas/render";
 import {
@@ -78,8 +79,12 @@ const BUBBLE_STYLES: Record<
   },
 };
 
-const BUBBLE_FILL = "rgba(244, 250, 255, 0.9)";
-const BUBBLE_TEXT = "#102033";
+const BUBBLE_TOKEN_NAMES = [
+  "--rf-surface-overlay",
+  "--rf-color-fg",
+  "--rf-surface-2",
+  "--rf-border-strong",
+] as const;
 
 const BUBBLE_POSITIONS: BubblePosition[] = ["top", "left", "right"];
 
@@ -123,13 +128,14 @@ type BubbleStyle = React.CSSProperties & { "--buddy-walk-x"?: string };
 function innerTailStyle(
   position: BubblePosition,
   compact: boolean,
+  bubbleFill: string,
 ): React.CSSProperties {
   const sideTransparent = compact
     ? "8px solid transparent"
     : "10px solid transparent";
   const sideFill = compact
-    ? `10px solid ${BUBBLE_FILL}`
-    : `14px solid ${BUBBLE_FILL}`;
+    ? `10px solid ${bubbleFill}`
+    : `14px solid ${bubbleFill}`;
 
   if (position === "left") {
     return {
@@ -160,8 +166,8 @@ function innerTailStyle(
     borderLeft: compact ? "8px solid transparent" : "11px solid transparent",
     borderRight: compact ? "8px solid transparent" : "11px solid transparent",
     borderTop: compact
-      ? `10px solid ${BUBBLE_FILL}`
-      : `14px solid ${BUBBLE_FILL}`,
+      ? `10px solid ${bubbleFill}`
+      : `14px solid ${bubbleFill}`,
   };
 }
 
@@ -199,6 +205,14 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   const bubblePositionRef = useRef<BubblePosition>(bubblePosition);
   const speechOverrideRef = useRef<string | null | undefined>(speechOverride);
   const speechControlCount = speechControls?.length ?? 0;
+  const bubbleTokens = useTokens([...BUBBLE_TOKEN_NAMES]);
+  const bubbleFill =
+    bubbleTokens["--rf-surface-overlay"] || "rgba(18, 20, 25, 0.82)";
+  const bubbleText = bubbleTokens["--rf-color-fg"] || "#f7f7fb";
+  const bubbleSoft =
+    bubbleTokens["--rf-surface-2"] || "rgba(255, 255, 255, 0.06)";
+  const bubbleShadow =
+    bubbleTokens["--rf-border-strong"] || "rgba(255, 255, 255, 0.14)";
 
   useEffect(() => {
     speechOverrideRef.current = speechOverride;
@@ -520,7 +534,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
             ...pos.container,
             ...compactSideContainer,
             "--buddy-walk-x": `${bubbleView.walkOffsetPx}px`,
-            background: BUBBLE_FILL,
+            background: bubbleFill,
             border: `3px solid ${palette.body}`,
             borderRadius: "8px",
             padding: "6px 10px",
@@ -536,8 +550,8 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
             overflowWrap: "break-word",
             overflow: "visible",
             pointerEvents: speechControlCount > 0 ? "auto" : "none",
-            color: BUBBLE_TEXT,
-            boxShadow: `4px 4px 0 rgba(0, 0, 0, 0.34), 0 0 0 1px ${palette.dark}`,
+            color: bubbleText,
+            boxShadow: `4px 4px 0 ${bubbleShadow}, 0 0 0 1px ${palette.dark}`,
             zIndex: 5,
             visibility: bubbleView.visible ? "visible" : "hidden",
             opacity: bubbleView.opacity,
@@ -569,13 +583,11 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
                       }}
                       style={{
                         background:
-                          ctrl.style === "primary"
-                            ? palette.body
-                            : "rgba(16, 32, 51, 0.06)",
+                          ctrl.style === "primary" ? palette.body : bubbleSoft,
                         border: `2px solid ${palette.body}`,
                         borderRadius: "8px",
                         color:
-                          ctrl.style === "primary" ? "#0d0d16" : BUBBLE_TEXT,
+                          ctrl.style === "primary" ? bubbleText : bubbleText,
                         fontFamily:
                           "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
                         fontWeight: 700,
@@ -597,7 +609,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
                   height: 0,
                   ...pos.tail,
                   ...tailColor,
-                  filter: `drop-shadow(3px 3px 0 rgba(0, 0, 0, 0.32))`,
+                  filter: `drop-shadow(3px 3px 0 ${bubbleShadow})`,
                   zIndex: 1,
                 }}
               />
@@ -606,7 +618,11 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
                   position: "absolute",
                   width: 0,
                   height: 0,
-                  ...innerTailStyle(bubbleView.position, compactBubble),
+                  ...innerTailStyle(
+                    bubbleView.position,
+                    compactBubble,
+                    bubbleFill,
+                  ),
                   zIndex: 2,
                 }}
               />

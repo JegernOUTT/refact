@@ -1,5 +1,6 @@
 import React from "react";
 import { Text, Tooltip } from "@radix-ui/themes";
+import { Button, Surface } from "../../components/ui";
 import classNames from "classnames";
 import type { BuddyRuntimeEvent } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
@@ -23,9 +24,11 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
   onInvestigate,
   onDismiss,
 }) => (
-  <div
+  <Surface
     className={classNames(styles.panel, styles.panelScroll)}
     data-testid="buddy-recent-errors-panel"
+    radius="card"
+    variant="surface-1"
   >
     <div className={styles.panelHeader}>
       <Text size="1" weight="bold" color="gray" className={styles.sectionLabel}>
@@ -80,23 +83,25 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
             </div>
             <div className={styles.errorActions}>
               <Tooltip content="Open a companion investigation and sniff the log crumbs">
-                <button
+                <Button
                   type="button"
-                  className={classNames(styles.chip, styles.chipPrimary)}
+                  size="sm"
+                  variant="primary"
                   onClick={() => void onInvestigate(e)}
                 >
                   Sniff logs
-                </button>
+                </Button>
               </Tooltip>
               {!acknowledged && (
                 <Tooltip content="Mark this gremlin as handled">
-                  <button
+                  <Button
                     type="button"
-                    className={classNames(styles.chip, styles.chipGhost)}
+                    size="sm"
+                    variant="ghost"
                     onClick={() => void onDismiss(e)}
                   >
                     Shoo
-                  </button>
+                  </Button>
                 </Tooltip>
               )}
             </div>
@@ -107,5 +112,5 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
         );
       })}
     </div>
-  </div>
+  </Surface>
 );

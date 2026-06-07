@@ -5,6 +5,24 @@ import type {
 } from "./buddyWorldModel";
 import type { Palette } from "./types";
 
+export interface BuddyWorldTokenPalette {
+  accent: string;
+  accentSoft: string;
+  success: string;
+  warning: string;
+  danger: string;
+  foreground: string;
+  muted: string;
+  surface1: string;
+  surface2: string;
+  surface3: string;
+  overlay: string;
+  border: string;
+  borderStrong: string;
+}
+
+export type BuddyWorldTokenName = keyof BuddyWorldTokenPalette;
+
 export const TAU = Math.PI * 2;
 export const BUDDY_WORLD_HOME_HOTSPOT = { x: 8.5, y: 67 } as const;
 
@@ -19,11 +37,34 @@ export interface DrawBuddyWorldBaseArgs {
   ctx: CanvasRenderingContext2D;
   world: BuddyWorldState;
   palette: Palette;
+  tokenPalette?: BuddyWorldTokenPalette;
   frame: number;
   width: number;
   height: number;
   compact: boolean;
   reducedMotion: boolean;
+}
+
+const FALLBACK_TOKEN_PALETTE: BuddyWorldTokenPalette = {
+  accent: "#60A5FA",
+  accentSoft: "rgba(96, 165, 250, 0.16)",
+  success: "#22C55E",
+  warning: "#F59E0B",
+  danger: "#EF4444",
+  foreground: "#FFFFFF",
+  muted: "rgba(255, 255, 255, 0.62)",
+  surface1: "rgba(255, 255, 255, 0.04)",
+  surface2: "rgba(255, 255, 255, 0.06)",
+  surface3: "rgba(255, 255, 255, 0.09)",
+  overlay: "rgba(18, 20, 25, 0.82)",
+  border: "rgba(255, 255, 255, 0.08)",
+  borderStrong: "rgba(255, 255, 255, 0.14)",
+};
+
+export function worldTokenPalette(
+  args: Pick<DrawBuddyWorldBaseArgs, "tokenPalette">,
+): BuddyWorldTokenPalette {
+  return args.tokenPalette ?? FALLBACK_TOKEN_PALETTE;
 }
 
 export function finiteOrZero(value: number): number {
@@ -124,17 +165,20 @@ export function alphaForMotion(alpha: number, reducedMotion: boolean): number {
   return clampAlpha(reducedMotion ? alpha * 0.62 : alpha);
 }
 
-export function toneColor(tone: BuddyWorldTone | undefined): string {
+export function toneColor(
+  tone: BuddyWorldTone | undefined,
+  tokens?: BuddyWorldTokenPalette,
+): string {
   switch (tone) {
     case "good":
-      return "#22C55E";
+      return tokens?.success ?? "#22C55E";
     case "warning":
-      return "#F59E0B";
+      return tokens?.warning ?? "#F59E0B";
     case "danger":
-      return "#EF4444";
+      return tokens?.danger ?? "#EF4444";
     case "neutral":
     default:
-      return "#60A5FA";
+      return tokens?.accent ?? "#60A5FA";
   }
 }
 

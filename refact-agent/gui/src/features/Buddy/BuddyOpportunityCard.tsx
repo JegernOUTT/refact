@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
 import { Text } from "@radix-ui/themes";
+import { Badge, Button, Surface } from "../../components/ui";
 import classNames from "classnames";
 import type { BuddyOpportunity } from "./types";
 import {
@@ -48,14 +49,15 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
   };
 
   return (
-    <div className={styles.card}>
+    <Surface className={styles.card} radius="control" variant="plain">
       <div className={styles.header}>
-        <span
+        <Badge
           className={classNames(styles.priorityBadge, priorityClass)}
           aria-label={`Priority: ${opportunity.priority}`}
+          tone="muted"
         >
           {opportunity.priority}
-        </span>
+        </Badge>
         <Text size="2" className={styles.summary}>
           {opportunity.summary}
         </Text>
@@ -68,22 +70,20 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
       {opportunity.proposed_actions.length > 0 && (
         <div className={styles.actions}>
           {opportunity.proposed_actions.map((action, idx) => (
-            <button
+            <Button
               key={idx}
+              size="sm"
               type="button"
-              className={classNames(
-                styles.actionButton,
-                action.kind === "dismiss"
-                  ? styles.actionButtonGhost
-                  : styles.actionButtonPrimary,
-              )}
+              variant={action.kind === "dismiss" ? "ghost" : "primary"}
+              className={styles.actionButton}
               disabled={!isActive || pendingActionIndex !== null}
               aria-label={actionLabel(action)}
               aria-busy={pendingActionIndex === idx}
+              loading={pendingActionIndex === idx}
               onClick={() => void handleActionClick(idx)}
             >
               {pendingActionIndex === idx ? "Working…" : actionLabel(action)}
-            </button>
+            </Button>
           ))}
         </div>
       )}
@@ -92,6 +92,6 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
           {actionError}
         </Text>
       )}
-    </div>
+    </Surface>
   );
 };

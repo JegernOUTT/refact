@@ -392,7 +392,7 @@ export function drawWorldObject(
 ): void {
   const x = pctX(args.width, item.x);
   const y = pctY(args.height, item.y);
-  const tone = toneColor(item.tone);
+  const tone = toneColor(item.tone, args.tokenPalette);
   const pulse = objectPulse(args, item);
   const scale = Math.max(0.1, finiteOr(item.depthScale, 1));
   const size = Math.max(1, finiteOr(item.size, 12) * scale);

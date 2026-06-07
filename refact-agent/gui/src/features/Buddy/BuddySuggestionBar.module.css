@@ -1,17 +1,17 @@
 .bar {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .card {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  background: var(--gray-a2);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  background: var(--rf-surface-1);
   border: 1px solid;
-  border-radius: var(--radius-3);
+  border-radius: var(--rf-radius-card);
 }
 
 .canvasWrap {
@@ -22,7 +22,7 @@
   flex: 1;
   min-width: 0;
   border-left: 2px solid;
-  padding-left: var(--space-2);
+  padding-left: var(--rf-space-2);
 }
 
 .title {
