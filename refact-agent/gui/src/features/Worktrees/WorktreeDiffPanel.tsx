@@ -1,6 +1,6 @@
 import React from "react";
 import { skipToken } from "@reduxjs/toolkit/query";
-import { Badge, Button, Dialog, Flex, Spinner, Text } from "@radix-ui/themes";
+import { Button, Dialog, Badge } from "../../components/ui";
 import {
   useGetWorktreeDiffQuery,
   type WorktreeMeta,
@@ -39,13 +39,13 @@ function statusLabel(status?: WorktreeStatus | null): string {
   return "clean";
 }
 
-function statusColor(
+function statusTone(
   status?: WorktreeStatus | null,
-): "green" | "amber" | "red" | "gray" {
-  if (!status) return "gray";
-  if ((status.deleted ?? false) || !status.path_exists) return "red";
-  if ((status.conflicted ?? false) || status.dirty) return "amber";
-  return "green";
+): React.ComponentProps<typeof Badge>["tone"] {
+  if (!status) return "muted";
+  if ((status.deleted ?? false) || !status.path_exists) return "danger";
+  if ((status.conflicted ?? false) || status.dirty) return "warning";
+  return "success";
 }
 
 function statsText(stats: {
@@ -128,127 +128,92 @@ export const WorktreeDiffPanel: React.FC<WorktreeDiffPanelProps> = ({
   const status = data?.status ?? record?.status ?? worktree?.status;
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content
-        className={styles.diffDialog}
-        {...(closeOnNonInteractiveContentClick
-          ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
-          : {})}
-      >
-        <Dialog.Title>Worktree diff</Dialog.Title>
-        <Dialog.Description size="2" color="gray">
-          Review changes for {label}
-        </Dialog.Description>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className={styles.diffDialog} maxWidth="900px">
+        <div
+          {...(closeOnNonInteractiveContentClick
+            ? dialogNonInteractiveCloseHandlers(() => onOpenChange(false))
+            : {})}
+        >
+          <Dialog.Title>Worktree diff</Dialog.Title>
+          <Dialog.Description>Review changes for {label}</Dialog.Description>
 
-        <Flex direction="column" gap="3" mt="3">
-          <Flex gap="2" wrap="wrap" align="center">
-            <Badge color={statusColor(status)} variant="soft">
-              {statusLabel(status)}
-            </Badge>
-            {data?.branch && (
-              <Badge color="gray" variant="soft">
-                {data.branch}
-              </Badge>
-            )}
-            {data?.base_branch && (
-              <Badge color="gray" variant="soft">
-                target {data.base_branch}
-              </Badge>
-            )}
-          </Flex>
-
-          {isFetching && (
-            <Flex align="center" gap="2">
-              <Spinner size="1" />
-              <Text size="2" color="gray">
-                Loading worktree diff...
-              </Text>
-            </Flex>
-          )}
-
-          {error && (
-            <Flex direction="column" gap="2" className={styles.warningBox}>
-              <Text size="2" color="red">
-                Could not load worktree diff.
-              </Text>
-              <Text size="1" color="gray">
-                {worktreeErrorText(error)}
-              </Text>
-              <Button
-                type="button"
-                size="1"
-                variant="soft"
-                onClick={() => void refetch()}
-              >
-                Retry
-              </Button>
-            </Flex>
-          )}
-
-          {data && (
-            <>
-              <Text size="2" color="gray">
-                {statsText(data.stats)}
-              </Text>
-
-              {data.patch_truncated && (
-                <Text size="2" color="amber" className={styles.warningBox}>
-                  Patch preview was truncated by the backend.
-                </Text>
+          <div className={styles.modalFields}>
+            <div className={styles.badgeRow}>
+              <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
+              {data?.branch && <Badge tone="muted">{data.branch}</Badge>}
+              {data?.base_branch && (
+                <Badge tone="muted">target {data.base_branch}</Badge>
               )}
+            </div>
 
-              <div className={styles.diffFileList}>
-                {data.files.length === 0 ? (
-                  <Text size="2" color="gray">
-                    No changed files reported.
-                  </Text>
-                ) : (
-                  data.files.map((file) => (
-                    <Flex
-                      key={`${file.source}-${file.path}`}
-                      justify="between"
-                      align="center"
-                      gap="2"
-                      className={styles.diffFileItem}
-                    >
-                      <Flex
-                        direction="column"
-                        gap="1"
-                        className={styles.itemTitle}
-                      >
-                        <Text size="2" weight="medium">
-                          {file.path}
-                        </Text>
-                        <Text size="1" color="gray">
-                          {file.source} · {file.status}
-                        </Text>
-                      </Flex>
-                      {fileDelta(file.additions, file.deletions) && (
-                        <Text size="1" color="gray">
-                          {fileDelta(file.additions, file.deletions)}
-                        </Text>
-                      )}
-                    </Flex>
-                  ))
+            {isFetching && (
+              <div className={styles.loadingRow}>
+                <span className={styles.spinner} aria-hidden="true" />
+                <span className={styles.helpText}>Loading worktree diff...</span>
+              </div>
+            )}
+
+            {error && (
+              <div className={styles.errorBox}>
+                <span className={styles.errorTitle}>Could not load worktree diff.</span>
+                <span className={styles.metaText}>{worktreeErrorText(error)}</span>
+                <Button size="sm" variant="soft" onClick={() => void refetch()}>
+                  Retry
+                </Button>
+              </div>
+            )}
+
+            {data && (
+              <>
+                <p className={styles.metaText}>{statsText(data.stats)}</p>
+
+                {data.patch_truncated && (
+                  <p className={styles.warningBox}>
+                    Patch preview was truncated by the backend.
+                  </p>
                 )}
-              </div>
 
-              <div className={styles.patchScroller}>
-                <RichPatchPreview patch={data.patch} />
-              </div>
-            </>
-          )}
-        </Flex>
+                <div className={styles.diffFileList}>
+                  {data.files.length === 0 ? (
+                    <span className={styles.emptyText}>No changed files reported.</span>
+                  ) : (
+                    data.files.map((file) => (
+                      <div
+                        key={`${file.source}-${file.path}`}
+                        className={styles.diffFileItem}
+                      >
+                        <span className={styles.itemTitle}>
+                          <span className={styles.itemName}>{file.path}</span>
+                          <span className={styles.metaText}>
+                            {file.source} · {file.status}
+                          </span>
+                        </span>
+                        {fileDelta(file.additions, file.deletions) && (
+                          <span className={styles.metaText}>
+                            {fileDelta(file.additions, file.deletions)}
+                          </span>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
 
-        <Flex className={styles.modalActions}>
-          <Dialog.Close>
-            <Button type="button" variant="soft" color="gray">
-              Close
-            </Button>
-          </Dialog.Close>
-        </Flex>
+                <div className={`${styles.patchScroller} scrollX`}>
+                  <RichPatchPreview patch={data.patch} />
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className={styles.modalActions}>
+            <Dialog.Close asChild>
+              <Button variant="soft">Close</Button>
+            </Dialog.Close>
+          </div>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 
