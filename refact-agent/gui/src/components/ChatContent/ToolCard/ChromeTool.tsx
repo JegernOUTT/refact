@@ -7,7 +7,6 @@ import { useAppSelector } from "../../../hooks";
 import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
 import { ToolCall } from "../../../services/refact/types";
 import type {
-  BrowserActionRequest,
   BrowserActionResponse,
   BrowserExecutionStep,
 } from "../../../services/refact/browser";
@@ -17,7 +16,10 @@ import styles from "./ChromeTool.module.css";
 
 interface ChromeArgs {
   commands?: string;
-  request?: Omit<BrowserActionRequest, "chat_id">;
+  request?: {
+    steps: Record<string, unknown>[];
+    [key: string]: unknown;
+  };
 }
 
 interface CommandStats {
@@ -93,6 +95,26 @@ interface ChromeToolProps {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function parseChromeArgs(value: string): ChromeArgs {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isRecord(parsed)) return {};
+
+    const commands =
+      typeof parsed.commands === "string" ? parsed.commands : undefined;
+    const request =
+      isRecord(parsed.request) && Array.isArray(parsed.request.steps)
+        ? {
+            ...parsed.request,
+            steps: parsed.request.steps.filter(isRecord),
+          }
+        : undefined;
+
+    return { commands, request };
+  } catch {
+    return {};
+  }
+}
 
 function isBrowserActionResponse(
   value: unknown,
@@ -158,13 +180,10 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     selectToolResultById(state, toolCall.id),
   );
 
-  const args = useMemo((): ChromeArgs => {
-    try {
-      return JSON.parse(toolCall.function.arguments) as ChromeArgs;
-    } catch {
-      return {};
-    }
-  }, [toolCall.function.arguments]);
+  const args = useMemo(
+    (): ChromeArgs => parseChromeArgs(toolCall.function.arguments),
+    [toolCall.function.arguments],
+  );
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult) return "running";
@@ -192,13 +211,24 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
     }
 
     const textParts = content
-      .filter((item) => item.m_type === "text")
+      .filter(
+        (item) =>
+          isRecord(item) &&
+          item.m_type === "text" &&
+          typeof item.m_content === "string",
+      )
       .map((item) => item.m_content)
       .join("\n")
       .trim();
 
     const imageParts = content
-      .filter((item) => item.m_type.startsWith("image/"))
+      .filter(
+        (item) =>
+          isRecord(item) &&
+          typeof item.m_type === "string" &&
+          item.m_type.startsWith("image/") &&
+          typeof item.m_content === "string",
+      )
       .map((item) => `data:${item.m_type};base64,${item.m_content}`);
 
     return { textLog: textParts || null, images: imageParts };

@@ -2,14 +2,91 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100%;
+  min-height: 100%;
   padding: var(--space-4);
 }
 
 .card {
   display: flex;
   flex-direction: column;
+  gap: var(--space-4);
+  width: min(100%, 42rem);
+  max-width: 42rem;
+  padding: var(--space-5);
+  border: 1px solid var(--gray-a6);
+  border-radius: var(--radius-5);
+  background: var(--color-panel-solid);
+  box-shadow: var(--shadow-5);
+}
+
+.reportPanel {
+  padding: var(--space-3);
+  border: 1px solid var(--gray-a5);
+  border-radius: var(--radius-4);
+  background: var(--gray-a2);
+}
+
+.valueText {
+  min-width: 0;
+  flex: 1;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--gray-a6);
+  border-radius: var(--radius-3);
+  background: var(--gray-a2);
+}
+
+.monoText {
+  display: block;
+  overflow: hidden;
+  font-family: var(--font-family-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copyButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  flex-shrink: 0;
+  border: 0;
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--gray-11);
+  cursor: pointer;
+}
+
+.copyButton:hover:not(:disabled) {
+  background: var(--gray-a3);
+  color: var(--gray-12);
+}
+
+.copyButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.copyAllButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: var(--space-2);
-  max-width: 32rem;
-  text-align: center;
+  width: 100%;
+  min-height: var(--space-7);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--gray-a6);
+  border-radius: var(--radius-3);
+  background: transparent;
+  color: var(--gray-12);
+  cursor: pointer;
+}
+
+.copyAllButton:hover:not(:disabled) {
+  background: var(--gray-a3);
+}
+
+.copyAllButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }

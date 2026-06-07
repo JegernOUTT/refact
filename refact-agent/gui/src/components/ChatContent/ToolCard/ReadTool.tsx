@@ -8,10 +8,11 @@ import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
 import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
+import { normalizeReadPaths, type ReadToolArgs } from "./readToolPaths";
 import styles from "./ReadTool.module.css";
 
-interface ReadToolArgs {
-  paths?: string;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function basename(path: string): string {
@@ -38,20 +39,14 @@ export const ReadTool: React.FC<ReadToolProps> = ({
 
   const args = useMemo<ReadToolArgs>(() => {
     try {
-      return JSON.parse(toolCall.function.arguments) as ReadToolArgs;
+      const parsed = JSON.parse(toolCall.function.arguments) as unknown;
+      return isRecord(parsed) ? parsed : {};
     } catch {
       return {};
     }
   }, [toolCall.function.arguments]);
 
-  const paths = useMemo(() => {
-    return (
-      args.paths
-        ?.split(",")
-        .map((p) => p.trim())
-        .filter(Boolean) ?? []
-    );
-  }, [args.paths]);
+  const paths = useMemo(() => normalizeReadPaths(args), [args]);
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult) return "running";
@@ -97,7 +92,7 @@ export const ReadTool: React.FC<ReadToolProps> = ({
       <>
         Read{" "}
         {paths.map((p, i) => (
-          <React.Fragment key={p}>
+          <React.Fragment key={`${p}:${i}`}>
             {i > 0 && ", "}
             <span
               className={styles.filename}

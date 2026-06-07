@@ -392,6 +392,23 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
     [backgroundAgents, currentThread?.id, currentThread?.link_type, dispatch],
   );
 
+  const pageWrapperStyle = useMemo<React.CSSProperties | undefined>(() => {
+    if (renderedPage.name === "history") {
+      return {
+        paddingTop: 0,
+        paddingRight: 0,
+        paddingBottom: 0,
+        paddingLeft: 0,
+      };
+    }
+
+    if (renderedPage.name === "integrations page") {
+      return { paddingRight: 0 };
+    }
+
+    return undefined;
+  }, [renderedPage.name]);
+
   const activeTab: Tab | undefined = useMemo(() => {
     if (desiredPage.name === "chat") {
       return {
@@ -491,14 +508,7 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
       ) : (
         <>
           {activeTab && <Toolbar activeTab={activeTab} />}
-          <PageWrapper
-            host={config.host}
-            style={{
-              padding: renderedPage.name === "history" ? 0 : undefined,
-              paddingRight:
-                renderedPage.name === "integrations page" ? 0 : undefined,
-            }}
-          >
+          <PageWrapper host={config.host} style={pageWrapperStyle}>
             {renderedPage.name === "login page" && <LoginPage />}
             {pageSwitching && <ChatLoading />}
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}
@@ -638,7 +648,7 @@ export const App = () => {
       <Provider store={store}>
         <Theme>
           <AbortControllerProvider>
-            <BuddyErrorBoundary>
+            <BuddyErrorBoundary showThreadReportPanel>
               <InnerApp />
             </BuddyErrorBoundary>
           </AbortControllerProvider>

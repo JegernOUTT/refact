@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import React from "react";
 import { http, HttpResponse } from "msw";
-import { fireEvent, render, screen, waitFor } from "../utils/test-utils";
+import {
+  createDefaultChatState,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "../utils/test-utils";
 import {
   executeBuddyAction,
   executeBuddyNavigation,
@@ -6058,5 +6064,58 @@ describe("installBuddyErrorReporter and BuddyErrorBoundary integration", () => {
       expect.objectContaining({ source: "react_error_boundary" }),
     );
     spy.mockRestore();
+  });
+
+  test("BuddyErrorBoundary_renders_thread_report_panel", async () => {
+    const threadId = "crashed-thread";
+    server.use(
+      http.get("*/v1/trajectories/:id/path", () =>
+        HttpResponse.json({ path: `/tmp/${threadId}.json` }),
+      ),
+    );
+
+    const state = createDefaultChatState();
+    state.current_thread_id = threadId;
+    const runtime = Object.values(state.threads)[0];
+    runtime.thread.id = threadId;
+    runtime.thread.messages = [
+      {
+        role: "user",
+        content: "hello",
+      },
+    ];
+    state.threads = { [threadId]: runtime };
+
+    const CrashingChild = () => {
+      throw new Error("render crash");
+    };
+
+    render(
+      React.createElement(
+        BuddyErrorBoundary,
+        { showThreadReportPanel: true },
+        React.createElement(CrashingChild),
+      ),
+      {
+        preloadedState: {
+          chat: state,
+        },
+      },
+    );
+
+    expect(
+      await screen.findByText("The chat frontend crashed."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(threadId)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /open github issue/i }),
+    ).toHaveAttribute(
+      "href",
+      expect.stringContaining(
+        "https://github.com/JegernOUTT/refact/issues/new",
+      ),
+    );
+    expect(screen.getByTestId("copy-crash-thread-json")).toBeInTheDocument();
   });
 });

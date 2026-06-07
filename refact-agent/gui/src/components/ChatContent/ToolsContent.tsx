@@ -46,6 +46,7 @@ import {
   RowsIcon,
 } from "@radix-ui/react-icons";
 import { AnimatedText } from "../Text";
+import { toolCallArgsToString } from "./toolCallArgs";
 import {
   ReadTool,
   ListTool,
@@ -151,22 +152,6 @@ function parseProgressEntry(entry: string): { step?: string; text: string } {
   if (!m) return { text: entry };
   const [, step, text] = m;
   return { step, text };
-}
-
-function toolCallArgsToString(toolCallArgs: string) {
-  try {
-    const json = JSON.parse(toolCallArgs) as unknown as Parameters<
-      typeof Object.entries
-    >;
-    if (Array.isArray(json)) {
-      return json.join(", ");
-    }
-    return Object.entries(json)
-      .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-      .join(", ");
-  } catch {
-    return toolCallArgs;
-  }
 }
 
 const EXEC_TOOL_NAMES = new Set([
