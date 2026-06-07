@@ -1,9 +1,9 @@
 import React, { useMemo } from "react";
-import { LightningBoltIcon } from "@radix-ui/react-icons";
-import { Box, Text } from "@radix-ui/themes";
+import { Zap } from "lucide-react";
 import { ToolCard } from "./ToolCard/ToolCard";
 import { useStoredOpen } from "./useStoredOpen";
 import { Markdown } from "../Markdown";
+import { Icon } from "../ui";
 import styles from "./SkillActivatedCard.module.css";
 
 interface SkillActivatedCardProps {
@@ -32,11 +32,11 @@ export const SkillActivatedCard: React.FC<SkillActivatedCardProps> = ({
 
   return (
     <ToolCard
-      icon={<LightningBoltIcon />}
+      icon={<Icon icon={Zap} size="sm" tone="accent" />}
       summary={
-        <Text className={styles.skillText}>
+        <span className={styles.skillText}>
           Skill active: <span className={styles.skillName}>{name}</span>
-        </Text>
+        </span>
       }
       meta={meta}
       status="success"
@@ -45,9 +45,9 @@ export const SkillActivatedCard: React.FC<SkillActivatedCardProps> = ({
       className={styles.skillCard}
     >
       {body && (
-        <Box className={styles.body}>
+        <div className={styles.body}>
           <Markdown>{body}</Markdown>
-        </Box>
+        </div>
       )}
     </ToolCard>
   );

@@ -1,13 +1,8 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, Box } from "@radix-ui/themes";
-import {
-  LightningBoltIcon,
-  CopyIcon,
-  CheckIcon,
-  FileTextIcon,
-} from "@radix-ui/react-icons";
+import { Check, Copy, FileText, Zap } from "lucide-react";
 import classNames from "classnames";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
+import { Icon } from "../ui";
 import { useDelayedUnmount } from "../shared/useDelayedUnmount";
 import { useStoredOpen } from "./useStoredOpen";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -85,18 +80,11 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
 
   return (
     <div className={classNames(styles.card, styles.variantSkillReport)}>
-      <Flex
-        className={styles.header}
-        align="center"
-        gap="2"
-        onClick={handleAnimatedToggle}
-      >
+      <div className={styles.header} onClick={handleAnimatedToggle}>
         <span className={styles.icon}>
-          <LightningBoltIcon />
+          <Icon icon={Zap} size="sm" tone="accent" />
         </span>
-        <Text size="1" className={styles.summary}>
-          Skill report: {skillName}
-        </Text>
+        <span className={styles.summary}>Skill report: {skillName}</span>
         {report && (
           <span className={styles.actions}>
             <button
@@ -107,7 +95,7 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
               onClick={handleCopy}
               title="Copy report"
             >
-              {copied ? <CheckIcon /> : <CopyIcon />}
+              <Icon icon={copied ? Check : Copy} size="sm" tone={copied ? "success" : "muted"} />
             </button>
             {showSaveButton && (
               <button
@@ -115,12 +103,12 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
                 onClick={handleSave}
                 title="Save as file"
               >
-                <FileTextIcon />
+                <Icon icon={FileText} size="sm" tone="muted" />
               </button>
             )}
           </span>
         )}
-      </Flex>
+      </div>
 
       {shouldRender && report && (
         <div
@@ -131,17 +119,17 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
           )}
         >
           <div className={styles.contentInner}>
-            <Box className={styles.content}>
+            <div className={styles.content}>
               {shouldRenderMarkdown ? (
-                <Text size="2">
+                <div className={styles.markdown}>
                   <Markdown>{report}</Markdown>
-                </Text>
+                </div>
               ) : (
                 <ShikiCodeBlock showLineNumbers={false}>
                   {report}
                 </ShikiCodeBlock>
               )}
-            </Box>
+            </div>
           </div>
         </div>
       )}

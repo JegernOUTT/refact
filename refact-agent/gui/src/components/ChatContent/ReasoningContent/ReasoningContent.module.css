@@ -3,7 +3,7 @@
 }
 
 .header {
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   cursor: pointer;
   user-select: none;
   min-height: 24px;
@@ -15,6 +15,9 @@
 }
 
 .iconWrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -67,7 +70,7 @@
 
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  padding: var(--space-2) 0 var(--space-1);
+  padding: var(--rf-space-2) 0 var(--rf-space-1);
   padding-left: 28px;
   max-height: 400px;
   overflow-y: auto;
@@ -85,8 +88,24 @@
 }
 
 .thinking .summary {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   animation: subtlePulse 2s ease-in-out infinite;
+}
+
+.spinner {
+  display: inline-flex;
+  animation: spin var(--rf-dur-slow) linear infinite;
+}
+
+.markdown {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Respect reduced motion preference */

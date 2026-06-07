@@ -1,5 +1,4 @@
 import { type ReactNode, useState } from "react";
-import { Badge, Box, Card, Flex, Heading, Text } from "@radix-ui/themes";
 import type { LucideIcon } from "lucide-react";
 import {
   BookOpen,
@@ -13,7 +12,7 @@ import {
   type BuddyPulsePayload,
   isBuddyPulsePayload,
 } from "../../services/refact/types";
-import { Icon } from "../ui";
+import { Badge, Icon } from "../ui";
 import styles from "./BuddyPulseContent.module.css";
 
 type Props = {
@@ -46,7 +45,7 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
   const minutesAgo = Math.floor((Date.now() - generated.getTime()) / 60_000);
 
   return (
-    <Card className={styles.card}>
+    <div className={styles.card}>
       <button
         type="button"
         className={styles.header}
@@ -54,25 +53,25 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
         aria-controls="buddy-pulse-sections"
         onClick={() => setExpanded((x) => !x)}
       >
-        <Heading size="3" className={styles.headerTitle}>
+        <h3 className={styles.headerTitle}>
           <Icon icon={Sparkles} size="sm" tone="accent" /> Project pulse · updated{" "}
           {minutesAgo}m ago
-        </Heading>
+        </h3>
       </button>
       {expanded && (
-        <Box id="buddy-pulse-sections" className={styles.sections}>
+        <div id="buddy-pulse-sections" className={styles.sections}>
           <Section
             icon={SECTION_ICONS.preferences}
             title="Preferences"
             count={payload.preferences.length}
           >
             {payload.preferences.map((preference) => (
-              <Text key={preference.statement} as="p" size="2">
+              <p key={preference.statement} className={styles.line}>
                 {preference.statement}{" "}
-                <Badge color="gray">
+                <Badge tone="muted">
                   conf {preference.confidence.toFixed(2)}
                 </Badge>
-              </Text>
+              </p>
             ))}
           </Section>
           <Section
@@ -81,9 +80,9 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
             count={payload.lessons.length}
           >
             {payload.lessons.map((lesson) => (
-              <Text key={lesson.title} as="p" size="2">
+              <p key={lesson.title} className={styles.line}>
                 <strong>{lesson.title}</strong> — {lesson.preview}
-              </Text>
+              </p>
             ))}
           </Section>
           <Section
@@ -91,13 +90,13 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
             title="Friction"
             count={payload.friction.top_error_types.length}
           >
-            <Text as="p" size="2">
+            <p className={styles.line}>
               Stuck tasks: {payload.friction.stuck_tasks}
-            </Text>
+            </p>
             {payload.friction.top_error_types.map((error) => (
-              <Text key={error.type} as="p" size="2">
+              <p key={error.type} className={styles.line}>
                 {error.type}: {error.count}
-              </Text>
+              </p>
             ))}
           </Section>
           <Section
@@ -106,9 +105,9 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
             count={payload.recent_reports.length}
           >
             {payload.recent_reports.map((report) => (
-              <Text key={report.chat_id} as="p" size="2">
+              <p key={report.chat_id} className={styles.line}>
                 <strong>{report.title}</strong> — {report.preview}
-              </Text>
+              </p>
             ))}
           </Section>
           <Section
@@ -116,29 +115,28 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
             title="Activity (24h)"
             count={payload.user_activity.grouped.length}
           >
-            <Text as="p" size="2">
+            <p className={styles.line}>
               {payload.user_activity.time_of_day_pattern}
-            </Text>
+            </p>
             {payload.user_activity.grouped.map((group) => (
-              <Text key={group.type} as="p" size="2">
+              <p key={group.type} className={styles.line}>
                 {group.type}: {group.count}
-              </Text>
+              </p>
             ))}
           </Section>
-        </Box>
+        </div>
       )}
-    </Card>
+    </div>
   );
 };
 
 const Section = ({ icon, title, count, children }: SectionProps) => (
-  <Flex direction="column" gap="1" className={styles.section}>
-    <Heading size="2" className={styles.sectionTitle}>
-      <Icon icon={icon} size="sm" /> {title}{" "}
-      <Badge color="gray">{count}</Badge>
-    </Heading>
-    <Box>{children}</Box>
-  </Flex>
+  <section className={styles.section}>
+    <h4 className={styles.sectionTitle}>
+      <Icon icon={icon} size="sm" tone="muted" /> {title} <Badge tone="muted">{count}</Badge>
+    </h4>
+    <div className={styles.sectionBody}>{children}</div>
+  </section>
 );
 
 type SectionProps = {

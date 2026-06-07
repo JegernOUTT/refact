@@ -1,5 +1,4 @@
 import React, { useId, useMemo, useState } from "react";
-import { Box, Flex } from "@radix-ui/themes";
 import type { LucideIcon } from "lucide-react";
 import { Archive, Brain, ChevronDown, ChevronUp, GitMerge } from "lucide-react";
 import {
@@ -218,14 +217,14 @@ function parseReactiveStats(content: string): StatCell[] | null {
 
 function StatsGrid({ stats }: { stats: StatCell[] }) {
   return (
-    <Box className={styles.statsGrid} data-testid="summarization-card-stats">
+    <div className={styles.statsGrid} data-testid="summarization-card-stats">
       {stats.map((s) => (
-        <Box key={s.label} className={styles.statCell}>
+        <div key={s.label} className={styles.statCell}>
           <span className={styles.statLabel}>{s.label}</span>
           <span className={styles.statValue}>{s.value}</span>
-        </Box>
+        </div>
       ))}
-    </Box>
+    </div>
   );
 }
 
@@ -297,8 +296,8 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const toggleOpen = () => setOpen((v) => !v);
 
   return (
-    <Box className={cardClassName} data-testid="summarization-card">
-      <Flex
+    <div className={cardClassName} data-testid="summarization-card">
+      <div
         className={styles.header}
         onClick={toggleOpen}
         role="button"
@@ -313,7 +312,7 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
         }}
         data-testid="summarization-card-header"
       >
-        <Flex className={styles.headerLeft}>
+        <div className={styles.headerLeft}>
           <span className={styles.icon} aria-hidden>
             <Icon icon={meta.icon} size="sm" />
           </span>
@@ -335,13 +334,13 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
           {showHeaderMetrics && tokenLabel && (
             <span className={styles.tokenLabel}>· {tokenLabel}</span>
           )}
-        </Flex>
+        </div>
         <span className={styles.toggle}>
           <Icon icon={open ? ChevronUp : ChevronDown} size="sm" tone="muted" />
         </span>
-      </Flex>
+      </div>
       {hasReportSummary && (
-        <Box
+        <div
           className={styles.eventSummary}
           data-testid="summarization-card-summary"
         >
@@ -353,10 +352,10 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
             </p>
           )}
           <StatsGrid stats={reportSummaryStats} />
-        </Box>
+        </div>
       )}
       {open && (
-        <Box
+        <div
           id={bodyId}
           className={styles.body}
           data-testid="summarization-card-body"
@@ -369,8 +368,8 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
             <span>No details available.</span>
           )}
           {bodyStats && bodyStats.length > 0 && <StatsGrid stats={bodyStats} />}
-        </Box>
+        </div>
       )}
-    </Box>
+    </div>
   );
 };

@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from "react";
 import classNames from "classnames";
-import { Box, Button, Callout, Flex, Text } from "@radix-ui/themes";
-import { FileTextIcon, GitHubLogoIcon } from "@radix-ui/react-icons";
+import { CircleAlert, FileText, Github } from "lucide-react";
 import groupBy from "lodash.groupby";
 import { useAppSelector } from "../../hooks";
 import {
@@ -11,6 +10,7 @@ import {
 } from "../../features/Chat/Thread/selectors";
 import type { DiffChunk, ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
+import { Button, Icon } from "../ui";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { DiffBlock } from "./ToolCard/DiffBlock";
 import editToolStyles from "./ToolCard/EditTool.module.css";
@@ -37,22 +37,15 @@ function groupDiffChunks(chunks: DiffChunk[]): GroupedDiffChunks {
   return groupBy(chunks, (chunk) => chunk.file_name);
 }
 
-function normalizeGroupedDiffs(
-  groupedDiffs: GroupedDiffChunks,
-): Record<string, DiffChunk[]> {
+function normalizeGroupedDiffs(groupedDiffs: GroupedDiffChunks): Record<string, DiffChunk[]> {
   return Object.fromEntries(
     Object.entries(groupedDiffs).map(([file, diffs]) => [file, diffs ?? []]),
   );
 }
 
-export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
-  report,
-}) => {
+export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({ report }) => {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const groupedDiffs = useMemo(
-    () => groupDiffChunks(report.diffChunks),
-    [report.diffChunks],
-  );
+  const groupedDiffs = useMemo(() => groupDiffChunks(report.diffChunks), [report.diffChunks]);
   const selectedDiffs = useMemo(() => {
     if (!selectedFile) return normalizeGroupedDiffs(groupedDiffs);
     return { [selectedFile]: groupedDiffs[selectedFile] ?? [] };
@@ -64,72 +57,57 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
     selectedFile !== null && (groupedDiffs[selectedFile]?.length ?? 0) === 0;
 
   return (
-    <Box className={styles.root}>
-      <Box className={styles.summary}>
-        <Flex justify="between" align="center" gap="2" wrap="wrap">
-          <Text weight="medium">Agent diff: {report.cardId}</Text>
-          <Text size="1" color="gray">
-            {report.mode}
-          </Text>
-        </Flex>
-        <Box className={styles.metaGrid}>
-          <Box className={styles.metaItem}>
+    <div className={styles.root}>
+      <section className={classNames(styles.summary, "rf-enter")}>
+        <div className={styles.summaryTop}>
+          <span className={styles.title}>Agent diff: {report.cardId}</span>
+          <span className={styles.mode}>{report.mode}</span>
+        </div>
+        <div className={styles.metaGrid}>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Card</span>
             <span className={styles.value}>{report.cardTitle}</span>
-          </Box>
-          <Box className={styles.metaItem}>
+          </div>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Branch</span>
             <span className={styles.value}>{report.branch}</span>
-          </Box>
-          <Box className={styles.metaItem}>
+          </div>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Base</span>
             <span className={styles.value}>{report.base}</span>
-          </Box>
-          <Box className={styles.metaItem}>
+          </div>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Files</span>
             <span className={styles.value}>{report.stats.files}</span>
-          </Box>
-        </Box>
-        <Flex gap="3" className={styles.stats} wrap="wrap">
-          <Text size="1" color="gray">
-            {report.stats.files} files
-          </Text>
-          {report.stats.added > 0 && (
-            <Text size="1" className={styles.added}>
-              +{report.stats.added}
-            </Text>
-          )}
+          </div>
+        </div>
+        <div className={styles.stats}>
+          <span className={styles.statMuted}>{report.stats.files} files</span>
+          {report.stats.added > 0 && <span className={styles.added}>+{report.stats.added}</span>}
           {report.stats.removed > 0 && (
-            <Text size="1" className={styles.removed}>
-              −{report.stats.removed}
-            </Text>
+            <span className={styles.removed}>−{report.stats.removed}</span>
           )}
-          <Text size="1" color="gray">
-            {countLines(report.body)} lines
-          </Text>
-        </Flex>
+          <span className={styles.statMuted}>{countLines(report.body)} lines</span>
+        </div>
         {report.truncated && (
-          <Callout.Root color="amber" size="1" className={styles.truncation}>
-            <Callout.Text>{report.truncated}</Callout.Text>
-          </Callout.Root>
+          <div className={styles.truncation}>
+            <Icon icon={CircleAlert} size="sm" tone="warning" />
+            <span>{report.truncated}</span>
+          </div>
         )}
-      </Box>
+      </section>
 
       {report.body.trim() === "(no changes detected)" ? (
-        <Text as="div" size="2" className={styles.empty}>
-          No changes detected.
-        </Text>
+        <div className={styles.empty}>No changes detected.</div>
       ) : (
-        <Box className={styles.content}>
+        <div className={styles.content}>
           {shouldShowFileTree && (
-            <Box className={styles.fileTree}>
-              <Text size="1" color="gray">
-                Files
-              </Text>
-              <Flex direction="column" gap="1" className={styles.fileList}>
+            <nav className={styles.fileTree} aria-label="Diff files">
+              <span className={styles.label}>Files</span>
+              <div className={styles.fileList}>
                 <Button
-                  size="1"
-                  variant={selectedFile === null ? "solid" : "soft"}
+                  size="sm"
+                  variant={selectedFile === null ? "primary" : "ghost"}
                   className={styles.fileButton}
                   onClick={() => setSelectedFile(null)}
                 >
@@ -138,37 +116,25 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
                 {report.files.map((file) => (
                   <Button
                     key={file}
-                    size="1"
-                    variant={selectedFile === file ? "solid" : "ghost"}
+                    size="sm"
+                    variant={selectedFile === file ? "primary" : "ghost"}
                     className={styles.fileButton}
                     onClick={() => setSelectedFile(file)}
                   >
-                    <Flex
-                      as="span"
-                      align="center"
-                      gap="1"
-                      className={styles.fileButtonInner}
-                    >
-                      <FileTextIcon />
+                    <span className={styles.fileButtonInner}>
+                      <Icon icon={FileText} size="sm" />
                       {file}
-                    </Flex>
+                    </span>
                   </Button>
                 ))}
-              </Flex>
-            </Box>
+              </div>
+            </nav>
           )}
-          <Box
-            className={classNames(
-              styles.diffPane,
-              !shouldShowFileTree && styles.diffPaneFull,
-            )}
-          >
+          <div className={classNames(styles.diffPane, !shouldShowFileTree && styles.diffPaneFull)}>
             {selectedFileHasNoDiffs ? (
-              <Text as="div" size="2" className={styles.emptyDiffMessage}>
-                No diff hunks for this file.
-              </Text>
+              <div className={styles.emptyDiffMessage}>No diff hunks for this file.</div>
             ) : showRenderedDiff ? (
-              <Box className={editToolStyles.diffContent}>
+              <div className={editToolStyles.diffContent}>
                 {Object.entries(selectedDiffs).flatMap(([fileName, diffs]) =>
                   diffs.map((diff, i) => (
                     <DiffBlock
@@ -179,21 +145,18 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
                     />
                   )),
                 )}
-              </Box>
+              </div>
             ) : (
-              <Box className={styles.rawDiff}>
-                <ShikiCodeBlock
-                  showLineNumbers={false}
-                  className="language-text"
-                >
+              <div className={styles.rawDiff}>
+                <ShikiCodeBlock showLineNumbers={false} className="language-text">
                   {report.body}
                 </ShikiCodeBlock>
-              </Box>
+              </div>
             )}
-          </Box>
-        </Box>
+          </div>
+        </div>
       )}
-    </Box>
+    </div>
   );
 };
 
@@ -203,17 +166,9 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
 
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
-  );
-  const content =
-    maybeResult && typeof maybeResult.content === "string"
-      ? maybeResult.content
-      : null;
-  const report = useMemo(
-    () => (content ? parseAgentDiffOutput(content) : null),
-    [content],
-  );
+  const maybeResult = useAppSelector((state) => selectToolResultById(state, toolCall.id));
+  const content = maybeResult && typeof maybeResult.content === "string" ? maybeResult.content : null;
+  const report = useMemo(() => (content ? parseAgentDiffOutput(content) : null), [content]);
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult && (isStreaming || isWaiting)) return "running";
@@ -233,7 +188,7 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
     <>
       <span data-testid="agent-diff-view" hidden />
       <ToolCard
-        icon={<GitHubLogoIcon />}
+        icon={<Icon icon={Github} size="sm" />}
         summary={report ? `Agent diff: ${report.cardId}` : "Agent diff"}
         meta={meta}
         status={status}

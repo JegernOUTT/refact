@@ -1,17 +1,15 @@
 import React, { useCallback, useMemo, useState } from "react";
-import {
-  Badge,
-  Box,
-  Button,
-  Callout,
-  Dialog,
-  Flex,
-  Spinner,
-  Text,
-  TextArea,
-} from "@radix-ui/themes";
-import { ExclamationTriangleIcon, LapTimerIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
+import {
+  CircleAlert,
+  CircleStop,
+  FileDiff,
+  Hand,
+  LoaderCircle,
+  Pause,
+  Send,
+  Timer,
+} from "lucide-react";
 import { useAppSelector } from "../../hooks";
 import {
   selectChatId,
@@ -23,6 +21,7 @@ import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
 import type { ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
+import { Badge, Button, Dialog, FieldTextarea, Icon, StatusDot } from "../ui";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "./useStoredOpen";
 import {
@@ -69,6 +68,23 @@ function stateClass(state: AgentPulseState): string {
       return styles.stateIdle;
     case "unknown":
       return styles.stateUnknown;
+  }
+}
+
+function stateStatus(state: AgentPulseState): React.ComponentProps<typeof StatusDot>["status"] {
+  switch (state) {
+    case "running":
+    case "waiting":
+      return "running";
+    case "paused":
+      return "warning";
+    case "done":
+      return "success";
+    case "error":
+      return "error";
+    case "idle":
+    case "unknown":
+      return "idle";
   }
 }
 
@@ -127,112 +143,87 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
   }, [report.cardId, steerMessage, submitCommand]);
 
   return (
-    <Box className={styles.root}>
-      <Box className={styles.header}>
-        <Flex justify="between" align="center" gap="2">
-          <Text weight="medium" className={styles.title}>
-            Pulse: {report.cardId}
-          </Text>
-          <Badge className={styles.stateBadge} variant="soft">
-            <Text
-              as="span"
-              size="1"
-              className={classNames(
-                styles.stateText,
-                stateClass(report.stateKind),
-              )}
-            >
+    <div className={styles.root}>
+      <header className={classNames(styles.header, "rf-enter")}>
+        <div className={styles.headerTop}>
+          <span className={styles.title}>Pulse: {report.cardId}</span>
+          <Badge className={styles.stateBadge} tone="accent">
+            <StatusDot status={stateStatus(report.stateKind)} pulse={report.stateKind === "running"} />
+            <span className={classNames(styles.stateText, stateClass(report.stateKind))}>
               {report.state}
-            </Text>
+            </span>
           </Badge>
-        </Flex>
+        </div>
 
-        <Box className={styles.metaGrid}>
-          <Box className={styles.metaItem}>
+        <div className={styles.metaGrid}>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Tokens</span>
             <span className={styles.value}>{maybeValue(report.tokens)}</span>
-          </Box>
-          <Box className={styles.metaItem}>
+          </div>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Last activity</span>
-            <span className={styles.value}>
-              {maybeValue(report.lastActivity)}
-            </span>
-          </Box>
-          <Box className={styles.metaItem}>
+            <span className={styles.value}>{maybeValue(report.lastActivity)}</span>
+          </div>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Editing</span>
-            <span className={styles.value}>
-              {maybeValue(report.currentlyEditing)}
-            </span>
-          </Box>
-          <Box className={styles.metaItem}>
+            <span className={styles.value}>{maybeValue(report.currentlyEditing)}</span>
+          </div>
+          <div className={styles.metaItem}>
             <span className={styles.label}>Card</span>
             <span className={styles.value}>{report.cardTitle}</span>
-          </Box>
-        </Box>
+          </div>
+        </div>
 
-        {report.sessionNote && (
-          <Text size="1" as="div" className={styles.note}>
-            {report.sessionNote}
-          </Text>
-        )}
-      </Box>
+        {report.sessionNote && <div className={styles.note}>{report.sessionNote}</div>}
+      </header>
 
-      <Box className={styles.section}>
-        <Text as="div" className={styles.sectionLabel}>
-          Last assistant message
-        </Text>
-        <Text as="div" size="2" className={styles.quote}>
-          {report.lastAssistantMessage}
-        </Text>
-      </Box>
+      <section className={styles.section}>
+        <span className={styles.sectionLabel}>Last assistant message</span>
+        <div className={styles.quote}>{report.lastAssistantMessage}</div>
+      </section>
 
-      <Box className={styles.section}>
-        <Text as="div" className={styles.sectionLabel}>
-          Last tool
-        </Text>
-        <Text as="div" size="2" className={styles.toolCall}>
-          {report.lastToolCall}
-        </Text>
-      </Box>
+      <section className={styles.section}>
+        <span className={styles.sectionLabel}>Last tool</span>
+        <div className={styles.toolCall}>{report.lastToolCall}</div>
+      </section>
 
-      <Flex gap="2" wrap="wrap" className={styles.actions}>
+      <div className={styles.actions}>
         <Button
-          size="1"
-          variant="soft"
+          size="sm"
+          variant="ghost"
+          leftIcon={Hand}
           disabled={actionsDisabled || isSubmitting}
           onClick={openSteer}
         >
           Steer
         </Button>
         <Button
-          size="1"
-          variant="soft"
+          size="sm"
+          variant="ghost"
+          leftIcon={Pause}
           disabled={actionsDisabled || isSubmitting}
           onClick={() => {
             void submitCommand(
               `Pause ${report.cardId}`,
-              formatAgentActionCommand(
-                "pause",
-                report.cardId,
-                DEFAULT_PAUSE_REASON,
-              ),
+              formatAgentActionCommand("pause", report.cardId, DEFAULT_PAUSE_REASON),
             );
           }}
         >
           Pause
         </Button>
         <Button
-          size="1"
-          variant="soft"
-          color="red"
+          size="sm"
+          variant="danger"
+          leftIcon={CircleStop}
           disabled={actionsDisabled || isSubmitting}
           onClick={openCancel}
         >
           Cancel
         </Button>
         <Button
-          size="1"
-          variant="soft"
+          size="sm"
+          variant="ghost"
+          leftIcon={FileDiff}
           disabled={actionsDisabled || isSubmitting}
           onClick={() => {
             void submitCommand(
@@ -243,33 +234,26 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
         >
           Diff
         </Button>
-      </Flex>
+      </div>
 
-      <Dialog.Root
-        open={dialog !== null}
-        onOpenChange={(open) => !open && closeDialog()}
-      >
+      <Dialog open={dialog !== null} onOpenChange={(open) => !open && closeDialog()}>
         <Dialog.Content className={styles.dialogContent}>
           {dialog?.kind === "queued" && (
             <>
               <Dialog.Title>{dialog.title}</Dialog.Title>
-              <Dialog.Description size="2" color="gray">
-                The command was sent through the chat queue.
-              </Dialog.Description>
-              <Box className={styles.toolCall}>{dialog.command}</Box>
+              <Dialog.Description>The command was sent through the chat queue.</Dialog.Description>
+              <div className={styles.toolCall}>{dialog.command}</div>
             </>
           )}
 
           {dialog?.kind === "steer" && (
             <>
               <Dialog.Title>Steer {report.cardId}</Dialog.Title>
-              <Dialog.Description size="2" color="gray">
-                Send a planner steering message to this agent.
-              </Dialog.Description>
-              <TextArea
+              <Dialog.Description>Send a planner steering message to this agent.</Dialog.Description>
+              <FieldTextarea
                 aria-label="Steering message"
                 value={steerMessage}
-                onChange={(event) => setSteerMessage(event.target.value)}
+                onChange={setSteerMessage}
                 placeholder="Add guidance for the agent"
                 className={styles.dialogInput}
               />
@@ -279,67 +263,53 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
           {dialog?.kind === "cancel" && (
             <>
               <Dialog.Title>Cancel {report.cardId}</Dialog.Title>
-              <Dialog.Description size="2" color="gray">
-                Send a cancellation command with the default reason.
-              </Dialog.Description>
-              <Box className={styles.toolCall}>
-                {formatAgentActionCommand(
-                  "cancel",
-                  report.cardId,
-                  DEFAULT_CANCEL_REASON,
-                )}
-              </Box>
+              <Dialog.Description>Send a cancellation command with the default reason.</Dialog.Description>
+              <div className={styles.toolCall}>
+                {formatAgentActionCommand("cancel", report.cardId, DEFAULT_CANCEL_REASON)}
+              </div>
             </>
           )}
 
           {dialogError && (
-            <Callout.Root color="red" size="1">
-              <Callout.Icon>
-                <ExclamationTriangleIcon />
-              </Callout.Icon>
-              <Callout.Text>{dialogError}</Callout.Text>
-            </Callout.Root>
+            <div className={styles.alert}>
+              <Icon icon={CircleAlert} size="sm" tone="danger" />
+              <span>{dialogError}</span>
+            </div>
           )}
 
-          <Flex gap="2" justify="end" mt="3">
-            <Button
-              variant="soft"
-              color="gray"
-              onClick={closeDialog}
-              disabled={isSubmitting}
-            >
+          <div className={styles.dialogActions}>
+            <Button variant="soft" onClick={closeDialog} disabled={isSubmitting}>
               {dialog?.kind === "queued" ? "Close" : "Back"}
             </Button>
             {dialog?.kind === "steer" && (
               <Button
+                variant="primary"
+                leftIcon={isSubmitting ? LoaderCircle : Send}
                 onClick={submitSteer}
                 disabled={isSubmitting || !steerMessage.trim()}
               >
-                {isSubmitting ? <Spinner size="1" /> : "Send steer"}
+                Send steer
               </Button>
             )}
             {dialog?.kind === "cancel" && (
               <Button
-                color="red"
+                variant="danger"
+                leftIcon={isSubmitting ? LoaderCircle : CircleStop}
                 disabled={isSubmitting}
                 onClick={() => {
                   void submitCommand(
                     `Cancel ${report.cardId}`,
-                    formatAgentActionCommand(
-                      "cancel",
-                      report.cardId,
-                      DEFAULT_CANCEL_REASON,
-                    ),
+                    formatAgentActionCommand("cancel", report.cardId, DEFAULT_CANCEL_REASON),
                   );
                 }}
               >
-                {isSubmitting ? <Spinner size="1" /> : "Confirm cancel"}
+                Confirm cancel
               </Button>
             )}
-          </Flex>
+          </div>
         </Dialog.Content>
-      </Dialog.Root>
-    </Box>
+      </Dialog>
+    </div>
   );
 };
 
@@ -352,17 +322,9 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
-  const maybeResult = useAppSelector((state) =>
-    selectToolResultById(state, toolCall.id),
-  );
-  const content =
-    maybeResult && typeof maybeResult.content === "string"
-      ? maybeResult.content
-      : null;
-  const report = useMemo(
-    () => (content ? parseAgentPulseOutput(content) : null),
-    [content],
-  );
+  const maybeResult = useAppSelector((state) => selectToolResultById(state, toolCall.id));
+  const content = maybeResult && typeof maybeResult.content === "string" ? maybeResult.content : null;
+  const report = useMemo(() => (content ? parseAgentPulseOutput(content) : null), [content]);
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult && (isStreaming || isWaiting)) return "running";
@@ -387,7 +349,7 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
     <>
       <span data-testid="agent-pulse-view" hidden />
       <ToolCard
-        icon={<LapTimerIcon />}
+        icon={<Icon icon={Timer} size="sm" />}
         summary={report ? `Agent pulse: ${report.cardId}` : "Agent pulse"}
         meta={report?.state}
         status={status}

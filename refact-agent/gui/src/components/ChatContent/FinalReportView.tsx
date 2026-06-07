@@ -1,8 +1,8 @@
 import React, { useMemo } from "react";
-import { Badge, Box, Flex, Text } from "@radix-ui/themes";
+import classNames from "classnames";
 import { CheckCircle2, CircleX } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
-import { Icon } from "../ui";
+import { Badge, Icon } from "../ui";
 import styles from "./FinalReportView.module.css";
 
 type VerificationResult = {
@@ -45,14 +45,12 @@ function parseVerification(value: unknown): VerificationResult[] | null {
       typeof item.command !== "string" ||
       typeof item.passed !== "boolean" ||
       typeof item.output_tail !== "string"
-    )
+    ) {
       return null;
-    if (
-      exitCode !== undefined &&
-      exitCode !== null &&
-      typeof exitCode !== "number"
-    )
+    }
+    if (exitCode !== undefined && exitCode !== null && typeof exitCode !== "number") {
       return null;
+    }
     out.push({
       command: item.command,
       passed: item.passed,
@@ -73,8 +71,9 @@ function parseFollowups(value: unknown): SuggestedCard[] | null {
       typeof item.title !== "string" ||
       typeof item.priority !== "string" ||
       typeof item.instructions !== "string"
-    )
+    ) {
       return null;
+    }
     out.push({
       title: item.title,
       priority: item.priority,
@@ -91,20 +90,18 @@ function parseFinalReport(content: string): FinalReport | null {
   } catch {
     return null;
   }
-  if (
-    !isRecord(raw) ||
-    typeof raw.summary !== "string" ||
-    typeof raw.success !== "boolean"
-  )
+  if (!isRecord(raw) || typeof raw.summary !== "string" || typeof raw.success !== "boolean") {
     return null;
+  }
   const files = optionalStringArray(raw.files_changed);
   const tests = optionalStringArray(raw.tests_added_or_updated);
   const verification = parseVerification(raw.verification);
   const followups = parseFollowups(raw.followup_cards);
   const risks = optionalStringArray(raw.risks);
   const assumptions = optionalStringArray(raw.assumptions);
-  if (!files || !tests || !verification || !followups || !risks || !assumptions)
+  if (!files || !tests || !verification || !followups || !risks || !assumptions) {
     return null;
+  }
   return {
     summary: raw.summary,
     success: raw.success,
@@ -121,22 +118,14 @@ function truncate(text: string): string {
   return text.length > 220 ? `${text.slice(0, 219)}…` : text;
 }
 
-const Section: React.FC<{ title: string; children: React.ReactNode }> = ({
-  title,
-  children,
-}) => (
-  <Box className={styles.section}>
-    <Text as="div" size="2" weight="medium" className={styles.sectionTitle}>
-      {title}
-    </Text>
+const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+  <section className={styles.section}>
+    <div className={styles.sectionTitle}>{title}</div>
     {children}
-  </Box>
+  </section>
 );
 
-const TextDetails: React.FC<{ title: string; items: string[] }> = ({
-  title,
-  items,
-}) =>
+const TextDetails: React.FC<{ title: string; items: string[] }> = ({ title, items }) =>
   items.length > 0 ? (
     <details className={styles.details}>
       <summary>
@@ -150,9 +139,7 @@ const TextDetails: React.FC<{ title: string; items: string[] }> = ({
     </details>
   ) : (
     <Section title={title}>
-      <Text size="2" color="gray">
-        None
-      </Text>
+      <span className={styles.none}>None</span>
     </Section>
   );
 
@@ -161,20 +148,19 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
   title = "Final Report",
 }) => {
   const report = useMemo(() => parseFinalReport(content), [content]);
-  if (!report)
+  if (!report) {
     return (
-      <Box className={styles.legacy}>
+      <div className={styles.legacy}>
         <Markdown>{content}</Markdown>
-      </Box>
+      </div>
     );
+  }
 
   return (
-    <Box className={styles.root} data-testid="final-report-view">
-      <Flex justify="between" align="center" gap="2" className={styles.header}>
-        <Text weight="medium" className={styles.title}>
-          {title}
-        </Text>
-        <Badge color={report.success ? "green" : "red"} variant="soft">
+    <div className={styles.root} data-testid="final-report-view">
+      <header className={classNames(styles.header, "rf-enter")}>
+        <span className={styles.title}>{title}</span>
+        <Badge tone={report.success ? "success" : "danger"}>
           <Icon
             icon={report.success ? CheckCircle2 : CircleX}
             size="sm"
@@ -182,25 +168,23 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
           />
           {report.success ? "Success" : "Failed"}
         </Badge>
-      </Flex>
+      </header>
       <Section title="Summary">
-        <Box className={styles.markdown}>
+        <div className={styles.markdown}>
           <Markdown>{report.summary}</Markdown>
-        </Box>
+        </div>
       </Section>
       <Section title="Files changed">
         {report.files_changed.length > 0 ? (
-          <Flex gap="2" wrap="wrap">
+          <div className={styles.followupHeader}>
             {report.files_changed.map((file) => (
-              <Badge key={file} variant="surface" color="gray">
+              <Badge key={file} tone="muted">
                 {file}
               </Badge>
             ))}
-          </Flex>
+          </div>
         ) : (
-          <Text size="2" color="gray">
-            None
-          </Text>
+          <span className={styles.none}>None</span>
         )}
       </Section>
       <Section title="Tests added or updated">
@@ -211,14 +195,12 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
             ))}
           </ul>
         ) : (
-          <Text size="2" color="gray">
-            None
-          </Text>
+          <span className={styles.none}>None</span>
         )}
       </Section>
       <Section title="Verification">
         {report.verification.length > 0 ? (
-          <Flex direction="column" gap="2">
+          <div>
             {report.verification.map((item) => (
               <details
                 key={`${item.command}:${item.exit_code ?? ""}`}
@@ -232,53 +214,39 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
                   />
                   <code>{item.command}</code>
                   {item.exit_code !== undefined && item.exit_code !== null && (
-                    <Text as="span" size="1" color="gray">
-                      ({item.exit_code})
-                    </Text>
+                    <span className={styles.exitCode}>({item.exit_code})</span>
                   )}
                 </summary>
                 {item.output_tail && (
-                  <ShikiCodeBlock showLineNumbers={false}>
-                    {item.output_tail}
-                  </ShikiCodeBlock>
+                  <ShikiCodeBlock showLineNumbers={false}>{item.output_tail}</ShikiCodeBlock>
                 )}
               </details>
             ))}
-          </Flex>
+          </div>
         ) : (
-          <Text size="2" color="gray">
-            None
-          </Text>
+          <span className={styles.none}>None</span>
         )}
       </Section>
       <Section title="Followup cards">
         {report.followup_cards.length > 0 ? (
-          <Flex direction="column" gap="2">
+          <div>
             {report.followup_cards.map((card) => (
-              <Box key={card.title} className={styles.followupCard}>
-                <Flex gap="2" align="center">
-                  <Text size="2" weight="medium">
-                    {card.title}
-                  </Text>
-                  <Badge variant="soft" color="gray">
-                    {card.priority}
-                  </Badge>
-                </Flex>
-                <Text as="p" size="2" color="gray">
-                  {truncate(card.instructions)}
-                </Text>
-              </Box>
+              <article key={card.title} className={styles.followupCard}>
+                <div className={styles.followupHeader}>
+                  <span className={styles.followupTitle}>{card.title}</span>
+                  <Badge tone="muted">{card.priority}</Badge>
+                </div>
+                <p className={styles.followupInstructions}>{truncate(card.instructions)}</p>
+              </article>
             ))}
-          </Flex>
+          </div>
         ) : (
-          <Text size="2" color="gray">
-            None
-          </Text>
+          <span className={styles.none}>None</span>
         )}
       </Section>
       <TextDetails title="Risks" items={report.risks} />
       <TextDetails title="Assumptions" items={report.assumptions} />
-    </Box>
+    </div>
   );
 };
 

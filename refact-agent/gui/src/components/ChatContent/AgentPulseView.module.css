@@ -1,18 +1,40 @@
 .root {
   width: 100%;
+  min-width: 0;
   overflow: hidden;
 }
 
 .header {
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a4);
-  border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  padding: var(--rf-space-2) 0;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.headerTop,
+.actions,
+.dialogActions,
+.stateBadge {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.headerTop,
+.actions,
+.dialogActions {
+  flex-wrap: wrap;
+}
+
+.headerTop {
+  justify-content: space-between;
 }
 
 .title {
   min-width: 0;
   overflow: hidden;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -22,100 +44,116 @@
 }
 
 .stateText {
-  font-weight: 500;
+  font-size: var(--rf-text-1);
+  font-weight: 650;
 }
 
 .stateRunning {
-  color: var(--blue-11);
+  color: var(--rf-color-accent);
 }
 
 .statePaused,
 .stateWaiting {
-  color: var(--amber-11);
+  color: var(--rf-color-warning);
 }
 
 .stateDone {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .stateError {
-  color: var(--red-11);
+  color: var(--rf-color-danger);
 }
 
 .stateIdle,
 .stateUnknown {
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
 }
 
 .metaGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--space-2);
-  margin-top: var(--space-2);
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: var(--rf-space-2);
+  margin-top: var(--rf-space-2);
 }
 
 .metaItem {
   min-width: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--gray-a3);
-  border-radius: var(--radius-2);
-  background: var(--gray-a1);
+  padding: var(--rf-space-2) 0;
 }
 
-.label {
+.label,
+.sectionLabel {
   display: block;
-  color: var(--gray-11);
-  font-size: 11px;
-  line-height: 1.4;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
 }
 
 .value {
   display: block;
   min-width: 0;
   overflow: hidden;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .note {
-  margin-top: var(--space-2);
-  padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--amber-a2);
-  color: var(--amber-12);
+  margin-top: var(--rf-space-2);
+  color: var(--rf-color-warning);
+  font-size: var(--rf-text-2);
 }
 
 .section {
-  margin-top: var(--space-3);
+  margin-top: var(--rf-space-3);
 }
 
 .sectionLabel {
-  margin-bottom: var(--space-1);
-  color: var(--gray-11);
-  font-size: 11px;
+  margin-bottom: var(--rf-space-1);
 }
 
 .quote,
 .toolCall {
-  padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  padding: var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .toolCall {
-  font-family: var(--code-font-family);
+  font-family: var(--rf-font-mono);
 }
 
 .actions {
-  margin-top: var(--space-3);
+  margin-top: var(--rf-space-3);
 }
 
 .dialogContent {
-  max-width: 520px;
+  max-width: min(520px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
 .dialogInput {
   min-height: 120px;
+}
+
+.alert {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  margin-top: var(--rf-space-3);
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  color: var(--rf-color-danger);
+  background: var(--rf-surface-1);
+}
+
+.dialogActions {
+  justify-content: flex-end;
+  margin-top: var(--rf-space-3);
 }

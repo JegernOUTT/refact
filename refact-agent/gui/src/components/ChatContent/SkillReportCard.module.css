@@ -1,6 +1,6 @@
 .variantSkillReport {
-  border-left: 2px solid var(--purple-9);
-  padding-left: var(--space-2);
+  border-left: 2px solid var(--rf-color-accent);
+  padding-left: var(--rf-space-2);
 }
 
 .card {
@@ -9,7 +9,7 @@
 
 .header {
   cursor: pointer;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   transition: filter 0.15s ease;
 }
 
@@ -38,7 +38,7 @@
   text-overflow: ellipsis;
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--purple-11);
+  color: var(--rf-color-accent);
 }
 
 .actions {
@@ -57,16 +57,16 @@
   justify-content: center;
   width: 22px;
   height: 22px;
-  border-radius: var(--radius-1);
-  color: var(--gray-11);
+  border-radius: var(--rf-radius-chip);
+  color: var(--rf-color-muted);
   transition:
     background-color 0.1s,
     color 0.1s;
 }
 
 .actionButton:hover {
-  background-color: var(--gray-a3);
-  color: var(--gray-12);
+  background-color: var(--rf-border);
+  color: var(--rf-color-fg);
 }
 
 .actionButton svg {
@@ -75,7 +75,7 @@
 }
 
 .copiedButton {
-  color: var(--green-11);
+  color: var(--rf-color-success);
 }
 
 .contentWrapper {
@@ -109,7 +109,7 @@
 
 .content {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
-  padding: var(--space-2) 0 var(--space-1);
+  padding: var(--rf-space-2) 0 var(--rf-space-1);
   max-height: 400px;
   overflow-y: auto;
 }

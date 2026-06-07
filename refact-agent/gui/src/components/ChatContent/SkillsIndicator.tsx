@@ -1,9 +1,9 @@
 import React from "react";
-import { Badge, Flex, Text } from "@radix-ui/themes";
+import { Badge, Icon } from "../ui";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../../features/Pages/pagesSlice";
 import { useSkillsStatus } from "../../hooks/useSkillsStatus";
-import { ReaderIcon } from "@radix-ui/react-icons";
+import { BookOpen } from "lucide-react";
 import styles from "./SkillsIndicator.module.css";
 
 export type SkillsIndicatorProps = {
@@ -30,9 +30,7 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
   };
 
   return (
-    <Flex
-      align="center"
-      gap="2"
+    <div
       className={styles.indicator}
       role="button"
       tabIndex={0}
@@ -41,28 +39,20 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
       onClick={handleClick}
       onKeyDown={handleKeyDown}
     >
-      <Text size="1" color="gray">
-        <ReaderIcon />
-      </Text>
+      <Icon icon={BookOpen} size="sm" tone="muted" />
       {activeSkill !== null ? (
         <>
-          <Text size="1" color="gray">
-            Active skill:
-          </Text>
-          <Badge size="1" variant="solid">
+          <span className={styles.muted}>Active skill:</span>
+          <Badge tone="accent">
             {activeSkill}
           </Badge>
           {skillsAvailable > 0 && (
-            <Text size="1" color="gray">
-              · {skillsAvailable} available
-            </Text>
+            <span className={styles.muted}>· {skillsAvailable} available</span>
           )}
         </>
       ) : (
-        <Text size="1" color="gray">
-          Skills: {skillsAvailable} available
-        </Text>
+        <span className={styles.muted}>Skills: {skillsAvailable} available</span>
       )}
-    </Flex>
+    </div>
   );
 };

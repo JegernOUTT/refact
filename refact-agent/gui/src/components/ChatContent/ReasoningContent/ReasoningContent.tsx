@@ -5,9 +5,9 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import { Flex, Text, Spinner } from "@radix-ui/themes";
 import classNames from "classnames";
-import { LightningBoltIcon } from "@radix-ui/react-icons";
+import { LoaderCircle, Zap } from "lucide-react";
+import { Icon } from "../../ui";
 
 import { Markdown } from "../../Markdown";
 import { useStreamingMarkdown } from "../../Markdown/useStreamingMarkdown";
@@ -193,22 +193,22 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
 
   return (
     <div className={styles.card}>
-      <Flex
+      <div
         className={classNames(
           styles.header,
           isActivelyThinking && styles.thinking,
         )}
-        align="center"
-        gap="2"
         onClick={handleToggle}
       >
         <span className={styles.iconWrapper}>
-          {isActivelyThinking ? <Spinner size="1" /> : <LightningBoltIcon />}
+          {isActivelyThinking ? (
+            <span className={styles.spinner}><Icon icon={LoaderCircle} size="sm" tone="accent" /></span>
+          ) : (
+            <Icon icon={Zap} size="sm" tone="accent" />
+          )}
         </span>
-        <Text size="1" className={styles.summary}>
-          {summaryText}
-        </Text>
-      </Flex>
+        <span className={styles.summary}>{summaryText}</span>
+      </div>
 
       {shouldRender && (
         <div
@@ -223,7 +223,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
               className={styles.content}
               onScroll={handleScroll}
             >
-              <Text size="1" color="gray" as="div">
+              <div className={styles.markdown}>
                 <Markdown
                   canHaveInteractiveElements={true}
                   onCopyClick={onCopyClick}
@@ -231,7 +231,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
                 >
                   {deferredContent ?? formattedContent}
                 </Markdown>
-              </Text>
+              </div>
             </div>
           </div>
         </div>
