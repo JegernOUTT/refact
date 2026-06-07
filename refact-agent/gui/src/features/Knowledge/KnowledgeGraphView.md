@@ -9,11 +9,11 @@ A simplified, pure graph renderer for displaying memory nodes and their relation
 - **Doc-only rendering**: Only displays `doc_code`, `doc_decision`, `doc_preference`, `doc_pattern`, and `doc_lesson` nodes
 - **Edge filtering**: Automatically filters edges to only show connections between doc nodes
 - **Node coloring by kind**:
-  - `doc_code` → Blue (#3B82F6)
-  - `doc_decision` → Purple (#8B5CF6)
-  - `doc_preference` → Green (#10B981)
-  - `doc_pattern` → Amber (#F59E0B)
-  - `doc_lesson` → Cyan (#06B6D4)
+  - `doc_code` → `--rf-color-info`
+  - `doc_decision` → `--rf-color-accent`
+  - `doc_preference` → `--rf-color-success`
+  - `doc_pattern` → `--rf-color-warning`
+  - `doc_lesson` → `--rf-color-info`
 - **Node sizing by degree**: More connected nodes appear larger
 - **Interactive selection**: Click nodes to select, click background to deselect
 - **Force-directed layout**: Uses fcose algorithm for optimal link visualization
@@ -77,8 +77,8 @@ Uses fcose (force-directed) layout with these parameters:
 ## Styling
 
 - Node size: Maps degree (1-20) to size (30-60px)
-- Selected node: 3px purple border + slightly larger
-- Edges: Gray (#9CA3AF) with arrow, 40% opacity
+- Selected node: tokenized accent border + slightly larger
+- Edges: `--rf-color-muted` with arrow, 40% opacity
 - Labels: Hidden by default, shown on hover or zoom > 1.2
 
 ## Differences from KnowledgeGraph.tsx

@@ -213,10 +213,21 @@ export function MemoryDetailsEditor({
       </div>
 
       <div className={styles.actions}>
-        <Button className={styles.actionButton} onClick={handleSave} disabled={!canSave || isSaving} loading={isSaving} variant="primary">
+        <Button
+          className={styles.actionButton}
+          onClick={handleSave}
+          disabled={!canSave || isSaving}
+          loading={isSaving}
+          variant="primary"
+        >
           Save
         </Button>
-        <Button className={styles.actionButton} variant="danger" onClick={() => setIsDeleteOpen(true)} disabled={!canDelete}>
+        <Button
+          className={styles.actionButton}
+          variant="danger"
+          onClick={() => setIsDeleteOpen(true)}
+          disabled={!canDelete}
+        >
           Delete
         </Button>
       </div>

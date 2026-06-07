@@ -89,7 +89,7 @@
   gap: var(--rf-space-2);
   padding: var(--rf-space-3);
   border-top: var(--rf-hairline) solid var(--rf-border);
-  background: var(--rf-surface-1);
+  background: transparent;
 }
 
 .actionButton {

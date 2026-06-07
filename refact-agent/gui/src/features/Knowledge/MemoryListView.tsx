@@ -4,7 +4,7 @@ import classNames from "classnames";
 import { BookOpen, FileText, Link2, Repeat2, Search, Star, Target } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-import { Badge, Icon, Surface } from "../../components/ui";
+import { Badge, Icon, Surface, VirtualList } from "../../components/ui";
 import type { KnowledgeMemoRecord } from "../../services/refact/types";
 import styles from "./MemoryListView.module.css";
 
@@ -66,8 +66,12 @@ export function MemoryListView({
 
   return (
     <Surface className={styles.container} radius="none">
-      <div className={styles.grid}>
-        {memories.map((memory) => {
+      <VirtualList
+        className={styles.list}
+        height="100%"
+        items={memories}
+        getItemKey={(memory) => memory.memid}
+        renderItem={(memory) => {
           const isSelected = selectedId === memory.memid;
           const isLinked = linkedIds.has(memory.memid);
           const kind = memory.kind ?? "code";
@@ -78,6 +82,7 @@ export function MemoryListView({
               className={classNames(styles.cardFrame, isSelected && styles.selected)}
               key={memory.memid}
               variant={isSelected ? "selected" : "plain"}
+              animated="rise"
             >
               <button
                 ref={(el) => {
@@ -130,8 +135,8 @@ export function MemoryListView({
               </button>
             </Surface>
           );
-        })}
-      </div>
+        }}
+      />
     </Surface>
   );
 }

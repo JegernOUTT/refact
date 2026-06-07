@@ -1,4 +1,3 @@
-import { TextField } from "@radix-ui/themes";
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
 import { CheckSquare, Moon, Plus, Sun, X, Home } from "lucide-react";
 import classNames from "classnames";
@@ -19,7 +18,6 @@ import {
   closeTask,
 } from "../../features/Tasks";
 import {
-  ChangeEvent,
   ComponentProps,
   KeyboardEvent,
   MouseEvent,
@@ -42,6 +40,7 @@ import {
 } from "../../features/Chat";
 import {
   Badge,
+  FieldText,
   Icon,
   IconButton,
   StatusDot,
@@ -406,10 +405,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [renameState, updateTaskMeta],
   );
 
-  const handleRenameChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setRenameState((prev) =>
-      prev ? { ...prev, value: event.target.value } : null,
-    );
+  const handleRenameChange = (value: string) => {
+    setRenameState((prev) => (prev ? { ...prev, value } : null));
   };
 
   const handleCloseTab = useCallback(
@@ -446,7 +443,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div className={styles.toolbarDivider} />
 
       <KitTabs
-        className={styles.tabsContainer}
+        className={classNames(styles.tabsContainer, "scrollX")}
         onWheel={(event) => {
           const container = event.currentTarget;
           if (container.scrollWidth <= container.clientWidth) return;
@@ -472,12 +469,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             if (isRenaming) {
               return (
                 <div key={`task-${task.id}`} className={styles.tabWrap}>
-                  <TextField.Root
+                  <FieldText
                     autoComplete="off"
                     onKeyUp={(e) => handleKeyUpOnTaskRename(e, task.id)}
                     onBlur={() => setRenameState(null)}
                     autoFocus
-                    size="1"
                     value={renameState.value}
                     onChange={handleRenameChange}
                     className={styles.RenameInput}
@@ -499,9 +495,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   <button
                     type="button"
                     aria-selected={isActive}
-                    className={`${styles.tabButton} ${
-                      isActive ? styles.tabButtonActive : ""
-                    }`}
+                    className={classNames(
+                      styles.tabButton,
+                      "rf-enter",
+                      isActive && styles.tabButtonActive,
+                    )}
                     onClick={() =>
                       goToTab({ type: "task", taskId: task.id, taskName })
                     }
@@ -538,12 +536,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             if (isRenaming) {
               return (
                 <div key={tab.id} className={styles.tabWrap}>
-                  <TextField.Root
+                  <FieldText
                     autoComplete="off"
                     onKeyUp={(e) => handleKeyUpOnRename(e, tab.id)}
                     onBlur={() => setRenameState(null)}
                     autoFocus
-                    size="1"
                     value={renameState.value}
                     onChange={handleRenameChange}
                     className={styles.RenameInput}
@@ -566,9 +563,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   <button
                     type="button"
                     aria-selected={isActive}
-                    className={`${styles.tabButton} ${
-                      isActive ? styles.tabButtonActive : ""
-                    }`}
+                    className={classNames(
+                      styles.tabButton,
+                      "rf-enter",
+                      isActive && styles.tabButtonActive,
+                    )}
                     onClick={() => goToTab({ type: "chat", id: tab.id })}
                     onDoubleClick={() =>
                       handleChatThreadRenaming(tab.id, tab.title)

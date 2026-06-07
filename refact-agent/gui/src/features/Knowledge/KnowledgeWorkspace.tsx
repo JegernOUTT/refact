@@ -94,11 +94,11 @@ export function KnowledgeWorkspace() {
 
   return (
     <Surface className={styles.workspace} radius="none">
-      <Surface className={styles.editorSection} variant="surface-1">
+      <Surface className={styles.editorSection} variant="plain">
         <MemoryDetailsEditor memory={selectedMemory} onMemoryDeleted={handleMemoryDeleted} />
       </Surface>
 
-      <Surface className={styles.listSection} variant="surface-1">
+      <Surface className={styles.listSection} variant="plain">
         <MemoryListView
           memories={memoryRecords}
           selectedId={selectedId}
@@ -107,7 +107,7 @@ export function KnowledgeWorkspace() {
         />
       </Surface>
 
-      <Surface className={styles.graphSection} variant="surface-1">
+      <Surface className={styles.graphSection} variant="plain">
         <KnowledgeGraphView
           nodes={linkedDocNodes}
           edges={docDocEdges}

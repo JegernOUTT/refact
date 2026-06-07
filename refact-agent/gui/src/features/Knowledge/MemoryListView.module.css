@@ -2,15 +2,14 @@
   min-width: 0;
   height: 100%;
   min-height: 0;
-  overflow: auto;
-  padding: var(--rf-space-3);
+  overflow: hidden;
 }
 
-.grid {
-  display: grid;
+.list {
   min-width: 0;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-  gap: var(--rf-space-3);
+  height: 100%;
+  min-height: 0;
+  padding: var(--rf-space-2);
 }
 
 .cardFrame {
