@@ -4,7 +4,7 @@ use axum::extract::Query;
 use axum::response::Result;
 use hyper::StatusCode;
 use serde::Deserialize;
-use refact_buddy_core::conductor::{DoneWhen, GoalAutonomy, GoalBudget};
+use refact_buddy_core::conductor::GoalBudget;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
@@ -41,16 +41,14 @@ pub struct AcceptRequest {
     pub action_index: usize,
     #[serde(default)]
     pub budget: Option<GoalBudget>,
+    #[serde(default)]
+    pub created_goal_id: Option<String>,
 }
 
 pub(crate) struct ActionOutcome {
     pub result: serde_json::Value,
     pub status: OpportunityStatus,
 }
-
-const OPPORTUNITY_GOAL_WALL_CLOCK_SECS: u64 = 6 * 60 * 60;
-const OPPORTUNITY_GOAL_NO_PROGRESS_WAKES: u32 = 3;
-const OPPORTUNITY_GOAL_TOTAL_TOKENS: u64 = 250_000;
 
 fn draft_create_error(err: DraftCreateError) -> ScratchError {
     ScratchError::new(StatusCode::PAYLOAD_TOO_LARGE, err.to_string())
@@ -184,13 +182,14 @@ pub async fn handle_v1_buddy_opportunity_accept(
         action
     };
 
-    let outcome = match dispatch_action(app.clone(), &id, &action, req.budget.as_ref()).await {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            clear_accept_claim(gcx.clone(), &id).await;
-            return Err(err);
-        }
-    };
+    let outcome =
+        match dispatch_action(app.clone(), &id, &action, req.created_goal_id.as_deref()).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                clear_accept_claim(gcx.clone(), &id).await;
+                return Err(err);
+            }
+        };
 
     let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
@@ -241,7 +240,7 @@ pub(crate) async fn dispatch_action(
     app: AppState,
     _opp_id: &str,
     action: &BuddyAction,
-    budget_override: Option<&GoalBudget>,
+    created_goal_id: Option<&str>,
 ) -> Result<ActionOutcome, ScratchError> {
     match action {
         BuddyAction::OpenPage { page } => {
@@ -440,21 +439,37 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
-        BuddyAction::StartConductorGoal {
-            plan_doc_slug,
-            title,
-        } => {
-            let mut req = start_conductor_goal_request(plan_doc_slug, title);
-            if let Some(budget) = budget_override {
-                req.budget = budget.clone();
-            }
+        BuddyAction::StartConductorGoal { title, .. } => {
+            let goal_id = created_goal_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    ScratchError::new(
+                        StatusCode::BAD_REQUEST,
+                        "created_goal_id is required after creating a valid conductor goal"
+                            .to_string(),
+                    )
+                })?;
             let goal =
-                crate::http::routers::v1::buddy_conductor::handle_v1_buddy_conductor_goal_create(
+                crate::http::routers::v1::buddy_conductor::handle_v1_buddy_conductor_goal_get(
                     State(app.clone()),
-                    axum::Json(req),
+                    Path(goal_id.to_string()),
                 )
                 .await?
                 .0;
+            if goal.title.trim().is_empty()
+                || goal.done_when.summary.trim().is_empty()
+                    && goal
+                        .done_when
+                        .checklist
+                        .iter()
+                        .all(|item| item.trim().is_empty())
+            {
+                return Err(ScratchError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("created conductor goal is incomplete for {title}"),
+                ));
+            }
             Ok(ActionOutcome {
                 result: serde_json::json!({
                     "kind": "start_conductor_goal",
@@ -467,41 +482,6 @@ pub(crate) async fn dispatch_action(
             result: serde_json::json!({ "kind": "dismiss" }),
             status: OpportunityStatus::Dismissed,
         }),
-    }
-}
-
-fn start_conductor_goal_request(
-    plan_doc_slug: &str,
-    title: &str,
-) -> crate::http::routers::v1::buddy_conductor::CreateConductorGoalRequest {
-    let title = title.trim().to_string();
-    let plan_doc_slug = plan_doc_slug.trim();
-    let plan_doc_slug = (!plan_doc_slug.is_empty()).then(|| plan_doc_slug.to_string());
-    let plan_doc_line = plan_doc_slug
-        .as_ref()
-        .map(|slug| format!("\n\nPlan document slug: `{slug}`"))
-        .unwrap_or_default();
-    crate::http::routers::v1::buddy_conductor::CreateConductorGoalRequest {
-        id: None,
-        title: title.clone(),
-        plan_doc_slug,
-        plan_markdown: format!(
-            "# {title}\n\nBuddy proposed this guarded conductor goal from an opportunity card.{plan_doc_line}"
-        ),
-        done_when: DoneWhen {
-            summary: format!("{title} has been resolved or safely handed off"),
-            checklist: vec![
-                "Conductor reviewed the opportunity context".to_string(),
-                "Required follow-up work is complete or explicitly escalated".to_string(),
-            ],
-        },
-        autonomy: GoalAutonomy::FullAuto,
-        budget: GoalBudget {
-            wall_clock_secs: Some(OPPORTUNITY_GOAL_WALL_CLOCK_SECS),
-            no_progress_wakes: Some(OPPORTUNITY_GOAL_NO_PROGRESS_WAKES),
-            total_tokens: Some(OPPORTUNITY_GOAL_TOTAL_TOKENS),
-            usd: None,
-        },
     }
 }
 
@@ -1179,101 +1159,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conductor_goal_action_dispatch_creates_guarded_goal() {
+    async fn conductor_goal_action_requires_created_goal_id() {
         let (app, _dir) = test_app().await;
+
+        let err = match dispatch_action(
+            app,
+            "opp-1",
+            &BuddyAction::StartConductorGoal {
+                title: "Recover abandoned task T-42".to_string(),
+                plan_doc_slug: None,
+                source_task_id: Some("T-42".to_string()),
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected conductor goal action to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("created_goal_id"));
+    }
+
+    #[tokio::test]
+    async fn conductor_goal_action_accepts_only_persisted_created_goal() {
+        let (app, _dir) = test_app().await;
+        let goal =
+            crate::http::routers::v1::buddy_conductor::handle_v1_buddy_conductor_goal_create(
+                State(app.clone()),
+                axum::Json(
+                    crate::http::routers::v1::buddy_conductor::CreateConductorGoalRequest {
+                        id: Some("created-goal-1".to_string()),
+                        title: "Recover abandoned task T-42".to_string(),
+                        plan_doc_slug: None,
+                        plan_markdown: "# Recover abandoned task T-42".to_string(),
+                        done_when: refact_buddy_core::conductor::DoneWhen {
+                            summary: "Task is recovered".to_string(),
+                            checklist: vec![],
+                        },
+                        autonomy: refact_buddy_core::conductor::GoalAutonomy::Governed,
+                        budget: GoalBudget {
+                            wall_clock_secs: Some(900),
+                            no_progress_wakes: Some(2),
+                            total_tokens: Some(50_000),
+                            usd: None,
+                        },
+                    },
+                ),
+            )
+            .await
+            .unwrap()
+            .0;
 
         let outcome = dispatch_action(
             app,
             "opp-1",
             &BuddyAction::StartConductorGoal {
-                plan_doc_slug: "task-T-42-recovery".to_string(),
                 title: "Recover abandoned task T-42".to_string(),
+                plan_doc_slug: None,
+                source_task_id: Some("T-42".to_string()),
             },
-            None,
+            Some(&goal.id),
         )
         .await
         .unwrap();
 
         assert_eq!(outcome.status, OpportunityStatus::Accepted);
         assert_eq!(outcome.result["kind"], "start_conductor_goal");
-        let goal: ConductorGoal = serde_json::from_value(outcome.result["goal"].clone()).unwrap();
-        assert_eq!(goal.title, "Recover abandoned task T-42");
-        assert_eq!(goal.plan_doc_slug.as_deref(), Some("task-T-42-recovery"));
-        assert_eq!(
-            goal.budget.wall_clock_secs,
-            Some(OPPORTUNITY_GOAL_WALL_CLOCK_SECS)
-        );
-        assert_eq!(
-            goal.budget.no_progress_wakes,
-            Some(OPPORTUNITY_GOAL_NO_PROGRESS_WAKES)
-        );
-        assert!(goal.plan_markdown.contains("opportunity card"));
+        let accepted_goal: ConductorGoal =
+            serde_json::from_value(outcome.result["goal"].clone()).unwrap();
+        assert_eq!(accepted_goal.id, "created-goal-1");
+        assert_eq!(accepted_goal.budget.wall_clock_secs, Some(900));
+        assert_eq!(accepted_goal.done_when.summary, "Task is recovered");
     }
 
     #[tokio::test]
-    async fn conductor_goal_action_accepts_empty_plan_slug_with_inline_plan() {
+    async fn conductor_goal_action_rejects_missing_persisted_goal() {
         let (app, _dir) = test_app().await;
 
-        let outcome = dispatch_action(
+        let err = match dispatch_action(
             app,
             "opp-1",
             &BuddyAction::StartConductorGoal {
-                plan_doc_slug: String::new(),
                 title: "Recover abandoned task T-42".to_string(),
+                plan_doc_slug: None,
+                source_task_id: Some("T-42".to_string()),
             },
-            None,
+            Some("missing-goal"),
         )
         .await
-        .unwrap();
-
-        assert_eq!(outcome.status, OpportunityStatus::Accepted);
-        let goal: ConductorGoal = serde_json::from_value(outcome.result["goal"].clone()).unwrap();
-        assert_eq!(goal.title, "Recover abandoned task T-42");
-        assert_eq!(goal.plan_doc_slug, None);
-        assert!(goal.plan_markdown.contains("opportunity card"));
-        assert!(!goal.plan_markdown.contains("Plan document slug"));
-    }
-
-    #[tokio::test]
-    async fn conductor_goal_action_missing_budget_is_rejected_by_create_path() {
-        let (app, _dir) = test_app().await;
-        let mut req = start_conductor_goal_request("slug", "Title");
-        req.budget.no_progress_wakes = None;
-
-        let err = crate::http::routers::v1::buddy_conductor::handle_v1_buddy_conductor_goal_create(
-            State(app),
-            axum::Json(req),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
-        assert!(err.message.contains("no_progress_wakes"));
-    }
-
-    #[tokio::test]
-    async fn conductor_goal_action_uses_accept_budget_override() {
-        let (app, _dir) = test_app().await;
-        let budget = GoalBudget {
-            wall_clock_secs: Some(900),
-            no_progress_wakes: Some(2),
-            total_tokens: Some(50_000),
-            usd: Some(3.5),
+        {
+            Ok(_) => panic!("expected conductor goal action to fail"),
+            Err(err) => err,
         };
 
-        let outcome = dispatch_action(
-            app,
-            "opp-1",
-            &BuddyAction::StartConductorGoal {
-                plan_doc_slug: "task-T-42-recovery".to_string(),
-                title: "Recover abandoned task T-42".to_string(),
-            },
-            Some(&budget),
-        )
-        .await
-        .unwrap();
-
-        let goal: ConductorGoal = serde_json::from_value(outcome.result["goal"].clone()).unwrap();
-        assert_eq!(goal.budget, budget);
+        assert_eq!(err.status_code, StatusCode::NOT_FOUND);
     }
 }

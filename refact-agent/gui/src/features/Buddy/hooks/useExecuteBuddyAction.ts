@@ -5,6 +5,7 @@ import { navigateFromBuddyPage, routeDraftByKind } from "../executeBuddyAction";
 import { validateBuddyDraftAction } from "../buddyActionValidation";
 import {
   useAcceptOpportunityMutation,
+  useCreateConductorGoalMutation,
   useDismissOpportunityMutation,
 } from "../../../services/refact/buddy";
 import { openBuddyChat, newBuddyChatAction } from "../../Chat/Thread";
@@ -13,7 +14,7 @@ import type {
   BuddyAction,
   BuddyOpportunity,
   BuddyOpportunityAcceptResponse,
-  GoalBudget,
+  CreateConductorGoalRequest,
 } from "../types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -52,6 +53,7 @@ export function formatOpportunityActionError(error: unknown): string {
 export function useExecuteBuddyAction() {
   const dispatch = useAppDispatch();
   const [acceptOpportunity] = useAcceptOpportunityMutation();
+  const [createConductorGoal] = useCreateConductorGoalMutation();
   const [dismissOpportunity] = useDismissOpportunityMutation();
 
   return useCallback(
@@ -59,7 +61,7 @@ export function useExecuteBuddyAction() {
       action: BuddyAction,
       opp: BuddyOpportunity | null,
       actionIndex: number,
-      budget?: GoalBudget,
+      conductorGoal?: CreateConductorGoalRequest,
     ) => {
       if (opp == null) {
         if (action.kind === "open_page") {
@@ -84,12 +86,25 @@ export function useExecuteBuddyAction() {
         throw new Error(validationError);
       }
 
+      let createdGoalId: string | undefined;
+      if (action.kind === "start_conductor_goal") {
+        if (!conductorGoal) {
+          throw new Error("Complete the conductor goal details first.");
+        }
+        try {
+          const goal = await createConductorGoal(conductorGoal).unwrap();
+          createdGoalId = goal.id;
+        } catch (error) {
+          throw new Error(formatOpportunityActionError(error));
+        }
+      }
+
       let response: BuddyOpportunityAcceptResponse;
       try {
         response = await acceptOpportunity({
           id: opp.id,
           action_index: actionIndex,
-          ...(budget ? { budget } : {}),
+          ...(createdGoalId ? { created_goal_id: createdGoalId } : {}),
         }).unwrap();
       } catch (error) {
         throw new Error(formatOpportunityActionError(error));
@@ -122,6 +137,6 @@ export function useExecuteBuddyAction() {
           break;
       }
     },
-    [dispatch, acceptOpportunity, dismissOpportunity],
+    [dispatch, acceptOpportunity, createConductorGoal, dismissOpportunity],
   );
 }

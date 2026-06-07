@@ -567,8 +567,11 @@ pub enum BuddyAction {
         item_id: String,
     },
     StartConductorGoal {
-        plan_doc_slug: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_doc_slug: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_task_id: Option<String>,
     },
     CreatePulseReport {
         scope: PulseScope,
@@ -911,19 +914,22 @@ mod tests {
     #[test]
     fn conductor_action_and_page_round_trip() {
         let action = BuddyAction::StartConductorGoal {
-            plan_doc_slug: "master-plan".to_string(),
             title: "Buddy Conductor".to_string(),
+            plan_doc_slug: Some("master-plan".to_string()),
+            source_task_id: Some("task-1".to_string()),
         };
         let action_json = serde_json::to_string(&action).unwrap();
         let action_back: BuddyAction = serde_json::from_str(&action_json).unwrap();
 
         match action_back {
             BuddyAction::StartConductorGoal {
-                plan_doc_slug,
                 title,
+                plan_doc_slug,
+                source_task_id,
             } => {
-                assert_eq!(plan_doc_slug, "master-plan");
                 assert_eq!(title, "Buddy Conductor");
+                assert_eq!(plan_doc_slug.as_deref(), Some("master-plan"));
+                assert_eq!(source_task_id.as_deref(), Some("task-1"));
             }
             other => panic!("expected StartConductorGoal, got {other:?}"),
         }

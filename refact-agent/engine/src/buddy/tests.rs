@@ -3737,8 +3737,9 @@ fn buddy_action_round_trip() {
             item_id: "github-mcp".to_string(),
         },
         BuddyAction::StartConductorGoal {
-            plan_doc_slug: "master-plan".to_string(),
             title: "Buddy Conductor".to_string(),
+            plan_doc_slug: Some("master-plan".to_string()),
+            source_task_id: Some("task-1".to_string()),
         },
         BuddyAction::CreatePulseReport {
             scope: PulseScope::All,
@@ -3945,8 +3946,9 @@ fn schema_contract_buddy_action_variants() {
         ),
         (
             BuddyAction::StartConductorGoal {
-                plan_doc_slug: "master-plan".to_string(),
                 title: "Buddy Conductor".to_string(),
+                plan_doc_slug: Some("master-plan".to_string()),
+                source_task_id: Some("task-1".to_string()),
             },
             "start_conductor_goal",
         ),
@@ -8100,6 +8102,7 @@ async fn accept_route_terminal_status_returns_409() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8137,6 +8140,7 @@ async fn accept_after_dismiss_returns_409() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8177,6 +8181,7 @@ async fn expired_opportunity_cannot_be_accepted() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8233,6 +8238,7 @@ async fn concurrent_accepts_only_one_succeeds() {
             Some(axum::extract::Json(AcceptRequest {
                 action_index: 0,
                 budget: None,
+                created_goal_id: None,
             })),
         )
         .await
@@ -8248,6 +8254,7 @@ async fn concurrent_accepts_only_one_succeeds() {
             Some(axum::extract::Json(AcceptRequest {
                 action_index: 0,
                 budget: None,
+                created_goal_id: None,
             })),
         )
         .await
@@ -8283,6 +8290,7 @@ async fn dismiss_action_through_accept_route_results_in_dismissed_not_accepted()
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8341,6 +8349,7 @@ async fn accept_route_with_action_index_1_returns_second_action_without_navigati
         Some(axum::extract::Json(AcceptRequest {
             action_index: 1,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8384,6 +8393,7 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8405,6 +8415,7 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8437,6 +8448,7 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8459,6 +8471,7 @@ async fn failed_marketplace_install_leaves_opportunity_retryable() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await
@@ -8490,6 +8503,7 @@ async fn successful_marketplace_install_accepts_opportunity() {
         Some(axum::extract::Json(AcceptRequest {
             action_index: 0,
             budget: None,
+            created_goal_id: None,
         })),
     )
     .await

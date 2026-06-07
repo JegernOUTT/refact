@@ -99,7 +99,9 @@
   color: var(--gray-11);
 }
 
-.goalBudgetField input {
+.goalBudgetField input,
+.goalBudgetField textarea,
+.goalBudgetField select {
   width: 100%;
   box-sizing: border-box;
   border: 1px solid var(--gray-a6);
@@ -107,6 +109,11 @@
   background: var(--color-panel-solid);
   color: var(--gray-12);
   padding: 4px 6px;
+}
+
+.goalBudgetField textarea {
+  min-height: 48px;
+  resize: vertical;
 }
 
 .actionError {

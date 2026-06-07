@@ -59,7 +59,11 @@ function assertBuddyAction(action: BuddyAction): string {
     case "offer_marketplace_install":
       return action.market_kind + action.item_id;
     case "start_conductor_goal":
-      return action.plan_doc_slug + action.title;
+      return (
+        (action.plan_doc_slug ?? "") +
+        action.title +
+        (action.source_task_id ?? "")
+      );
     case "create_pulse_report":
       return action.scope;
     case "dismiss":
@@ -142,8 +146,9 @@ describe("Buddy schema contract", () => {
       },
       {
         kind: "start_conductor_goal",
-        plan_doc_slug: "master-plan",
         title: "Buddy Conductor",
+        plan_doc_slug: "master-plan",
+        source_task_id: "task-1",
       },
       { kind: "create_pulse_report", scope: "all" },
       { kind: "dismiss" },

@@ -5,24 +5,26 @@ import {
   type EngineApiConnection,
   type PortOrConnection,
 } from "./chatCommands";
-import type {
-  BuddySnapshot,
-  BuddySettings,
-  BuddyActivityEntry,
-  BuddyConversationMeta,
-  BuddyConversationEntry,
-  BuddyCareRequest,
-  BuddyCareResponse,
-  BuddyQuestAcceptResponse,
-  BuddyPersonalityRerollResponse,
-  BuddyOpportunity,
-  OpportunityStatus,
-  BuddyPulse,
-  BuddyDraft,
-  BuddyOpportunityAcceptResponse,
-  BuddyOpportunityAcceptRequest,
-  ConductorGoal,
-  GoalAutonomy,
+import {
+  normalizeGoalStatus,
+  type BuddySnapshot,
+  type BuddySettings,
+  type BuddyActivityEntry,
+  type BuddyConversationMeta,
+  type BuddyConversationEntry,
+  type BuddyCareRequest,
+  type BuddyCareResponse,
+  type BuddyQuestAcceptResponse,
+  type BuddyPersonalityRerollResponse,
+  type BuddyOpportunity,
+  type OpportunityStatus,
+  type BuddyPulse,
+  type BuddyDraft,
+  type BuddyOpportunityAcceptResponse,
+  type BuddyOpportunityAcceptRequest,
+  type ConductorGoal,
+  type CreateConductorGoalRequest,
+  type GoalAutonomy,
 } from "../../features/Buddy/types";
 import {
   addDraft,
@@ -287,6 +289,22 @@ function buddyUrlFromState(
   query?: Record<string, string | number | boolean | null | undefined>,
 ): string {
   return buildApiUrlFromState(state, path, query);
+}
+
+function normalizeConductorGoal(goal: ConductorGoal): ConductorGoal {
+  return {
+    ...goal,
+    status: normalizeGoalStatus(goal.status),
+    ledger: goal.ledger
+      ? {
+          ...goal.ledger,
+          status:
+            goal.ledger.status == null
+              ? goal.ledger.status
+              : normalizeGoalStatus(goal.ledger.status),
+        }
+      : goal.ledger,
+  };
 }
 
 async function parseBuddyResponse<T>(response: Response): Promise<T> {
@@ -649,15 +667,25 @@ export const buddyApi = createApi({
       BuddyOpportunityAcceptResponse,
       BuddyOpportunityAcceptRequest
     >({
-      queryFn: async ({ id, action_index, budget }, api, _opts, baseQuery) => {
+      queryFn: async (
+        { id, action_index, budget, created_goal_id },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
         const state = api.getState() as BuddyApiState;
+        const body = {
+          action_index,
+          ...(budget ? { budget } : {}),
+          ...(created_goal_id ? { created_goal_id } : {}),
+        };
         const result = await baseQuery({
           url: buddyUrlFromState(
             state,
             `/v1/buddy/opportunities/${encodeURIComponent(id)}/accept`,
           ),
           method: "POST",
-          body: budget ? { action_index, budget } : { action_index },
+          body,
         });
         if (result.error) return { error: result.error };
         return { data: result.data as BuddyOpportunityAcceptResponse };
@@ -697,6 +725,22 @@ export const buddyApi = createApi({
         return { data: result.data as ConductorAnswerResponse };
       },
     }),
+    createConductorGoal: builder.mutation<
+      ConductorGoal,
+      CreateConductorGoalRequest
+    >({
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyApiState;
+        const result = await baseQuery({
+          url: buddyUrlFromState(state, "/v1/buddy/conductor/goals"),
+          method: "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
+      },
+      invalidatesTags: ["BuddySnapshot"],
+    }),
     pauseConductorGoal: builder.mutation<ConductorGoal, string>({
       queryFn: async (goalId, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyApiState;
@@ -708,7 +752,7 @@ export const buddyApi = createApi({
           method: "POST",
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as ConductorGoal };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
       },
       invalidatesTags: ["BuddySnapshot"],
     }),
@@ -723,7 +767,7 @@ export const buddyApi = createApi({
           method: "POST",
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as ConductorGoal };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
       },
       invalidatesTags: ["BuddySnapshot"],
     }),
@@ -742,7 +786,7 @@ export const buddyApi = createApi({
           body: { autonomy },
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as ConductorGoal };
+        return { data: normalizeConductorGoal(result.data as ConductorGoal) };
       },
       invalidatesTags: ["BuddySnapshot"],
     }),
@@ -1050,6 +1094,7 @@ export const {
   useAcceptOpportunityMutation,
   useDismissOpportunityMutation,
   useAnswerConductorGhostMutation,
+  useCreateConductorGoalMutation,
   usePauseConductorGoalMutation,
   useResumeConductorGoalMutation,
   useSetConductorGoalAutonomyMutation,

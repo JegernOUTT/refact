@@ -756,8 +756,9 @@ export type BuddyAction =
     }
   | {
       kind: "start_conductor_goal";
-      plan_doc_slug: string;
       title: string;
+      plan_doc_slug?: string | null;
+      source_task_id?: string | null;
     }
   | { kind: "create_pulse_report"; scope: PulseScope }
   | { kind: "dismiss" };
@@ -813,6 +814,7 @@ export interface BuddyOpportunityAcceptRequest {
   id: string;
   action_index: number;
   budget?: GoalBudget;
+  created_goal_id?: string;
 }
 
 export interface BuddyOpportunityAcceptResponse {
@@ -986,6 +988,16 @@ export interface GoalBudget {
   usd?: number | null;
   token_ceiling?: number | null;
   usd_ceiling?: number | null;
+}
+
+export interface CreateConductorGoalRequest {
+  id?: string;
+  title: string;
+  plan_doc_slug?: string | null;
+  plan_markdown?: string;
+  done_when: DoneWhen;
+  autonomy: GoalAutonomy;
+  budget: GoalBudget;
 }
 
 export interface GoalBudgetSpent {

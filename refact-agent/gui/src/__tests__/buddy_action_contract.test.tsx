@@ -446,21 +446,27 @@ describe("buddy action execution contract", () => {
     );
   });
 
-  it("goal_proposal_accept_requires_budgets_and_sends_budget", async () => {
-    let requestBody: unknown = null;
+  it("goal_proposal_accept_requires_done_when_budget_and_creates_goal_first", async () => {
+    let createBody: unknown = null;
+    let acceptBody: unknown = null;
     server.use(
+      http.post("*/v1/buddy/conductor/goals", async ({ request }) => {
+        createBody = await request.json();
+        return HttpResponse.json(makeConductorGoal({ id: "created-goal" }));
+      }),
       http.post("*/v1/buddy/opportunities/:id/accept", async ({ request }) => {
-        requestBody = await request.json();
+        acceptBody = await request.json();
         return acceptResponse({
           kind: "start_conductor_goal",
-          goal: makeConductorGoal(),
+          goal: makeConductorGoal({ id: "created-goal" }),
         });
       }),
     );
     const action: BuddyAction = {
       kind: "start_conductor_goal",
-      plan_doc_slug: "task-recovery",
       title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      source_task_id: "task-1",
     };
     const opp = makeOpportunity({ proposed_actions: [action] });
     const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
@@ -468,13 +474,17 @@ describe("buddy action execution contract", () => {
     });
 
     const accept = screen.getByRole("button", {
-      name: "Start conductor goal",
+      name: "Create conductor goal",
     });
     expect(
-      screen.getByText("Guardrails before Buddy starts the conductor goal"),
+      screen.getByText("Guardrails before Buddy opens the conductor goal"),
     ).toBeInTheDocument();
     expect(accept).toBeDisabled();
 
+    await user.type(
+      screen.getByLabelText("Done when summary or checklist required"),
+      "Task recovered",
+    );
     await user.type(screen.getByLabelText("Wall-clock hours required"), "2");
     await user.type(screen.getByLabelText("No-progress wakes required"), "4");
     await user.type(screen.getByLabelText("Token ceiling optional"), "50000");
@@ -483,8 +493,11 @@ describe("buddy action execution contract", () => {
     await user.click(accept);
 
     await waitFor(() => {
-      expect(requestBody).toEqual({
-        action_index: 0,
+      expect(createBody).toMatchObject({
+        title: "Recover task",
+        plan_doc_slug: "task-recovery",
+        done_when: { summary: "Task recovered", checklist: [] },
+        autonomy: "governed",
         budget: {
           wall_clock_secs: 7200,
           no_progress_wakes: 4,
@@ -492,36 +505,52 @@ describe("buddy action execution contract", () => {
           usd: 3.25,
         },
       });
+      expect(acceptBody).toEqual({
+        action_index: 0,
+        created_goal_id: "created-goal",
+      });
     });
   });
 
   it("successful_goal_proposal_accept_navigates_to_conductor", async () => {
     server.use(
+      http.post("*/v1/buddy/conductor/goals", () =>
+        HttpResponse.json(makeConductorGoal({ id: "created-goal" })),
+      ),
       http.post("*/v1/buddy/opportunities/:id/accept", () =>
         acceptResponse({
           kind: "start_conductor_goal",
-          goal: makeConductorGoal(),
+          goal: makeConductorGoal({ id: "created-goal" }),
         }),
       ),
     );
     const action: BuddyAction = {
       kind: "start_conductor_goal",
-      plan_doc_slug: "task-recovery",
       title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      source_task_id: "task-1",
     };
 
     const { store, execute } = renderExecutor();
     await execute(action, makeOpportunity({ proposed_actions: [action] }), 0, {
-      wall_clock_secs: 3600,
-      no_progress_wakes: 2,
+      title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      plan_markdown: "# Recover task",
+      done_when: { summary: "Task recovered", checklist: [] },
+      autonomy: "governed",
+      budget: {
+        wall_clock_secs: 3600,
+        no_progress_wakes: 2,
+      },
     });
 
     expect(lastPage(store)).toMatchObject({ name: "conductor" });
   });
 
-  it("goal_proposal_validation_errors_display_clearly", async () => {
+  it("goal_proposal_create_errors_display_clearly", async () => {
+    let acceptCalled = false;
     server.use(
-      http.post("*/v1/buddy/opportunities/:id/accept", () =>
+      http.post("*/v1/buddy/conductor/goals", () =>
         HttpResponse.json(
           {
             detail:
@@ -530,21 +559,30 @@ describe("buddy action execution contract", () => {
           { status: 400 },
         ),
       ),
+      http.post("*/v1/buddy/opportunities/:id/accept", () => {
+        acceptCalled = true;
+        return acceptResponse({ kind: "dismiss" });
+      }),
     );
     const action: BuddyAction = {
       kind: "start_conductor_goal",
-      plan_doc_slug: "task-recovery",
       title: "Recover task",
+      plan_doc_slug: "task-recovery",
+      source_task_id: "task-1",
     };
     const opp = makeOpportunity({ proposed_actions: [action] });
     const { user } = render(<BuddyOpportunityCard opportunity={opp} />, {
       preloadedState: CONFIG_STATE,
     });
 
+    await user.type(
+      screen.getByLabelText("Done when summary or checklist required"),
+      "Task recovered",
+    );
     await user.type(screen.getByLabelText("Wall-clock hours required"), "1");
     await user.type(screen.getByLabelText("No-progress wakes required"), "2");
     await user.click(
-      screen.getByRole("button", { name: "Start conductor goal" }),
+      screen.getByRole("button", { name: "Create conductor goal" }),
     );
 
     await waitFor(() => {
@@ -552,6 +590,7 @@ describe("buddy action execution contract", () => {
         "goal budget requires wall_clock_secs",
       );
     });
+    expect(acceptCalled).toBe(false);
   });
 
   it("failed_marketplace_install_shows_error_and_stays_retryable", async () => {

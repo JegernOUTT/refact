@@ -229,8 +229,9 @@ mod rules {
                     format!("task_health:abandoned:{}", task_id),
                     vec![
                         BuddyAction::StartConductorGoal {
-                            plan_doc_slug: String::new(),
                             title: format!("Recover abandoned task {}", task_id),
+                            plan_doc_slug: None,
+                            source_task_id: Some(task_id.clone()),
                         },
                         BuddyAction::OpenPage {
                             page: BuddyPage::TasksList,
@@ -1117,11 +1118,13 @@ mod tests {
         assert_eq!(opp.related.task_ids, vec!["T-42".to_string()]);
         match &opp.proposed_actions[0] {
             BuddyAction::StartConductorGoal {
-                plan_doc_slug,
                 title,
+                plan_doc_slug,
+                source_task_id,
             } => {
-                assert!(plan_doc_slug.is_empty());
                 assert_eq!(title, "Recover abandoned task T-42");
+                assert_eq!(plan_doc_slug, &None);
+                assert_eq!(source_task_id.as_deref(), Some("T-42"));
             }
             other => panic!("expected StartConductorGoal, got {other:?}"),
         }
