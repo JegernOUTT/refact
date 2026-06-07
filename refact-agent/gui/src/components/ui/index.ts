@@ -5,6 +5,15 @@ export { Button, ButtonGroup } from "./Button";
 export type { ButtonGroupProps, ButtonProps, ButtonSize, ButtonVariant } from "./Button";
 export * from "./Card";
 export * from "./Chip";
+export { Dialog } from "./Dialog";
+export type {
+  DialogCloseProps,
+  DialogContentProps,
+  DialogDescriptionProps,
+  DialogProps,
+  DialogTitleProps,
+  DialogTriggerProps,
+} from "./Dialog";
 export * from "./EmptyState";
 export * from "./ErrorState";
 export { Icon } from "./Icon";
@@ -12,8 +21,40 @@ export { IconButton } from "./Button";
 export type { IconButtonProps } from "./Button";
 export type { IconProps } from "./Icon";
 export * from "./LoadingState";
+export { Menu } from "./Menu";
+export type {
+  MenuContentProps,
+  MenuItemProps,
+  MenuLabelProps,
+  MenuProps,
+  MenuSeparatorProps,
+  MenuTriggerProps,
+} from "./Menu";
+export { Popover } from "./Popover";
+export type {
+  PopoverCloseProps,
+  PopoverContentProps,
+  PopoverProps,
+  PopoverTriggerProps,
+} from "./Popover";
+export { Sheet } from "./Sheet";
+export type {
+  SheetCloseProps,
+  SheetContentProps,
+  SheetDescriptionProps,
+  SheetProps,
+  SheetSide,
+  SheetTitleProps,
+  SheetTriggerProps,
+} from "./Sheet";
 export * from "./Skeleton";
 export * from "./StatusDot";
 export * from "./Surface";
+export { Tooltip } from "./Tooltip";
+export type {
+  TooltipContentProps,
+  TooltipProps,
+  TooltipTriggerProps,
+} from "./Tooltip";
 export { useToken } from "./useToken";
 export { useTokens } from "./useTokens";
