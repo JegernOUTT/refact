@@ -1,13 +1,5 @@
 import React, { useState, useCallback, useMemo } from "react";
-import {
-  Flex,
-  TextField,
-  Text,
-  Switch,
-  TextArea,
-  Tabs,
-  Select,
-} from "@radix-ui/themes";
+import { Flex, TextField, Text, Switch, TextArea, Tabs } from "@radix-ui/themes";
 import { StringListEditor } from "./StringListEditor";
 import { RulesTableEditor } from "./RulesTableEditor";
 import {
@@ -22,13 +14,22 @@ import {
 import { useGetCapsQuery } from "../../../services/refact/caps";
 import { useCapsForToolUse } from "../../../hooks";
 import { enrichAndGroupModels } from "../../../utils/enrichModels";
-import { RichModelSelectItem } from "../../../components/Select/RichModelSelectItem";
+import { CapabilityIcons } from "../../Providers/ProviderForm/ProviderModelsList/components";
+import {
+  formatContextWindow,
+  formatPricing,
+} from "../../Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import {
   ModelSamplingParams,
   type SamplingValues,
 } from "../../../components/ModelSamplingParams";
+import {
+  ModelSelector,
+  type ModelOption,
+  type ModelSelectorBadge,
+  type ModelSelectorGroup,
+} from "../../../components/ui";
 import styles from "./editors.module.css";
-import selectStyles from "../../../components/Select/select.module.css";
 
 type ModeFormProps = {
   config: Record<string, unknown>;
@@ -36,11 +37,55 @@ type ModeFormProps = {
   availableTools?: string[];
 };
 
+type EnrichedModelGroup = ReturnType<typeof enrichAndGroupModels>;
+type EnrichedModel = EnrichedModelGroup[number]["models"][number];
+
+function modelBadges(model: EnrichedModel) {
+  const badges: ModelSelectorBadge[] = [];
+  if (model.isDefault) badges.push("default");
+  if (model.isThinking) badges.push("reasoning");
+  if (model.isLight) badges.push("light");
+  if (model.isBuddy) badges.push("buddy");
+  if (model.isTaskPlannerAgent) badges.push("task-agent");
+  if (model.isChat2) badges.push("chat2");
+  return badges;
+}
+
+function pricingOption(model: EnrichedModel) {
+  if (!model.pricing) return undefined;
+  const [prompt, output] = formatPricing(model.pricing, true).split("/");
+  return { prompt, output };
+}
+
+function modelGroups(groupedModels: EnrichedModelGroup): ModelSelectorGroup[] {
+  return groupedModels.map((group) => ({
+    id: group.provider,
+    label: group.displayName,
+  }));
+}
+
+function modelOptions(groupedModels: EnrichedModelGroup): ModelOption[] {
+  return groupedModels.flatMap((group) =>
+    group.models.map((model) => ({
+      value: model.value,
+      displayName: model.value,
+      group: group.provider,
+      disabled: model.disabled,
+      pricing: pricingOption(model),
+      contextWindow: model.nCtx ? formatContextWindow(model.nCtx) : undefined,
+      badges: modelBadges(model),
+      capabilities: model.capabilities ? (
+        <CapabilityIcons capabilities={model.capabilities} />
+      ) : undefined,
+    })),
+  );
+}
+
 type ModelTypeSectionProps = {
   title: string;
   typeKey: "default" | "light" | "thinking";
   config: Record<string, unknown>;
-  groupedModels: ReturnType<typeof enrichAndGroupModels>;
+  groupedModels: EnrichedModelGroup;
   onPatch: (path: (string | number)[], value: unknown) => void;
 };
 
@@ -111,52 +156,16 @@ const ModelTypeSection: React.FC<ModelTypeSectionProps> = ({
         <Text size="1" color="gray">
           Model
         </Text>
-        <Select.Root
-          value={model || "__inherit__"}
-          onValueChange={(v) =>
-            onPatch([...basePath, "model"], v === "__inherit__" ? undefined : v)
+        <ModelSelector
+          allowUnset
+          groups={modelGroups(groupedModels)}
+          models={modelOptions(groupedModels)}
+          unsetLabel="Inherit from global"
+          value={model || null}
+          onSelect={(v) =>
+            onPatch([...basePath, "model"], v === "" ? undefined : v)
           }
-          size="1"
-        >
-          <Select.Trigger
-            placeholder="Inherit from global"
-            style={{ width: "100%" }}
-          />
-          <Select.Content position="popper">
-            <Select.Item value="__inherit__">
-              <Text color="gray">Inherit from global</Text>
-            </Select.Item>
-            <Select.Separator />
-            {groupedModels.map((group) => (
-              <Select.Group key={group.provider}>
-                <Select.Label>{group.displayName}</Select.Label>
-                {group.models.map((m) => (
-                  <Select.Item
-                    key={m.value}
-                    value={m.value}
-                    textValue={m.value}
-                  >
-                    <span className={selectStyles.trigger_only}>{m.value}</span>
-                    <span className={selectStyles.dropdown_only}>
-                      <RichModelSelectItem
-                        displayName={m.value}
-                        pricing={m.pricing}
-                        nCtx={m.nCtx}
-                        capabilities={m.capabilities}
-                        isDefault={m.isDefault}
-                        isChat2={m.isChat2}
-                        isTaskPlannerAgent={m.isTaskPlannerAgent}
-                        isThinking={m.isThinking}
-                        isLight={m.isLight}
-                        isBuddy={m.isBuddy}
-                      />
-                    </span>
-                  </Select.Item>
-                ))}
-              </Select.Group>
-            ))}
-          </Select.Content>
-        </Select.Root>
+        />
       </Flex>
 
       <ModelSamplingParams
