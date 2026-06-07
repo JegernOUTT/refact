@@ -6,16 +6,9 @@ import React, {
   useEffect,
   useRef,
 } from "react";
-import {
-  Box,
-  Flex,
-  Text,
-  TextArea,
-  RadioGroup,
-  Checkbox,
-} from "@radix-ui/themes";
+import { Box, Flex, Text } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
-import { Button } from "../../ui";
+import { Button, FieldTextarea, SegmentedControl, Switch } from "../../ui";
 import { useStoredOpen } from "../useStoredOpen";
 import { Markdown } from "../../Markdown";
 import { useAppSelector, useChatActions } from "../../../hooks";
@@ -142,15 +135,15 @@ const QuestionWidget: React.FC<{
           <Box mb="2">
             <Markdown>{question.text}</Markdown>
           </Box>
-          <RadioGroup.Root
+          <SegmentedControl
+            name={question.id}
+            options={[
+              { value: "Yes", label: "Yes" },
+              { value: "No", label: "No" },
+            ]}
             value={typeof value === "string" ? value : ""}
             onValueChange={onChange}
-          >
-            <Flex gap="3">
-              <RadioGroup.Item value="Yes">Yes</RadioGroup.Item>
-              <RadioGroup.Item value="No">No</RadioGroup.Item>
-            </Flex>
-          </RadioGroup.Root>
+          />
         </Box>
       );
 
@@ -160,18 +153,12 @@ const QuestionWidget: React.FC<{
           <Box mb="2">
             <Markdown>{question.text}</Markdown>
           </Box>
-          <RadioGroup.Root
+          <SegmentedControl
+            name={question.id}
+            options={(question.options ?? []).map((opt) => ({ value: opt, label: opt }))}
             value={typeof value === "string" ? value : ""}
             onValueChange={onChange}
-          >
-            <Flex direction="column" gap="2">
-              {question.options?.map((opt) => (
-                <RadioGroup.Item key={opt} value={opt}>
-                  {opt}
-                </RadioGroup.Item>
-              ))}
-            </Flex>
-          </RadioGroup.Root>
+          />
         </Box>
       );
 
@@ -182,22 +169,24 @@ const QuestionWidget: React.FC<{
             <Markdown>{question.text}</Markdown>
           </Box>
           <Flex direction="column" gap="2">
-            {question.options?.map((opt) => (
-              <Flex key={opt} align="center" gap="2">
-                <Checkbox
-                  checked={Array.isArray(value) && value.includes(opt)}
-                  onCheckedChange={(checked) => {
+            {question.options?.map((opt) => {
+              const checked = Array.isArray(value) && value.includes(opt);
+              return (
+                <Switch
+                  key={opt}
+                  checked={checked}
+                  label={opt}
+                  onCheckedChange={(nextChecked) => {
                     const current = Array.isArray(value) ? value : [];
-                    if (checked === true) {
+                    if (nextChecked) {
                       onChange([...current, opt]);
-                    } else {
-                      onChange(current.filter((v) => v !== opt));
+                      return;
                     }
+                    onChange(current.filter((v) => v !== opt));
                   }}
                 />
-                <Text size="2">{opt}</Text>
-              </Flex>
-            ))}
+              );
+            })}
           </Flex>
         </Box>
       );
@@ -208,9 +197,9 @@ const QuestionWidget: React.FC<{
           <Box mb="2">
             <Markdown>{question.text}</Markdown>
           </Box>
-          <TextArea
+          <FieldTextarea
             value={typeof value === "string" ? value : ""}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={onChange}
             placeholder="Type your answer..."
           />
         </Box>
@@ -367,9 +356,9 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
               <Text size="1" color="gray" mb="1" as="p">
                 Additional comments (optional)
               </Text>
-              <TextArea
+              <FieldTextarea
                 value={additionalText}
-                onChange={(e) => setAdditionalText(e.target.value)}
+                onChange={setAdditionalText}
                 placeholder="Add any extra context..."
               />
             </Box>
@@ -405,7 +394,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
             ))}
             {parsedAnswers.__additional__ && (
               <Box mt="2">
-                <Text size="2" color="gray" style={{ fontStyle: "italic" }}>
+                <Text className={styles.additionalAnswer} size="2" color="gray">
                   {parsedAnswers.__additional__}
                 </Text>
               </Box>

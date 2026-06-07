@@ -5,3 +5,7 @@
 .questionItem {
   padding: var(--rf-space-2) 0;
 }
+
+.additionalAnswer {
+  font-style: italic;
+}
