@@ -86,7 +86,7 @@ export const Diff: React.FC<DiffProps> = ({ diff }) => {
     >
       {isRename && (
         <Flex py="1" px="2">
-          <Text size="1" color="orange">
+          <Text size="1" className={styles.diffRenameText}>
             {filename(diff.file_name)} was renamed to{" "}
             {filename(diff.file_name_rename ?? "")}
           </Text>
@@ -145,24 +145,21 @@ function buildDiffTitleNodes(
       const newName = filename(renameAction.file_name_rename);
       nodes.push(
         <Text
-          style={{ display: "inline-block" }}
+          className={styles.diffTitleNode}
           key={fullPath + "-" + diffForFile.length}
         >
-          {name}{" "}
-          <Text color="orange" style={{ fontStyle: "italic" }}>
-            → {newName}
-          </Text>
+          {name} <span className={styles.diffRenameText}>→ {newName}</span>
         </Text>,
       );
     } else {
       nodes.push(
         <Text
-          style={{ display: "inline-block" }}
+          className={styles.diffTitleNode}
           key={fullPath + "-" + diffForFile.length}
         >
-          {name} {addCount > 0 && <Text color="green">+{addCount}</Text>}
+          {name} {addCount > 0 && <span className={styles.diffAddedText}>+{addCount}</span>}
           {addCount > 0 && removeCount > 0 && " "}
-          {removeCount > 0 && <Text color="red">-{removeCount}</Text>}
+          {removeCount > 0 && <span className={styles.diffRemovedText}>-{removeCount}</span>}
         </Text>,
       );
     }
@@ -209,7 +206,7 @@ export const DiffContent: React.FC<{
   return (
     <Collapsible.Root open={open} onOpenChange={(v) => setOpen(v)}>
       <Collapsible.Trigger asChild>
-        <Flex gap="2" align="center" ref={ref}>
+        <Flex gap="2" align="center" ref={ref} className={styles.diffHeader}>
           <Text weight="light" size="1">
             <DiffTitle diffs={diffs} />
           </Text>
@@ -269,9 +266,10 @@ export const DiffForm: React.FC<{
                 >
                   <Text
                     as="span"
-                    color={
-                      renameAction?.file_name_rename ? "orange" : undefined
-                    }
+                    className={classNames({
+                      [styles.diffRenameText]: Boolean(renameAction?.file_name_rename),
+                      [styles.diffFilePath]: !renameAction?.file_name_rename,
+                    })}
                   >
                     {renameAction?.file_name_rename
                       ? renameAction.file_name_rename
@@ -318,7 +316,8 @@ const _GroupedDiffs: React.FC<GroupedDiffsProps> = ({
 
   return (
     <Container>
-      <Flex direction="column" gap="4" py="4">
+      <Flex direction="column" gap="4" py="4" className="rf-enter-rise">
+
         <DiffContent
           diffs={groupedByFileName}
           open={open}

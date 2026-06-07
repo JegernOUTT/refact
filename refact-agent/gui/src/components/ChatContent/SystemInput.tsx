@@ -1,7 +1,7 @@
 import React from "react";
 import { Markdown } from "../Markdown";
 
-import { Box } from "@radix-ui/themes";
+import styles from "./ChatContent.module.css";
 
 type ChatInputProps = {
   children: string;
@@ -9,8 +9,8 @@ type ChatInputProps = {
 
 export const SystemInput: React.FC<ChatInputProps> = (props) => {
   return (
-    <Box p="2" position="relative" width="100%" style={{ maxWidth: "100%" }}>
+    <div className={styles.systemInput}>
       <Markdown>{props.children}</Markdown>
-    </Box>
+    </div>
   );
 };

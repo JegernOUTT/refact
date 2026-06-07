@@ -1,14 +1,11 @@
 import React from "react";
 import { useStoredOpen } from "./useStoredOpen";
 import { Container, Box, Flex, Text } from "@radix-ui/themes";
+import { ChevronDown, ChevronRight, FileText } from "lucide-react";
 import { Markdown } from "./ContextFiles";
 import styles from "./ChatContent.module.css";
 import { ScrollArea } from "../ScrollArea";
-import {
-  FileTextIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-} from "@radix-ui/react-icons";
+import { Icon } from "../ui";
 import * as Collapsible from "@radix-ui/react-collapsible";
 
 export type PlainTextProps = {
@@ -28,6 +25,7 @@ export const PlainText: React.FC<PlainTextProps> = ({
   const preview =
     children.slice(0, 100).replace(/\n/g, " ") +
     (children.length > 100 ? "..." : "");
+  const ChevronIcon = open ? ChevronDown : ChevronRight;
 
   return (
     <Container position="relative" data-plain-text-id={id}>
@@ -37,25 +35,21 @@ export const PlainText: React.FC<PlainTextProps> = ({
             gap="2"
             align="center"
             py="1"
-            className={styles.plainTextTrigger}
+            className={`${styles.plainTextTrigger} rf-pressable`}
           >
-            <FileTextIcon width="14" height="14" />
-            <Text size="1" weight="light" style={{ color: "var(--gray-10)" }}>
+            <Icon icon={FileText} size="sm" tone="muted" />
+            <Text size="1" weight="light" className={styles.plainTextLabel}>
               Plain text
             </Text>
-            <Text size="1" style={{ color: "var(--gray-9)", flex: 1 }} truncate>
+            <Text size="1" className={styles.plainTextPreview} truncate>
               {preview}
             </Text>
-            {open ? (
-              <ChevronDownIcon width="14" height="14" />
-            ) : (
-              <ChevronRightIcon width="14" height="14" />
-            )}
+            <Icon icon={ChevronIcon} size="sm" tone="muted" />
           </Flex>
         </Collapsible.Trigger>
-        <Collapsible.Content>
+        <Collapsible.Content className="rf-expand-grid">
           <ScrollArea scrollbars="both">
-            <Box style={{ maxHeight: "300px" }} pl="4">
+            <Box className={styles.plainTextBody}>
               <Markdown>{text}</Markdown>
             </Box>
           </ScrollArea>

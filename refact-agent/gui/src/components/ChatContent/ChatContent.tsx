@@ -9,7 +9,8 @@ import { v4 as uuidv4 } from "uuid";
 import { ChatMessages, UserMessage } from "../../services/refact";
 import { UserInput } from "./UserInput";
 import { ScrollArea } from "../ScrollArea";
-import { Flex, Container, Button, Box, Text } from "@radix-ui/themes";
+import { Flex, Container, Box, Text } from "@radix-ui/themes";
+import { Button } from "../ui";
 import styles from "./ChatContent.module.css";
 import { BuddyPulseContent } from "./BuddyPulseContent";
 import { ContextFiles } from "./ContextFiles";
@@ -360,7 +361,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               {visibleCompression && (
                 <Text
                   size="2"
-                  color="gray"
                   role="status"
                   aria-live="polite"
                   data-testid="compression-progress"
@@ -494,11 +494,10 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return (
       <Flex
         direction="column"
-        className={styles.content}
+        className={`${styles.content} ${styles.chatColumn}`}
         data-element="ChatContent"
         p="2"
         gap="1"
-        style={{ flexGrow: 1, height: "100%" }}
       >
         <ChatLoading />
       </Flex>
@@ -509,13 +508,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return (
       <Flex
         direction="column"
-        className={styles.content}
+
+        className={`${styles.content} ${styles.chatColumn}`}
         data-element="ChatContent"
         p="2"
         gap="1"
-        style={{ flexGrow: 1, height: "100%" }}
       >
-        <Container style={{ height: "100%" }}>
+        <Container height="100%">
           <PlaceHolderText />
         </Container>
       </Flex>
@@ -525,10 +524,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   return (
     <CollapsibleStoreProvider value={collapsibleStore}>
       <SelectionToolbar />
-      <Box
-        style={{ flexGrow: 1, height: "100%", position: "relative" }}
-        data-element="ChatContent"
-      >
+      <Box className={styles.chatRoot} data-element="ChatContent">
         <VirtualizedChatList
           key={renderChatId}
           items={displayItems}
@@ -539,20 +535,16 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           isStreaming={isStreaming}
         />
 
-        <Box
-          style={{
-            position: "absolute",
-            bottom: 0,
-            maxWidth: "100%",
-          }}
-        >
+        <Box className={styles.floatingLinks}>
           <ScrollArea scrollbars="horizontal">
             <Flex align="start" gap="3" pb="2">
+
               {shouldConfigButtonBeVisible && (
                 <Button
-                  color="gray"
                   title="Return to configuration page"
                   onClick={handleReturnToConfigurationClick}
+                  size="sm"
+                  variant="soft"
                 >
                   Return
                 </Button>

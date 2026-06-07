@@ -1,6 +1,7 @@
 import React from "react";
-import { Badge, Box, Button, Card, Flex, Text } from "@radix-ui/themes";
-import { ExclamationTriangleIcon, UpdateIcon } from "@radix-ui/react-icons";
+import { Flex, Text } from "@radix-ui/themes";
+import { AlertTriangle, LoaderCircle } from "lucide-react";
+import { Badge, Button, Icon } from "../ui";
 import styles from "./ChatContent.module.css";
 import type {
   ErrorMessage,
@@ -19,22 +20,21 @@ type ParsedError = {
   retry?: RetryStatus;
 };
 
-const CATEGORY_COLORS: Record<
-  UserErrorCategory,
-  React.ComponentProps<typeof Text>["color"]
-> = {
-  ProviderTransient: "amber",
-  ProviderRateLimit: "amber",
-  ContextTooLarge: "orange",
-  AuthenticationFailed: "red",
-  ModelUnavailable: "purple",
-  BillingQuota: "red",
-  InvalidRequest: "red",
-  NetworkFailure: "amber",
-  StreamCorrupted: "amber",
-  ToolSchemaInvalid: "red",
-  ContentPolicy: "red",
-  Unknown: "red",
+type ErrorTone = React.ComponentProps<typeof Badge>["tone"];
+
+const CATEGORY_TONES: Record<UserErrorCategory, ErrorTone> = {
+  ProviderTransient: "warning",
+  ProviderRateLimit: "warning",
+  ContextTooLarge: "warning",
+  AuthenticationFailed: "danger",
+  ModelUnavailable: "accent",
+  BillingQuota: "danger",
+  InvalidRequest: "danger",
+  NetworkFailure: "warning",
+  StreamCorrupted: "warning",
+  ToolSchemaInvalid: "danger",
+  ContentPolicy: "danger",
+  Unknown: "danger",
 };
 
 const ACTION_LABELS: Partial<Record<string, string>> = {
@@ -153,10 +153,15 @@ function shouldShowRawError(rawError: string, error: ParsedError): boolean {
 
 const RetryingBadge: React.FC<{
   retry: RetryStatus;
-  color: React.ComponentProps<typeof Badge>["color"];
-}> = ({ retry, color }) => (
-  <Badge color={color} variant="soft">
-    <UpdateIcon className={styles.retryingBadgeIcon} />
+  tone: ErrorTone;
+}> = ({ retry, tone }) => (
+  <Badge tone={tone}>
+    <Icon
+      className={styles.retryingBadgeIcon}
+      icon={LoaderCircle}
+      size="sm"
+      tone={tone === "danger" ? "danger" : "warning"}
+    />
     Retrying {retry.delay_secs}s · {retry.attempt}/{retry.max_attempts}
   </Badge>
 );
@@ -167,14 +172,10 @@ const ClassifiedError: React.FC<{
 }> = ({ error, showHeader }) => {
   const info = error.info;
   if (!info) {
-    return (
-      <Text as="div" size="2" className={styles.errorMessageBody}>
-        {error.message}
-      </Text>
-    );
+    return <div className={styles.errorMessageBody}>{error.message}</div>;
   }
 
-  const color = CATEGORY_COLORS[info.category];
+  const tone = CATEGORY_TONES[info.category];
   const rawError = info.raw_error ?? error.message;
   const retry = error.retry?.in_progress ? error.retry : undefined;
 
@@ -183,24 +184,22 @@ const ClassifiedError: React.FC<{
       {showHeader && (
         <Flex align="center" justify="between" gap="2" wrap="wrap">
           <Flex align="center" gap="2" wrap="wrap">
-            <Text size="2" weight="bold" color={color}>
+            <Text size="2" weight="bold">
               {info.title}
             </Text>
-            <Badge color={color} variant="soft">
-              {info.category}
-            </Badge>
+            <Badge tone={tone}>{info.category}</Badge>
           </Flex>
           {retry ? (
-            <RetryingBadge retry={retry} color={color} />
+            <RetryingBadge retry={retry} tone={tone} />
           ) : (
-            <Button size="1" variant="soft" color={color}>
+            <Button size="sm" variant={tone === "danger" ? "danger" : "soft"}>
               {errorActionLabel(info.suggested_action)}
             </Button>
           )}
         </Flex>
       )}
       <Text size="2">{info.explanation}</Text>
-      <Text size="1" color="gray">
+      <Text className={styles.errorMessageHint} size="1">
         {retry
           ? `Auto-retrying in ${retry.delay_secs}s (attempt ${retry.attempt}/${retry.max_attempts}).`
           : info.is_retryable
@@ -208,9 +207,7 @@ const ClassifiedError: React.FC<{
             : "Retrying unchanged is unlikely to fix this."}
       </Text>
       {shouldShowRawError(rawError, error) && (
-        <Text as="div" size="1" className={styles.errorMessageRaw}>
-          {rawError}
-        </Text>
+        <div className={styles.errorMessageRaw}>{rawError}</div>
       )}
     </Flex>
   );
@@ -230,34 +227,28 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
     : errors.length === 1
       ? "Generation error"
       : `${errors.length} generation errors`;
-  const color = firstClassified
-    ? CATEGORY_COLORS[firstClassified.category]
-    : "red";
+  const tone = firstClassified ? CATEGORY_TONES[firstClassified.category] : "danger";
   const showPerErrorHeader = parsedErrors.length > 1;
 
   return (
-    <Card className={styles.errorMessageCard} variant="surface">
+    <div className={`${styles.errorMessageCard} rf-enter-rise`}>
       <Flex direction="column" gap="2">
         <Flex align="center" justify="between" gap="2" wrap="wrap">
           <Flex align="center" gap="2" wrap="wrap">
-            <Box className={styles.errorMessageIcon}>
-              <ExclamationTriangleIcon width="15" height="15" />
-            </Box>
-            <Text size="2" weight="medium" color={color}>
+            <span className={styles.errorMessageIcon}>
+              <Icon icon={AlertTriangle} size="md" tone="danger" />
+            </span>
+            <Text size="2" weight="medium">
               {title}
             </Text>
-            {firstClassified && (
-              <Badge color={color} variant="soft">
-                {firstClassified.category}
-              </Badge>
-            )}
+            {firstClassified && <Badge tone={tone}>{firstClassified.category}</Badge>}
           </Flex>
           {firstClassified &&
             !showPerErrorHeader &&
             (latestRetry ? (
-              <RetryingBadge retry={latestRetry} color={color} />
+              <RetryingBadge retry={latestRetry} tone={tone} />
             ) : (
-              <Button size="1" variant="soft" color={color}>
+              <Button size="sm" variant={tone === "danger" ? "danger" : "soft"}>
                 {errorActionLabel(firstClassified.suggested_action)}
               </Button>
             ))}
@@ -272,6 +263,6 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
           ))}
         </Flex>
       </Flex>
-    </Card>
+    </div>
   );
 };

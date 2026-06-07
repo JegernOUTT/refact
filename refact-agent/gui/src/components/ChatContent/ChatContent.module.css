@@ -1,5 +1,22 @@
 .content {
-  margin-right: 16px;
+  margin-right: var(--rf-space-4);
+}
+
+.chatRoot {
+  position: relative;
+  flex-grow: 1;
+  height: 100%;
+}
+
+.chatColumn {
+  flex-grow: 1;
+  height: 100%;
+}
+
+.floatingLinks {
+  position: absolute;
+  bottom: 0;
+  max-width: 100%;
 }
 
 .file {
@@ -8,13 +25,20 @@
 }
 
 .file_with_icon {
-  gap: 2px;
+  gap: var(--rf-space-1);
   align-items: center;
   justify-items: center;
 }
 
 .footer {
-  min-height: var(--space-5);
+  min-height: var(--rf-space-5);
+}
+
+.systemInput {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  padding: var(--rf-space-2);
 }
 
 .userInput {
@@ -26,22 +50,31 @@
   text-align: left;
   cursor: pointer;
   user-select: auto;
-  max-width: calc(100% - var(--space-2) * 4.5);
-  padding: var(--space-2) var(--space-3);
-  min-height: var(--base-button-height);
+  max-width: calc(100% - var(--rf-space-6));
+  padding: var(--rf-space-2) var(--rf-space-3);
+  min-height: var(--rf-control-h);
   height: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  /* Mimic Button variant="soft" appearance */
-  background-color: var(--accent-a3);
-  border-radius: var(--radius-3);
+  background: var(--rf-color-accent-soft);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-card);
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .userInput:hover {
-  background-color: var(--accent-a4);
+  background: var(--rf-surface-2);
+  border-color: var(--rf-border);
 }
 
-/* Reset Markdown margins inside user messages - override Radix styles */
+.userInput:focus-within {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
 .userInput :global(.rt-Text),
 .userInput :global(.rt-Heading),
 .userInput :global(p),
@@ -59,20 +92,19 @@
   margin-bottom: 0 !important;
 }
 
-/* Add small spacing between consecutive elements */
 .userInput :global(.rt-Text + .rt-Text),
 .userInput :global(.rt-Text + pre),
 .userInput :global(pre + .rt-Text),
 .userInput :global(p + p),
 .userInput :global(p + pre),
 .userInput :global(pre + p) {
-  margin-top: var(--space-1) !important;
+  margin-top: var(--rf-space-1) !important;
 }
 
-/* Proper spacing between list items */
 .userInput :global(li) {
-  margin-bottom: 2px;
+  margin-bottom: var(--rf-space-1);
 }
+
 .userInput :global(li:last-child) {
   margin-bottom: 0;
 }
@@ -81,8 +113,30 @@
   word-break: break-word;
 }
 
+.serverSourcesCard {
+  margin: var(--rf-space-3) 0;
+  padding: var(--rf-space-2) 0;
+  color: var(--rf-color-muted);
+}
+
+.serverSourcesText {
+  color: var(--rf-color-muted);
+}
+
+.serverSourcesList {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.serverBlocksRaw {
+  max-height: 200px;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
 .diff {
-  background: var(--rf-surface-1);
+  background: transparent;
   max-width: unset;
   min-width: min-content;
 }
@@ -130,25 +184,21 @@
 }
 
 .diff_line_remove .diff_line_number {
-  background: rgba(216, 115, 109, 0.24);
-  background: color-mix(in oklab, var(--rf-color-danger) 24%, var(--rf-bg));
+  background: color-mix(in oklab, var(--rf-color-danger) 24%, transparent);
 }
 
 .diff_line_remove .diff_sign,
 .diff_line_remove .diff_line_content {
-  background: rgba(216, 115, 109, 0.14);
-  background: color-mix(in oklab, var(--rf-color-danger) 14%, var(--rf-bg));
+  background: color-mix(in oklab, var(--rf-color-danger) 14%, transparent);
 }
 
 .diff_line_add .diff_line_number {
-  background: rgba(95, 174, 139, 0.24);
-  background: color-mix(in oklab, var(--rf-color-success) 24%, var(--rf-bg));
+  background: color-mix(in oklab, var(--rf-color-success) 24%, transparent);
 }
 
 .diff_line_add .diff_sign,
 .diff_line_add .diff_line_content {
-  background: rgba(95, 174, 139, 0.14);
-  background: color-mix(in oklab, var(--rf-color-success) 14%, var(--rf-bg));
+  background: color-mix(in oklab, var(--rf-color-success) 14%, transparent);
 }
 
 .diff_line_number {
@@ -185,37 +235,62 @@
 
 .diff_file_body {
   min-width: min-content;
-  background: var(--rf-surface-2);
-  border: 1px solid var(--rf-border);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   overflow: hidden;
 }
 
+.diffHeader {
+  cursor: pointer;
+  color: var(--rf-color-muted);
+  transition: color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.diffHeader:hover {
+  color: var(--rf-color-fg);
+}
+
+.diffTitleNode {
+  display: inline-block;
+}
+
+.diffRenameText {
+  color: var(--rf-color-warning);
+  font-style: italic;
+}
+
+.diffAddedText {
+  color: var(--rf-color-success);
+}
+
+.diffRemovedText {
+  color: var(--rf-color-danger);
+}
+
+.diffFilePath {
+  color: var(--rf-color-accent);
+}
+
 .tool_result {
   width: 100%;
-  margin-top: var(--space-1);
+  margin-top: var(--rf-space-1);
   box-sizing: border-box;
 }
 
 .tool_result_markdown {
   width: 100%;
   box-sizing: border-box;
-
-  /* keep the block feel (like the code block) */
-  border-radius: var(--radius-2);
-  padding: var(--space-2);
-
-  /* tool output can be wide */
+  border-radius: var(--rf-radius-ctl);
+  padding: var(--rf-space-2);
   overflow-x: auto;
 }
 
-/* Preserve indentation/line breaks for plain text paragraphs */
 .tool_result_markdown :global(p) {
   white-space: pre-wrap;
   margin: 0;
 }
 
-/* First element (likely a heading/paragraph) has no top margin */
 .tool_result_markdown > :first-child {
   margin-top: 0 !important;
 }
@@ -225,9 +300,9 @@
   bottom: 60px;
   left: 0;
   right: 0;
-  padding: var(--space-2) 0;
+  padding: var(--rf-space-2) 0;
   pointer-events: none;
-  z-index: 5;
+  z-index: var(--rf-z-dropdown);
 }
 
 .queuedMessagesContainer > * {
@@ -241,17 +316,24 @@
 }
 
 .queuedMessage {
-  --base-card-surface-box-shadow: 0 0 0 1px var(--amber-6);
-  background: color-mix(in oklab, var(--amber-3) 40%, var(--color-surface));
-  border-radius: var(--radius-2);
-  padding: var(--space-2) var(--space-3);
+  max-width: calc(100% - var(--rf-space-6));
   margin-left: auto;
-  max-width: calc(100% - var(--space-2) * 4.5);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-overlay);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .queuedMessagePriority {
-  --base-card-surface-box-shadow: 0 0 0 1px var(--blue-6);
-  background: color-mix(in oklab, var(--blue-3) 40%, var(--color-surface));
+  border-color: var(--rf-color-accent);
+}
+
+.queuedMessageMain {
+  flex: 1;
+  min-width: 0;
 }
 
 .queuedMessageText {
@@ -262,6 +344,7 @@
   -webkit-box-orient: vertical;
   white-space: pre-wrap;
   word-break: break-word;
+  color: var(--rf-color-muted);
 }
 
 .queuedMessageEditable {
@@ -269,47 +352,67 @@
 }
 
 .queuedMessageEditable:hover {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .plainTextTrigger {
   cursor: pointer;
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .plainTextTrigger:hover {
-  color: var(--gray-11);
+  color: var(--rf-color-fg);
+}
+
+.plainTextLabel {
+  color: var(--rf-color-muted);
+}
+
+.plainTextPreview {
+  flex: 1;
+  color: var(--rf-color-faint);
+}
+
+.plainTextBody {
+  max-height: 300px;
+  padding-left: var(--rf-space-4);
 }
 
 .errorMessageCard {
-  margin: var(--space-2) 0;
-  border-color: var(--red-a6);
-  background: linear-gradient(180deg, var(--red-a2), var(--color-panel-solid));
+  margin: var(--rf-space-2) 0;
+  padding: var(--rf-space-3);
+  color: var(--rf-color-fg);
+  background: color-mix(in oklab, var(--rf-color-danger) 8%, transparent);
+  border-left: var(--rf-hairline) solid var(--rf-color-danger);
+  border-radius: var(--rf-radius-card);
 }
 
 .errorMessageIcon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--space-5);
-  height: var(--space-5);
-  border-radius: var(--radius-full);
-  color: var(--red-11);
-  background: var(--red-a3);
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
+  border-radius: var(--rf-radius-pill);
+  color: var(--rf-color-danger);
+  background: color-mix(in oklab, var(--rf-color-danger) 14%, transparent);
 }
 
 .errorMessageBody {
-  color: var(--red-12);
+  color: var(--rf-color-fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.errorMessageHint,
+.errorMessageRaw {
+  color: var(--rf-color-muted);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .retryingBadgeIcon {
-  width: 11px;
-  height: 11px;
-  margin-right: var(--space-1);
   animation: retryingSpin 1.8s linear infinite;
-  vertical-align: -1px;
 }
 
 @keyframes retryingSpin {
@@ -318,19 +421,11 @@
   }
 }
 
-.errorMessageRaw {
-  color: var(--gray-11);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .virtuosoScroller {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   height: 100%;
   overflow-anchor: none;
   scroll-behavior: auto;
-
-  /* Keep gutter stable so content doesn't shift when thumb appears. */
   scrollbar-gutter: stable;
 }
 

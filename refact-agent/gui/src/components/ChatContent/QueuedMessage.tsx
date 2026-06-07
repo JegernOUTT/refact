@@ -1,10 +1,6 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, IconButton, Card, Badge, Tooltip } from "@radix-ui/themes";
-import {
-  Cross1Icon,
-  ClockIcon,
-  LightningBoltIcon,
-} from "@radix-ui/react-icons";
+import { Flex, Text } from "@radix-ui/themes";
+import { Clock, Send, X } from "lucide-react";
 import type { QueuedItem } from "../../features/Chat";
 import { useChatActions } from "../../hooks";
 import { useAppSelector } from "../../hooks";
@@ -12,6 +8,7 @@ import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { selectChatId } from "../../features/Chat/Thread/selectors";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { setInputValue } from "../ChatForm/actions";
+import { Badge, Icon, IconButton, Tooltip } from "../ui";
 import styles from "./ChatContent.module.css";
 import classNames from "classnames";
 
@@ -47,7 +44,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
     try {
       await cancelQueued(queuedItem.client_request_id);
     } catch {
-      // ignore cancel errors
+      return;
     } finally {
       setIsWorking(false);
     }
@@ -61,7 +58,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
       if (!ok) return;
       postInputValue(content, queuedItem.priority);
     } catch {
-      // ignore edit errors
+      return;
     } finally {
       setIsWorking(false);
     }
@@ -102,7 +99,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
         postInputValue(content, queuedItem.priority);
       }
     } catch {
-      // ignore toggle errors
+      return;
     } finally {
       setIsWorking(false);
     }
@@ -119,80 +116,67 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
   ]);
 
   const tooltipContent = content || queuedItem.preview;
+  const PriorityIcon = queuedItem.priority ? Send : Clock;
 
   return (
-    <Tooltip content={tooltipContent} side="left" delayDuration={400}>
-      <Card
-        className={classNames(styles.queuedMessage, {
-          [styles.queuedMessagePriority]: queuedItem.priority,
-        })}
-      >
-        <Flex gap="2" align="center" justify="between">
-          <Flex gap="2" align="center" style={{ flex: 1, minWidth: 0 }}>
-            <Badge
-              color={queuedItem.priority ? "blue" : "amber"}
-              variant="soft"
-              size="1"
-            >
-              {queuedItem.priority ? (
-                <LightningBoltIcon width={12} height={12} />
-              ) : (
-                <ClockIcon width={12} height={12} />
-              )}
-              {position}
-            </Badge>
-            <Text
-              size="2"
-              color="gray"
-              className={classNames(styles.queuedMessageText, {
-                [styles.queuedMessageEditable]: isEditable && !isWorking,
-              })}
-              role={isEditable ? "button" : undefined}
-              tabIndex={isEditable ? 0 : undefined}
-              aria-label={
-                isEditable ? "Click to edit queued message" : undefined
-              }
-              aria-disabled={isWorking || undefined}
-              onClick={isEditable ? () => void handleEdit() : undefined}
-              onKeyDown={isEditable ? handleEditKeyDown : undefined}
-            >
-              {queuedItem.preview || `[${queuedItem.command_type}]`}
-            </Text>
-          </Flex>
-          <Flex gap="1" align="center" flexShrink="0">
-            {isEditable && (
-              <IconButton
-                size="1"
-                variant="ghost"
-                color={queuedItem.priority ? "amber" : "blue"}
-                disabled={isWorking}
-                onClick={() => void handleTogglePriority()}
-                title={
-                  queuedItem.priority
-                    ? "Change to normal queue"
-                    : "Change to send next"
+    <Tooltip delayDuration={400}>
+      <Tooltip.Trigger asChild>
+        <div
+          className={classNames(styles.queuedMessage, "rf-enter-rise", {
+            [styles.queuedMessagePriority]: queuedItem.priority,
+          })}
+        >
+          <Flex gap="2" align="center" justify="between">
+            <Flex gap="2" align="center" className={styles.queuedMessageMain}>
+              <Badge tone={queuedItem.priority ? "accent" : "warning"}>
+                <Icon icon={PriorityIcon} size="sm" />
+                {position}
+              </Badge>
+              <Text
+                size="2"
+                className={classNames(styles.queuedMessageText, {
+                  [styles.queuedMessageEditable]: isEditable && !isWorking,
+                })}
+                role={isEditable ? "button" : undefined}
+                tabIndex={isEditable ? 0 : undefined}
+                aria-label={
+                  isEditable ? "Click to edit queued message" : undefined
                 }
+                aria-disabled={isWorking || undefined}
+                onClick={isEditable ? () => void handleEdit() : undefined}
+                onKeyDown={isEditable ? handleEditKeyDown : undefined}
               >
-                {queuedItem.priority ? (
-                  <ClockIcon width={14} height={14} />
-                ) : (
-                  <LightningBoltIcon width={14} height={14} />
-                )}
-              </IconButton>
-            )}
-            <IconButton
-              size="1"
-              variant="ghost"
-              color="gray"
-              disabled={isWorking}
-              onClick={() => void handleCancel()}
-              title="Cancel queued message"
-            >
-              <Cross1Icon width={14} height={14} />
-            </IconButton>
+                {queuedItem.preview || `[${queuedItem.command_type}]`}
+              </Text>
+            </Flex>
+            <Flex gap="1" align="center" flexShrink="0">
+              {isEditable && (
+                <IconButton
+                  aria-label={
+                    queuedItem.priority
+                      ? "Change to normal queue"
+                      : "Change to send next"
+                  }
+                  disabled={isWorking}
+                  icon={queuedItem.priority ? Clock : Send}
+                  onClick={() => void handleTogglePriority()}
+                  size="sm"
+                  variant="plain"
+                />
+              )}
+              <IconButton
+                aria-label="Cancel queued message"
+                disabled={isWorking}
+                icon={X}
+                onClick={() => void handleCancel()}
+                size="sm"
+                variant="plain"
+              />
+            </Flex>
           </Flex>
-        </Flex>
-      </Card>
+        </div>
+      </Tooltip.Trigger>
+      <Tooltip.Content side="left">{tooltipContent}</Tooltip.Content>
     </Tooltip>
   );
 };

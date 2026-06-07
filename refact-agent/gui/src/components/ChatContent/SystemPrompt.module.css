@@ -3,50 +3,46 @@
 }
 
 .header {
-  padding: var(--space-1) 0;
+  min-height: var(--rf-control-h-sm);
+  padding: var(--rf-space-1) 0;
   cursor: pointer;
   user-select: none;
-  min-height: 24px;
-  transition: filter 0.15s ease;
+  color: var(--rf-color-muted);
+  transition:
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .header:hover {
-  filter: brightness(1.3);
+  color: var(--rf-color-fg);
 }
 
 .icon {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 16px;
-  flex-shrink: 0;
-}
-
-.icon svg {
-  width: 14px;
-  height: 14px;
+  width: var(--rf-control-h-sm);
+  min-width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
 }
 
 .summary {
-  color: inherit;
   overflow: hidden;
+  color: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .contentWrapper {
-  overflow: hidden;
-  /* Force GPU layer for JCEF compatibility */
-  transform: translateZ(0);
-  /* CSS-based collapse animation using grid */
   display: grid;
+  overflow: hidden;
   grid-template-rows: 0fr;
   opacity: 0;
+  transform: translateZ(0);
   transition:
-    grid-template-rows 0.2s ease-out,
-    opacity 0.15s ease-out;
+    grid-template-rows var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .contentWrapperOpen {
@@ -60,7 +56,7 @@
 
 .content {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
-  padding: var(--space-2) 0 var(--space-1);
   max-height: 400px;
+  padding: var(--rf-space-2) 0 var(--rf-space-1);
   overflow-y: auto;
 }

@@ -3,12 +3,8 @@ import { useStoredOpen } from "./useStoredOpen";
 import { Flex, Box, Text } from "@radix-ui/themes";
 import classNames from "classnames";
 import ReactMarkDown from "react-markdown";
-import {
-  FileIcon,
-  ArchiveIcon,
-  ReaderIcon,
-  LightningBoltIcon,
-} from "@radix-ui/react-icons";
+import { Archive, BookOpen, FileText, Zap } from "lucide-react";
+import { Icon } from "../ui";
 import { ChatContextFile } from "../../services/refact";
 import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 import { filename } from "../../utils";
@@ -187,7 +183,7 @@ const FileItem: React.FC<{
   return (
     <div className={styles.fileItem}>
       <Flex
-        className={styles.fileHeader}
+        className={`${styles.fileHeader} rf-pressable`}
         align="center"
         gap="2"
         onClick={handleToggle}
@@ -275,7 +271,7 @@ const FilesContent: React.FC<{
       <Flex direction="column" gap="2">
         {memories.length > 0 && (
           <FileSection
-            icon={<ReaderIcon />}
+            icon={<Icon icon={BookOpen} size="sm" tone="muted" />}
             title="Knowledge"
             files={memories}
             onOpenFile={onOpenFile}
@@ -284,7 +280,7 @@ const FilesContent: React.FC<{
         )}
         {trajectories.length > 0 && (
           <FileSection
-            icon={<ArchiveIcon />}
+            icon={<Icon icon={Archive} size="sm" tone="muted" />}
             title="Past Conversations"
             files={trajectories}
             onOpenFile={onOpenFile}
@@ -293,7 +289,7 @@ const FilesContent: React.FC<{
         )}
         {other.length > 0 && (
           <FileSection
-            icon={<FileIcon />}
+            icon={<Icon icon={FileText} size="sm" tone="muted" />}
             title="Related"
             files={other}
             onOpenFile={onOpenFile}
@@ -315,7 +311,7 @@ const FilesContent: React.FC<{
       <Flex direction="column" gap="2">
         {instructions.length > 0 && (
           <FileSection
-            icon={<ReaderIcon />}
+            icon={<Icon icon={BookOpen} size="sm" tone="muted" />}
             title="Instructions"
             files={instructions}
             onOpenFile={onOpenFile}
@@ -324,7 +320,7 @@ const FilesContent: React.FC<{
         )}
         {ideSettings.length > 0 && (
           <FileSection
-            icon={<ArchiveIcon />}
+            icon={<Icon icon={Archive} size="sm" tone="muted" />}
             title="IDE Settings"
             files={ideSettings}
             onOpenFile={onOpenFile}
@@ -333,7 +329,7 @@ const FilesContent: React.FC<{
         )}
         {other.length > 0 && (
           <FileSection
-            icon={<FileIcon />}
+            icon={<Icon icon={FileText} size="sm" tone="muted" />}
             title="Other"
             files={other}
             onOpenFile={onOpenFile}
@@ -409,17 +405,17 @@ const _ContextFiles: React.FC<{
           ? "memories_context"
           : "default";
 
+
   const icon =
     variant === "enrichment" ? (
-      <LightningBoltIcon />
+      <Icon icon={Zap} size="sm" tone="accent" />
     ) : variant === "project_context" ? (
-      <ArchiveIcon />
+      <Icon icon={Archive} size="sm" tone="muted" />
     ) : variant === "memories_context" ? (
-      <LightningBoltIcon />
+      <Icon icon={Zap} size="sm" tone="accent" />
     ) : (
-      <FileIcon />
+      <Icon icon={FileText} size="sm" tone="muted" />
     );
-
   const label =
     variant === "enrichment"
       ? `Memories (${files.length})`
@@ -434,7 +430,8 @@ const _ContextFiles: React.FC<{
   return (
     <div className={styles.card}>
       <Flex
-        className={styles.header}
+
+        className={`${styles.header} rf-pressable`}
         align="center"
         gap="2"
         onClick={handleToggle}
