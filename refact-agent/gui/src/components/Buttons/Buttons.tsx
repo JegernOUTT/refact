@@ -1,25 +1,32 @@
 import React, { forwardRef } from "react";
-import { IconButton, Button, Flex, HoverCard, Text } from "@radix-ui/themes";
-import {
-  PaperPlaneIcon,
-  ExitIcon,
-  Cross1Icon,
-  FileTextIcon,
-} from "@radix-ui/react-icons";
+import { Flex, HoverCard, Text } from "@radix-ui/themes";
+import { FileText, LogOut, Puzzle, Send, X } from "lucide-react";
 import classNames from "classnames";
+import { Button, ButtonGroup, IconButton } from "../ui";
 import styles from "./button.module.css";
-import iconStyles from "./iconButton.module.css";
-import { PuzzleIcon } from "../../images/PuzzleIcon";
 
-type IconButtonProps = React.ComponentProps<typeof IconButton>;
-type ButtonProps = React.ComponentProps<typeof Button>;
-
-export const PaperPlaneButton: React.FC<IconButtonProps> = (props) => (
-  <IconButton variant="ghost" {...props}>
-    <PaperPlaneIcon />
-  </IconButton>
-);
+type KitIconButtonProps = Omit<
+  React.ComponentProps<typeof IconButton>,
+  "icon" | "aria-label"
+> & {
+  "aria-label"?: string;
+};
+type KitButtonProps = React.ComponentProps<typeof Button>;
 type PlainButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
+
+type LegacyButtonSize = React.ComponentProps<typeof IconButton>["size"] | "1" | "2" | "3";
+
+function normalizeSize(size: LegacyButtonSize | undefined): React.ComponentProps<typeof IconButton>["size"] {
+  if (size === "1") return "sm";
+  if (size === "2") return "md";
+  if (size === "3") return "lg";
+  return size ?? "md";
+}
+
+export const PaperPlaneButton: React.FC<KitIconButtonProps> = ({
+  "aria-label": ariaLabel = "Send message",
+  ...props
+}) => <IconButton aria-label={ariaLabel} icon={Send} variant="ghost" {...props} />;
 
 export const AgentIntegrationsButton = forwardRef<
   HTMLButtonElement,
@@ -27,15 +34,14 @@ export const AgentIntegrationsButton = forwardRef<
 >((props, ref) => (
   <HoverCard.Root>
     <HoverCard.Trigger>
-      <button
-        type="button"
-        className={iconStyles.iconButton}
-        aria-label="Set up Agent Integrations"
+      <IconButton
         {...props}
         ref={ref}
-      >
-        <PuzzleIcon />
-      </button>
+        aria-label="Set up Agent Integrations"
+        icon={Puzzle}
+        size="sm"
+        variant="ghost"
+      />
     </HoverCard.Trigger>
     <HoverCard.Content size="1" side="top">
       <Text as="p" size="2">
@@ -47,47 +53,55 @@ export const AgentIntegrationsButton = forwardRef<
 
 AgentIntegrationsButton.displayName = "AgentIntegrationsButton";
 
-export const ThreadHistoryButton: React.FC<IconButtonProps> = (props) => (
-  <IconButton variant="ghost" {...props}>
-    <FileTextIcon />
-  </IconButton>
-);
+export const ThreadHistoryButton: React.FC<KitIconButtonProps> = ({
+  "aria-label": ariaLabel = "Thread history",
+  ...props
+}) => <IconButton aria-label={ariaLabel} icon={FileText} variant="ghost" {...props} />;
 
-export const BackToSideBarButton: React.FC<PlainButtonProps> = (props) => (
-  <HoverCard.Root>
-    <HoverCard.Trigger>
-      <button
-        type="button"
-        className={iconStyles.iconButton}
-        aria-label="Return to sidebar"
-        {...props}
-      >
-        <ExitIcon style={{ transform: "scaleX(-1)" }} />
-      </button>
-    </HoverCard.Trigger>
-    <HoverCard.Content size="1" side="top">
-      <Text as="p" size="2">
-        Return to sidebar
-      </Text>
-    </HoverCard.Content>
-  </HoverCard.Root>
-);
+export function BackToSideBarButton(props: PlainButtonProps) {
+  return (
+    <HoverCard.Root>
+      <HoverCard.Trigger>
+        <IconButton
+          {...props}
+          aria-label="Return to sidebar"
+          className={styles.flipIcon}
+          icon={LogOut}
+          size="sm"
+          variant="ghost"
+        />
+      </HoverCard.Trigger>
+      <HoverCard.Content size="1" side="top">
+        <Text as="p" size="2">
+          Return to sidebar
+        </Text>
+      </HoverCard.Content>
+    </HoverCard.Root>
+  );
+}
 
 export const CloseButton: React.FC<
-  IconButtonProps & { iconSize?: number | string }
-> = ({ iconSize, ...props }) => (
-  <IconButton variant="ghost" {...props}>
-    <Cross1Icon width={iconSize} height={iconSize} />
-  </IconButton>
+  Omit<KitIconButtonProps, "size"> & {
+    iconSize?: number | string;
+    size?: LegacyButtonSize;
+  }
+> = ({ "aria-label": ariaLabel = "Close", iconSize: _iconSize, size, ...props }) => (
+  <IconButton
+    aria-label={ariaLabel}
+    icon={X}
+    size={normalizeSize(size)}
+    variant="ghost"
+    {...props}
+  />
 );
 
-export const RightButton: React.FC<ButtonProps & { className?: string }> = (
+export const RightButton: React.FC<KitButtonProps & { className?: string }> = (
   props,
 ) => {
   return (
     <Button
-      size="1"
-      variant="surface"
+      size="sm"
+      variant="soft"
       {...props}
       className={classNames(styles.rightButton, props.className)}
     />
@@ -107,3 +121,5 @@ export const RightButtonGroup: React.FC<React.PropsWithChildren & FlexProps> = (
     />
   );
 };
+
+export { ButtonGroup };

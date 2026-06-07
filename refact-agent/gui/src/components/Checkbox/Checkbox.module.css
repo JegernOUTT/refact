@@ -1,0 +1,25 @@
+.label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.control {
+  width: var(--rf-icon-md);
+  height: var(--rf-icon-md);
+  flex: 0 0 auto;
+  accent-color: var(--rf-color-accent);
+  cursor: pointer;
+}
+
+.control:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.content {
+  min-width: 0;
+}

@@ -1,6 +1,6 @@
 import classNames from "classnames";
 import type { LucideIcon } from "lucide-react";
-import type React from "react";
+import React from "react";
 import { LoaderCircle } from "lucide-react";
 import { Icon } from "../Icon";
 import styles from "./Button.module.css";
@@ -8,7 +8,7 @@ import styles from "./Button.module.css";
 export type ButtonVariant = "ghost" | "soft" | "primary" | "danger" | "plain";
 export type ButtonSize = "sm" | "md" | "lg";
 
-export interface ButtonProps extends React.ComponentProps<"button"> {
+export interface ButtonProps extends React.ComponentPropsWithoutRef<"button"> {
   variant?: ButtonVariant;
   size?: ButtonSize;
   loading?: boolean;
@@ -17,7 +17,7 @@ export interface ButtonProps extends React.ComponentProps<"button"> {
 }
 
 export interface IconButtonProps
-  extends Omit<React.ComponentProps<"button">, "aria-label" | "children"> {
+  extends Omit<React.ComponentPropsWithoutRef<"button">, "aria-label" | "children"> {
   "aria-label": string;
   icon: LucideIcon;
   variant?: ButtonVariant;
@@ -53,50 +53,57 @@ function getIconSize(size: ButtonSize): React.ComponentProps<typeof Icon>["size"
   return "md";
 }
 
-export function Button({
-  children,
-  className,
-  disabled,
-  leftIcon,
-  loading = false,
-  rightIcon,
-  size = "md",
-  type = "button",
-  variant = "ghost",
-  ...props
-}: ButtonProps) {
-  const isDisabled = disabled === true || loading;
-  const iconTone = getIconTone(variant);
-  const iconSize = getIconSize(size);
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  (
+    {
+      children,
+      className,
+      disabled,
+      leftIcon,
+      loading = false,
+      rightIcon,
+      size = "md",
+      type = "button",
+      variant = "ghost",
+      ...props
+    },
+    ref,
+  ) => {
+    const isDisabled = disabled === true || loading;
+    const iconTone = getIconTone(variant);
+    const iconSize = getIconSize(size);
 
-  return (
-    <button
-      {...props}
-      aria-busy={loading ? true : props["aria-busy"]}
-      className={classNames(
-        styles.button,
-        styles[`variant-${variant}`],
-        styles[`size-${size}`],
-        "rf-pressable",
-        className,
-      )}
-      disabled={isDisabled}
-      type={type}
-    >
-      {loading ? (
-        <span aria-hidden="true" className={styles.spinner}>
-          <Icon icon={LoaderCircle} size={iconSize} tone={iconTone} />
-        </span>
-      ) : leftIcon ? (
-        <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
-      ) : null}
-      <span className={styles.label}>{children}</span>
-      {rightIcon && !loading ? (
-        <Icon icon={rightIcon} size={iconSize} tone={iconTone} />
-      ) : null}
-    </button>
-  );
-}
+    return (
+      <button
+        {...props}
+        ref={ref}
+        aria-busy={loading ? true : props["aria-busy"]}
+        className={classNames(
+          styles.button,
+          styles[`variant-${variant}`],
+          styles[`size-${size}`],
+          "rf-pressable",
+          className,
+        )}
+        disabled={isDisabled}
+        type={type}
+      >
+        {loading ? (
+          <span aria-hidden="true" className={styles.spinner}>
+            <Icon icon={LoaderCircle} size={iconSize} tone={iconTone} />
+          </span>
+        ) : leftIcon ? (
+          <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
+        ) : null}
+        <span className={styles.label}>{children}</span>
+        {rightIcon && !loading ? (
+          <Icon icon={rightIcon} size={iconSize} tone={iconTone} />
+        ) : null}
+      </button>
+    );
+  },
+);
+Button.displayName = "Button";
 
 export function ButtonGroup({ children, className, ...props }: ButtonGroupProps) {
   return (
@@ -106,39 +113,46 @@ export function ButtonGroup({ children, className, ...props }: ButtonGroupProps)
   );
 }
 
-export function IconButton({
-  "aria-label": ariaLabel,
-  className,
-  disabled,
-  icon,
-  loading = false,
-  size = "md",
-  type = "button",
-  variant = "ghost",
-  ...props
-}: IconButtonProps) {
-  const isDisabled = disabled === true || loading;
-  const iconTone = getIconTone(variant);
-  const iconSize = getIconSize(size);
+export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
+  (
+    {
+      "aria-label": ariaLabel,
+      className,
+      disabled,
+      icon,
+      loading = false,
+      size = "md",
+      type = "button",
+      variant = "ghost",
+      ...props
+    },
+    ref,
+  ) => {
+    const isDisabled = disabled === true || loading;
+    const iconTone = getIconTone(variant);
+    const iconSize = getIconSize(size);
 
-  return (
-    <button
-      {...props}
-      aria-busy={loading ? true : props["aria-busy"]}
-      aria-label={ariaLabel}
-      className={classNames(
-        styles.iconButton,
-        styles[`variant-${variant}`],
-        styles[`size-${size}`],
-        "rf-pressable",
-        className,
-      )}
-      disabled={isDisabled}
-      type={type}
-    >
-      <span aria-hidden="true" className={loading ? styles.spinner : undefined}>
-        <Icon icon={loading ? LoaderCircle : icon} size={iconSize} tone={iconTone} />
-      </span>
-    </button>
-  );
-}
+    return (
+      <button
+        {...props}
+        ref={ref}
+        aria-busy={loading ? true : props["aria-busy"]}
+        aria-label={ariaLabel}
+        className={classNames(
+          styles.iconButton,
+          styles[`variant-${variant}`],
+          styles[`size-${size}`],
+          "rf-pressable",
+          className,
+        )}
+        disabled={isDisabled}
+        type={type}
+      >
+        <span aria-hidden="true" className={loading ? styles.spinner : undefined}>
+          <Icon icon={loading ? LoaderCircle : icon} size={iconSize} tone={iconTone} />
+        </span>
+      </button>
+    );
+  },
+);
+IconButton.displayName = "IconButton";

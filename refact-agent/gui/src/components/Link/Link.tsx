@@ -1,21 +1,17 @@
 import { FC, useCallback } from "react";
-import {
-  type LinkProps as RadixLinkProps,
-  Link as RadixLink,
-} from "@radix-ui/themes";
 import classNames from "classnames";
-
 import { useConfig, useOpenUrl } from "../../hooks";
 import styles from "./Link.module.css";
 
-interface LinkProps extends RadixLinkProps {
+interface LinkProps extends React.ComponentPropsWithoutRef<"a"> {
   href?: string;
   children?: React.ReactNode;
   className?: string;
   onClick?: React.MouseEventHandler<HTMLAnchorElement>;
+  size?: string;
 }
 
-export const Link: FC<LinkProps> = ({ onClick, ...props }) => {
+export const Link: FC<LinkProps> = ({ onClick, size: _size, ...props }) => {
   const config = useConfig();
   const openUrl = useOpenUrl();
 
@@ -37,7 +33,7 @@ export const Link: FC<LinkProps> = ({ onClick, ...props }) => {
   );
 
   return (
-    <RadixLink
+    <a
       className={classNames(
         styles.link,
         { [styles.jetbrains]: config.host === "jetbrains" },

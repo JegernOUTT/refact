@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { HoverCard, Text } from "@radix-ui/themes";
-import { MagicWandIcon } from "@radix-ui/react-icons";
-import iconStyles from "./iconButton.module.css";
+import { WandSparkles } from "lucide-react";
+import { IconButton } from "../ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectCurrentThreadId,
@@ -67,16 +67,15 @@ export const WandButton = ({
   return (
     <HoverCard.Root>
       <HoverCard.Trigger>
-        <button
-          type="button"
-          className={iconStyles.iconButton}
-          onClick={handleClick}
-          disabled={disabled || isLoading || !currentText.trim()}
+        <IconButton
           aria-label={label}
           data-testid="wand-button"
-        >
-          <MagicWandIcon style={{ opacity: hasItems ? 1 : 0.45 }} />
-        </button>
+          disabled={disabled || isLoading || !currentText.trim()}
+          icon={WandSparkles}
+          onClick={handleClick}
+          size="sm"
+          variant={hasItems ? "primary" : "ghost"}
+        />
       </HoverCard.Trigger>
       <HoverCard.Content size="1" side="top">
         <Text as="p" size="2">

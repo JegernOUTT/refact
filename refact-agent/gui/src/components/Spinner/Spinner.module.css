@@ -1,5 +1,7 @@
 .spinner {
   margin: 0;
+  color: var(--rf-color-muted);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-mono);
 }
 
 .spinner::after {
@@ -8,31 +10,44 @@
 }
 
 .spinner.spinning::after {
-  visibility: inherit;
   display: inline-block;
-  animation: dots steps(1, end) 1s infinite;
+  animation: dots var(--rf-dur-slow) steps(1, end) infinite;
   content: "";
+  visibility: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner.spinning::after {
+    animation: none;
+    content: "...";
+  }
 }
 
 @keyframes dots {
   0% {
     content: "";
   }
+
   17% {
     content: ".";
   }
+
   34% {
     content: "..";
   }
+
   51% {
     content: "...";
   }
+
   68% {
     content: " ..";
   }
+
   85% {
     content: "  .";
   }
+
   100% {
     content: "";
   }
