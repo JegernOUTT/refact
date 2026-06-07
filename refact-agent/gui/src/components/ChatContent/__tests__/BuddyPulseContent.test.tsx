@@ -67,11 +67,11 @@ describe("BuddyPulseContent", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Project pulse/ }));
 
-    expect(screen.getByText(/🧭/)).toBeTruthy();
-    expect(screen.getByText(/📚/)).toBeTruthy();
-    expect(screen.getByText(/⚠️/)).toBeTruthy();
-    expect(screen.getByText(/🕵️/)).toBeTruthy();
-    expect(screen.getByText(/🖱️/)).toBeTruthy();
+    expect(screen.getByText(/Preferences/)).toBeTruthy();
+    expect(screen.getByText(/Lessons/)).toBeTruthy();
+    expect(screen.getByText(/Friction/)).toBeTruthy();
+    expect(screen.getByText(/Recent reports/)).toBeTruthy();
+    expect(screen.getByText(/Activity \(24h\)/)).toBeTruthy();
   });
 
   it("returns_null_when_payload_missing", () => {

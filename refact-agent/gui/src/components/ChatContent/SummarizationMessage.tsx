@@ -1,5 +1,7 @@
 import React, { useId, useMemo, useState } from "react";
 import { Box, Flex } from "@radix-ui/themes";
+import type { LucideIcon } from "lucide-react";
+import { Archive, Brain, ChevronDown, ChevronUp, GitMerge } from "lucide-react";
 import {
   getAssistantCompressionMetadata,
   getCompressionReportMetadata,
@@ -10,6 +12,7 @@ import type {
   SummarizationTier,
 } from "../../services/refact/types";
 import { ToolMarkdown } from "../Markdown";
+import { Icon } from "../ui";
 import styles from "./SummarizationMessage.module.css";
 
 interface SummarizationMessageProps {
@@ -18,7 +21,7 @@ interface SummarizationMessageProps {
 
 type TierMeta = {
   label: string;
-  icon: string;
+  icon: LucideIcon;
   badgeClass: string;
 };
 
@@ -34,7 +37,7 @@ function metaForTier(
   if (isSegmentCompressionReport) {
     return {
       label: "Context compressed",
-      icon: "🗜️",
+      icon: Archive,
       badgeClass: styles.tierBadgeTier1,
     };
   }
@@ -43,31 +46,31 @@ function metaForTier(
     case "tier0_deterministic":
       return {
         label: "Deterministic compaction",
-        icon: "🗜️",
+        icon: Archive,
         badgeClass: styles.tierBadgeTier0,
       };
     case "tier1_llm":
       return {
         label: "LLM summary",
-        icon: "🧠",
+        icon: Brain,
         badgeClass: styles.tierBadgeTier1,
       };
     case "tier1_merged":
       return {
         label: "Merged history summary",
-        icon: "🪡",
+        icon: GitMerge,
         badgeClass: styles.tierBadgeTier1Merged,
       };
     case "tier2_reactive":
       return {
         label: "Reactive compaction",
-        icon: "🗜️",
+        icon: Archive,
         badgeClass: styles.tierBadgeTier2,
       };
     default:
       return {
         label: "Context compression",
-        icon: "🗜️",
+        icon: Archive,
         badgeClass: styles.tierBadgeTier0,
       };
   }
@@ -312,7 +315,7 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
       >
         <Flex className={styles.headerLeft}>
           <span className={styles.icon} aria-hidden>
-            {meta.icon}
+            <Icon icon={meta.icon} size="sm" />
           </span>
           <span
             className={`${styles.tierBadge} ${meta.badgeClass}`}
@@ -333,7 +336,9 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
             <span className={styles.tokenLabel}>· {tokenLabel}</span>
           )}
         </Flex>
-        <span className={styles.toggle}>{open ? "▲" : "▼"}</span>
+        <span className={styles.toggle}>
+          <Icon icon={open ? ChevronUp : ChevronDown} size="sm" tone="muted" />
+        </span>
       </Flex>
       {hasReportSummary && (
         <Box

@@ -18,6 +18,13 @@
   background: var(--accent-a3);
 }
 
+.headerTitle,
+.sectionTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 .sections {
   padding: 0 var(--space-3) var(--space-3);
   display: flex;

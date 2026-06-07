@@ -1,9 +1,19 @@
 import { type ReactNode, useState } from "react";
 import { Badge, Box, Card, Flex, Heading, Text } from "@radix-ui/themes";
+import type { LucideIcon } from "lucide-react";
+import {
+  BookOpen,
+  Compass,
+  MousePointerClick,
+  Search,
+  Sparkles,
+  TriangleAlert,
+} from "lucide-react";
 import {
   type BuddyPulsePayload,
   isBuddyPulsePayload,
 } from "../../services/refact/types";
+import { Icon } from "../ui";
 import styles from "./BuddyPulseContent.module.css";
 
 type Props = {
@@ -11,11 +21,11 @@ type Props = {
 };
 
 const SECTION_ICONS = {
-  preferences: "🧭",
-  lessons: "📚",
-  friction: "⚠️",
-  reports: "🕵️",
-  activity: "🖱️",
+  preferences: Compass,
+  lessons: BookOpen,
+  friction: TriangleAlert,
+  reports: Search,
+  activity: MousePointerClick,
 } as const;
 
 export const BuddyPulseContent = ({ rawExtra }: Props) => {
@@ -44,7 +54,10 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
         aria-controls="buddy-pulse-sections"
         onClick={() => setExpanded((x) => !x)}
       >
-        <Heading size="3">💫 Project pulse · updated {minutesAgo}m ago</Heading>
+        <Heading size="3" className={styles.headerTitle}>
+          <Icon icon={Sparkles} size="sm" tone="accent" /> Project pulse · updated{" "}
+          {minutesAgo}m ago
+        </Heading>
       </button>
       {expanded && (
         <Box id="buddy-pulse-sections" className={styles.sections}>
@@ -120,15 +133,16 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
 
 const Section = ({ icon, title, count, children }: SectionProps) => (
   <Flex direction="column" gap="1" className={styles.section}>
-    <Heading size="2">
-      {icon} {title} <Badge color="gray">{count}</Badge>
+    <Heading size="2" className={styles.sectionTitle}>
+      <Icon icon={icon} size="sm" /> {title}{" "}
+      <Badge color="gray">{count}</Badge>
     </Heading>
     <Box>{children}</Box>
   </Flex>
 );
 
 type SectionProps = {
-  icon: string;
+  icon: LucideIcon;
   title: string;
   count: number;
   children: ReactNode;

@@ -8,9 +8,11 @@ import React, {
 import { CheckIcon, CopyIcon } from "@radix-ui/react-icons";
 import { Box, Button, Container, Flex, Text } from "@radix-ui/themes";
 import classNames from "classnames";
+import { ClipboardList } from "lucide-react";
 import { useAppSelector, useCopyToClipboard } from "../../../hooks";
 import { selectPlanBannerState } from "../../../features/Chat/Thread/selectors";
 import { Markdown } from "../../Markdown";
+import { Icon } from "../../ui";
 import styles from "./PlanBanner.module.css";
 import { getPlanMetadata } from "../../../services/refact/types";
 import { PlanHistoryModal } from "./PlanHistoryModal";
@@ -152,7 +154,9 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
             onClick={handleToggle}
             data-testid="plan-banner-header"
           >
-            <span className={styles.icon}>📋</span>
+            <span className={styles.icon}>
+              <Icon icon={ClipboardList} size="sm" />
+            </span>
             <Text size="1" className={styles.title}>
               {title}
             </Text>

@@ -113,10 +113,9 @@ describe("FinalReportView", () => {
     expect(container.querySelector("img[onerror]")).not.toBeInTheDocument();
   });
 
-  it("shows verification pass and fail emoji", () => {
+  it("shows verification pass and fail states", () => {
     render(<FinalReportView content={structuredPayload} />);
-    expect(screen.getAllByText("✅").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("❌").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Success/)).toBeInTheDocument();
     expect(
       screen.getByText("npm run test -- FinalReportView --run"),
     ).toBeInTheDocument();

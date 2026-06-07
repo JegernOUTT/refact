@@ -11,7 +11,7 @@ import {
   normalizeEventMessageMetadata,
 } from "../../../services/refact/types";
 import { EventLogEntry } from "./EventLogEntry";
-import { eventSubkindIcon } from "./eventSubkind";
+import { eventSubkindIconElement } from "./eventSubkind";
 import styles from "./EventLog.module.css";
 
 export type EventLogProps = {
@@ -242,7 +242,7 @@ export const EventLog: React.FC<EventLogProps> = ({
                   onChange={() => toggleSubkind(subkind)}
                 />
                 <Text as="span" size="1" aria-hidden="true">
-                  {eventSubkindIcon(subkind)}
+                  {eventSubkindIconElement(subkind)}
                 </Text>
                 <Text as="span" size="1">
                   {subkind}

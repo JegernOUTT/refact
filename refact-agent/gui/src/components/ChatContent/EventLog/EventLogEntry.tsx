@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import type { EventMessage } from "../../../services/refact/types";
 import { normalizeEventMessageMetadata } from "../../../services/refact/types";
-import { eventSubkindIcon } from "./eventSubkind";
+import { eventSubkindIconElement } from "./eventSubkind";
 import styles from "./EventLog.module.css";
 
 type EventLogEntryProps = {
@@ -106,7 +106,7 @@ export const EventLogEntry: React.FC<EventLogEntryProps> = ({
       >
         <Flex align="center" gap="2" className={styles.entryRow}>
           <Text as="span" className={styles.icon} aria-hidden="true">
-            {eventSubkindIcon(normalizedEvent.subkind)}
+            {eventSubkindIconElement(normalizedEvent.subkind)}
           </Text>
           <Text as="span" size="1" className={styles.timestamp}>
             {timestamp}

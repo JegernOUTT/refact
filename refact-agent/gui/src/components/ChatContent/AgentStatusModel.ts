@@ -94,11 +94,11 @@ function normalizePriority(value: string | null): string {
 
 function normalizeState(emoji: string, text: string): AgentStatusState {
   const lower = `${emoji} ${text}`.toLowerCase();
-  if (emoji.includes("🔴") || lower.includes("stuck")) return "stuck";
-  if (emoji.includes("❌") || lower.includes("failed")) return "failed";
-  if (emoji.includes("✅") || lower.includes("done")) return "done";
+  if (emoji.includes("\u{1F534}") || lower.includes("stuck")) return "stuck";
+  if (emoji.includes("\u{274C}") || lower.includes("failed")) return "failed";
+  if (emoji.includes("\u{2705}") || lower.includes("done")) return "done";
   if (
-    emoji.includes("⏸") ||
+    emoji.includes("\u{23F8}") ||
     lower.includes("paused") ||
     lower.includes("approval")
   ) {
@@ -109,18 +109,8 @@ function normalizeState(emoji: string, text: string): AgentStatusState {
 
 function stateEmoji(state: AgentStatusState, fallback: string): string {
   if (fallback) return fallback;
-  switch (state) {
-    case "stuck":
-      return "🔴";
-    case "failed":
-      return "❌";
-    case "done":
-      return "✅";
-    case "paused":
-      return "⏸️";
-    case "running":
-      return "🔄";
-  }
+  void state;
+  return "";
 }
 
 function stateLabel(state: AgentStatusState, text: string): string {

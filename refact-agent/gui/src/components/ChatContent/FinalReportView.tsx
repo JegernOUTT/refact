@@ -1,6 +1,8 @@
 import React, { useMemo } from "react";
 import { Badge, Box, Flex, Text } from "@radix-ui/themes";
+import { CheckCircle2, CircleX } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
+import { Icon } from "../ui";
 import styles from "./FinalReportView.module.css";
 
 type VerificationResult = {
@@ -173,7 +175,12 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
           {title}
         </Text>
         <Badge color={report.success ? "green" : "red"} variant="soft">
-          {report.success ? "✅ Success" : "❌ Failed"}
+          <Icon
+            icon={report.success ? CheckCircle2 : CircleX}
+            size="sm"
+            tone={report.success ? "success" : "danger"}
+          />
+          {report.success ? "Success" : "Failed"}
         </Badge>
       </Flex>
       <Section title="Summary">
@@ -218,7 +225,11 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
                 className={styles.verificationItem}
               >
                 <summary className={styles.verificationHeader}>
-                  <span>{item.passed ? "✅" : "❌"}</span>
+                  <Icon
+                    icon={item.passed ? CheckCircle2 : CircleX}
+                    size="sm"
+                    tone={item.passed ? "success" : "danger"}
+                  />
                   <code>{item.command}</code>
                   {item.exit_code !== undefined && item.exit_code !== null && (
                     <Text as="span" size="1" color="gray">
