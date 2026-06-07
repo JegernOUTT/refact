@@ -289,6 +289,7 @@ export type ProviderDefaults = {
   chat_buddy?: ModelTypeDefaults;
   completion_model?: string | null;
   embedding_model?: string | null;
+  [key: string]: unknown;
 };
 
 export type ProviderDefaultsUpdateRequest = ProviderDefaults & {

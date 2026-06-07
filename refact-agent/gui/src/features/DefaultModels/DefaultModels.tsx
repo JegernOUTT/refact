@@ -217,7 +217,8 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
       chat_thinking: capsData?.chat_thinking_model ?? "",
       chat_buddy: capsData?.chat_buddy_model ?? "",
       completion_model: capsData?.completion_default_model ?? "",
-      embedding_model: capsData?.embedding_model?.id ?? "",
+      embedding_model:
+        capsData?.embedding_model?.id ?? capsData?.embedding_model?.name ?? "",
     }),
     [capsData],
   );
@@ -246,11 +247,12 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
   useEffect(() => {
     if (defaults) {
       const base: ProviderDefaults = {
-        chat: defaults.chat,
-        chat_model_2: defaults.chat_model_2,
-        task_planner_agent_model: defaults.task_planner_agent_model,
-        chat_light: defaults.chat_light,
-        chat_thinking: defaults.chat_thinking,
+        ...defaults,
+        chat: defaults.chat ?? {},
+        chat_model_2: defaults.chat_model_2 ?? {},
+        task_planner_agent_model: defaults.task_planner_agent_model ?? {},
+        chat_light: defaults.chat_light ?? {},
+        chat_thinking: defaults.chat_thinking ?? {},
         chat_buddy: defaults.chat_buddy ?? {},
         completion_model: defaults.completion_model,
         embedding_model: defaults.embedding_model,
@@ -303,13 +305,14 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
         ? { ...localDefaults, draft_id: draftId }
         : localDefaults;
       await updateDefaults(payload).unwrap();
+      void refetch();
       void refetchCaps();
       setHasChanges(false);
       setSaveError(null);
     } catch {
       setSaveError("Failed to save defaults. Please try again.");
     }
-  }, [draftId, localDefaults, refetchCaps, updateDefaults]);
+  }, [draftId, localDefaults, refetch, refetchCaps, updateDefaults]);
 
   if (isLoading || draftLoading) {
     return <Spinner spinning />;
