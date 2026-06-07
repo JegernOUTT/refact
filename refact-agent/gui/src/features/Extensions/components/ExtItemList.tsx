@@ -1,6 +1,6 @@
 import React from "react";
-import { Flex, Button, Text, Badge, IconButton } from "@radix-ui/themes";
-import { PlusIcon, TrashIcon } from "@radix-ui/react-icons";
+import { Plus, Trash2 } from "lucide-react";
+import { Badge, Button, EmptyState, IconButton } from "../../../components/ui";
 import type {
   SkillRegistryItem,
   CommandRegistryItem,
@@ -31,77 +31,47 @@ export const ExtItemList: React.FC<ExtItemListProps> = ({
   onDelete,
 }) => {
   return (
-    <Flex direction="column" gap="1" className={styles.list}>
-      <Button variant="soft" onClick={onCreate} size="1">
-        <PlusIcon /> New
+    <div className={`${styles.list} rf-stagger`}>
+      <Button variant="soft" onClick={onCreate} size="sm" leftIcon={Plus}>
+        New
       </Button>
       {items.map((item) => (
-        <div
+        <button
           key={item.name}
-          role="button"
-          tabIndex={0}
+          type="button"
           aria-label={`Select ${item.name}`}
-          className={`${styles.item} ${
+          className={`${styles.item} rf-pressable ${
             selectedId === item.name ? styles.selected : ""
           }`}
           onClick={() => onSelect(item.name)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              onSelect(item.name);
-            }
-          }}
         >
-          <Flex direction="column" gap="0" style={{ minWidth: 0, flex: 1 }}>
-            <Text
-              size="1"
-              weight="medium"
-              style={{
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {item.name}
-            </Text>
-            <Text
-              size="1"
-              color="gray"
-              style={{
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {item.description}
-            </Text>
-          </Flex>
-          <Flex gap="1" align="center" style={{ flexShrink: 0 }}>
-            <Badge size="1" variant="soft">
-              {SCOPE_LABELS[item.scope]}
-            </Badge>
+          <span className={styles.content}>
+            <span className={styles.title}>{item.name}</span>
+            <span className={styles.description}>{item.description}</span>
+          </span>
+          <span className={styles.meta}>
+            <Badge tone="muted">{SCOPE_LABELS[item.scope]}</Badge>
             {!item.read_only && (
               <IconButton
-                size="1"
-                variant="ghost"
-                color="red"
-                aria-label={`Delete ${item.name}`}
+                variant="danger"
+                size="sm"
+                icon={Trash2}
+                aria-label={`Delete `}
                 onClick={(e) => {
                   e.stopPropagation();
                   onDelete(item.name, item.scope);
                 }}
-              >
-                <TrashIcon />
-              </IconButton>
+              />
             )}
-          </Flex>
-        </div>
+          </span>
+        </button>
       ))}
       {items.length === 0 && (
-        <Text size="1" color="gray">
-          No items found
-        </Text>
+        <EmptyState
+          title="No items found"
+          description="Create one to get started."
+        />
       )}
-    </Flex>
+    </div>
   );
 };

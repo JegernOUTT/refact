@@ -2,14 +2,44 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.tabLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.actionsStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .panelContainer {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding-top: var(--space-2);
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
+  margin-top: var(--rf-space-4);
 }

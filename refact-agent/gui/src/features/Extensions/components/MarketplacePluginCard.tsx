@@ -1,6 +1,6 @@
 import React, { useCallback } from "react";
-import { Badge, Button, Card, Flex, Spinner, Text } from "@radix-ui/themes";
-import { CheckIcon } from "@radix-ui/react-icons";
+import { Check } from "lucide-react";
+import { Badge, Button, FieldError, Icon } from "../../../components/ui";
 import {
   useInstallPluginMutation,
   useUninstallPluginMutation,
@@ -54,66 +54,56 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
         : null;
 
   return (
-    <Card className={styles.card}>
-      <Flex direction="column" gap="2" height="100%">
+    <article className={`${styles.card} rf-enter`}>
+      <div className={styles.body}>
         <div className={styles.header}>
           <div className={styles.info}>
-            <Text size="2" weight="bold">
-              {plugin.name}
-            </Text>
+            <h3 className={styles.title}>{plugin.name}</h3>
             {plugin.description && (
-              <Text size="1" className={styles.description} mt="1" as="p">
-                {plugin.description}
-              </Text>
+              <p className={styles.description}>{plugin.description}</p>
             )}
           </div>
           <div className={styles.actions}>
             {isInstalled ? (
-              <Flex gap="2" align="center">
-                <Text size="1" weight="medium">
-                  <Flex as="span" align="center" gap="1">
-                    <CheckIcon /> Installed
-                  </Flex>
-                </Text>
+              <div className={styles.installed}>
+                <Icon icon={Check} size="sm" tone="success" />
+                Installed
                 <Button
-                  size="1"
+                  size="sm"
                   variant="soft"
                   onClick={handleUninstall}
                   disabled={uninstalling}
+                  loading={uninstalling}
                 >
-                  {uninstalling ? <Spinner size="1" /> : "Uninstall"}
+                  Uninstall
                 </Button>
-              </Flex>
+              </div>
             ) : (
-              <Button size="1" onClick={handleInstall} disabled={installing}>
-                {installing ? <Spinner size="1" /> : "Install"}
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={handleInstall}
+                disabled={installing}
+                loading={installing}
+              >
+                Install
               </Button>
             )}
           </div>
         </div>
 
-        {errorMessage && (
-          <Text size="1" color="red">
-            {errorMessage}
-          </Text>
-        )}
+        {errorMessage && <FieldError>{errorMessage}</FieldError>}
 
-        <Flex className={styles.tags} gap="1" wrap="wrap">
-          <Badge size="1" color="gray" variant="soft">
-            {plugin.marketplace}
-          </Badge>
-          {plugin.version && (
-            <Badge size="1" variant="soft">
-              {plugin.version}
-            </Badge>
-          )}
+        <div className={styles.tags}>
+          <Badge tone="muted">{plugin.marketplace}</Badge>
+          {plugin.version && <Badge tone="muted">{plugin.version}</Badge>}
           {plugin.tags?.map((tag) => (
-            <Badge key={tag} size="1" variant="soft">
+            <Badge key={tag} tone="default">
               {tag}
             </Badge>
           ))}
-        </Flex>
-      </Flex>
-    </Card>
+        </div>
+      </div>
+    </article>
   );
 };

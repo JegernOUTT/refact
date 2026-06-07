@@ -1,6 +1,5 @@
 import React, { useState, useMemo, useCallback } from "react";
-import { Button, Flex, Spinner, Text, TextField } from "@radix-ui/themes";
-import { ChevronDownIcon, ChevronRightIcon } from "@radix-ui/react-icons";
+import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 import { useDebounceCallback } from "usehooks-ts";
 import {
   useGetMarketplacesQuery,
@@ -13,6 +12,14 @@ import type {
   MarketplaceEntry,
   PluginEntry,
 } from "../../../services/refact/plugins";
+import {
+  Button,
+  EmptyState,
+  FieldError,
+  FieldText,
+  Icon,
+} from "../../../components/ui";
+import { Spinner } from "../../../components/Spinner";
 import { AddMarketplaceDialog } from "./AddMarketplaceDialog";
 import { MarketplacePluginCard } from "./MarketplacePluginCard";
 
@@ -51,55 +58,49 @@ const MarketplaceSection: React.FC<MarketplaceSectionProps> = ({
   }, [data, searchQuery]);
 
   return (
-    <div className={styles.marketplaceSection}>
+    <section className={`${styles.marketplaceSection} rf-enter`}>
       <div className={styles.marketplaceHeader}>
-        <Flex align="center" gap="2">
-          <Text size="2" weight="bold">
-            {marketplace.name}
-          </Text>
-          <Text size="1" color="gray">
-            {marketplace.source}
-          </Text>
+        <div className={styles.marketplaceTitle}>
+          <h3 className={styles.heading}>{marketplace.name}</h3>
+          <span className={styles.muted}>{marketplace.source}</span>
           {data && (
-            <Text size="1" color="gray">
+            <span className={styles.muted}>
               ({data.plugins.length} plugins)
-            </Text>
+            </span>
           )}
-        </Flex>
+        </div>
         <Button
-          size="1"
-          variant="ghost"
-          color="red"
+          size="sm"
+          variant="danger"
           onClick={handleDelete}
           disabled={deleting}
+          loading={deleting}
         >
-          {deleting ? <Spinner size="1" /> : "Remove"}
+          Remove
         </Button>
       </div>
 
       {isLoading && (
-        <Flex align="center" gap="2" py="2">
-          <Spinner size="1" />
-          <Text size="1" color="gray">
-            Loading plugins…
-          </Text>
-        </Flex>
+        <div className={styles.marketplaceTitle}>
+          <Spinner spinning />
+          <span className={styles.muted}>Loading plugins…</span>
+        </div>
       )}
 
       {isError && (
-        <Text size="1" color="red">
-          Failed to load plugins for this marketplace.
-        </Text>
+        <FieldError>Failed to load plugins for this marketplace.</FieldError>
       )}
 
       {!isLoading && !isError && filteredPlugins.length === 0 && (
-        <Text size="1" color="gray">
-          {searchQuery ? "No plugins match your search." : "No plugins found."}
-        </Text>
+        <EmptyState
+          title={
+            searchQuery ? "No plugins match your search" : "No plugins found"
+          }
+        />
       )}
 
       {filteredPlugins.length > 0 && (
-        <div className={styles.pluginsGrid}>
+        <div className={`${styles.pluginsGrid} rf-stagger`}>
           {filteredPlugins.map((plugin) => (
             <MarketplacePluginCard
               key={plugin.name}
@@ -109,7 +110,7 @@ const MarketplaceSection: React.FC<MarketplaceSectionProps> = ({
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 };
 
@@ -122,9 +123,9 @@ export const MarketplacePanel: React.FC = () => {
   const debouncedSetSearch = useDebounceCallback(setDebouncedSearch, 300);
 
   const handleSearchChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setSearch(e.target.value);
-      debouncedSetSearch(e.target.value);
+    (value: string) => {
+      setSearch(value);
+      debouncedSetSearch(value);
     },
     [debouncedSetSearch],
   );
@@ -149,14 +150,15 @@ export const MarketplacePanel: React.FC = () => {
   if (!loadingMarketplaces && marketplacesError) {
     return (
       <div className={styles.panel}>
-        <Flex direction="column" align="center" gap="3" py="6">
-          <Text size="2" color="red">
-            Failed to load marketplaces.
-          </Text>
-          <Button size="1" variant="soft" onClick={() => void refetch()}>
-            Retry
-          </Button>
-        </Flex>
+        <EmptyState
+          action={
+            <Button size="sm" variant="soft" onClick={() => void refetch()}>
+              Retry
+            </Button>
+          }
+          title="Failed to load marketplaces"
+          variant="full"
+        />
       </div>
     );
   }
@@ -164,26 +166,28 @@ export const MarketplacePanel: React.FC = () => {
   if (!loadingMarketplaces && marketplaces.length === 0) {
     return (
       <div className={styles.panel}>
-        <Flex
-          direction="column"
-          align="center"
-          gap="3"
+        <EmptyState
           className={styles.onboarding}
-        >
-          <Text size="3" weight="bold">
-            Plugin Marketplace
-          </Text>
-          <Text size="2" color="gray" align="center">
-            Add a marketplace source to discover and install plugins. A
-            marketplace is a Git repository containing plugin definitions.
-          </Text>
-          <Text size="1" color="gray" align="center">
-            Example: JegernOUTT/refact-plugins
-          </Text>
-          <Button size="2" onClick={() => setDialogOpen(true)}>
-            + Add Marketplace
-          </Button>
-        </Flex>
+          title="Plugin Marketplace"
+          description={
+            <>
+              Add a marketplace source to discover and install plugins. A
+              marketplace is a Git repository containing plugin definitions.
+              <br />
+              Example: JegernOUTT/refact-plugins
+            </>
+          }
+          action={
+            <Button
+              variant="primary"
+              onClick={() => setDialogOpen(true)}
+              leftIcon={Plus}
+            >
+              Add Marketplace
+            </Button>
+          }
+          variant="full"
+        />
 
         <AddMarketplaceDialog
           open={dialogOpen}
@@ -194,56 +198,42 @@ export const MarketplacePanel: React.FC = () => {
   }
 
   return (
-    <div className={styles.panel}>
+    <div className={`${styles.panel} rf-stagger`}>
       {loadingMarketplaces && (
-        <Flex align="center" gap="2" py="4">
-          <Spinner size="2" />
-          <Text size="2" color="gray">
-            Loading marketplaces…
-          </Text>
-        </Flex>
+        <div className={styles.marketplaceTitle}>
+          <Spinner spinning />
+          <span className={styles.muted}>Loading marketplaces…</span>
+        </div>
       )}
 
       {installed.length > 0 && (
-        <div className={styles.installedSection}>
-          <div
-            className={styles.installedHeader}
-            role="button"
-            tabIndex={0}
+        <section className={styles.installedSection}>
+          <button
+            className={`${styles.installedHeader} rf-pressable`}
+            type="button"
             aria-label="Toggle installed plugins"
             onClick={() => setInstalledExpanded((v) => !v)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                setInstalledExpanded((v) => !v);
-              }
-            }}
           >
-            {installedExpanded ? (
-              <ChevronDownIcon width="14" height="14" />
-            ) : (
-              <ChevronRightIcon width="14" height="14" />
-            )}
-            <Text size="2" weight="bold">
-              Installed ({installed.length})
-            </Text>
-          </div>
+            <Icon
+              icon={installedExpanded ? ChevronDown : ChevronRight}
+              size="sm"
+            />
+            <h3 className={styles.heading}>Installed ({installed.length})</h3>
+          </button>
           {installedExpanded && (
-            <div className={styles.installedList}>
+            <div className={`${styles.installedList} rf-stagger`}>
               {installed.map((plugin) => (
                 <div key={plugin.name} className={styles.installedItem}>
-                  <Flex direction="column" gap="1">
-                    <Text size="2" weight="medium">
-                      {plugin.name}
-                    </Text>
-                    <Text size="1" color="gray">
+                  <div className={styles.installedInfo}>
+                    <span className={styles.heading}>{plugin.name}</span>
+                    <span className={styles.muted}>
                       Installed{" "}
                       {new Date(plugin.installed_at).toLocaleDateString()}
-                    </Text>
-                  </Flex>
+                    </span>
+                  </div>
                   <Button
-                    size="1"
-                    color="red"
-                    variant="soft"
+                    size="sm"
+                    variant="danger"
                     onClick={() => void uninstallPlugin(plugin.name)}
                   >
                     Uninstall
@@ -252,7 +242,7 @@ export const MarketplacePanel: React.FC = () => {
               ))}
             </div>
           )}
-        </div>
+        </section>
       )}
 
       {marketplaces.map((marketplace) => (
@@ -265,11 +255,15 @@ export const MarketplacePanel: React.FC = () => {
       ))}
 
       <div className={styles.toolbar}>
-        <Button size="2" onClick={() => setDialogOpen(true)}>
-          + Add Marketplace
+        <Button
+          variant="primary"
+          onClick={() => setDialogOpen(true)}
+          leftIcon={Plus}
+        >
+          Add Marketplace
         </Button>
         <div className={styles.searchInput}>
-          <TextField.Root
+          <FieldText
             placeholder="Search plugins…"
             value={search}
             onChange={handleSearchChange}

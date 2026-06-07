@@ -1,22 +1,17 @@
 import React, { useState, useCallback, useEffect } from "react";
+import { Code, Info, Plus, SlidersHorizontal, Trash2 } from "lucide-react";
 import {
-  Flex,
-  Button,
-  Text,
-  TextField,
-  Select,
-  SegmentedControl,
   Badge,
+  Button,
+  EmptyState,
+  FieldError,
+  FieldSelect,
+  FieldStack,
+  FieldText,
+  Icon,
   IconButton,
-  Callout,
-} from "@radix-ui/themes";
-import {
-  PlusIcon,
-  TrashIcon,
-  CodeIcon,
-  MixerHorizontalIcon,
-  InfoCircledIcon,
-} from "@radix-ui/react-icons";
+  SegmentedControl,
+} from "../../../components/ui";
 import {
   useGetHooksQuery,
   useSaveHooksMutation,
@@ -24,6 +19,7 @@ import {
 } from "../../../services/refact/extensions";
 import { Spinner } from "../../../components/Spinner";
 import styles from "./HooksEditor.module.css";
+import featureStyles from "../../featureUi.module.css";
 
 const HOOK_EVENTS = [
   "PreToolUse",
@@ -38,6 +34,11 @@ const HOOK_EVENTS = [
 type HookEvent = (typeof HOOK_EVENTS)[number];
 
 const EVENTS_WITH_MATCHER: HookEvent[] = ["PreToolUse", "PostToolUse"];
+
+const hookEventOptions = HOOK_EVENTS.map((event) => ({
+  value: event,
+  label: event,
+}));
 
 type HookRowProps = {
   hook: HookEntry;
@@ -55,102 +56,82 @@ const HookRow: React.FC<HookRowProps> = ({
   const showMatcher = EVENTS_WITH_MATCHER.includes(hook.event as HookEvent);
 
   return (
-    <Flex direction="column" gap="2" className={styles.hookRow}>
-      <Flex gap="2" align="center" wrap="wrap">
-        <Badge size="1" variant="soft">
-          {hook.event}
-        </Badge>
+    <div className={`${styles.hookRow} rf-enter`}>
+      <div className={styles.hookHeader}>
+        <Badge tone="accent">{hook.event}</Badge>
         {hook.matcher && (
-          <Text size="1" color="gray">
-            matcher: {hook.matcher}
-          </Text>
+          <span className={styles.matcher}>matcher: {hook.matcher}</span>
         )}
         <IconButton
-          size="1"
-          variant="ghost"
-          color="red"
+          variant="danger"
+          size="sm"
+          icon={Trash2}
           aria-label={`Delete hook ${index}`}
           onClick={() => onDelete(index)}
-          style={{ marginLeft: "auto" }}
-        >
-          <TrashIcon />
-        </IconButton>
-      </Flex>
+        />
+      </div>
 
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Event
-        </Text>
-        <Select.Root
-          size="1"
-          value={hook.event}
-          onValueChange={(v) => onUpdate(index, { ...hook, event: v })}
-        >
-          <Select.Trigger style={{ width: "100%" }} />
-          <Select.Content>
-            {HOOK_EVENTS.map((e) => (
-              <Select.Item key={e} value={e}>
-                {e}
-              </Select.Item>
-            ))}
-          </Select.Content>
-        </Select.Root>
-      </Flex>
+      <FieldStack
+        label="Event"
+        control={
+          <FieldSelect
+            value={hook.event}
+            onChange={(event) => onUpdate(index, { ...hook, event })}
+            options={hookEventOptions}
+          />
+        }
+      />
 
       {showMatcher && (
-        <Flex direction="column" gap="1">
-          <Text size="1" weight="medium">
-            Matcher (optional regex)
-          </Text>
-          <TextField.Root
-            size="1"
-            value={hook.matcher ?? ""}
-            onChange={(e) =>
-              onUpdate(index, {
-                ...hook,
-                matcher: e.target.value || undefined,
-              })
-            }
-            placeholder="Tool name regex, e.g., shell.*"
-          />
-        </Flex>
+        <FieldStack
+          label="Matcher (optional regex)"
+          control={
+            <FieldText
+              value={hook.matcher ?? ""}
+              onChange={(matcher) =>
+                onUpdate(index, {
+                  ...hook,
+                  matcher: matcher || undefined,
+                })
+              }
+              placeholder="Tool name regex, e.g., shell.*"
+            />
+          }
+        />
       )}
 
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Command
-        </Text>
-        <textarea
-          className={styles.commandTextarea}
-          value={hook.command}
-          onChange={(e) =>
-            onUpdate(index, { ...hook, command: e.target.value })
-          }
-          placeholder="Shell command to run..."
-          spellCheck={false}
-        />
-      </Flex>
+      <FieldStack
+        label="Command"
+        control={
+          <textarea
+            className={styles.commandTextarea}
+            value={hook.command}
+            onChange={(event) =>
+              onUpdate(index, { ...hook, command: event.target.value })
+            }
+            placeholder="Shell command to run..."
+            spellCheck={false}
+          />
+        }
+      />
 
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Timeout (seconds, optional)
-        </Text>
-        <TextField.Root
-          size="1"
-          type="number"
-          value={hook.timeout !== undefined ? String(hook.timeout) : ""}
-          onChange={(e) =>
-            onUpdate(index, {
-              ...hook,
-              timeout: e.target.value
-                ? parseInt(e.target.value, 10)
-                : undefined,
-            })
-          }
-          placeholder="30"
-        />
-      </Flex>
-    </Flex>
+      <FieldStack
+        label="Timeout (seconds, optional)"
+        control={
+          <FieldText
+            type="number"
+            value={hook.timeout !== undefined ? String(hook.timeout) : ""}
+            onChange={(timeout) =>
+              onUpdate(index, {
+                ...hook,
+                timeout: timeout ? parseInt(timeout, 10) : undefined,
+              })
+            }
+            placeholder="30"
+          />
+        }
+      />
+    </div>
   );
 };
 
@@ -217,80 +198,80 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
   if (isLoading) return <Spinner spinning />;
   if (error) {
     return (
-      <Callout.Root color="red">
-        <Callout.Icon>
-          <InfoCircledIcon />
-        </Callout.Icon>
-        <Callout.Text>Failed to load hooks</Callout.Text>
-      </Callout.Root>
+      <div
+        className={`${featureStyles.callout} ${featureStyles.calloutDanger}`}
+      >
+        <Icon icon={Info} size="sm" tone="danger" />
+        Failed to load hooks
+      </div>
     );
   }
 
   return (
-    <Flex direction="column" gap="2" className={styles.editor}>
-      <Flex justify="between" align="center" gap="2" wrap="wrap">
-        <Flex gap="2" align="center">
-          <Text size="2" weight="bold">
-            Hooks
-          </Text>
-          <SegmentedControl.Root
-            size="1"
+    <div className={`${styles.editor} rf-enter`}>
+      <div className={styles.header}>
+        <div className={styles.headerTitle}>
+          <h2 className={styles.title}>Hooks</h2>
+          <SegmentedControl
+            size="sm"
             value={hooksScope}
-            onValueChange={(v) => setHooksScope(v as "global" | "local")}
-          >
-            <SegmentedControl.Item value="global">Global</SegmentedControl.Item>
-            <SegmentedControl.Item value="local">Project</SegmentedControl.Item>
-          </SegmentedControl.Root>
-        </Flex>
-        <Flex gap="1" align="center">
-          <SegmentedControl.Root
-            size="1"
+            onValueChange={(value) =>
+              setHooksScope(value as "global" | "local")
+            }
+            options={[
+              { value: "global", label: "Global" },
+              { value: "local", label: "Project" },
+            ]}
+          />
+        </div>
+        <div className={styles.headerActions}>
+          <SegmentedControl
+            size="sm"
             value={view}
-            onValueChange={(v) => setView(v as EditorView)}
-          >
-            <SegmentedControl.Item value="form">
-              <MixerHorizontalIcon width={12} height={12} />
-            </SegmentedControl.Item>
-            <SegmentedControl.Item value="raw">
-              <CodeIcon width={12} height={12} />
-            </SegmentedControl.Item>
-          </SegmentedControl.Root>
+            onValueChange={(value) => setView(value as EditorView)}
+            options={[
+              {
+                value: "form",
+                label: <Icon icon={SlidersHorizontal} size="sm" />,
+              },
+              { value: "raw", label: <Icon icon={Code} size="sm" /> },
+            ]}
+          />
           <Button
-            size="1"
+            variant="primary"
+            size="sm"
             onClick={() => void handleSave()}
             disabled={isSaving}
+            loading={isSaving}
           >
-            {isSaving ? "..." : "Save"}
+            Save
           </Button>
-        </Flex>
-      </Flex>
+        </div>
+      </div>
 
-      {saveError && (
-        <Text size="1" color="red">
-          {saveError}
-        </Text>
-      )}
+      {saveError && <FieldError>{saveError}</FieldError>}
 
       {view === "form" ? (
-        <Flex direction="column" gap="3" className={styles.formContent}>
-          {hooks.map((hook, i) => (
+        <div className={`${styles.formContent} rf-stagger`}>
+          {hooks.map((hook, index) => (
             <HookRow
-              key={i}
+              key={index}
               hook={hook}
-              index={i}
+              index={index}
               onUpdate={handleUpdate}
               onDelete={handleDelete}
             />
           ))}
           {hooks.length === 0 && (
-            <Text size="1" color="gray">
-              No hooks configured.
-            </Text>
+            <EmptyState
+              title="No hooks configured"
+              description="Add a hook to run commands on lifecycle events."
+            />
           )}
-          <Button variant="soft" size="1" onClick={handleAdd}>
-            <PlusIcon /> Add Hook
+          <Button variant="soft" size="sm" onClick={handleAdd} leftIcon={Plus}>
+            Add Hook
           </Button>
-        </Flex>
+        </div>
       ) : (
         <textarea
           className={styles.rawTextarea}
@@ -299,6 +280,6 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
           spellCheck={false}
         />
       )}
-    </Flex>
+    </div>
   );
 };

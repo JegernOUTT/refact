@@ -1,15 +1,16 @@
 import React, { useState, useCallback } from "react";
+import { AlertTriangle } from "lucide-react";
 import {
   Button,
-  Callout,
   Dialog,
-  Flex,
-  Spinner,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
+  FieldError,
+  FieldStack,
+  FieldText,
+  Icon,
+} from "../../../components/ui";
 import { useAddMarketplaceMutation } from "../../../services/refact/plugins";
+import featureStyles from "../../featureUi.module.css";
+import styles from "./ExtensionDialog.module.css";
 
 export type AddMarketplaceDialogProps = {
   open: boolean;
@@ -30,7 +31,7 @@ export const AddMarketplaceDialog: React.FC<AddMarketplaceDialogProps> = ({
       setSource("");
       onClose();
     } catch {
-      // error is shown via the `error` state from RTK Query
+      return;
     }
   }, [addMarketplace, source, onClose]);
 
@@ -56,54 +57,52 @@ export const AddMarketplaceDialog: React.FC<AddMarketplaceDialogProps> = ({
       : null;
 
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Content style={{ maxWidth: 440 }}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <Dialog.Content maxWidth="440px">
         <Dialog.Title>Add Marketplace</Dialog.Title>
-        <Dialog.Description size="2" mb="4">
+        <Dialog.Description>
           Enter a GitHub repository (owner/repo) or local path to a marketplace.
         </Dialog.Description>
 
-        <Flex direction="column" gap="3">
-          <Flex direction="column" gap="1">
-            <Text as="label" size="2" weight="medium">
-              Marketplace source
-            </Text>
-            <TextField.Root
+        <FieldStack
+          label="Marketplace source"
+          control={
+            <FieldText
               placeholder="owner/repo or /path/to/marketplace"
               value={source}
-              onChange={(e) => setSource(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
+              onChange={setSource}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
                   void handleAdd();
                 }
               }}
             />
-          </Flex>
+          }
+        />
 
-          {errorMessage && (
-            <Callout.Root color="red" size="1">
-              <Callout.Icon>
-                <ExclamationTriangleIcon />
-              </Callout.Icon>
-              <Callout.Text>{errorMessage}</Callout.Text>
-            </Callout.Root>
-          )}
-        </Flex>
+        {errorMessage && (
+          <div
+            className={`${featureStyles.callout} ${featureStyles.calloutDanger}`}
+          >
+            <Icon icon={AlertTriangle} size="sm" tone="danger" />
+            <FieldError>{errorMessage}</FieldError>
+          </div>
+        )}
 
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray">
-              Cancel
-            </Button>
+        <div className={styles.actions}>
+          <Dialog.Close asChild>
+            <Button variant="soft">Cancel</Button>
           </Dialog.Close>
           <Button
+            variant="primary"
             onClick={() => void handleAdd()}
             disabled={!source.trim() || isLoading}
+            loading={isLoading}
           >
-            {isLoading ? <Spinner size="1" /> : "Add"}
+            Add
           </Button>
-        </Flex>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

@@ -1,22 +1,17 @@
 import React, { useState, useCallback, useEffect } from "react";
-import {
-  Flex,
-  Button,
-  Text,
-  TextField,
-  TextArea,
-  Switch,
-  Select,
-  SegmentedControl,
-  Callout,
-} from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  MixerHorizontalIcon,
-  CodeIcon,
-  InfoCircledIcon,
-} from "@radix-ui/react-icons";
+import { ArrowLeft, Code, Info, SlidersHorizontal } from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
+import {
+  Button,
+  FieldError,
+  FieldSelect,
+  FieldStack,
+  FieldSwitch,
+  FieldText,
+  FieldTextarea,
+  Icon,
+  SegmentedControl,
+} from "../../../components/ui";
 import {
   useGetSkillQuery,
   useSaveSkillMutation,
@@ -27,6 +22,7 @@ import { StringListEditor } from "../../Customization/components/StringListEdito
 import { Spinner } from "../../../components/Spinner";
 import { BuddyDraftPreview } from "../../Buddy/BuddyDraftPreview";
 import styles from "./SkillEditor.module.css";
+import featureStyles from "../../featureUi.module.css";
 
 type EditorView = "form" | "raw";
 
@@ -38,62 +34,62 @@ type SkillFormProps = {
 
 const SkillForm: React.FC<SkillFormProps> = ({ data, onChange, disabled }) => {
   return (
-    <Flex direction="column" gap="3" className={styles.formContent}>
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Name
-        </Text>
-        <TextField.Root size="1" value={data.name} disabled />
-      </Flex>
+    <div className={styles.formContent}>
+      <FieldStack
+        label="Name"
+        control={
+          <FieldText value={data.name} onChange={(value) => value} disabled />
+        }
+      />
 
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Description
-        </Text>
-        <TextArea
-          size="1"
-          value={data.description}
-          onChange={(e) => onChange({ description: e.target.value })}
-          placeholder="Describe what this skill does..."
-          disabled={disabled}
-        />
-      </Flex>
-
-      <Flex gap="4" wrap="wrap">
-        <Flex align="center" gap="2">
-          <Switch
-            size="1"
-            checked={data.user_invocable}
-            onCheckedChange={(checked) => onChange({ user_invocable: checked })}
+      <FieldStack
+        label="Description"
+        control={
+          <FieldTextarea
+            value={data.description}
+            onChange={(description) => onChange({ description })}
+            placeholder="Describe what this skill does..."
             disabled={disabled}
           />
-          <Text size="1">User Invocable</Text>
-        </Flex>
-        <Flex align="center" gap="2">
-          <Switch
-            size="1"
-            checked={data.disable_model_invocation}
-            onCheckedChange={(checked) =>
-              onChange({ disable_model_invocation: checked })
-            }
+        }
+      />
+
+      <div className={styles.switchRow}>
+        <FieldStack
+          label="User Invocable"
+          control={
+            <FieldSwitch
+              checked={data.user_invocable}
+              onChange={(user_invocable) => onChange({ user_invocable })}
+              disabled={disabled}
+            />
+          }
+        />
+        <FieldStack
+          label="Disable Model Invocation"
+          control={
+            <FieldSwitch
+              checked={data.disable_model_invocation}
+              onChange={(disable_model_invocation) =>
+                onChange({ disable_model_invocation })
+              }
+              disabled={disabled}
+            />
+          }
+        />
+      </div>
+
+      <FieldStack
+        label="Argument Hint"
+        control={
+          <FieldText
+            value={data.argument_hint}
+            onChange={(argument_hint) => onChange({ argument_hint })}
+            placeholder="e.g., [file_path]"
             disabled={disabled}
           />
-          <Text size="1">Disable Model Invocation</Text>
-        </Flex>
-      </Flex>
-
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Argument Hint
-        </Text>
-        <TextField.Root
-          size="1"
-          value={data.argument_hint}
-          onChange={(e) => onChange({ argument_hint: e.target.value })}
-          placeholder="e.g., [file_path]"
-          disabled={disabled}
-        />
-      </Flex>
+        }
+      />
 
       <StringListEditor
         value={data.allowed_tools}
@@ -102,66 +98,63 @@ const SkillForm: React.FC<SkillFormProps> = ({ data, onChange, disabled }) => {
         placeholder="Add tool..."
       />
 
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Model (optional)
-        </Text>
-        <TextField.Root
-          size="1"
-          value={data.model ?? ""}
-          onChange={(e) => onChange({ model: e.target.value || null })}
-          placeholder="Leave blank to use default"
-          disabled={disabled}
-        />
-      </Flex>
-
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Context
-        </Text>
-        <Select.Root
-          value={data.context ?? "none"}
-          onValueChange={(v) => onChange({ context: v === "none" ? null : v })}
-          disabled={disabled}
-          size="1"
-        >
-          <Select.Trigger style={{ width: "100%" }} />
-          <Select.Content>
-            <Select.Item value="none">None</Select.Item>
-            <Select.Item value="fork">Fork (run in subagent)</Select.Item>
-          </Select.Content>
-        </Select.Root>
-      </Flex>
-
-      {data.context === "fork" && (
-        <Flex direction="column" gap="1">
-          <Text size="1" weight="medium">
-            Agent (optional)
-          </Text>
-          <TextField.Root
-            size="1"
-            value={data.agent ?? ""}
-            onChange={(e) => onChange({ agent: e.target.value || null })}
-            placeholder="subagent"
+      <FieldStack
+        label="Model (optional)"
+        control={
+          <FieldText
+            value={data.model ?? ""}
+            onChange={(model) => onChange({ model: model || null })}
+            placeholder="Leave blank to use default"
             disabled={disabled}
           />
-        </Flex>
+        }
+      />
+
+      <FieldStack
+        label="Context"
+        control={
+          <FieldSelect
+            value={data.context ?? "none"}
+            onChange={(value) =>
+              onChange({ context: value === "none" ? null : value })
+            }
+            disabled={disabled}
+            options={[
+              { value: "none", label: "None" },
+              { value: "fork", label: "Fork (run in subagent)" },
+            ]}
+          />
+        }
+      />
+
+      {data.context === "fork" && (
+        <FieldStack
+          label="Agent (optional)"
+          control={
+            <FieldText
+              value={data.agent ?? ""}
+              onChange={(agent) => onChange({ agent: agent || null })}
+              placeholder="subagent"
+              disabled={disabled}
+            />
+          }
+        />
       )}
 
-      <Flex direction="column" gap="1">
-        <Text size="1" weight="medium">
-          Body
-        </Text>
-        <textarea
-          className={styles.bodyTextarea}
-          value={data.body}
-          onChange={(e) => onChange({ body: e.target.value })}
-          placeholder="Markdown content for the skill..."
-          disabled={disabled}
-          spellCheck={false}
-        />
-      </Flex>
-    </Flex>
+      <FieldStack
+        label="Body"
+        control={
+          <textarea
+            className={styles.bodyTextarea}
+            value={data.body}
+            onChange={(event) => onChange({ body: event.target.value })}
+            placeholder="Markdown content for the skill..."
+            disabled={disabled}
+            spellCheck={false}
+          />
+        }
+      />
+    </div>
   );
 };
 
@@ -249,97 +242,90 @@ export const SkillEditor: React.FC<SkillEditorProps> = ({
   if (isLoading || draftLoading) return <Spinner spinning />;
   if (!localData) {
     return (
-      <Callout.Root color="red">
-        <Callout.Icon>
-          <InfoCircledIcon />
-        </Callout.Icon>
-        <Callout.Text>
-          {error !== undefined ? "Failed to load skill" : "Loading..."}
-        </Callout.Text>
-      </Callout.Root>
+      <div
+        className={`${featureStyles.callout} ${featureStyles.calloutDanger}`}
+      >
+        <Icon icon={Info} size="sm" tone="danger" />
+        {error !== undefined ? "Failed to load skill" : "Loading..."}
+      </div>
     );
   }
 
   if (draft && draft.kind !== "skill") {
     return (
-      <Callout.Root color="red">
-        <Callout.Icon>
-          <InfoCircledIcon />
-        </Callout.Icon>
-        <Callout.Text>Draft kind mismatch: expected skill draft</Callout.Text>
-      </Callout.Root>
+      <div
+        className={`${featureStyles.callout} ${featureStyles.calloutDanger}`}
+      >
+        <Icon icon={Info} size="sm" tone="danger" />
+        Draft kind mismatch: expected skill draft
+      </div>
     );
   }
 
   const isReadOnly = localData.source.startsWith("plugin:");
 
   return (
-    <Flex direction="column" gap="2" className={styles.editor}>
+    <div className={`${styles.editor} rf-enter`}>
       <Button
         variant="ghost"
-        size="1"
+        size="sm"
         onClick={onBack}
         className={styles.backButton}
+        leftIcon={ArrowLeft}
       >
-        <ArrowLeftIcon /> Back to list
+        Back to list
       </Button>
 
       {draftExpired && (
-        <Callout.Root color="orange">
-          <Callout.Icon>
-            <InfoCircledIcon />
-          </Callout.Icon>
-          <Callout.Text>Draft expired</Callout.Text>
-        </Callout.Root>
+        <div
+          className={`${featureStyles.callout} ${featureStyles.calloutWarning}`}
+        >
+          <Icon icon={Info} size="sm" tone="warning" />
+          Draft expired
+        </div>
       )}
 
       {draft && <BuddyDraftPreview draft={draft} />}
 
       {isReadOnly && (
-        <Callout.Root color="blue">
-          <Callout.Icon>
-            <InfoCircledIcon />
-          </Callout.Icon>
-          <Callout.Text>
-            This item is from an installed plugin and cannot be edited.
-          </Callout.Text>
-        </Callout.Root>
+        <div
+          className={`${featureStyles.callout} ${featureStyles.calloutAccent}`}
+        >
+          <Icon icon={Info} size="sm" tone="accent" />
+          This item is from an installed plugin and cannot be edited.
+        </div>
       )}
 
-      <Flex justify="between" align="center" gap="2" wrap="wrap">
-        <Text size="2" weight="bold">
-          {name}
-        </Text>
-        <Flex gap="1" align="center">
-          <SegmentedControl.Root
-            size="1"
+      <div className={styles.header}>
+        <h2 className={styles.title}>{name}</h2>
+        <div className={styles.headerActions}>
+          <SegmentedControl
+            size="sm"
             value={view}
-            onValueChange={(v) => setView(v as EditorView)}
-          >
-            <SegmentedControl.Item value="form">
-              <MixerHorizontalIcon width={12} height={12} />
-            </SegmentedControl.Item>
-            <SegmentedControl.Item value="raw">
-              <CodeIcon width={12} height={12} />
-            </SegmentedControl.Item>
-          </SegmentedControl.Root>
+            onValueChange={(value) => setView(value as EditorView)}
+            options={[
+              {
+                value: "form",
+                label: <Icon icon={SlidersHorizontal} size="sm" />,
+              },
+              { value: "raw", label: <Icon icon={Code} size="sm" /> },
+            ]}
+          />
           {!isReadOnly && (
             <Button
-              size="1"
+              variant="primary"
+              size="sm"
               onClick={() => void handleSave()}
               disabled={isSaving}
+              loading={isSaving}
             >
-              {isSaving ? "..." : "Save"}
+              Save
             </Button>
           )}
-        </Flex>
-      </Flex>
+        </div>
+      </div>
 
-      {saveError && (
-        <Text size="1" color="red">
-          {saveError}
-        </Text>
-      )}
+      {saveError && <FieldError>{saveError}</FieldError>}
 
       {view === "form" ? (
         <SkillForm
@@ -356,6 +342,6 @@ export const SkillEditor: React.FC<SkillEditorProps> = ({
           spellCheck={false}
         />
       )}
-    </Flex>
+    </div>
   );
 };

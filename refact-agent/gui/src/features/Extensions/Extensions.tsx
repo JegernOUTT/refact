@@ -1,9 +1,15 @@
 import React, { useState, useCallback } from "react";
-import { AlertDialog, Flex, Button, Text, Tabs } from "@radix-ui/themes";
-import { ArrowLeftIcon } from "@radix-ui/react-icons";
+import { ArrowLeft } from "lucide-react";
 
 import { PageWrapper } from "../../components/PageWrapper";
 import { Spinner } from "../../components/Spinner";
+import {
+  Button,
+  Dialog,
+  EmptyState,
+  FieldError,
+  SegmentedControl,
+} from "../../components/ui";
 import type { Config } from "../Config/configSlice";
 import { useAppDispatch } from "../../hooks";
 import {
@@ -41,7 +47,6 @@ type DeleteTarget = {
 export const Extensions: React.FC<ExtensionsProps> = ({
   backFromExtensions,
   host,
-  tabbed,
   initialTab = "skills",
   initialItemId,
   draftId,
@@ -141,52 +146,51 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   if (isError) {
     return (
       <PageWrapper host={host} noPadding>
-        <Flex direction="column" align="center" gap="3" p="4">
-          <Text color="red">Failed to load extensions registry</Text>
-          <Button onClick={() => void refetch()}>Retry</Button>
-        </Flex>
+        <EmptyState
+          action={<Button onClick={() => void refetch()}>Retry</Button>}
+          title="Failed to load extensions registry"
+          variant="full"
+        />
       </PageWrapper>
     );
   }
 
   return (
     <PageWrapper host={host} noPadding>
-      <div className={styles.page}>
-        {host === "vscode" && !tabbed ? (
-          <Flex gap="2" pb="2">
-            <Button variant="surface" onClick={backFromExtensions}>
-              <ArrowLeftIcon width="16" height="16" />
-              Back
-            </Button>
-          </Flex>
-        ) : (
-          <Button
-            mr="auto"
-            variant="outline"
-            onClick={backFromExtensions}
-            mb="2"
-          >
+      <div className={`${styles.page} rf-enter`}>
+        <div className={styles.header}>
+          <Button variant="ghost" onClick={backFromExtensions}>
+            <ArrowLeft size={15} />
             Back
           </Button>
-        )}
+        </div>
 
-        <Tabs.Root value={activeTab} onValueChange={handleTabChange}>
-          <Tabs.List size="1">
-            <Tabs.Trigger value="skills">
-              Skills ({registry?.skills.length ?? 0})
-            </Tabs.Trigger>
-            <Tabs.Trigger value="commands">
-              Commands ({registry?.slash_commands.length ?? 0})
-            </Tabs.Trigger>
-            <Tabs.Trigger value="hooks">Hooks</Tabs.Trigger>
-          </Tabs.List>
-        </Tabs.Root>
+        <SegmentedControl
+          value={activeTab}
+          onValueChange={handleTabChange}
+          size="sm"
+          options={[
+            {
+              value: "skills",
+              label: (
+                <span className={styles.tabLabel}>
+                  Skills <span>({registry?.skills.length ?? 0})</span>
+                </span>
+              ),
+            },
+            {
+              value: "commands",
+              label: (
+                <span className={styles.tabLabel}>
+                  Commands <span>({registry?.slash_commands.length ?? 0})</span>
+                </span>
+              ),
+            },
+            { value: "hooks", label: "Hooks" },
+          ]}
+        />
 
-        {deleteError && (
-          <Text color="red" size="2" mt="2">
-            {deleteError}
-          </Text>
-        )}
+        {deleteError && <FieldError>{deleteError}</FieldError>}
 
         <div className={styles.panelContainer}>
           {activeTab === "skills" &&
@@ -197,10 +201,10 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 draftId={draftId}
               />
             ) : (
-              <Flex direction="column" gap="2">
+              <div className={`${styles.actionsStack} rf-stagger`}>
                 <Button
-                  variant="outline"
-                  size="1"
+                  variant="soft"
+                  size="sm"
                   onClick={openSkillsMarketplace}
                 >
                   Browse Skills Marketplace
@@ -212,7 +216,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                   onCreate={() => openCreateDialog("skill")}
                   onDelete={handleDeleteSkill}
                 />
-              </Flex>
+              </div>
             ))}
 
           {activeTab === "commands" &&
@@ -223,10 +227,10 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                 draftId={draftId}
               />
             ) : (
-              <Flex direction="column" gap="2">
+              <div className={`${styles.actionsStack} rf-stagger`}>
                 <Button
-                  variant="outline"
-                  size="1"
+                  variant="soft"
+                  size="sm"
                   onClick={openCommandsMarketplace}
                 >
                   Browse Commands Marketplace
@@ -238,7 +242,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
                   onCreate={() => openCreateDialog("command")}
                   onDelete={handleDeleteCommand}
                 />
-              </Flex>
+              </div>
             ))}
 
           {activeTab === "hooks" && <HooksEditor />}
@@ -256,33 +260,31 @@ export const Extensions: React.FC<ExtensionsProps> = ({
           hasProjectRoot={hasProjectRoot}
         />
 
-        <AlertDialog.Root
+        <Dialog
           open={deleteTarget !== null}
           onOpenChange={(open) => {
             if (!open) setDeleteTarget(null);
           }}
         >
-          <AlertDialog.Content maxWidth="400px">
-            <AlertDialog.Title>Confirm Delete</AlertDialog.Title>
-            <AlertDialog.Description>
+          <Dialog.Content maxWidth="400px">
+            <Dialog.Title>Confirm Delete</Dialog.Title>
+            <Dialog.Description>
               {`Delete ${deleteTarget?.type ?? ""} "${
                 deleteTarget?.name ?? ""
               }"?`}
-            </AlertDialog.Description>
-            <Flex gap="3" mt="4" justify="end">
-              <AlertDialog.Cancel>
-                <Button variant="soft" color="gray">
-                  Cancel
-                </Button>
-              </AlertDialog.Cancel>
-              <AlertDialog.Action>
-                <Button color="red" onClick={() => void confirmDelete()}>
+            </Dialog.Description>
+            <div className={styles.dialogActions}>
+              <Dialog.Close asChild>
+                <Button variant="soft">Cancel</Button>
+              </Dialog.Close>
+              <Dialog.Close asChild>
+                <Button variant="danger" onClick={() => void confirmDelete()}>
                   Delete
                 </Button>
-              </AlertDialog.Action>
-            </Flex>
-          </AlertDialog.Content>
-        </AlertDialog.Root>
+              </Dialog.Close>
+            </div>
+          </Dialog.Content>
+        </Dialog>
       </div>
     </PageWrapper>
   );

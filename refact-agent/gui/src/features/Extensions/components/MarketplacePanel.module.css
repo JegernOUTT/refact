@@ -2,16 +2,18 @@
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--rf-space-4);
+  min-width: 0;
   overflow-y: auto;
-  padding: var(--space-3) var(--space-2);
+  padding: var(--rf-space-3);
 }
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
   flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .searchInput {
@@ -22,57 +24,94 @@
 .marketplaceSection {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .marketplaceHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding-bottom: var(--space-1);
-  border-bottom: 1px solid var(--gray-4);
+  gap: var(--rf-space-2);
+  min-width: 0;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  padding-bottom: var(--rf-space-2);
+}
+
+.marketplaceTitle {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.heading {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 650;
+}
+
+.muted {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
 }
 
 .pluginsGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: var(--rf-space-3);
+  min-width: 0;
 }
 
 .installedSection {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .installedHeader {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rf-color-fg);
   cursor: pointer;
-  user-select: none;
+  padding: 0;
+  text-align: left;
 }
 
 .installedList {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 .installedItem {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-2);
-  background: var(--gray-2);
+  gap: var(--rf-space-2);
+  min-width: 0;
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+  padding: var(--rf-space-2) var(--rf-space-3);
+}
+
+.installedInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }
 
 .onboarding {
-  padding: var(--space-6) var(--space-4);
-  margin-top: var(--space-6);
-  max-width: 400px;
   align-self: center;
+  max-width: 400px;
+  margin-top: var(--rf-space-6);
 }
