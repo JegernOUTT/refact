@@ -3,9 +3,7 @@
 <idea-plugin require-restart="true">
     <id>com.smallcloud.codify</id>
     <name><![CDATA[Refact - Open-Source AI Agent, Code Generator & Chat]]></name>
-    <vendor email="info@smallcloud.ai"
-            url="https://refact.ai/?utm_source=jb&amp;utm_medium=marketplace&amp;utm_campaign=plugin">smallcloudai
-    </vendor>
+    <vendor url="https://github.com/JegernOUTT/refact">Refact</vendor>
 
     <description><![CDATA[
 <h2>Refact.ai - Open-Source AI Software Engineering Agent</h2>

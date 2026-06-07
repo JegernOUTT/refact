@@ -65,7 +65,7 @@ class PluginErrorReportSubmitter : ErrorReportSubmitter(), Disposable {
       |### Additional information
       |${additionalInfo.orEmpty()}
     """.trimMargin().urlEncoded()
-        val gitHubUrl = "https://github.com/smallcloudai/refact/issues/new?" +
+        val gitHubUrl = "https://github.com/JegernOUTT/refact/issues/new?" +
             "labels=bug%2Cplugin%3Aintellij" +
             "&title=${issueTitle}" +
             "&body=${issueBody}"

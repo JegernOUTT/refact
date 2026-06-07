@@ -23,11 +23,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/smallcloudai/refact.git",
+    "url": "git+https://github.com/JegernOUTT/refact.git",
     "directory": "refact-agent/gui"
   },
   "bugs": {
-    "url": "https://github.com/smallcloudai/refact/issues"
+    "url": "https://github.com/JegernOUTT/refact/issues"
   },
   "scripts": {
     "dev": "vite",

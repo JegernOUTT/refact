@@ -20,4 +20,4 @@ For local packaging, build or copy the engine binary into `plugins/vscode/assets
 
 ## Issues
 
-Report plugin issues in the monorepo issue tracker: <https://github.com/smallcloudai/refact/issues>.
+Report plugin issues in the monorepo issue tracker: <https://github.com/JegernOUTT/refact/issues>.

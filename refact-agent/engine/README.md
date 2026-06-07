@@ -134,9 +134,9 @@ AST indexing currently covers C, C++, Python, Java, Kotlin, JavaScript, Rust, an
 
 ## Contributing
 
-- Root repository: <https://github.com/smallcloudai/refact>
-- Docs: <https://docs.refact.ai/>
-- Issues: <https://github.com/smallcloudai/refact/issues>
-- Discussions: <https://github.com/smallcloudai/refact/discussions>
+- Root repository: <https://github.com/JegernOUTT/refact>
+- Docs: <https://github.com/JegernOUTT/refact/wiki>
+- Issues: <https://github.com/JegernOUTT/refact/issues>
+- Discussions: <https://github.com/JegernOUTT/refact/discussions>
 
 Run `cargo fmt`, `cargo check`, and the relevant tests before submitting engine changes.

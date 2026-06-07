@@ -49,7 +49,7 @@ Before diving deep, here's what you need to know:
 
 ```bash
 # Clone the repository
-git clone https://github.com/smallcloudai/refact.git
+git clone https://github.com/JegernOUTT/refact.git
 cd refact
 
 # Install Rust if you haven't already
@@ -366,9 +366,9 @@ model_default_settings_ui:
 
 ## 🎯 Next Steps
 
-1. **Join our [Discord](https://www.smallcloud.ai/discord)** for community support
-2. **Check [GitHub Issues](https://github.com/smallcloudai/refact/issues)** for contribution opportunities - search for tags related to good first issues
-3. **Check [Documentation](https://docs.refact.ai/)** for more details
+1. **Join our [Discord](https://github.com/JegernOUTT/refact/discussions)** for community support
+2. **Check [GitHub Issues](https://github.com/JegernOUTT/refact/issues)** for contribution opportunities - search for tags related to good first issues
+3. **Check [Documentation](https://github.com/JegernOUTT/refact/wiki)** for more details
 
 Happy contributing! 🚀
 

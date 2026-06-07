@@ -141,7 +141,7 @@ See `src/events/index.ts`, `src/events/setup.ts`, `src/hooks/useEventBusForIDE.t
 
 ## Links
 
-- Root repository: <https://github.com/smallcloudai/refact>
-- Documentation: <https://docs.refact.ai/>
-- Issues: <https://github.com/smallcloudai/refact/issues>
-- Discussions: <https://github.com/smallcloudai/refact/discussions>
+- Root repository: <https://github.com/JegernOUTT/refact>
+- Documentation: <https://github.com/JegernOUTT/refact/wiki>
+- Issues: <https://github.com/JegernOUTT/refact/issues>
+- Discussions: <https://github.com/JegernOUTT/refact/discussions>

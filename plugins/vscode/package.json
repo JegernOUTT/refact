@@ -8,16 +8,15 @@
 		"color": "#000000",
 		"theme": "dark"
 	},
-	"homepage": "https://refact.ai",
-	"author": "Small Magellanic Cloud AI <info@smallcloud.tech> (https://refact.ai)",
+	"homepage": "https://github.com/JegernOUTT/refact",
+	"author": "JegernOUTT (https://github.com/JegernOUTT/refact)",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/smallcloudai/refact",
+		"url": "https://github.com/JegernOUTT/refact",
 		"directory": "plugins/vscode"
 	},
 	"bugs": {
-		"url": "https://github.com/smallcloudai/refact/issues",
-		"email": "support@smallcloud.tech"
+		"url": "https://github.com/JegernOUTT/refact/issues"
 	},
 	"version": "8.1.0",
 	"dependencies": {
