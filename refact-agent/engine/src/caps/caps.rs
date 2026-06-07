@@ -301,6 +301,8 @@ fn build_chat_model_record(
             id: model_id,
             endpoint,
             endpoint_style,
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             wire_format: effective_wire_format,
             api_key: runtime_api_key.to_string(),
             auth_token: runtime_auth_token.to_string(),

@@ -576,9 +576,13 @@ mod worktree_scope_read_tools {
                 crate::vecdb::vdb_structs::EmbeddingModelConfig {
                     endpoint: String::new(),
                     endpoint_style: String::new(),
+                    embedding_endpoint_style: String::new(),
                     api_key: String::new(),
                     model_name: String::new(),
                     embedding_size: 0,
+                    dimensions: None,
+                    query_prefix: String::new(),
+                    document_prefix: String::new(),
                     rejection_threshold: 0.0,
                     embedding_batch: 1,
                     n_ctx: 0,

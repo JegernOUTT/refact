@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex as AMutex;
 
+use refact_core::llm_types::EmbeddingEndpointStyle;
 use refact_core::vecdb_types::EmbeddingModelConfig;
 
 pub async fn get_embedding(
@@ -9,10 +10,33 @@ pub async fn get_embedding(
     embedding_model: &EmbeddingModelConfig,
     text: Vec<String>,
 ) -> Result<Vec<Vec<f32>>, String> {
-    match embedding_model.endpoint_style.to_lowercase().as_str() {
-        "hf" => Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style with an OpenAI-compatible embedding endpoint.".to_string()),
-        "openai" | "" => get_embedding_openai_style(client, text, embedding_model).await,
-        _ => Err(format!("Invalid endpoint_embeddings_style: {}", embedding_model.endpoint_style)),
+    if embedding_model.embedding_endpoint_style.is_empty()
+        && embedding_model.endpoint_style.eq_ignore_ascii_case("hf")
+    {
+        return Err("HuggingFace endpoint style is no longer supported. Please use 'openai' embedding_endpoint_style with an OpenAI-compatible embedding endpoint.".to_string());
+    }
+
+    let style = if embedding_model.embedding_endpoint_style.is_empty() {
+        EmbeddingEndpointStyle::from_config(
+            &embedding_model.endpoint_style,
+            "embedding_endpoint_style",
+        )?
+    } else {
+        EmbeddingEndpointStyle::from_config(
+            &embedding_model.embedding_endpoint_style,
+            "embedding_endpoint_style",
+        )?
+    };
+
+    match style {
+        EmbeddingEndpointStyle::Openai => get_embedding_openai_style(client, text, embedding_model).await,
+        EmbeddingEndpointStyle::OllamaNative => Err(
+            "embedding_endpoint_style 'ollama_native' is not supported by this embedding transport yet".to_string(),
+        ),
+        style => Err(format!(
+            "embedding_endpoint_style '{}' is recognized but not supported yet",
+            style
+        )),
     }
 }
 

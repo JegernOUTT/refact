@@ -4,6 +4,7 @@ use tokio::sync::Mutex as AMutex;
 use tracing::error;
 
 use refact_core::llm_types::EmbeddingModelRecord;
+use refact_core::llm_types::EmbeddingEndpointStyle;
 
 use super::embeddings::get_embedding_openai_style;
 
@@ -12,17 +13,26 @@ pub async fn get_embedding(
     embedding_model: &EmbeddingModelRecord,
     text: Vec<String>,
 ) -> Result<Vec<Vec<f32>>, String> {
-    match embedding_model.base.endpoint_style.to_lowercase().as_str() {
-        "hf" => {
-            Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style with an OpenAI-compatible embedding endpoint.".to_string())
-        }
-        "openai" | "" => get_embedding_openai_style(client, text, embedding_model).await,
-        _ => {
-            error!(
-                "Invalid endpoint_embeddings_style: {}",
-                embedding_model.base.endpoint_style
-            );
-            Err("Invalid endpoint_embeddings_style".to_string())
+    if embedding_model.base.embedding_endpoint_style.is_empty()
+        && embedding_model
+            .base
+            .endpoint_style
+            .eq_ignore_ascii_case("hf")
+    {
+        return Err("HuggingFace endpoint style is no longer supported. Please use 'openai' embedding_endpoint_style with an OpenAI-compatible embedding endpoint.".to_string());
+    }
+
+    match embedding_model.base.effective_embedding_endpoint_style()? {
+        EmbeddingEndpointStyle::Openai => get_embedding_openai_style(client, text, embedding_model).await,
+        EmbeddingEndpointStyle::OllamaNative => Err(
+            "embedding_endpoint_style 'ollama_native' is not supported by this embedding transport yet".to_string(),
+        ),
+        style => {
+            error!("Unsupported embedding_endpoint_style: {}", style);
+            Err(format!(
+                "embedding_endpoint_style '{}' is recognized but not supported yet",
+                style
+            ))
         }
     }
 }
@@ -82,7 +92,7 @@ mod tests {
 
         assert_eq!(
             result.unwrap_err(),
-            "HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style with an OpenAI-compatible embedding endpoint."
+            "HuggingFace endpoint style is no longer supported. Please use 'openai' embedding_endpoint_style with an OpenAI-compatible embedding endpoint."
         );
     }
 }

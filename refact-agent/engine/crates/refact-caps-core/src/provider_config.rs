@@ -4,7 +4,10 @@ use std::fmt;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use refact_core::llm_types::{EmbeddingModelRecord, HasBaseModelRecord, WireFormat, default_true};
+use refact_core::llm_types::{
+    CompletionEndpointStyle, EmbeddingEndpointStyle, EmbeddingModelRecord, HasBaseModelRecord,
+    WireFormat, default_true,
+};
 use refact_core::provider_types::{extra_headers_mapping_to_hash_map, parse_extra_headers_value};
 
 use super::model_records::{ChatModelRecord, CompletionModelRecord, DefaultModels, normalize_string};
@@ -27,6 +30,11 @@ pub struct CapsProvider {
 
     #[serde(default = "default_endpoint_style")]
     pub endpoint_style: String,
+
+    #[serde(default)]
+    pub completion_endpoint_style: String,
+    #[serde(default)]
+    pub embedding_endpoint_style: String,
 
     #[serde(default)]
     pub completion_endpoint: String,
@@ -104,6 +112,16 @@ impl CapsProvider {
         )?;
         set_field_if_exists::<WireFormat>(&mut self.wire_format, "wire_format", &value)?;
         set_field_if_exists::<String>(&mut self.endpoint_style, "endpoint_style", &value)?;
+        set_field_if_exists::<String>(
+            &mut self.completion_endpoint_style,
+            "completion_endpoint_style",
+            &value,
+        )?;
+        set_field_if_exists::<String>(
+            &mut self.embedding_endpoint_style,
+            "embedding_endpoint_style",
+            &value,
+        )?;
         set_field_if_exists::<String>(
             &mut self.completion_endpoint,
             "completion_endpoint",
@@ -184,6 +202,22 @@ impl CapsProvider {
 
         Ok(())
     }
+
+    pub fn effective_completion_endpoint_style(&self) -> Result<CompletionEndpointStyle, String> {
+        let style = self.completion_endpoint_style.trim();
+        if style.is_empty() {
+            return Ok(CompletionEndpointStyle::OpenaiCompletions);
+        }
+        CompletionEndpointStyle::from_config(style, "completion_endpoint_style")
+    }
+
+    pub fn effective_embedding_endpoint_style(&self) -> Result<EmbeddingEndpointStyle, String> {
+        let style = self.embedding_endpoint_style.trim();
+        if !style.is_empty() {
+            return EmbeddingEndpointStyle::from_config(style, "embedding_endpoint_style");
+        }
+        EmbeddingEndpointStyle::from_config(&self.endpoint_style, "embedding_endpoint_style")
+    }
 }
 
 impl Default for CapsProvider {
@@ -196,6 +230,8 @@ impl Default for CapsProvider {
             supports_cache_control: default_true(),
             wire_format: WireFormat::default(),
             endpoint_style: default_endpoint_style(),
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             completion_endpoint: String::new(),
             chat_endpoint: String::new(),
             embedding_endpoint: String::new(),
@@ -229,6 +265,8 @@ impl fmt::Debug for CapsProvider {
             .field("supports_cache_control", &self.supports_cache_control)
             .field("wire_format", &self.wire_format)
             .field("endpoint_style", &self.endpoint_style)
+            .field("completion_endpoint_style", &self.completion_endpoint_style)
+            .field("embedding_endpoint_style", &self.embedding_endpoint_style)
             .field("completion_endpoint", &self.completion_endpoint)
             .field("chat_endpoint", &self.chat_endpoint)
             .field("embedding_endpoint", &self.embedding_endpoint)
@@ -396,6 +434,8 @@ supports_completion: false
 supports_cache_control: false
 wire_format: anthropic_messages
 endpoint_style: anthropic
+completion_endpoint_style: openai_chat_completions
+embedding_endpoint_style: ollama_native
 completion_endpoint: new-completion
 chat_endpoint: new-chat
 embedding_endpoint: new-embedding
@@ -441,6 +481,11 @@ chat_buddy_model: buddy-default
         assert!(!provider.supports_cache_control);
         assert_eq!(provider.wire_format, WireFormat::AnthropicMessages);
         assert_eq!(provider.endpoint_style, "anthropic");
+        assert_eq!(
+            provider.completion_endpoint_style,
+            "openai_chat_completions"
+        );
+        assert_eq!(provider.embedding_endpoint_style, "ollama_native");
         assert_eq!(provider.completion_endpoint, "new-completion");
         assert_eq!(provider.chat_endpoint, "new-chat");
         assert_eq!(provider.embedding_endpoint, "new-embedding");
@@ -479,6 +524,89 @@ chat_buddy_model: buddy-default
         let provider: CapsProvider = serde_yaml::from_str("{}").unwrap();
 
         assert_eq!(provider.endpoint_style, "openai");
+        assert_eq!(provider.completion_endpoint_style, "");
+        assert_eq!(provider.embedding_endpoint_style, "");
+    }
+
+    #[test]
+    fn capability_endpoint_styles_serialize_and_validate_separate_axes() {
+        let provider: CapsProvider = serde_yaml::from_str(
+            r#"
+completion_endpoint_style: openai_chat_completions
+embedding_endpoint_style: ollama_native
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.effective_completion_endpoint_style().unwrap(),
+            CompletionEndpointStyle::OpenaiChatCompletions
+        );
+        assert_eq!(
+            provider.effective_embedding_endpoint_style().unwrap(),
+            EmbeddingEndpointStyle::OllamaNative
+        );
+
+        let value = serde_yaml::to_value(&provider).unwrap();
+        assert_eq!(
+            value
+                .get("completion_endpoint_style")
+                .and_then(|v| v.as_str()),
+            Some("openai_chat_completions")
+        );
+        assert_eq!(
+            value
+                .get("embedding_endpoint_style")
+                .and_then(|v| v.as_str()),
+            Some("ollama_native")
+        );
+    }
+
+    #[test]
+    fn unsupported_future_endpoint_styles_are_recognized_but_not_supported() {
+        let provider: CapsProvider = serde_yaml::from_str(
+            r#"
+completion_endpoint_style: openai_responses
+embedding_endpoint_style: cohere_v2
+"#,
+        )
+        .unwrap();
+
+        let completion_style = provider.effective_completion_endpoint_style().unwrap();
+        let embedding_style = provider.effective_embedding_endpoint_style().unwrap();
+        assert_eq!(completion_style, CompletionEndpointStyle::OpenaiResponses);
+        assert_eq!(embedding_style, EmbeddingEndpointStyle::CohereV2);
+        assert!(!completion_style.is_supported());
+        assert!(!embedding_style.is_supported());
+    }
+
+    #[test]
+    fn invalid_capability_endpoint_styles_name_actual_config_keys() {
+        let completion_provider: CapsProvider = serde_yaml::from_str(
+            r#"
+completion_endpoint_style: bad
+"#,
+        )
+        .unwrap();
+        let embedding_provider: CapsProvider = serde_yaml::from_str(
+            r#"
+embedding_endpoint_style: bad
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            completion_provider
+                .effective_completion_endpoint_style()
+                .unwrap_err(),
+            "Invalid completion_endpoint_style: bad"
+        );
+        assert_eq!(
+            embedding_provider
+                .effective_embedding_endpoint_style()
+                .unwrap_err(),
+            "Invalid embedding_endpoint_style: bad"
+        );
     }
 
     #[test]

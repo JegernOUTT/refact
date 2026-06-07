@@ -385,6 +385,10 @@ pub fn add_models_to_caps(
                     }
                 }
             }
+            if !provider.completion_endpoint_style.is_empty() {
+                model_rec.base.completion_endpoint_style =
+                    provider.completion_endpoint_style.clone();
+            }
 
             caps.completion_models
                 .insert(model_rec.base.id.clone(), Arc::new(model_rec));
@@ -420,6 +424,10 @@ pub fn add_models_to_caps(
                     &model_name,
                     &provider.embedding_endpoint,
                 );
+            }
+            if !provider.embedding_endpoint_style.is_empty() {
+                embedding_model.base.embedding_endpoint_style =
+                    provider.embedding_endpoint_style.clone();
             }
             embedding_models.push(embedding_model.clone());
             caps.embedding_model = embedding_model;

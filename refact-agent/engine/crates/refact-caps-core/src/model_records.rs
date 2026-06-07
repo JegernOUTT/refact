@@ -334,6 +334,7 @@ mod tests {
                 n_ctx: 8192,
                 name: "qwen".to_string(),
                 tokenizer: "hf://tokenizer".to_string(),
+                completion_endpoint_style: "openai_chat_completions".to_string(),
                 ..Default::default()
             },
             scratchpad: "custom".to_string(),
@@ -352,6 +353,10 @@ mod tests {
         assert_eq!(decoded.base.n_ctx, 8192);
         assert_eq!(decoded.base.name, "qwen");
         assert_eq!(decoded.base.tokenizer, "hf://tokenizer");
+        assert_eq!(
+            decoded.base.completion_endpoint_style,
+            "openai_chat_completions"
+        );
         assert_eq!(decoded.scratchpad, "custom");
         assert_eq!(
             decoded
@@ -407,6 +412,36 @@ mod tests {
         assert!(completion.base.enabled);
         assert!(default_completion.base.supports_cache_control);
         assert!(completion.base.supports_cache_control);
+    }
+
+    #[test]
+    fn completion_endpoint_style_is_independent_from_scratchpad_style() {
+        let completion: CompletionModelRecord = serde_json::from_value(serde_json::json!({
+            "completion_endpoint_style": "openai_chat_completions",
+            "scratchpad": "FIM-SPM",
+            "scratchpad_patch": {"context_format": "plain"}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            completion.base.completion_endpoint_style,
+            "openai_chat_completions"
+        );
+        assert_eq!(completion.scratchpad, "FIM-SPM");
+        assert_eq!(
+            completion
+                .scratchpad_patch
+                .get("context_format")
+                .and_then(|v| v.as_str()),
+            Some("plain")
+        );
+        assert_eq!(
+            completion
+                .base
+                .effective_completion_endpoint_style()
+                .unwrap(),
+            refact_core::llm_types::CompletionEndpointStyle::OpenaiChatCompletions
+        );
     }
 
     #[test]
