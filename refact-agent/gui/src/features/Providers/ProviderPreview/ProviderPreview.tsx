@@ -1,7 +1,7 @@
 import React from "react";
-import { Button, Flex, Heading } from "@radix-ui/themes";
-import { CopyIcon } from "@radix-ui/react-icons";
+import { Copy } from "lucide-react";
 
+import { Button } from "../../../components/ui";
 import { ProviderForm } from "../ProviderForm";
 
 import { getProviderName } from "../getProviderName";
@@ -12,6 +12,7 @@ import { useDeleteProviderMutation } from "../../../hooks/useProvidersQuery";
 import { useAppDispatch } from "../../../hooks";
 import { setInformation } from "../../Errors/informationSlice";
 import { providersApi } from "../../../services/refact";
+import styles from "./ProviderPreview.module.css";
 
 export type ProviderPreviewProps = {
   configuredProviders: ProviderListItem[];
@@ -26,17 +27,14 @@ export const ProviderPreview: React.FC<ProviderPreviewProps> = ({
   onDuplicateProvider,
 }) => {
   const dispatch = useAppDispatch();
-  const [deleteProvider, { isLoading: isDeletingProvider }] =
-    useDeleteProviderMutation();
+  const [deleteProvider, { isLoading: isDeletingProvider }] = useDeleteProviderMutation();
 
   const handleDeleteProvider = async (providerName: string) => {
     const response = await deleteProvider(providerName);
     if (response.error) return;
     dispatch(
       setInformation(
-        `${getProviderName(
-          currentProvider,
-        )}'s Provider configuration was deleted successfully`,
+        `${getProviderName(currentProvider)}'s Provider configuration was deleted successfully`,
       ),
     );
     dispatch(providersApi.util.resetApiState());
@@ -44,34 +42,31 @@ export const ProviderPreview: React.FC<ProviderPreviewProps> = ({
   };
 
   return (
-    <Flex direction="column" align="start" minHeight="100%">
-      <Flex justify="between" align="center" width="100%" mb="4">
-        <Heading as="h2" size="3">
-          {getProviderName(currentProvider)} Configuration
-        </Heading>
-        <Flex gap="2" align="center">
-          {onDuplicateProvider && (
+    <section className={styles.preview}>
+      <div className={styles.headerRow}>
+        <h2 className={styles.title}>{getProviderName(currentProvider)} Configuration</h2>
+        <div className={styles.actions}>
+          {onDuplicateProvider ? (
             <Button
               type="button"
-              size="2"
+              size="md"
               variant="soft"
+              leftIcon={Copy}
               onClick={() => onDuplicateProvider(currentProvider)}
             >
-              <CopyIcon /> Duplicate instance
+              Duplicate instance
             </Button>
-          )}
+          ) : null}
           <DeletePopover
             itemName={getProviderName(currentProvider)}
             isDisabled={currentProvider.readonly}
             isDeleting={isDeletingProvider}
             deleteBy={currentProvider.name}
-            handleDelete={(providerName: string) =>
-              void handleDeleteProvider(providerName)
-            }
+            handleDelete={(providerName: string) => void handleDeleteProvider(providerName)}
           />
-        </Flex>
-      </Flex>
+        </div>
+      </div>
       <ProviderForm currentProvider={currentProvider} />
-    </Flex>
+    </section>
   );
 };

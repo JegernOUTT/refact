@@ -2,7 +2,7 @@ import type { FC } from "react";
 import { useModelDialogState } from "../hooks";
 import { ModelType } from "../../../../../services/refact";
 import { ModelCardPopup } from "./ModelCardPopup";
-import { Button } from "@radix-ui/themes";
+import { Button } from "../../../../../components/ui";
 
 export type AddModelButtonProps = {
   modelType: ModelType;
@@ -41,12 +41,7 @@ export const AddModelButton: FC<AddModelButtonProps> = ({
         currentModelNames={currentModelNames}
         newModelCreation
       />
-      <Button
-        variant="outline"
-        size="1"
-        color="gray"
-        onClick={() => setIsOpen(!isOpen)}
-      >
+      <Button variant="soft" size="sm" onClick={() => setIsOpen(!isOpen)}>
         Add model
       </Button>
     </>

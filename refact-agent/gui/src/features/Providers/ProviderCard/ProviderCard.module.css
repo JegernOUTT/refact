@@ -1,7 +1,30 @@
 .providerCard {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid transparent;
+  color: var(--rf-color-fg);
+  text-align: left;
   cursor: pointer;
   user-select: none;
-  transition: opacity 0.15s ease-in-out;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    opacity var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.providerCard:hover {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
+}
+
+.providerCard:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .providerCardDisabled {
@@ -9,9 +32,46 @@
   cursor: not-allowed;
 }
 
+.identity,
+.meta {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.identity {
+  gap: var(--rf-space-3);
+}
+
+.meta {
+  flex-shrink: 0;
+  gap: var(--rf-space-2);
+}
+
+.iconWrap {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.copy {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
 .providerName,
 .providerId {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.providerName {
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+}
+
+.providerId {
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }

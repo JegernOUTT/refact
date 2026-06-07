@@ -1,5 +1,4 @@
 import React from "react";
-import { Flex } from "@radix-ui/themes";
 
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
@@ -16,41 +15,19 @@ export type ProvidersProps = {
   host: Config["host"];
   tabbed: Config["tabbed"];
 };
-export const Providers: React.FC<ProvidersProps> = ({
-  backFromProviders,
-  host,
-}) => {
-  const { data: configuredProvidersData, isSuccess } =
-    useGetConfiguredProvidersQuery();
+export const Providers: React.FC<ProvidersProps> = ({ backFromProviders, host }) => {
+  const { data: configuredProvidersData, isSuccess } = useGetConfiguredProvidersQuery();
 
   if (!isSuccess) return <Spinner spinning />;
   return (
-    <PageWrapper
-      host={host}
-      style={{
-        padding: 0,
-        marginTop: 0,
-      }}
-    >
-      <ScrollArea
-        scrollbars="vertical"
-        fullHeight
-        className={styles.scrollArea}
-      >
-        <Flex
-          direction="column"
-          justify="between"
-          flexGrow="1"
-          style={{
-            width: "inherit",
-            minHeight: "100%",
-          }}
-        >
+    <PageWrapper host={host} className={styles.page} noPadding>
+      <ScrollArea scrollbars="vertical" fullHeight className={styles.scrollArea}>
+        <div className={styles.content}>
           <ProvidersView
             configuredProviders={configuredProvidersData.providers}
             backFromProviders={backFromProviders}
           />
-        </Flex>
+        </div>
       </ScrollArea>
     </PageWrapper>
   );

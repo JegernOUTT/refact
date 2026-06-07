@@ -1,11 +1,12 @@
 import React from "react";
+import { Plus } from "lucide-react";
 
-import { Button, Flex, Heading, Text } from "@radix-ui/themes";
-import { PlusIcon } from "@radix-ui/react-icons";
+import { Button, EmptyState } from "../../../components/ui";
 import { ProviderCard } from "../ProviderCard/ProviderCard";
 
 import type { ProviderListItem } from "../../../services/refact";
 import { useGetConfiguredProvidersView } from "./useConfiguredProvidersView";
+import styles from "./ProvidersView.module.css";
 
 export type ConfiguredProvidersViewProps = {
   configuredProviders: ProviderListItem[];
@@ -14,44 +15,52 @@ export type ConfiguredProvidersViewProps = {
   onDuplicateProvider: (provider: ProviderListItem) => void;
 };
 
-export const ConfiguredProvidersView: React.FC<
-  ConfiguredProvidersViewProps
-> = ({
+export const ConfiguredProvidersView: React.FC<ConfiguredProvidersViewProps> = ({
   configuredProviders,
   handleSetCurrentProvider,
   onAddInstance,
   onDuplicateProvider,
 }) => {
-  const { sortedConfiguredProviders } = useGetConfiguredProvidersView({
-    configuredProviders,
-  });
+  const { sortedConfiguredProviders } = useGetConfiguredProvidersView({ configuredProviders });
 
   return (
-    <Flex direction="column" gap="2" justify="between" height="100%">
-      <Flex direction="column" gap="2">
-        <Flex justify="between" align="start" gap="3">
-          <Flex direction="column" gap="1">
-            <Heading as="h2" size="3">
-              Configured Providers
-            </Heading>
-            <Text as="p" size="2" color="gray">
-              Here you can navigate through the list of configured and available
-              providers
-            </Text>
-          </Flex>
-          <Button variant="soft" size="2" onClick={onAddInstance}>
-            <PlusIcon /> Add instance
-          </Button>
-        </Flex>
-        {sortedConfiguredProviders.map((provider, idx) => (
-          <ProviderCard
-            key={`${provider.name}_${idx}`}
-            provider={provider}
-            setCurrentProvider={handleSetCurrentProvider}
-            onDuplicateProvider={onDuplicateProvider}
-          />
-        ))}
-      </Flex>
-    </Flex>
+    <section className={styles.configuredView}>
+      <div className={styles.headerRow}>
+        <div className={styles.headerCopy}>
+          <h2 className={styles.title}>Configured Providers</h2>
+          <p className={styles.description}>
+            Here you can navigate through the list of configured and available providers
+          </p>
+        </div>
+        <Button variant="soft" size="md" leftIcon={Plus} onClick={onAddInstance}>
+          Add instance
+        </Button>
+      </div>
+      {sortedConfiguredProviders.length > 0 ? (
+        <div className="rf-stagger">
+          <div className={styles.providersGrid}>
+            {sortedConfiguredProviders.map((provider, idx) => (
+              <div className="rf-enter" key={`${provider.name}_${idx}`}>
+                <ProviderCard
+                  provider={provider}
+                  setCurrentProvider={handleSetCurrentProvider}
+                  onDuplicateProvider={onDuplicateProvider}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <EmptyState
+          title="No providers configured"
+          description="Add a provider instance to start using models in chat."
+          action={
+            <Button variant="primary" leftIcon={Plus} onClick={onAddInstance}>
+              Add instance
+            </Button>
+          }
+        />
+      )}
+    </section>
   );
 };

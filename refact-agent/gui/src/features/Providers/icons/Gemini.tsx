@@ -17,9 +17,9 @@ export const GeminiIcon: FC<SVGProps<SVGSVGElement>> = (props) => {
           y1="100%"
           y2="30.395%"
         >
-          <stop offset="0%" stopColor="#1C7DFF"></stop>
-          <stop offset="52.021%" stopColor="#1C69FF"></stop>
-          <stop offset="100%" stopColor="#F0DCD6"></stop>
+          <stop offset="0%" stopColor="var(--rf-color-accent)"></stop>
+          <stop offset="52.021%" stopColor="var(--rf-color-accent)"></stop>
+          <stop offset="100%" stopColor="var(--rf-color-muted)"></stop>
         </linearGradient>
       </defs>
       <path

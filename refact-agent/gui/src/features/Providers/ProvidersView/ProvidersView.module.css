@@ -1,14 +1,75 @@
-.popup {
-  position: fixed;
-  max-width: max-content;
-  width: 80%;
-  left: 50%;
-  transform: translateX(-50%);
-  background-color: var(--accent-3);
-  bottom: 65px;
+.view {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  flex-direction: column;
+  padding: var(--rf-space-1);
 }
 
-/* styles for IDEs (padding for pages varies on config.host (vscode, jetbrains, web) */
+.backRow {
+  display: flex;
+  margin-bottom: var(--rf-space-4);
+}
+
+.configuredView {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-4);
+}
+
+.headerRow {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.headerCopy {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.title,
+.description {
+  margin: 0;
+}
+
+.title {
+  color: var(--rf-color-fg);
+  font: 700 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
+}
+
+.description {
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.providersGrid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: var(--rf-space-2);
+}
+
+.popup {
+  position: fixed;
+  bottom: var(--rf-space-6);
+  left: 50%;
+  width: min(max-content, calc(100vw - var(--rf-space-4)));
+  max-width: calc(100vw - var(--rf-space-4));
+  transform: translateX(-50%);
+  background-color: var(--rf-color-accent-soft);
+}
+
 .popup_ide {
-  width: calc(100vw - var(--space-2) * 2);
+  width: calc(100vw - var(--rf-space-2) * 2);
+}
+
+@media (width <= 640px) {
+  .headerRow {
+    flex-direction: column;
+  }
 }

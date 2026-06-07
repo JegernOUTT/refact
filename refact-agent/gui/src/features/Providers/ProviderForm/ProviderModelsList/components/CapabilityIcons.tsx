@@ -1,15 +1,14 @@
 import type { ComponentProps, FC, ReactNode } from "react";
-import { Flex, Text } from "@radix-ui/themes";
 import {
+  BarChart,
+  Bot,
+  Eye,
+  Gauge,
   ImageIcon,
-  CursorArrowIcon,
-  RocketIcon,
-  GearIcon,
-  BarChartIcon,
-  EyeOpenIcon,
-  WidthIcon,
-  ScissorsIcon,
-} from "@radix-ui/react-icons";
+  MousePointer2,
+  Scissors,
+  Settings,
+} from "lucide-react";
 import type { ModelCapabilities } from "../utils/groupModelsWithPricing";
 import styles from "../ModelCard.module.css";
 
@@ -21,49 +20,33 @@ export type CapabilityIconsProps = {
 type ModelDetailIconProps = {
   icon: ReactNode;
   children?: ReactNode;
-  color?: ComponentProps<typeof Text>["color"];
   tone?: "default" | "accent";
 };
 
 export const ModelDetailIcon: FC<ModelDetailIconProps> = ({
   icon,
   children,
-  color = "gray",
   tone = "default",
 }) => (
-  <Text as="span" size="1" color={color}>
-    <Flex as="span" align="center" gap="1" className={styles.modelDetailIcon}>
-      <span
-        className={
-          tone === "accent"
-            ? styles.modelDetailIconGlyphAccent
-            : styles.modelDetailIconGlyph
-        }
-      >
-        {icon}
-      </span>
-      {children}
-    </Flex>
-  </Text>
+  <span className={styles.modelDetailIcon}>
+    <span
+      className={
+        tone === "accent" ? styles.modelDetailIconGlyphAccent : styles.modelDetailIconGlyph
+      }
+    >
+      {icon}
+    </span>
+    {children}
+  </span>
 );
 
-type DetailSvgIconProps = ComponentProps<typeof WidthIcon>;
+type DetailSvgIconProps = ComponentProps<typeof Gauge>;
 
-export const ContextWindowIcon: FC<DetailSvgIconProps> = (props) => (
-  <WidthIcon {...props} />
-);
-export const MaxOutputIcon: FC<DetailSvgIconProps> = (props) => (
-  <ScissorsIcon {...props} />
-);
-export const PricingIcon: FC<DetailSvgIconProps> = (props) => (
-  <BarChartIcon {...props} />
-);
-export const ToolsIcon: FC<DetailSvgIconProps> = (props) => (
-  <GearIcon {...props} />
-);
-export const VisionIcon: FC<DetailSvgIconProps> = (props) => (
-  <EyeOpenIcon {...props} />
-);
+export const ContextWindowIcon: FC<DetailSvgIconProps> = (props) => <Gauge {...props} />;
+export const MaxOutputIcon: FC<DetailSvgIconProps> = (props) => <Scissors {...props} />;
+export const PricingIcon: FC<DetailSvgIconProps> = (props) => <BarChart {...props} />;
+export const ToolsIcon: FC<DetailSvgIconProps> = (props) => <Settings {...props} />;
+export const VisionIcon: FC<DetailSvgIconProps> = (props) => <Eye {...props} />;
 export const ReasoningIcon: FC<DetailSvgIconProps> = (props) => (
   <svg
     width="15"
@@ -87,44 +70,38 @@ export const ReasoningIcon: FC<DetailSvgIconProps> = (props) => (
   </svg>
 );
 
-export const CapabilityIcons: FC<CapabilityIconsProps> = ({
-  capabilities,
-  size = "1",
-}) => {
+export const CapabilityIcons: FC<CapabilityIconsProps> = ({ capabilities }) => {
   if (!capabilities) return null;
 
-  const iconSize = size === "1" ? 12 : 14;
-  const iconStyle = { width: iconSize, height: iconSize };
-
   return (
-    <Flex gap="1" align="center">
-      {capabilities.supportsTools && (
+    <span className={styles.modelMetaRow}>
+      {capabilities.supportsTools ? (
         <span title="Supports tools">
-          <ToolsIcon style={iconStyle} color="var(--gray-11)" />
+          <ToolsIcon />
         </span>
-      )}
-      {capabilities.supportsMultimodality && (
+      ) : null}
+      {capabilities.supportsMultimodality ? (
         <span title="Supports images">
-          <ImageIcon style={iconStyle} color="var(--gray-11)" />
+          <ImageIcon />
         </span>
-      )}
-      {capabilities.supportsClicks && (
+      ) : null}
+      {capabilities.supportsClicks ? (
         <span title="Computer use">
-          <CursorArrowIcon style={iconStyle} color="var(--gray-11)" />
+          <MousePointer2 />
         </span>
-      )}
-      {capabilities.supportsAgent && (
+      ) : null}
+      {capabilities.supportsAgent ? (
         <span title="Agent mode">
-          <RocketIcon style={iconStyle} color="var(--gray-11)" />
+          <Bot />
         </span>
-      )}
+      ) : null}
       {(!!capabilities.reasoningEffortOptions?.length ||
-        !!capabilities.supportsThinkingBudget ||
-        !!capabilities.supportsAdaptiveThinkingBudget) && (
-        <span title="Reasoning">
-          <ReasoningIcon style={iconStyle} color="var(--blue-11)" />
+        (capabilities.supportsThinkingBudget ?? false) ||
+        (capabilities.supportsAdaptiveThinkingBudget ?? false)) ? (
+        <span title="Reasoning" className={styles.modelDetailIconGlyphAccent}>
+          <ReasoningIcon />
         </span>
-      )}
-    </Flex>
+      ) : null}
+    </span>
   );
 };
