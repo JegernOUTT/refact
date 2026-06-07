@@ -1,7 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { DocumentationSettings } from ".";
-import { Flex } from "@radix-ui/themes";
 import { fn } from "@storybook/test";
+
+import { DocumentationSettings } from ".";
+import styles from "./DocumentationSettings.stories.module.css";
 
 const meta: Meta<typeof DocumentationSettings> = {
   title: "Documentation settings",
@@ -24,12 +25,13 @@ const meta: Meta<typeof DocumentationSettings> = {
     editDocumentation: fn(),
     addDocumentation: fn(),
     deleteDocumentation: fn(),
+    refetchDocumentation: fn(),
   },
   decorators: [
     (Children) => (
-      <Flex p="4">
+      <div className={styles.frame}>
         <Children />
-      </Flex>
+      </div>
     ),
   ],
 } satisfies Meta<typeof DocumentationSettings>;

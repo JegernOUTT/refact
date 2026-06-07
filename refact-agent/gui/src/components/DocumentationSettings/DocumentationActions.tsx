@@ -1,13 +1,9 @@
-import {
-  Button,
-  Dialog,
-  DropdownMenu,
-  Flex,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
-import { DocumentationSource } from "./DocumentationSettings";
 import { useState } from "react";
+import { MoreHorizontal } from "lucide-react";
+
+import { Button, Dialog, Field, FieldText, Menu } from "../ui";
+import type { DocumentationSource } from "./DocumentationSettings";
+import styles from "./DocumentationSettings.module.css";
 
 type DocumentationActionsProps = {
   source: DocumentationSource;
@@ -22,97 +18,71 @@ export const DocumentationActions: React.FC<DocumentationActionsProps> = ({
   editDocumentation,
   refetchDocumentation,
 }: DocumentationActionsProps) => {
-  const [maxDepth, setMaxDepth] = useState(source.maxDepth);
-  const [maxPages, setMaxPages] = useState(source.maxPages);
+  const [maxDepth, setMaxDepth] = useState(String(source.maxDepth));
+  const [maxPages, setMaxPages] = useState(String(source.maxPages));
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
 
+  const resetValues = () => {
+    setMaxDepth(String(source.maxDepth));
+    setMaxPages(String(source.maxPages));
+  };
+
   return (
     <>
-      <DropdownMenu.Root onOpenChange={setIsDropdownOpen}>
-        <DropdownMenu.Trigger>
-          <Button variant="soft">
+      <Menu onOpenChange={setIsDropdownOpen}>
+        <Menu.Trigger asChild>
+          <Button variant="soft" rightIcon={MoreHorizontal}>
             Actions
-            <DropdownMenu.TriggerIcon />
           </Button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Content>
-          <DropdownMenu.Item
-            onSelect={() => {
-              setIsDialogOpen(true);
-            }}
-          >
-            Edit
-          </DropdownMenu.Item>
-          <DropdownMenu.Item onSelect={() => refetchDocumentation(source.url)}>
-            Refetch
-          </DropdownMenu.Item>
-          <DropdownMenu.Separator />
-          <DropdownMenu.Item
-            color="red"
-            onClick={() => deleteDocumentation(source.url)}
-          >
-            Delete
-          </DropdownMenu.Item>
-        </DropdownMenu.Content>
-      </DropdownMenu.Root>
-      <Dialog.Root
-        open={isDialogOpen && !isDropdownOpen}
-        onOpenChange={setIsDialogOpen}
-      >
+        </Menu.Trigger>
+        <Menu.Content>
+          <Menu.Item onSelect={() => setIsDialogOpen(true)}>Edit</Menu.Item>
+          <Menu.Item onSelect={() => refetchDocumentation(source.url)}>Refetch</Menu.Item>
+          <Menu.Separator />
+          <Menu.Item onClick={() => deleteDocumentation(source.url)}>Delete</Menu.Item>
+        </Menu.Content>
+      </Menu>
+      <Dialog open={isDialogOpen && !isDropdownOpen} onOpenChange={setIsDialogOpen}>
         <Dialog.Content maxWidth="450px">
           <Dialog.Title>{`Edit ${source.url}`}</Dialog.Title>
-          <Flex direction="column" gap="3">
-            {/**TODO: text can be have `as="label"` and wrap the TextField  */}
-            <label>
-              <Text as="div" size="2" mb="1" weight="bold">
-                Max depth
-              </Text>
-              <TextField.Root
-                defaultValue={maxDepth}
-                onChange={(change) => setMaxDepth(Number(change.target.value))}
+          <Dialog.Description>Update crawl limits for this documentation source.</Dialog.Description>
+          <div className={styles.dialogBody}>
+            <Field label="Max depth" helper="How many link levels to follow from the root.">
+              <FieldText
+                value={maxDepth}
+                onChange={setMaxDepth}
                 type="number"
                 placeholder="Enter the max depth"
               />
-            </label>
-            <label>
-              <Text as="div" size="2" mb="1" weight="bold">
-                Max pages
-              </Text>
-              <TextField.Root
-                defaultValue={maxPages}
-                onChange={(change) => setMaxPages(Number(change.target.value))}
+            </Field>
+            <Field label="Max pages" helper="The maximum number of pages to index.">
+              <FieldText
+                value={maxPages}
+                onChange={setMaxPages}
                 type="number"
                 placeholder="Enter the max pages"
               />
-            </label>
-          </Flex>
+            </Field>
+          </div>
 
-          <Flex gap="3" mt="4" justify="end">
-            <Dialog.Close>
-              <Button
-                variant="soft"
-                color="gray"
-                onClick={() => {
-                  setMaxDepth(source.maxDepth);
-                  setMaxPages(source.maxPages);
-                }}
-              >
+          <div className={styles.dialogActions}>
+            <Dialog.Close asChild>
+              <Button variant="ghost" onClick={resetValues}>
                 Cancel
               </Button>
             </Dialog.Close>
-            <Dialog.Close>
+            <Dialog.Close asChild>
               <Button
-                onClick={() => {
-                  editDocumentation(source.url, maxDepth, maxPages);
-                }}
+                variant="primary"
+                onClick={() => editDocumentation(source.url, Number(maxDepth), Number(maxPages))}
               >
                 Save
               </Button>
             </Dialog.Close>
-          </Flex>
+          </div>
         </Dialog.Content>
-      </Dialog.Root>
+      </Dialog>
     </>
   );
 };

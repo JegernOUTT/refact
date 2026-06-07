@@ -1,13 +1,7 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
-import { Flex, Button, Text, Card, Heading, Callout } from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  ExclamationTriangleIcon,
-  InfoCircledIcon,
-} from "@radix-ui/react-icons";
+import { AlertTriangle, ArrowLeft, Bot, Brain, Info, MessageCircle, MessagesSquare, Rabbit, Zap } from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
 
-import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
 import { Spinner } from "../../components/Spinner";
 import { ModelSelector } from "../../components/Chat/ModelSelector";
@@ -15,6 +9,8 @@ import {
   ModelSamplingParams,
   type SamplingValues,
 } from "../../components/ModelSamplingParams";
+import { Button, Icon, SettingItem, SettingsShell } from "../../components/ui";
+import type { SettingsShellSection } from "../../components/ui";
 
 import {
   useGetDefaultsQuery,
@@ -47,34 +43,41 @@ type ModelTypeKey =
 
 const MODEL_TYPE_LABELS: Record<
   ModelTypeKey,
-  { title: string; description: string }
+  { title: string; description: string; icon: SettingsShellSection["icon"] }
 > = {
   chat: {
     title: "Default Chat Model",
-    description: "The primary model used for chat conversations",
+    description: "The primary model used for chat conversations.",
+    icon: MessageCircle,
   },
   chat_model_2: {
     title: "Chat Model 2",
-    description: "Secondary chat model slot for future chat workflows",
+    description: "Secondary chat model slot for future chat workflows.",
+    icon: MessagesSquare,
   },
   task_planner_agent_model: {
     title: "Task Planner Agent Model",
-    description: "Model used by task management when spawning task agents",
+    description: "Model used by task management when spawning task agents.",
+    icon: Bot,
   },
   chat_light: {
     title: "Light Chat Model",
-    description: "Fast, lightweight model for quick responses and subagents",
+    description: "Fast, lightweight model for quick responses and subagents.",
+    icon: Zap,
   },
   chat_thinking: {
     title: "Thinking Model",
-    description: "Reasoning-focused model for complex analysis tasks",
+    description: "Reasoning-focused model for complex analysis tasks.",
+    icon: Brain,
   },
   chat_buddy: {
     title: "Companion Model",
-    description:
-      "Model used by your companion for background tasks and suggestions",
+    description: "Model used by your companion for background tasks and suggestions.",
+    icon: Rabbit,
   },
 };
+
+const MODEL_TYPE_KEYS = Object.keys(MODEL_TYPE_LABELS) as ModelTypeKey[];
 
 const ModelTypeSection: React.FC<{
   typeKey: ModelTypeKey;
@@ -101,50 +104,51 @@ const ModelTypeSection: React.FC<{
   const effectiveModel = config.model ?? capsDefault;
 
   return (
-    <Card className={styles.modelTypeCard}>
-      <Flex direction="column" gap="4">
-        <Flex direction="column" gap="1">
-          <Heading size="3">{title}</Heading>
-          <Text size="2" color="gray">
-            {description}
-          </Text>
-        </Flex>
+    <div className={`${styles.content} rf-enter`}>
+      <div className={styles.sectionHeader}>
+        <h2 className={styles.title}>{title}</h2>
+        <p className={styles.description}>{description}</p>
+      </div>
 
-        <Flex direction="column" gap="2">
-          <Text size="2" weight="medium">
-            Model
-          </Text>
-          <ModelSelector
-            value={config.model}
-            onValueChange={handleModelChange}
-            defaultValue={capsDefault}
-            showLabel={false}
-            compact={false}
-            allowUnset
-            unsetLabel="None"
-          />
-        </Flex>
+      <div className={`${styles.settingGroup} rf-stagger`}>
+        <SettingItem
+          className="rf-enter"
+          title="Model"
+          description="Choose the model override for this slot, or leave it empty to use the server default."
+          control={
+            <div className={styles.selectorWrap}>
+              <ModelSelector
+                value={config.model}
+                onValueChange={handleModelChange}
+                defaultValue={capsDefault}
+                showLabel={false}
+                compact={false}
+                allowUnset
+                unsetLabel="None"
+              />
+            </div>
+          }
+        />
 
         {effectiveModel ? (
-          <ModelSamplingParams
-            model={effectiveModel}
-            values={config}
-            onChange={handleSamplingChange}
-            size="2"
-          />
+          <SettingItem
+            className="rf-enter"
+            title="Sampling"
+            description="Tune output length and reasoning behavior for this model slot."
+            layout="stack"
+          >
+            <div className={styles.samplingWrap}>
+              <ModelSamplingParams model={effectiveModel} values={config} onChange={handleSamplingChange} />
+            </div>
+          </SettingItem>
         ) : (
-          <Callout.Root color="gray">
-            <Callout.Icon>
-              <InfoCircledIcon />
-            </Callout.Icon>
-            <Callout.Text>
-              No model selected. Features that require this model type will ask
-              you to configure it.
-            </Callout.Text>
-          </Callout.Root>
+          <div className={`${styles.notice} rf-enter`}>
+            <Icon icon={Info} size="sm" tone="muted" />
+            <span>No model selected. Features that require this model type will ask you to configure it.</span>
+          </div>
         )}
-      </Flex>
-    </Card>
+      </div>
+    </div>
   );
 };
 
@@ -181,6 +185,17 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     [capsData],
   );
 
+  const sections = useMemo<SettingsShellSection[]>(
+    () =>
+      MODEL_TYPE_KEYS.map((key) => ({
+        id: key,
+        label: MODEL_TYPE_LABELS[key].title,
+        icon: MODEL_TYPE_LABELS[key].icon,
+      })),
+    [],
+  );
+
+  const [activeSection, setActiveSection] = useState<ModelTypeKey>("chat");
   const [localDefaults, setLocalDefaults] = useState<ProviderDefaults>({
     chat: {},
     chat_model_2: {},
@@ -274,96 +289,84 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
   if (isError || !isSuccess) {
     return (
       <PageWrapper host={host}>
-        <Flex direction="column" gap="4" p="4" align="center" justify="center">
-          <Callout.Root color="red">
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>
-              Failed to load default models configuration.
-            </Callout.Text>
-          </Callout.Root>
-          <Button onClick={() => void refetch()}>Retry</Button>
-          <Button variant="outline" onClick={backFromDefaultModels}>
-            Back
-          </Button>
-        </Flex>
+        <div className={styles.page}>
+          <div className={`${styles.notice} ${styles.noticeDanger}`}>
+            <Icon icon={AlertTriangle} size="sm" tone="danger" />
+            <span>Failed to load default models configuration.</span>
+          </div>
+          <div className={styles.actions}>
+            <Button variant="soft" onClick={() => void refetch()}>
+              Retry
+            </Button>
+            <Button variant="ghost" onClick={backFromDefaultModels}>
+              Back
+            </Button>
+          </div>
+        </div>
       </PageWrapper>
     );
   }
 
+  const activeKey = MODEL_TYPE_KEYS.includes(activeSection) ? activeSection : "chat";
+
   return (
-    <PageWrapper
-      host={host}
-      style={{
-        padding: 0,
-        marginTop: 0,
-      }}
-    >
-      <Flex direction="column" gap="4" p="4" style={{ height: "100%" }}>
-        <Flex justify="between" align="center">
-          {host === "vscode" && !tabbed ? (
-            <Button variant="surface" onClick={backFromDefaultModels}>
-              <ArrowLeftIcon width="16" height="16" />
+    <PageWrapper host={host}>
+      <div className={styles.page}>
+        <div className={styles.frame}>
+          <div className={styles.toolbar}>
+            <Button
+              variant={host === "vscode" && !tabbed ? "soft" : "ghost"}
+              leftIcon={ArrowLeft}
+              onClick={backFromDefaultModels}
+            >
               Back
             </Button>
-          ) : (
-            <Button variant="outline" onClick={backFromDefaultModels}>
-              Back
-            </Button>
-          )}
+            <div className={styles.actions}>
+              <Button
+                onClick={() => void handleSave()}
+                disabled={!hasChanges || isSaving}
+                loading={isSaving}
+                variant="primary"
+              >
+                Save Changes
+              </Button>
+            </div>
+          </div>
 
-          <Button
-            onClick={() => void handleSave()}
-            disabled={!hasChanges || isSaving}
-            variant="solid"
+          {draftExpired ? (
+            <div className={`${styles.notice} ${styles.noticeAccent} rf-enter`}>
+              <Icon icon={Info} size="sm" tone="accent" />
+              <span>Draft expired</span>
+            </div>
+          ) : null}
+
+          {draft ? <BuddyDraftPreview draft={draft} /> : null}
+
+          {saveError ? (
+            <div className={`${styles.notice} ${styles.noticeDanger} rf-enter`}>
+              <Icon icon={AlertTriangle} size="sm" tone="danger" />
+              <span>{saveError}</span>
+            </div>
+          ) : null}
+
+          <SettingsShell
+            className={styles.shell}
+            sections={sections}
+            active={activeKey}
+            onSectionChange={(sectionId) => setActiveSection(sectionId as ModelTypeKey)}
+            title="Default Models"
+            description="Configure which models to use by default for different purposes. These settings apply globally across all modes."
           >
-            {isSaving ? "Saving..." : "Save Changes"}
-          </Button>
-        </Flex>
-
-        {draftExpired && (
-          <Callout.Root color="orange">
-            <Callout.Icon>
-              <InfoCircledIcon />
-            </Callout.Icon>
-            <Callout.Text>Draft expired</Callout.Text>
-          </Callout.Root>
-        )}
-
-        {draft && <BuddyDraftPreview draft={draft} />}
-
-        {saveError && (
-          <Callout.Root color="red">
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>{saveError}</Callout.Text>
-          </Callout.Root>
-        )}
-
-        <Flex direction="column" gap="2">
-          <Heading size="5">Default Models</Heading>
-          <Text size="2" color="gray">
-            Configure which models to use by default for different purposes.
-            These settings apply globally across all modes.
-          </Text>
-        </Flex>
-
-        <ScrollArea scrollbars="vertical" fullHeight>
-          <Flex direction="column" gap="4" pb="4">
-            {(Object.keys(MODEL_TYPE_LABELS) as ModelTypeKey[]).map((key) => (
-              <ModelTypeSection
-                key={key}
-                typeKey={key}
-                config={localDefaults[key] ?? {}}
-                capsDefault={capsDefaults[key]}
-                onChange={handleModelTypeChange}
-              />
-            ))}
-          </Flex>
-        </ScrollArea>
-      </Flex>
+            <ModelTypeSection
+              key={activeKey}
+              typeKey={activeKey}
+              config={localDefaults[activeKey] ?? {}}
+              capsDefault={capsDefaults[activeKey]}
+              onChange={handleModelTypeChange}
+            />
+          </SettingsShell>
+        </div>
+      </div>
     </PageWrapper>
   );
 };

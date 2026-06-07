@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Dialog, Flex, Button, Checkbox, Text } from "@radix-ui/themes";
 import {
   useAppDispatch,
   useAppSelector,
@@ -7,6 +6,8 @@ import {
 } from "../../hooks";
 import { selectFeatures, changeFeature } from "./configSlice";
 import { Link } from "../../components/Link";
+import { Button, Dialog, FieldSwitch, SettingItem } from "../../components/ui";
+import styles from "./FeatureMenu.module.css";
 
 const useInputEvent = () => {
   const [key, setKey] = useState<string | null>(null);
@@ -77,51 +78,55 @@ export const FeatureMenu: React.FC = () => {
     [openSettings],
   );
 
-  // if (!success) return false;
-
   const keysAndValues = Object.entries(features ?? {});
 
   return (
-    <Dialog.Root open={success} onOpenChange={reset}>
+    <Dialog open={success} onOpenChange={reset}>
       <Dialog.Content>
         <Dialog.Title>Hidden Features Menu</Dialog.Title>
-        {keysAndValues.length === 0 && (
-          <Dialog.Description>No hidden features</Dialog.Description>
-        )}
-        <Flex direction="column" gap="3">
-          {keysAndValues.map(([feature, value]) => {
-            const setInSettings = feature === "ast" || feature === "vecdb";
-            return (
-              <Text key={feature} as="label" size="2">
-                <Flex as="span" gap="2">
-                  <Checkbox
-                    checked={value}
-                    onCheckedChange={() => {
-                      dispatch(changeFeature({ feature, value: !value }));
-                    }}
-                    disabled={setInSettings}
-                  />{" "}
-                  {feature}
-                  {setInSettings && (
-                    <Text>
-                      Option set in{" "}
-                      <Link onClick={handleSettingsClick}>settings</Link>
-                    </Text>
-                  )}
-                </Flex>
-              </Text>
-            );
-          })}
-        </Flex>
+        <Dialog.Description>Toggle experimental features that are not shown in regular settings.</Dialog.Description>
+        <div className={`${styles.body} rf-enter`}>
+          {keysAndValues.length === 0 ? (
+            <p className={styles.empty}>No hidden features</p>
+          ) : (
+            <SettingItem
+              className="rf-enter"
+              title="Feature flags"
+              description="Some flags are managed by the main settings screen and are locked here."
+              layout="stack"
+            >
+              <div className={`${styles.featureList} rf-stagger`}>
+                {keysAndValues.map(([feature, value]) => {
+                  const setInSettings = feature === "ast" || feature === "vecdb";
+                  return (
+                    <div className={`${styles.featureRow} rf-enter`} key={feature}>
+                      <div className={styles.featureCopy}>
+                        <span className={styles.featureName}>{feature}</span>
+                        {setInSettings ? (
+                          <span className={styles.featureHint}>
+                            Option set in <Link onClick={handleSettingsClick}>settings</Link>
+                          </span>
+                        ) : null}
+                      </div>
+                      <FieldSwitch
+                        checked={value}
+                        onChange={() => dispatch(changeFeature({ feature, value: !value }))}
+                        disabled={setInSettings}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </SettingItem>
+          )}
 
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray">
-              Close
-            </Button>
-          </Dialog.Close>
-        </Flex>
+          <div className={styles.actions}>
+            <Dialog.Close asChild>
+              <Button variant="ghost">Close</Button>
+            </Dialog.Close>
+          </div>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

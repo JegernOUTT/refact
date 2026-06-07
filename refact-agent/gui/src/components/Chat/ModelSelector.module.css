@@ -1,0 +1,27 @@
+.compact,
+.stack {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  gap: var(--rf-space-1);
+}
+
+.compact {
+  flex-direction: row;
+  align-items: center;
+}
+
+.stack {
+  flex-direction: column;
+}
+
+.label,
+.fallbackText {
+  color: var(--rf-color-muted);
+  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.fallbackText {
+  display: inline-flex;
+  min-width: 0;
+}

@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo } from "react";
-import { Flex, Text } from "@radix-ui/themes";
+
+import styles from "./ModelSelector.module.css";
 
 import { useGetCapsQuery } from "../../hooks";
 import { CapabilityIcons } from "../../features/Providers/ProviderForm/ProviderModelsList/components";
@@ -131,27 +132,16 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   if (!caps && models.length === 0) {
     return (
-      <Text size="1" color="gray">
+      <span className={styles.fallbackText}>
         {showLabel ? `${label} ` : ""}
-        {allowUnset && !effectiveValue
-          ? unsetLabel
-          : effectiveValue || "No models"}
-      </Text>
+        {allowUnset && !effectiveValue ? unsetLabel : effectiveValue || "No models"}
+      </span>
     );
   }
 
   return (
-    <Flex
-      direction={compact ? "row" : "column"}
-      align={compact ? "center" : undefined}
-      gap="1"
-      width="100%"
-    >
-      {showLabel && (
-        <Text size="1" color="gray">
-          {label}
-        </Text>
-      )}
+    <div className={compact ? styles.compact : styles.stack}>
+      {showLabel ? <span className={styles.label}>{label}</span> : null}
       <KitModelSelector
         allowUnset={allowUnset}
         disabled={disabled}
@@ -162,6 +152,6 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         value={allowUnset && !effectiveValue ? null : effectiveValue || null}
         onSelect={handleSelect}
       />
-    </Flex>
+    </div>
   );
 };

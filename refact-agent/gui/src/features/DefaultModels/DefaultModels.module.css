@@ -1,3 +1,116 @@
-.modelTypeCard {
-  padding: var(--space-4);
+.page {
+  display: grid;
+  min-height: 100%;
+  min-width: 0;
+  padding: var(--rf-space-4);
+}
+
+.frame {
+  display: grid;
+  min-height: 0;
+  min-width: 0;
+  gap: var(--rf-space-4);
+}
+
+.toolbar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.actions {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
+}
+
+.notice {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3) 0;
+  color: var(--rf-color-muted);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.noticeDanger {
+  color: var(--rf-color-danger);
+  border-color: var(--rf-color-danger);
+}
+
+.noticeAccent {
+  color: var(--rf-color-accent);
+  border-color: var(--rf-border-strong);
+}
+
+.shell {
+  min-height: 0;
+}
+
+.content {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-4);
+  animation-delay: var(--rf-stagger, 0ms);
+}
+
+.sectionHeader {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.title {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: 700 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+}
+
+.description {
+  max-width: 64ch;
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.settingGroup {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.selectorWrap {
+  width: min(100%, 420px);
+}
+
+.samplingWrap {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+  padding-top: var(--rf-space-2);
+}
+
+@media (width <= 640px) {
+  .page {
+    padding: var(--rf-space-3);
+  }
+
+  .toolbar,
+  .actions {
+    align-items: stretch;
+  }
+
+  .actions {
+    width: 100%;
+    justify-content: stretch;
+  }
 }

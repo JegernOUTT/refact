@@ -1,7 +1,9 @@
-import { Button, Dialog, Flex, Table, Text, TextField } from "@radix-ui/themes";
-import { DocumentationActions } from "./DocumentationActions";
 import { useState } from "react";
-import { ChevronLeftIcon } from "@radix-ui/react-icons";
+import { ArrowLeft, BookOpen, Plus } from "lucide-react";
+
+import { Button, Dialog, Field, FieldText, SettingItem, SettingsShell } from "../ui";
+import { DocumentationActions } from "./DocumentationActions";
+import styles from "./DocumentationSettings.module.css";
 
 export interface DocumentationSource {
   url: string;
@@ -26,123 +28,120 @@ export const DocumentationSettings: React.FC<DocumentationSettingsProps> = ({
   refetchDocumentation,
 }: DocumentationSettingsProps) => {
   const [url, setUrl] = useState("");
-  const [maxDepth, setMaxDepth] = useState(2);
-  const [maxPages, setMaxPages] = useState(50);
+  const [maxDepth, setMaxDepth] = useState("2");
+  const [maxPages, setMaxPages] = useState("50");
+
+  const resetForm = () => {
+    setUrl("");
+    setMaxDepth("2");
+    setMaxPages("50");
+  };
+
+  const handleAdd = () => {
+    addDocumentation(url, Number(maxDepth), Number(maxPages));
+    resetForm();
+  };
 
   return (
-    <Flex direction="column" gap="2" maxWidth="540px" m="8px">
-      <Text size="4">Documentation sources</Text>
-      {sources.length > 0 ? (
-        <Table.Root>
-          <Table.Header>
-            <Table.Row>
-              <Table.ColumnHeaderCell>Url</Table.ColumnHeaderCell>
-              <Table.ColumnHeaderCell>Pages</Table.ColumnHeaderCell>
-              <Table.ColumnHeaderCell></Table.ColumnHeaderCell>
-            </Table.Row>
-          </Table.Header>
-          <Table.Body>
-            {sources.map((source) => {
-              return (
-                <Table.Row key={source.url}>
-                  <Table.RowHeaderCell>{source.url}</Table.RowHeaderCell>
-                  <Table.Cell>{source.pages}</Table.Cell>
-                  <Table.Cell>
-                    <DocumentationActions
-                      source={source}
-                      deleteDocumentation={deleteDocumentation}
-                      editDocumentation={editDocumentation}
-                      refetchDocumentation={refetchDocumentation}
-                    />
-                  </Table.Cell>
-                </Table.Row>
-              );
-            })}
-          </Table.Body>
-        </Table.Root>
-      ) : (
-        <Text min-height="200px">
-          No documentation has been added yet. Press the add button to add
-          documentation that the chat assistent can use.
-        </Text>
-      )}
-      <Flex direction="row">
-        <Button variant="outline" mr="auto">
-          <ChevronLeftIcon />
-          {"< Back"}
-        </Button>
-        <Dialog.Root>
-          <Dialog.Trigger>
-            <Button ml="auto" type="submit">
-              {"add"}
-            </Button>
-          </Dialog.Trigger>
-          <Dialog.Content maxWidth="450px">
-            <Dialog.Title>Add documentation</Dialog.Title>
-            <Dialog.Description size="2" mb="4">
-              Add a documentation source that the chat assistent can use.
-            </Dialog.Description>
+    <SettingsShell
+      className={styles.shell}
+      sections={[{ id: "sources", label: "Sources", icon: BookOpen }]}
+      active="sources"
+      onSectionChange={() => undefined}
+      title="Documentation"
+      description="Manage external documentation that the chat assistant can use for grounded answers."
+    >
+      <div className={`${styles.content} rf-enter`}>
+        <div className={styles.sectionHeader}>
+          <h2 className={styles.title}>Documentation sources</h2>
+          <p className={styles.description}>Add, refresh, or tune crawl limits for documentation sites.</p>
+        </div>
 
-            <Flex direction="column" gap="3">
-              <label>
-                <Text as="div" size="2" mb="1" weight="bold">
-                  Url
-                </Text>
-                <TextField.Root
-                  defaultValue={url}
-                  onChange={(event) => {
-                    setUrl(event.target.value);
-                  }}
-                  placeholder="Enter the documentation url"
-                />
-              </label>
-              <label>
-                <Text as="div" size="2" mb="1" weight="bold">
-                  Max depth
-                </Text>
-                <TextField.Root
-                  defaultValue={maxDepth}
-                  onChange={(event) => {
-                    setMaxDepth(Number(event.target.value));
-                  }}
-                  type="number"
-                  placeholder="Enter the max depth"
-                />
-              </label>
-              <label>
-                <Text as="div" size="2" mb="1" weight="bold">
-                  Max pages
-                </Text>
-                <TextField.Root
-                  defaultValue={maxPages}
-                  onChange={(event) => {
-                    setMaxPages(Number(event.target.value));
-                  }}
-                  type="number"
-                  placeholder="Enter the max pages"
-                />
-              </label>
-            </Flex>
+        <SettingItem
+          className="rf-enter"
+          title="Sources"
+          description="Configured documentation sites are indexed with their current page counts."
+          layout="stack"
+        >
+          {sources.length > 0 ? (
+            <div className={`${styles.sourceList} rf-stagger`}>
+              {sources.map((source) => (
+                <div className={`${styles.sourceRow} rf-enter`} key={source.url}>
+                  <div className={styles.sourceCopy}>
+                    <span className={styles.sourceUrl}>{source.url}</span>
+                    <span className={styles.sourceMeta}>
+                      Max depth {source.maxDepth} · max pages {source.maxPages}
+                    </span>
+                  </div>
+                  <span className={styles.pages}>{source.pages} pages</span>
+                  <DocumentationActions
+                    source={source}
+                    deleteDocumentation={deleteDocumentation}
+                    editDocumentation={editDocumentation}
+                    refetchDocumentation={refetchDocumentation}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className={styles.empty}>
+              No documentation has been added yet. Add documentation that the chat assistant can use.
+            </div>
+          )}
+        </SettingItem>
 
-            <Flex gap="3" mt="4" justify="end">
-              <Dialog.Close>
-                <Button variant="soft" color="gray">
-                  Cancel
-                </Button>
-              </Dialog.Close>
-              <Dialog.Close>
-                <Button
-                  onClick={() => {
-                    addDocumentation(url, maxDepth, maxPages);
-                  }}
-                >
-                  Add
-                </Button>
-              </Dialog.Close>
-            </Flex>
-          </Dialog.Content>
-        </Dialog.Root>
-      </Flex>
-    </Flex>
+        <div className={styles.actions}>
+          <Button variant="ghost" leftIcon={ArrowLeft}>
+            Back
+          </Button>
+          <Dialog>
+            <Dialog.Trigger asChild>
+              <Button variant="primary" leftIcon={Plus}>
+                Add documentation
+              </Button>
+            </Dialog.Trigger>
+            <Dialog.Content maxWidth="450px">
+              <Dialog.Title>Add documentation</Dialog.Title>
+              <Dialog.Description>
+                Add a documentation source that the chat assistant can use.
+              </Dialog.Description>
+              <div className={styles.dialogBody}>
+                <Field label="Url" helper="The root documentation URL to crawl.">
+                  <FieldText value={url} onChange={setUrl} placeholder="Enter the documentation url" />
+                </Field>
+                <Field label="Max depth" helper="How many link levels to follow from the root.">
+                  <FieldText
+                    value={maxDepth}
+                    onChange={setMaxDepth}
+                    type="number"
+                    placeholder="Enter the max depth"
+                  />
+                </Field>
+                <Field label="Max pages" helper="The maximum number of pages to index.">
+                  <FieldText
+                    value={maxPages}
+                    onChange={setMaxPages}
+                    type="number"
+                    placeholder="Enter the max pages"
+                  />
+                </Field>
+              </div>
+              <div className={styles.dialogActions}>
+                <Dialog.Close asChild>
+                  <Button variant="ghost" onClick={resetForm}>
+                    Cancel
+                  </Button>
+                </Dialog.Close>
+                <Dialog.Close asChild>
+                  <Button variant="primary" onClick={handleAdd}>
+                    Add
+                  </Button>
+                </Dialog.Close>
+              </div>
+            </Dialog.Content>
+          </Dialog>
+        </div>
+      </div>
+    </SettingsShell>
   );
 };
