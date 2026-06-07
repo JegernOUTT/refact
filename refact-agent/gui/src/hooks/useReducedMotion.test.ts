@@ -1,4 +1,5 @@
-import { act, renderHook } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useReducedMotion } from "./useReducedMotion";
 
