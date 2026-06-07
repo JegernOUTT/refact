@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use hyper::StatusCode;
-use refact_buddy_core::conductor::{ConductorGoal, ConductorWakeReason, GoalLedger, PendingQuestion};
+use refact_buddy_core::conductor::{
+    ConductorGoal, ConductorWakeReason, GoalLedger, GoalStatus, PendingQuestion,
+};
 use refact_buddy_core::conductor_store::{mutate_goal_ledger, MissingGoalBehavior};
 use refact_buddy_core::types::{BuddyGhostMessage, BuddyGhostMessageRole};
 use uuid::Uuid;
@@ -128,11 +130,22 @@ pub async fn conductor_ghost_answer(
 ) -> Result<GhostAnswerResult, ScratchError> {
     let capped_answer = cap_ghost_content(answer);
     let (ledger, ()) = mutate_required(project_root, goal_id, |ledger| {
+        let status = ledger.status.unwrap_or_default();
+        if status != GoalStatus::Active {
+            return Err(GhostAnswerMutationError::InactiveGoal(status).to_string());
+        }
         let question = ledger
             .pending_questions
             .iter_mut()
             .find(|question| question.id == question_id)
-            .ok_or_else(|| format!("question not found: {question_id}"))?;
+            .ok_or_else(|| {
+                GhostAnswerMutationError::QuestionNotFound(question_id.to_string()).to_string()
+            })?;
+        if question.answer.is_some() {
+            return Err(
+                GhostAnswerMutationError::DuplicateAnswer(question_id.to_string()).to_string(),
+            );
+        }
         question.answer = Some(capped_answer);
         question.answered_at = Some(Utc::now().to_rfc3339());
         Ok(())
@@ -151,6 +164,25 @@ pub async fn conductor_ghost_answer(
         question_id: question_id.to_string(),
         answered: enqueued,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GhostAnswerMutationError {
+    InactiveGoal(GoalStatus),
+    QuestionNotFound(String),
+    DuplicateAnswer(String),
+}
+
+impl std::fmt::Display for GhostAnswerMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InactiveGoal(status) => write!(f, "inactive conductor goal: {status:?}"),
+            Self::QuestionNotFound(question_id) => write!(f, "question not found: {question_id}"),
+            Self::DuplicateAnswer(question_id) => {
+                write!(f, "question already answered: {question_id}")
+            }
+        }
+    }
 }
 
 fn make_ghost_message(
@@ -222,6 +254,16 @@ fn store_error(error: refact_buddy_core::conductor_store::ConductorStoreError) -
         }
         refact_buddy_core::conductor_store::ConductorStoreError::MissingGoal(_) => {
             StatusCode::NOT_FOUND
+        }
+        refact_buddy_core::conductor_store::ConductorStoreError::Update(ref error)
+            if error.contains("question not found") =>
+        {
+            StatusCode::NOT_FOUND
+        }
+        refact_buddy_core::conductor_store::ConductorStoreError::Update(ref error)
+            if error.contains("already answered") || error.contains("inactive conductor goal") =>
+        {
+            StatusCode::CONFLICT
         }
         refact_buddy_core::conductor_store::ConductorStoreError::Update(_) => StatusCode::NOT_FOUND,
         refact_buddy_core::conductor_store::ConductorStoreError::Io { .. }
@@ -421,13 +463,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conductor_ghost_answer_terminal_goal_persists_without_wake() {
+    async fn conductor_ghost_answer_duplicate_returns_conflict_without_mutation_or_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_answerable_goal(dir.path(), "goal-answer-duplicate", GoalStatus::Active).await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+
+        conductor_ghost_answer(
+            app.clone(),
+            dir.path(),
+            "goal-answer-duplicate",
+            "question-1",
+            "Original",
+        )
+        .await
+        .unwrap();
+        let error = conductor_ghost_answer(
+            app,
+            dir.path(),
+            "goal-answer-duplicate",
+            "question-1",
+            "Replacement",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        assert!(error.message.contains("already answered"));
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-duplicate")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ledger.pending_questions[0].answer.as_deref(),
+            Some("Original")
+        );
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-answer-duplicate").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::GhostAnswer]);
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_answer_missing_question_returns_not_found_without_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_answerable_goal(
+            dir.path(),
+            "goal-answer-missing-question",
+            GoalStatus::Active,
+        )
+        .await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+
+        let error = conductor_ghost_answer(
+            app,
+            dir.path(),
+            "goal-answer-missing-question",
+            "missing-question",
+            "Nope",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::NOT_FOUND);
+        assert!(error.message.contains("question not found"));
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-missing-question")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.pending_questions[0].answer, None);
+        assert!(gcx
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-answer-missing-question")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn conductor_ghost_answer_terminal_goal_returns_conflict_without_mutation_or_wake() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
         save_answerable_goal(dir.path(), "goal-answer-done", GoalStatus::Done).await;
         let app = AppState::from_gcx(gcx.clone()).await;
 
-        let result = conductor_ghost_answer(
+        let error = conductor_ghost_answer(
             app,
             dir.path(),
             "goal-answer-done",
@@ -435,17 +555,15 @@ mod tests {
             "Done answer",
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert!(!result.answered);
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        assert!(error.message.contains("inactive conductor goal"));
         let ledger = load_goal_ledger(dir.path(), "goal-answer-done")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            ledger.pending_questions[0].answer.as_deref(),
-            Some("Done answer")
-        );
+        assert_eq!(ledger.pending_questions[0].answer, None);
         assert!(gcx
             .conductor_wake_bus
             .lock()
@@ -455,13 +573,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conductor_ghost_answer_paused_goal_persists_without_wake() {
+    async fn conductor_ghost_answer_paused_goal_returns_conflict_without_mutation_or_wake() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
         save_answerable_goal(dir.path(), "goal-answer-paused", GoalStatus::Paused).await;
         let app = AppState::from_gcx(gcx.clone()).await;
 
-        let result = conductor_ghost_answer(
+        let error = conductor_ghost_answer(
             app,
             dir.path(),
             "goal-answer-paused",
@@ -469,17 +587,15 @@ mod tests {
             "Pause answer",
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert!(!result.answered);
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        assert!(error.message.contains("inactive conductor goal"));
         let ledger = load_goal_ledger(dir.path(), "goal-answer-paused")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            ledger.pending_questions[0].answer.as_deref(),
-            Some("Pause answer")
-        );
+        assert_eq!(ledger.pending_questions[0].answer, None);
         assert!(gcx
             .conductor_wake_bus
             .lock()

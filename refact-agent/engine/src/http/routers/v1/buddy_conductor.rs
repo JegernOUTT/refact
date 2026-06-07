@@ -917,6 +917,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buddy_conductor_answer_duplicate_returns_conflict_and_preserves_original() {
+        let (app, dir) = test_app().await;
+        create_goal(app.clone(), "goal-answer-duplicate").await;
+        let ask = crate::buddy::conductor::ghost::conductor_ghost_ask(
+            app.gcx.clone(),
+            dir.path(),
+            "goal-answer-duplicate",
+            "Can I proceed?",
+            true,
+            Some("target-chat".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let _ = handle_v1_buddy_conductor_answer(
+            State(app.clone()),
+            axum::Json(ConductorAnswerRequest {
+                goal_id: "goal-answer-duplicate".to_string(),
+                question_id: ask.question.id.clone(),
+                answer: "Original".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let error = handle_v1_buddy_conductor_answer(
+            State(app.clone()),
+            axum::Json(ConductorAnswerRequest {
+                goal_id: "goal-answer-duplicate".to_string(),
+                question_id: ask.question.id.clone(),
+                answer: "Replacement".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-duplicate")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ledger.pending_questions[0].answer.as_deref(),
+            Some("Original")
+        );
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_answer_paused_goal_returns_conflict_without_mutation_or_wake() {
+        let (app, dir) = test_app().await;
+        create_goal(app.clone(), "goal-answer-paused").await;
+        let _ = handle_v1_buddy_conductor_goal_pause(
+            State(app.clone()),
+            Path("goal-answer-paused".to_string()),
+        )
+        .await
+        .unwrap();
+        let ask = crate::buddy::conductor::ghost::conductor_ghost_ask(
+            app.gcx.clone(),
+            dir.path(),
+            "goal-answer-paused",
+            "Can I proceed?",
+            true,
+            Some("target-chat".to_string()),
+        )
+        .await
+        .unwrap();
+        {
+            let mut bus = app.buddy.conductor_wake_bus.lock().await;
+            bus.reconcile_targets(&crate::buddy::conductor::wake::ConductorWakeTargets::default());
+        }
+
+        let error = handle_v1_buddy_conductor_answer(
+            State(app.clone()),
+            axum::Json(ConductorAnswerRequest {
+                goal_id: "goal-answer-paused".to_string(),
+                question_id: ask.question.id.clone(),
+                answer: "No mutate".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-paused")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.pending_questions[0].answer, None);
+        assert!(app
+            .buddy
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-answer-paused")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_answer_terminal_goal_returns_conflict_without_mutation_or_wake() {
+        let (app, dir) = test_app().await;
+        create_goal(app.clone(), "goal-answer-terminal").await;
+        let _ = handle_v1_buddy_conductor_goal_stop(
+            State(app.clone()),
+            Path("goal-answer-terminal".to_string()),
+        )
+        .await
+        .unwrap();
+        let ask = crate::buddy::conductor::ghost::conductor_ghost_ask(
+            app.gcx.clone(),
+            dir.path(),
+            "goal-answer-terminal",
+            "Can I proceed?",
+            true,
+            Some("target-chat".to_string()),
+        )
+        .await
+        .unwrap();
+        {
+            let mut bus = app.buddy.conductor_wake_bus.lock().await;
+            bus.reconcile_targets(&crate::buddy::conductor::wake::ConductorWakeTargets::default());
+        }
+
+        let error = handle_v1_buddy_conductor_answer(
+            State(app.clone()),
+            axum::Json(ConductorAnswerRequest {
+                goal_id: "goal-answer-terminal".to_string(),
+                question_id: ask.question.id.clone(),
+                answer: "No mutate".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        let ledger = load_goal_ledger(dir.path(), "goal-answer-terminal")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.pending_questions[0].answer, None);
+        assert!(app
+            .buddy
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-answer-terminal")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn buddy_conductor_routes_control_stop_and_autonomy() {
         let (app, dir) = test_app().await;
         create_goal(app.clone(), "goal-control").await;
