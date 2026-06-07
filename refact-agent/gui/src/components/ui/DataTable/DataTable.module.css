@@ -1,0 +1,151 @@
+.root {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.tableWrap {
+  min-width: 0;
+}
+
+.wide .tableWrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  min-width: 0;
+  border-spacing: 0;
+  border-collapse: separate;
+  color: var(--rf-color-fg);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.wide .table {
+  min-width: max-content;
+}
+
+.caption {
+  margin-bottom: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font: 550 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  text-align: start;
+}
+
+.headerCell,
+.cell,
+.emptyCell {
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  text-align: start;
+  vertical-align: top;
+}
+
+.headerCell {
+  color: var(--rf-color-muted);
+  font-weight: 650;
+  background: var(--rf-surface-1);
+}
+
+.cell,
+.emptyCell {
+  background: transparent;
+}
+
+.headerCell[data-align="center"],
+.cell[data-align="center"] {
+  text-align: center;
+}
+
+.headerCell[data-align="end"],
+.cell[data-align="end"] {
+  text-align: end;
+}
+
+.sortButton {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: inherit;
+  gap: var(--rf-space-1);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.sortButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+  border-radius: var(--rf-radius-chip);
+}
+
+.headerContent {
+  min-width: 0;
+}
+
+.cards {
+  display: none;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.card,
+.emptyCard {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.cardField {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.cardField[data-align="center"] {
+  justify-items: center;
+  text-align: center;
+}
+
+.cardField[data-align="end"] {
+  justify-items: end;
+  text-align: end;
+}
+
+.cardLabel {
+  color: var(--rf-color-muted);
+  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+.cardValue {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  overflow-wrap: anywhere;
+}
+
+.emptyCell,
+.emptyCard {
+  color: var(--rf-color-muted);
+}
+
+@media (width <= 640px) {
+  .root:not(.wide) .tableWrap {
+    display: none;
+  }
+
+  .root:not(.wide) .cards {
+    display: grid;
+  }
+}

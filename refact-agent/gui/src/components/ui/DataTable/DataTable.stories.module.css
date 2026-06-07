@@ -1,0 +1,24 @@
+.stack {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-5);
+  width: min(100%, 760px);
+}
+
+.narrow {
+  width: 320px;
+  min-width: 0;
+}
+
+.wideCell {
+  display: inline-block;
+  min-width: 260px;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-success);
+  font-weight: 650;
+}

@@ -4,6 +4,7 @@ export * from "./Badge";
 export { Button, ButtonGroup } from "./Button";
 export type { ButtonGroupProps, ButtonProps, ButtonSize, ButtonVariant } from "./Button";
 export * from "./Card";
+export * from "./DataTable";
 export * from "./Chip";
 export { Combobox } from "./Combobox";
 export type { ComboboxItemOption, ComboboxProps } from "./Combobox";
@@ -16,6 +17,7 @@ export type {
   DialogTitleProps,
   DialogTriggerProps,
 } from "./Dialog";
+export * from "./EditableTable";
 export * from "./EmptyState";
 export * from "./ErrorState";
 export * from "./Field";
@@ -87,5 +89,6 @@ export type {
   TooltipProps,
   TooltipTriggerProps,
 } from "./Tooltip";
+export * from "./VirtualList";
 export { useToken } from "./useToken";
 export { useTokens } from "./useTokens";

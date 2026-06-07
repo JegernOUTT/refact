@@ -1,0 +1,38 @@
+.root {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.virtuoso {
+  min-width: 0;
+  min-height: 0;
+}
+
+.item {
+  min-width: 0;
+  padding: var(--rf-space-2) 0;
+}
+
+.header,
+.footer {
+  min-width: 0;
+  padding: var(--rf-space-2) 0;
+  color: var(--rf-color-muted);
+  font: 550 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.empty {
+  display: grid;
+  min-width: 0;
+  min-height: 100%;
+  place-items: center;
+  padding: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
