@@ -1,13 +1,12 @@
 import React, { useCallback } from "react";
-import { Flex, Box, Text, Card, Heading, Tooltip } from "@radix-ui/themes";
 import classNames from "classnames";
-import { Badge } from "../../components/ui";
+import { FileText, Link2, User } from "lucide-react";
+import { Badge, Card, Icon } from "../../components/ui";
 import type {
   TaskBoard,
   BoardCard,
   BoardColumn,
 } from "../../services/refact/tasks";
-import { FileTextIcon, Link2Icon, PersonIcon } from "@radix-ui/react-icons";
 import { BranchIcon } from "../Worktrees/BranchIcon";
 import styles from "./Tasks.module.css";
 
@@ -32,12 +31,12 @@ function cardWorktreeLabel(card: BoardCard): string | null {
   return label ? compactWorktreeLabel(label) : null;
 }
 
-const columnColors: Record<string, string> = {
-  planned: "var(--rf-border-strong)",
-  doing: "var(--rf-color-accent)",
-  done: "var(--rf-color-success)",
-  failed: "var(--rf-color-danger)",
-};
+function columnToneClass(columnId: string): string {
+  if (columnId === "doing") return styles.kanbanColumnDoing;
+  if (columnId === "done") return styles.kanbanColumnDone;
+  if (columnId === "failed") return styles.kanbanColumnFailed;
+  return styles.kanbanColumnPlanned;
+}
 
 interface KanbanCardProps {
   card: BoardCard;
@@ -70,73 +69,63 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
 
   return (
     <Card
+      animated="rise"
       className={classNames(
         styles.kanbanCard,
         onClick && styles.kanbanCardClickable,
       )}
+      interactive={Boolean(onClick)}
       onClick={handleClick}
     >
-      <Flex direction="column" gap="2">
-        <Flex
-          justify="between"
-          align="center"
-          className={styles.kanbanCardTopRow}
-        >
+      <div className={styles.kanbanCardFrame}>
+        <div className={styles.kanbanCardTopRow}>
           <Badge tone="muted">{card.id}</Badge>
           <Badge tone={priorityTone(card.priority)}>{card.priority}</Badge>
-        </Flex>
+        </div>
 
-        <Text size="2" weight="medium" className={styles.kanbanCardTitle}>
-          {card.title}
-        </Text>
+        <span className={styles.kanbanCardTitle}>{card.title}</span>
 
-        <Flex gap="1" wrap="wrap" className={styles.kanbanCardBadges}>
+        <div className={styles.kanbanCardBadges}>
           {hasAgent && (
-            <Tooltip content={`Agent: ${card.assignee}`}>
-              <span>
-                <Badge tone="accent">
-                  {card.agent_chat_id ? (
-                    <button
-                      type="button"
-                      className={styles.agentBadgeButton}
-                      onClick={handleAgentClick}
-                    >
-                      <PersonIcon /> Agent
-                    </button>
-                  ) : (
-                    <span>
-                      <PersonIcon /> Agent
-                    </span>
-                  )}
-                </Badge>
-              </span>
-            </Tooltip>
+            <Badge tone="accent" title={`Agent: ${card.assignee}`}>
+              {card.agent_chat_id ? (
+                <button
+                  type="button"
+                  className={styles.agentBadgeButton}
+                  onClick={handleAgentClick}
+                >
+                  <Icon icon={User} size="sm" /> Agent
+                </button>
+              ) : (
+                <span className={styles.inlineBadgeContent}>
+                  <Icon icon={User} size="sm" /> Agent
+                </span>
+              )}
+            </Badge>
           )}
           {worktree && (
-            <Tooltip content={`Worktree: ${worktree}`}>
-              <span>
-                <Badge tone="success">
-                  <BranchIcon /> {worktree}
-                </Badge>
+            <Badge tone="success" title={`Worktree: ${worktree}`}>
+              <span className={styles.inlineBadgeContent}>
+                <BranchIcon /> {worktree}
               </span>
-            </Tooltip>
+            </Badge>
           )}
           {hasDeps && (
-            <Tooltip content={`Depends on: ${card.depends_on.join(", ")}`}>
-              <span>
-                <Badge tone="muted">
-                  <Link2Icon /> {card.depends_on.length}
-                </Badge>
+            <Badge tone="muted" title={`Depends on: ${card.depends_on.join(", ")}`}>
+              <span className={styles.inlineBadgeContent}>
+                <Icon icon={Link2} size="sm" /> {card.depends_on.length}
               </span>
-            </Tooltip>
+            </Badge>
           )}
           {card.status_updates.length > 0 && (
             <Badge tone="muted">
-              <FileTextIcon /> {card.status_updates.length}
+              <span className={styles.inlineBadgeContent}>
+                <Icon icon={FileText} size="sm" /> {card.status_updates.length}
+              </span>
             </Badge>
           )}
-        </Flex>
-      </Flex>
+        </div>
+      </div>
     </Card>
   );
 };
@@ -155,34 +144,24 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
   onAgentClick,
 }) => {
   return (
-    <Flex
-      direction="column"
-      className={styles.kanbanColumn}
-      style={{ borderTopColor: columnColors[column.id] || "var(--rf-border-strong)" }}
+    <section
+      className={classNames(styles.kanbanColumn, columnToneClass(column.id), "rf-enter", "rf-stagger")}
     >
-      <Flex
-        justify="between"
-        align="center"
-        className={styles.kanbanColumnHeader}
-      >
-        <Heading size="1">{column.title}</Heading>
-        <Badge tone="muted">
-          {cards.length}
-        </Badge>
-      </Flex>
-      <Box className={styles.kanbanColumnContent}>
-        <Flex direction="column" gap="1">
-          {cards.map((card) => (
-            <KanbanCard
-              key={card.id}
-              card={card}
-              onClick={onCardClick}
-              onAgentClick={onAgentClick}
-            />
-          ))}
-        </Flex>
-      </Box>
-    </Flex>
+      <header className={styles.kanbanColumnHeader}>
+        <h3 className={styles.kanbanColumnTitle}>{column.title}</h3>
+        <Badge tone="muted">{cards.length}</Badge>
+      </header>
+      <div className={styles.kanbanColumnContent}>
+        {cards.map((card) => (
+          <KanbanCard
+            key={card.id}
+            card={card}
+            onClick={onCardClick}
+            onAgentClick={onAgentClick}
+          />
+        ))}
+      </div>
+    </section>
   );
 };
 
@@ -205,7 +184,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   );
 
   return (
-    <Flex className={styles.kanbanBoard}>
+    <div className={styles.kanbanBoard}>
       {board.columns.map((column) => (
         <KanbanColumn
           key={column.id}
@@ -215,6 +194,6 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           onAgentClick={onAgentClick}
         />
       ))}
-    </Flex>
+    </div>
   );
 };

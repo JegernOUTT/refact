@@ -1,5 +1,5 @@
 .commentItem {
-  background: var(--gray-2);
+  background: var(--rf-surface-1);
   border-radius: var(--radius-2);
   padding: var(--space-2);
 }
@@ -10,6 +10,6 @@
 }
 
 .composer {
-  border-top: 1px solid var(--gray-a4);
+  border-top: 1px solid var(--rf-border);
   padding-top: var(--space-2);
 }

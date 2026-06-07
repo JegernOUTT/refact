@@ -15,9 +15,9 @@
 .filters {
   flex-shrink: 0;
   padding: var(--space-2);
-  border: 1px solid var(--gray-a5);
+  border: 1px solid var(--rf-border);
   border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  background: var(--rf-surface-1);
 }
 
 .filterControl {
@@ -33,16 +33,16 @@
 }
 
 .row {
-  border: 1px solid var(--gray-a5);
-  background: var(--color-background);
+  border: 1px solid var(--rf-border);
+  background: transparent;
   padding: var(--space-3);
   border-radius: var(--radius-3);
   cursor: pointer;
 }
 
 .rowPinned {
-  border-color: var(--amber-8);
-  box-shadow: 0 0 0 1px var(--amber-a7);
+  border-color: var(--rf-color-warning);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--rf-color-warning) 42%, transparent);
 }
 
 .rowHeader {
@@ -64,7 +64,7 @@
   margin-top: var(--space-2);
   padding: var(--space-2);
   border-radius: var(--radius-2);
-  background: var(--gray-a2);
+  background: var(--rf-surface-1);
   max-height: 320px;
   overflow: auto;
 }
@@ -97,9 +97,9 @@
   gap: var(--space-1);
   width: 100%;
   padding: var(--space-2);
-  border: 1px solid var(--gray-a5);
+  border: 1px solid var(--rf-border);
   border-radius: var(--radius-2);
-  background: var(--color-background);
+  background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
@@ -107,8 +107,8 @@
 
 .historyVersionButton:hover,
 .historyVersionButtonActive {
-  border-color: var(--accent-a7);
-  background: var(--accent-a3);
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
 }
 
 .historyContent {
@@ -118,7 +118,7 @@
   max-height: 420px;
   overflow: auto;
   padding: var(--space-3);
-  border: 1px solid var(--gray-a5);
+  border: 1px solid var(--rf-border);
   border-radius: var(--radius-3);
-  background: var(--gray-a2);
+  background: var(--rf-surface-1);
 }

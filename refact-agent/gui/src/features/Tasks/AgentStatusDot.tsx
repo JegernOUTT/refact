@@ -1,5 +1,5 @@
 import React from "react";
-import styles from "./Tasks.module.css";
+import { StatusDot } from "../../components/ui";
 
 interface AgentStatusDotProps {
   status: "doing" | "done" | "failed";
@@ -10,14 +10,14 @@ export const AgentStatusDot: React.FC<AgentStatusDotProps> = ({
   status,
   size = "medium",
 }) => {
-  const sizeClass =
-    size === "small" ? styles.agentDotSmall : styles.agentDotMedium;
-  const statusClass =
-    status === "doing"
-      ? styles.agentDotDoing
-      : status === "done"
-        ? styles.agentDotDone
-        : styles.agentDotFailed;
+  const dotStatus =
+    status === "doing" ? "running" : status === "done" ? "success" : "error";
 
-  return <div className={`${sizeClass} ${statusClass}`} />;
+  return (
+    <StatusDot
+      status={dotStatus}
+      size={size === "small" ? "small" : "medium"}
+      pulse={status !== "failed"}
+    />
+  );
 };
