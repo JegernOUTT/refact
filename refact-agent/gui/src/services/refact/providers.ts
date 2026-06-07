@@ -99,6 +99,36 @@ export type ProviderModelsResponse = {
   models: ProviderModel[];
 };
 
+export type CompletionProviderModelConfig = {
+  n_ctx?: number;
+  name?: string;
+  tokenizer?: string;
+  scratchpad?: string;
+  scratchpad_patch?: Record<string, unknown>;
+  model_family?: string | null;
+};
+
+export type EmbeddingProviderModelConfig = {
+  n_ctx?: number;
+  name?: string;
+  tokenizer?: string;
+  embedding_size?: number;
+  dimensions?: number;
+  query_prefix?: string;
+  document_prefix?: string;
+  rejection_threshold?: number;
+  embedding_batch?: number;
+};
+
+export type ProviderFormRoleSettings = Record<string, unknown> & {
+  completion_endpoint?: string;
+  completion_endpoint_style?: string;
+  completion_models?: Record<string, CompletionProviderModelConfig>;
+  embedding_endpoint?: string;
+  embedding_endpoint_style?: string;
+  embedding_model?: EmbeddingProviderModelConfig;
+};
+
 // Available models from model discovery (lazy loaded)
 export type AvailableModel = {
   id: string;

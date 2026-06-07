@@ -296,6 +296,8 @@ export type CodeCompletionModel = {
   id?: string;
   tokenizer?: string;
   completion_endpoint_style?: string;
+  scratchpad?: string;
+  scratchpad_patch?: Record<string, unknown>;
   model_family: string | null;
   type: "completion";
   enabled: boolean;

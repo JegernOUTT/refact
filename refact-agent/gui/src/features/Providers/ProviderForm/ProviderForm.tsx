@@ -3,6 +3,7 @@ import { Badge, Button, Card, Flex, Separator, Text } from "@radix-ui/themes";
 
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
+import { RoleSeparatedModelConfig } from "./RoleSeparatedModelConfig";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
@@ -615,6 +616,10 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
       </Flex>
 
       {hasCredentials && <ProviderModelsList provider={currentProvider} />}
+
+      {hasCredentials && baseProvider === "custom" && detailedProvider && (
+        <RoleSeparatedModelConfig provider={detailedProvider} />
+      )}
 
       {hasCredentials && <ProviderDefaultModelsSetup />}
     </Flex>
