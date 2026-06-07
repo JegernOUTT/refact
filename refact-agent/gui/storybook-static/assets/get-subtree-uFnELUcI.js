@@ -1,1 +1,0 @@
-import{r as o}from"./index-CBqU2yxZ.js";function l(c,n){const{asChild:i,children:r}=c;if(!i)return typeof n=="function"?n(r):n;const t=o.Children.only(r);return o.cloneElement(t,{children:typeof n=="function"?n(t.props.children):n})}export{l as d};

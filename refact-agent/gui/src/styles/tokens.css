@@ -24,11 +24,7 @@
   --rf-color-warning: #cda04e;
   --rf-color-danger: #d8736d;
   --rf-color-info: var(--rf-color-accent);
-  --rf-focus-ring: color-mix(
-    in oklab,
-    var(--rf-color-accent) 70%,
-    transparent
-  );
+  --rf-focus-ring: color-mix(in oklab, var(--rf-color-accent) 70%, transparent);
   --rf-radius-chip: 6px;
   --rf-radius-ctl: 8px;
   --rf-radius-card: 10px;
