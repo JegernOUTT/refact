@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use indexmap::IndexMap;
 
 use crate::caps::{
-    BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord,
+    BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord, DefaultModels,
     EmbeddingEndpointStyle, EmbeddingModelRecord, HasBaseModelRecord, strip_model_from_finetune,
 };
 use crate::custom_error::YamlError;
@@ -373,43 +373,16 @@ pub fn add_models_to_caps(
             continue;
         }
 
+        let mut inserted_chat_model = false;
+        let mut inserted_embedding_model = false;
+
         let completion_models = std::mem::take(&mut provider.completion_models);
         for (model_name, mut model_rec) in completion_models {
-            let style = if model_rec.base.completion_endpoint_style.is_empty() {
-                provider.effective_completion_endpoint_style()
-            } else {
-                model_rec.base.effective_completion_endpoint_style()
-            };
-            let Ok(style) = style else {
-                tracing::warn!(
-                    "Skipping completion model '{}/{}': invalid completion_endpoint_style",
-                    provider.name,
-                    model_name
-                );
-                continue;
-            };
-            if !style.is_supported() {
-                tracing::warn!(
-                    "Skipping completion model '{}/{}': completion_endpoint_style '{}' is not supported yet",
-                    provider.name,
-                    model_name,
-                    style
-                );
-                continue;
-            }
             let endpoint = if model_rec.base.endpoint.is_empty() {
                 provider.completion_endpoint.clone()
             } else {
                 model_rec.base.endpoint.clone()
             };
-            if endpoint.is_empty() {
-                tracing::warn!(
-                    "Skipping completion model '{}/{}': completion endpoint is not configured",
-                    provider.name,
-                    model_name
-                );
-                continue;
-            }
             model_rec.base.supports_cache_control =
                 model_rec.base.supports_cache_control && provider.supports_cache_control;
             add_provider_details_to_model(&mut model_rec.base, &provider, &model_name, &endpoint);
@@ -427,6 +400,10 @@ pub fn add_models_to_caps(
             {
                 model_rec.base.completion_endpoint_style =
                     provider.completion_endpoint_style.clone();
+            }
+
+            if !completion_model_is_selectable(&provider, &model_rec) {
+                continue;
             }
 
             caps.completion_models
@@ -448,53 +425,16 @@ pub fn add_models_to_caps(
 
             caps.chat_models
                 .insert(model_rec.base.id.clone(), Arc::new(model_rec));
+            inserted_chat_model = true;
         }
 
         if provider.embedding_model.is_configured() && provider.embedding_model.base.enabled {
             let mut embedding_model = std::mem::take(&mut provider.embedding_model);
-            let style = if embedding_model.base.embedding_endpoint_style.is_empty()
-                && embedding_model.base.endpoint_style.is_empty()
-            {
-                provider.effective_embedding_endpoint_style()
-            } else {
-                embedding_model.base.effective_embedding_endpoint_style()
-            };
-            let Ok(style) = style else {
-                tracing::warn!(
-                    "Skipping embedding model '{}/{}': invalid embedding_endpoint_style",
-                    provider.name,
-                    embedding_model.base.name
-                );
-                caps.defaults
-                    .apply_override(&provider.defaults(), Some(&provider.name));
-                continue;
-            };
-            if !style.is_supported() {
-                tracing::warn!(
-                    "Skipping embedding model '{}/{}': embedding_endpoint_style '{}' is not supported yet",
-                    provider.name,
-                    embedding_model.base.name,
-                    style
-                );
-                caps.defaults
-                    .apply_override(&provider.defaults(), Some(&provider.name));
-                continue;
-            }
             let endpoint = if embedding_model.base.endpoint.is_empty() {
                 provider.embedding_endpoint.clone()
             } else {
                 embedding_model.base.endpoint.clone()
             };
-            if endpoint.is_empty() && style != EmbeddingEndpointStyle::OllamaNative {
-                tracing::warn!(
-                    "Skipping embedding model '{}/{}': embedding endpoint is not configured",
-                    provider.name,
-                    embedding_model.base.name
-                );
-                caps.defaults
-                    .apply_override(&provider.defaults(), Some(&provider.name));
-                continue;
-            }
             embedding_model.base.supports_cache_control =
                 embedding_model.base.supports_cache_control && provider.supports_cache_control;
 
@@ -511,6 +451,15 @@ pub fn add_models_to_caps(
                 embedding_model.base.embedding_endpoint_style =
                     provider.embedding_endpoint_style.clone();
             }
+            if !embedding_model_is_selectable(&provider, &embedding_model) {
+                apply_provider_defaults_for_inserted_models(
+                    caps,
+                    &provider,
+                    inserted_chat_model,
+                    false,
+                );
+                continue;
+            }
             if provider.embedding_default_model.is_empty() {
                 tracing::info!(
                     "Embedding provider '{}' has no embedding_default_model; deterministic selection may use sorted fallback",
@@ -518,10 +467,15 @@ pub fn add_models_to_caps(
                 );
             }
             embedding_models.push(embedding_model.clone());
+            inserted_embedding_model = true;
         }
 
-        caps.defaults
-            .apply_override(&provider.defaults(), Some(&provider.name));
+        apply_provider_defaults_for_inserted_models(
+            caps,
+            &provider,
+            inserted_chat_model,
+            inserted_embedding_model,
+        );
     }
 
     select_embedding_model(caps, &embedding_models);
@@ -532,6 +486,7 @@ pub fn add_models_to_caps(
 fn select_embedding_model(caps: &mut CodeAssistantCaps, embedding_models: &[EmbeddingModelRecord]) {
     if embedding_models.is_empty() {
         caps.embedding_model = EmbeddingModelRecord::default();
+        caps.defaults.embedding_default_model.clear();
         return;
     }
 
@@ -564,6 +519,135 @@ fn select_embedding_model(caps: &mut CodeAssistantCaps, embedding_models: &[Embe
         );
         caps.embedding_model = (*model).clone();
         caps.defaults.embedding_default_model = model.base.id.clone();
+    }
+}
+
+fn completion_model_is_selectable(provider: &CapsProvider, model: &CompletionModelRecord) -> bool {
+    let Ok(style) = model.base.effective_completion_endpoint_style() else {
+        tracing::warn!(
+            "Skipping completion model '{}' for provider '{}' because completion_endpoint_style is invalid",
+            model.base.id,
+            provider.name
+        );
+        return false;
+    };
+    if !style.is_supported() {
+        tracing::warn!(
+            "Skipping completion model '{}' for provider '{}' because completion_endpoint_style '{}' is not supported",
+            model.base.id,
+            provider.name,
+            style
+        );
+        return false;
+    }
+    if !endpoint_is_selectable(&model.base.endpoint) {
+        tracing::warn!(
+            "Skipping completion model '{}' for provider '{}' because completion endpoint is invalid",
+            model.base.id,
+            provider.name
+        );
+        return false;
+    }
+    true
+}
+
+fn embedding_model_is_selectable(provider: &CapsProvider, model: &EmbeddingModelRecord) -> bool {
+    let Ok(style) = model.base.effective_embedding_endpoint_style() else {
+        tracing::warn!(
+            "Skipping embedding model '{}' for provider '{}' because embedding_endpoint_style is invalid",
+            model.base.id,
+            provider.name
+        );
+        return false;
+    };
+    if !style.is_supported() {
+        tracing::warn!(
+            "Skipping embedding model '{}' for provider '{}' because embedding_endpoint_style '{}' is not supported",
+            model.base.id,
+            provider.name,
+            style
+        );
+        return false;
+    }
+    if model.base.endpoint.trim().is_empty() && style != EmbeddingEndpointStyle::OllamaNative {
+        tracing::warn!(
+            "Skipping embedding model '{}' for provider '{}' because embedding endpoint is invalid",
+            model.base.id,
+            provider.name
+        );
+        return false;
+    }
+    if !model.base.endpoint.trim().is_empty() && !endpoint_is_selectable(&model.base.endpoint) {
+        tracing::warn!(
+            "Skipping embedding model '{}' for provider '{}' because embedding endpoint is invalid",
+            model.base.id,
+            provider.name
+        );
+        return false;
+    }
+    true
+}
+
+fn endpoint_is_selectable(endpoint: &str) -> bool {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return false;
+    }
+    url::Url::parse(endpoint)
+        .map(|url| matches!(url.scheme(), "http" | "https"))
+        .unwrap_or(false)
+}
+
+fn apply_provider_defaults_for_inserted_models(
+    caps: &mut CodeAssistantCaps,
+    provider: &CapsProvider,
+    inserted_chat_model: bool,
+    inserted_embedding_model: bool,
+) {
+    let provider_defaults = provider.defaults();
+    let mut role_defaults = DefaultModels {
+        chat_default_model: provider_defaults.chat_default_model,
+        chat_model_2: provider_defaults.chat_model_2,
+        task_planner_agent_model: provider_defaults.task_planner_agent_model,
+        chat_thinking_model: provider_defaults.chat_thinking_model,
+        chat_light_model: provider_defaults.chat_light_model,
+        chat_buddy_model: provider_defaults.chat_buddy_model,
+        ..Default::default()
+    };
+
+    if !inserted_chat_model {
+        role_defaults.chat_default_model.clear();
+        role_defaults.chat_model_2.clear();
+        role_defaults.task_planner_agent_model.clear();
+        role_defaults.chat_thinking_model.clear();
+        role_defaults.chat_light_model.clear();
+        role_defaults.chat_buddy_model.clear();
+    }
+
+    if !provider_defaults.completion_default_model.is_empty() {
+        let qualified_completion_default =
+            qualify_model_for_provider(&provider_defaults.completion_default_model, &provider.name);
+        if caps
+            .completion_models
+            .contains_key(&qualified_completion_default)
+        {
+            role_defaults.completion_default_model = provider_defaults.completion_default_model;
+        }
+    }
+
+    if inserted_embedding_model && !provider_defaults.embedding_default_model.is_empty() {
+        role_defaults.embedding_default_model = provider_defaults.embedding_default_model;
+    }
+
+    caps.defaults
+        .apply_override(&role_defaults, Some(&provider.name));
+}
+
+fn qualify_model_for_provider(model: &str, provider: &str) -> String {
+    if model.is_empty() || model.starts_with(&format!("{provider}/")) {
+        model.to_string()
+    } else {
+        format!("{provider}/{model}")
     }
 }
 

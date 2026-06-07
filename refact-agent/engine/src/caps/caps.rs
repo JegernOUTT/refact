@@ -900,9 +900,35 @@ pub async fn load_caps(
         }
     }
 
+    sanitize_role_defaults(&mut caps);
     validate_default_models(&caps)?;
 
     Ok(Arc::new(caps))
+}
+
+fn sanitize_role_defaults(caps: &mut CodeAssistantCaps) {
+    if !caps.defaults.completion_default_model.is_empty()
+        && !caps
+            .completion_models
+            .contains_key(&caps.defaults.completion_default_model)
+    {
+        warn!(
+            "Completion default model '{}' was reset to none because it is not in completion_models",
+            caps.defaults.completion_default_model
+        );
+        caps.defaults.completion_default_model.clear();
+    }
+
+    if !caps.embedding_model.base.id.is_empty()
+        && (is_legacy_refact_model(&caps.embedding_model.base.id)
+            || is_legacy_refact_model(&caps.embedding_model.base.name))
+    {
+        warn!(
+            "Embedding model '{}' was reset to none because it is legacy or unavailable",
+            caps.embedding_model.base.id
+        );
+        caps.embedding_model = EmbeddingModelRecord::default();
+    }
 }
 
 fn validate_default_models(caps: &CodeAssistantCaps) -> Result<(), String> {
@@ -1289,6 +1315,54 @@ mod tests {
         );
         assert_eq!(target.base.id, "openai_2/text-embedding-3-small");
         assert_eq!(target.embedding_size, 3072);
+    }
+
+    #[test]
+    fn sanitize_role_defaults_clears_missing_completion_default() {
+        let mut caps = CodeAssistantCaps::default();
+        caps.defaults.completion_default_model = "custom/missing".to_string();
+
+        sanitize_role_defaults(&mut caps);
+
+        assert!(caps.defaults.completion_default_model.is_empty());
+    }
+
+    #[test]
+    fn sanitize_role_defaults_preserves_existing_completion_default() {
+        let mut caps = CodeAssistantCaps::default();
+        caps.completion_models.insert(
+            "custom/coder".to_string(),
+            Arc::new(CompletionModelRecord {
+                base: BaseModelRecord {
+                    id: "custom/coder".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        caps.defaults.completion_default_model = "custom/coder".to_string();
+
+        sanitize_role_defaults(&mut caps);
+
+        assert_eq!(caps.defaults.completion_default_model, "custom/coder");
+    }
+
+    #[test]
+    fn sanitize_role_defaults_clears_legacy_embedding_model() {
+        let mut caps = CodeAssistantCaps::default();
+        caps.embedding_model = EmbeddingModelRecord {
+            base: BaseModelRecord {
+                id: "refact/legacy-embed".to_string(),
+                name: "legacy-embed".to_string(),
+                ..Default::default()
+            },
+            embedding_size: 768,
+            ..Default::default()
+        };
+
+        sanitize_role_defaults(&mut caps);
+
+        assert!(caps.embedding_model.base.id.is_empty());
     }
 
     #[tokio::test]
