@@ -13,7 +13,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { useGetStatsSummaryQuery } from "../../../services/refact/stats";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
-import { useAppearance } from "../../../hooks";
+import { useTokens } from "../../../components/ui";
 import {
   formatTokenCount,
   formatCostDisplay,
@@ -34,6 +34,29 @@ echarts.use([
 ]);
 
 type Props = { dateRange: DateRange };
+
+const CHART_TOKEN_NAMES = [
+  "--rf-color-fg",
+  "--rf-color-muted",
+  "--rf-color-faint",
+  "--rf-border-strong",
+  "--rf-surface-overlay",
+  "--rf-color-accent",
+  "--rf-color-info",
+  "--rf-color-warning",
+  "--rf-color-danger",
+  "--rf-color-success",
+  "--accent-10",
+  "--cyan-9",
+  "--purple-9",
+] as const;
+
+const chartToken = (
+  tokens: Record<string, string>,
+  name: (typeof CHART_TOKEN_NAMES)[number],
+  fallback: string,
+): string => tokens[name] || fallback;
+
 
 type SortKey =
   | "total_calls"
@@ -69,43 +92,29 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
   const { data, isLoading, isError } = useGetStatsSummaryQuery(
     dateRangeToApiArgs(dateRange),
   );
-  const { isDarkMode } = useAppearance();
+  const chartTokens = useTokens([...CHART_TOKEN_NAMES]);
 
-  const theme = isDarkMode
-    ? {
-        text: "#ededef",
-        textMuted: "#a0a0a3",
-        axisLine: "#a0a0a3",
-        splitLine: "#2e2e32",
-        tooltip: { bg: "#1c1c1e", border: "#3a3a3c", text: "#ededef" },
-        palette: [
-          "#3e63dd",
-          "#7c66dc",
-          "#e5c07b",
-          "#e06c75",
-          "#56b6c2",
-          "#d19a66",
-          "#98c379",
-          "#c678dd",
-        ],
-      }
-    : {
-        text: "#1c2024",
-        textMuted: "#60646c",
-        axisLine: "#60646c",
-        splitLine: "#e0e0e2",
-        tooltip: { bg: "#ffffff", border: "#d0d0d2", text: "#1c2024" },
-        palette: [
-          "#3e63dd",
-          "#7c66dc",
-          "#e5c07b",
-          "#e06c75",
-          "#56b6c2",
-          "#d19a66",
-          "#98c379",
-          "#c678dd",
-        ],
-      };
+  const theme = {
+    text: chartToken(chartTokens, "--rf-color-fg", "currentColor"),
+    textMuted: chartToken(chartTokens, "--rf-color-muted", "currentColor"),
+    axisLine: chartToken(chartTokens, "--rf-color-faint", "currentColor"),
+    splitLine: chartToken(chartTokens, "--rf-border-strong", "currentColor"),
+    tooltip: {
+      bg: chartToken(chartTokens, "--rf-surface-overlay", "Canvas"),
+      border: chartToken(chartTokens, "--rf-border-strong", "currentColor"),
+      text: chartToken(chartTokens, "--rf-color-fg", "CanvasText"),
+    },
+    palette: [
+      chartToken(chartTokens, "--rf-color-accent", "currentColor"),
+      chartToken(chartTokens, "--accent-10", "currentColor"),
+      chartToken(chartTokens, "--rf-color-warning", "currentColor"),
+      chartToken(chartTokens, "--rf-color-danger", "currentColor"),
+      chartToken(chartTokens, "--cyan-9", "currentColor"),
+      chartToken(chartTokens, "--rf-color-info", "currentColor"),
+      chartToken(chartTokens, "--rf-color-success", "currentColor"),
+      chartToken(chartTokens, "--purple-9", "currentColor"),
+    ],
+  };
 
   const [modelSort, setModelSort] = useState<{ key: SortKey; asc: boolean }>({
     key: "total_tokens",

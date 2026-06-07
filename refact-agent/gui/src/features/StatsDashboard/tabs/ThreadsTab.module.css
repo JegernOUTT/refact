@@ -1,16 +1,16 @@
 .searchInput {
   width: 100%;
   max-width: 320px;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--gray-6);
-  border-radius: var(--radius-2);
-  background: var(--color-panel-solid);
-  color: var(--gray-12);
-  font-size: var(--font-size-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: 1px solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-overlay);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
 }
 
 .searchInput:focus {
-  outline: 2px solid var(--accent-8);
+  outline: 2px solid var(--rf-focus-ring);
   outline-offset: -1px;
 }
 
@@ -25,23 +25,23 @@
 
 .th {
   text-align: left;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-5);
-  color: var(--gray-11);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border-strong);
+  color: var(--rf-color-muted);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
 }
 
 .th:hover {
-  color: var(--accent-9);
+  color: var(--rf-color-accent);
 }
 
 .td {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-4);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
   white-space: nowrap;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .titleCell {
@@ -52,7 +52,7 @@
 }
 
 .emptyText {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .sortButton {

@@ -1,15 +1,15 @@
 .cardsRow {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
 }
 
 .emptyText {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .sectionTitle {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .tableWrapper {
@@ -23,17 +23,17 @@
 
 .th {
   text-align: left;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-5);
-  color: var(--gray-11);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border-strong);
+  color: var(--rf-color-muted);
   white-space: nowrap;
 }
 
 .td {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-4);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
   white-space: nowrap;
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .chatId {

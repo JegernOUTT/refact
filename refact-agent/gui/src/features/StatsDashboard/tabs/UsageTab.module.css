@@ -1,6 +1,6 @@
 .chartsRow {
   flex-wrap: wrap;
-  gap: var(--space-4);
+  gap: var(--rf-space-4);
 }
 
 .chartBox {
@@ -20,30 +20,30 @@
 
 .th {
   text-align: left;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-5);
-  color: var(--gray-11);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border-strong);
+  color: var(--rf-color-muted);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
 }
 
 .th:hover {
-  color: var(--accent-9);
+  color: var(--rf-color-accent);
 }
 
 .td {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--gray-4);
-  color: var(--gray-12);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
+  color: var(--rf-color-fg);
 }
 
 .emptyText {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
 
 .sectionTitle {
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
 }
 
 .sortButton {

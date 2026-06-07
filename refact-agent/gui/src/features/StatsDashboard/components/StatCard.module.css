@@ -2,15 +2,15 @@
 }
 
 .title {
-  color: var(--gray-10);
-  margin-bottom: var(--space-1);
+  color: var(--rf-color-muted);
+  margin-bottom: var(--rf-space-1);
 }
 
 .value {
   line-height: 1.1;
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--rf-space-1);
 }
 
 .subtitle {
-  color: var(--gray-9);
+  color: var(--rf-color-faint);
 }

@@ -34,17 +34,17 @@ const UsageBar: React.FC<{ pct: number }> = ({ pct }) => {
   const clamped = Math.max(0, Math.min(pct, 100));
   const color =
     clamped >= 90
-      ? "var(--red-9)"
+      ? "var(--rf-color-danger)"
       : clamped >= 70
-        ? "var(--orange-9)"
-        : "var(--green-9)";
+        ? "var(--rf-color-warning)"
+        : "var(--rf-color-success)";
   return (
     <div
       style={{
         height: "4px",
         width: "100%",
         borderRadius: "2px",
-        background: "var(--gray-a4)",
+        background: "var(--rf-surface-3)",
         overflow: "hidden",
         marginTop: "4px",
       }}
@@ -77,10 +77,10 @@ const ClaudeCodeInstanceCard: React.FC<{
     <Box
       style={{
         flex: "1 1 200px",
-        minWidth: "180px",
-        background: "var(--gray-a2)",
-        borderRadius: "var(--radius-3)",
-        padding: "var(--space-3)",
+        minWidth: 0,
+        background: "var(--rf-surface-1)",
+        borderRadius: "var(--rf-radius-card)",
+        padding: "var(--rf-space-3)",
       }}
     >
       <Flex align="center" gap="2" mb="2">
@@ -159,10 +159,10 @@ const OpenAICodexInstanceCard: React.FC<{
     <Box
       style={{
         flex: "1 1 200px",
-        minWidth: "180px",
-        background: "var(--gray-a2)",
-        borderRadius: "var(--radius-3)",
-        padding: "var(--space-3)",
+        minWidth: 0,
+        background: "var(--rf-surface-1)",
+        borderRadius: "var(--rf-radius-card)",
+        padding: "var(--rf-space-3)",
       }}
     >
       <Flex align="center" gap="2" mb="2">

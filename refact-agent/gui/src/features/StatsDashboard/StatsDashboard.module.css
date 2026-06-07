@@ -10,7 +10,7 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-top: var(--space-3);
+  padding-top: var(--rf-space-3);
 }
 
 .presetButton {
@@ -22,5 +22,5 @@
 }
 
 .placeholderText {
-  color: var(--gray-10);
+  color: var(--rf-color-muted);
 }
