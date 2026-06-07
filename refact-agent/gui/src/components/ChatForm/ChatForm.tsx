@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 
-import { Flex, Box, Text } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
 
 const TEXT_FILE_EXTENSIONS = new Set([
@@ -163,6 +163,13 @@ import { useUsageCounter } from "../UsageCounter/useUsageCounter";
 import { ChatInputTopControls } from "./ChatInputTopControls";
 
 import classNames from "classnames";
+type ComposerHelpProps = {
+  children: React.ReactNode;
+};
+
+const ComposerHelp: React.FC<ComposerHelpProps> = ({ children }) => (
+  <div className={styles.helpText}>{children}</div>
+);
 
 export type SendPolicy = "immediate" | "after_flow";
 
@@ -614,11 +621,11 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   }
 
   return (
-    <Box
+    <div
       ref={composerRef}
+      className={styles.composerRoot}
       onBlur={handleComposerBlur}
       onFocusCapture={handleComposerFocusCapture}
-      style={{ flexShrink: 0, position: "relative" }}
     >
       {!globalError && !chatError && information && (
         <InformationCallout
@@ -636,19 +643,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         </Callout>
       )}
 
-      <Flex
-        style={{
-          flexDirection: "column",
-          alignSelf: "stretch",
-          flex: 1,
-          width: "100%",
-        }}
-      >
-        {helpInfo && (
-          <Flex mb="3" direction="column">
-            {helpInfo}
-          </Flex>
-        )}
+      <div className={styles.composerStack}>
+        {helpInfo && <ComposerHelp>{helpInfo}</ComposerHelp>}
         <Form
           disabled={disableSend}
           className={classNames(
@@ -668,13 +664,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           onPointerDownCapture={handleComposerPointerDownCapture}
           onSubmit={() => handleSubmit("after_flow")}
         >
-          <Box
+          <div
             className={styles.expandedComposerContent}
             onFocus={() => setIsComposerExpanded(true)}
           >
-            <Box className={styles.expandedComposerContentInner}>
-              <Box className={styles.textareaWrapper}>
-                <Box className={styles.inputHeader}>
+            <div className={styles.expandedComposerContentInner}>
+              <div className={styles.textareaWrapper}>
+                <div className={styles.inputHeader}>
                   <UnifiedAttachmentsTray
                     attachedFiles={attachedFiles}
                     previewFiles={previewFiles}
@@ -722,7 +718,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       </span>
                     </Flex>
                   </Flex>
-                </Box>
+                </div>
 
                 <ComboBox
                   key={inputResetKey}
@@ -753,14 +749,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                       onOpenFile={queryPathThenOpenFile}
                       autoFocus={isComposerExpanded && autoFocus}
                       readOnly={isVoiceActive}
-                      style={{ boxShadow: "none", outline: "none" }}
                       onPaste={handlePastingFile}
                     />
                   )}
                 />
-              </Box>
-            </Box>
-          </Box>
+              </div>
+            </div>
+          </div>
           <Flex
             gap="2"
             wrap="nowrap"
@@ -868,7 +863,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             </Flex>
           </Flex>
         </Form>
-      </Flex>
-    </Box>
+      </div>
+    </div>
   );
 };

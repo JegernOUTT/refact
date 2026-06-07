@@ -1,185 +1,141 @@
 .tile {
   position: relative;
+  display: flex;
   width: 56px;
   height: 56px;
-  border-radius: var(--radius-2);
-  overflow: hidden;
   flex-shrink: 0;
-  display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
   transition:
-    background 0.15s,
-    box-shadow 0.15s;
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .tile:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: 1px;
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
-.imageThumbnail {
+.imageThumbnail,
+.previewImage {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.imageTrigger {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.imageThumbnail {
   cursor: zoom-in;
 }
 
-.fileTile {
-  background: var(--gray-a3);
-  padding: var(--space-1);
-  gap: 2px;
+.previewImage {
+  object-fit: contain;
 }
 
-.fileTile:hover {
-  background: var(--gray-a4);
+.fileTile,
+.plainTextTile {
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1);
+  background: var(--rf-surface-1);
+}
+
+.fileTile:hover,
+.plainTextTile:hover {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-2);
 }
 
 .fileTile[data-color="blue"] {
-  background: var(--blue-a3);
+  color: var(--rf-color-accent);
 }
-.fileTile[data-color="blue"]:hover {
-  background: var(--blue-a4);
-}
-
-.fileTile[data-color="orange"] {
-  background: var(--orange-a3);
-}
-.fileTile[data-color="orange"]:hover {
-  background: var(--orange-a4);
-}
-
+.fileTile[data-color="orange"],
 .fileTile[data-color="yellow"] {
-  background: var(--yellow-a3);
+  color: var(--rf-color-warning);
 }
-.fileTile[data-color="yellow"]:hover {
-  background: var(--yellow-a4);
-}
-
-.fileTile[data-color="purple"] {
-  background: var(--purple-a3);
-}
-.fileTile[data-color="purple"]:hover {
-  background: var(--purple-a4);
-}
-
+.fileTile[data-color="red"],
 .fileTile[data-color="pink"] {
-  background: var(--pink-a3);
+  color: var(--rf-color-danger);
 }
-.fileTile[data-color="pink"]:hover {
-  background: var(--pink-a4);
-}
-
-.fileTile[data-color="red"] {
-  background: var(--red-a3);
-}
-.fileTile[data-color="red"]:hover {
-  background: var(--red-a4);
-}
-
-.fileTile[data-color="cyan"] {
-  background: var(--cyan-a3);
-}
-.fileTile[data-color="cyan"]:hover {
-  background: var(--cyan-a4);
-}
-
 .fileTile[data-color="green"] {
-  background: var(--green-a3);
+  color: var(--rf-color-success);
 }
-.fileTile[data-color="green"]:hover {
-  background: var(--green-a4);
-}
-
-.plainTextTile {
-  background: var(--gray-a3);
-  padding: var(--space-1);
-  gap: 2px;
-}
-
-.plainTextTile:hover {
-  background: var(--gray-a4);
+.fileTile[data-color="purple"],
+.fileTile[data-color="cyan"],
+.fileTile[data-color="gray"] {
+  color: var(--rf-color-muted);
 }
 
 .extensionBadge {
+  color: currentColor;
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 650;
+  line-height: var(--rf-line-tight);
   text-transform: uppercase;
-  color: var(--gray-12);
-  line-height: 1;
-}
-
-.extensionBadge[data-color="blue"] {
-  color: var(--blue-11);
-}
-.extensionBadge[data-color="orange"] {
-  color: var(--orange-11);
-}
-.extensionBadge[data-color="yellow"] {
-  color: var(--yellow-11);
-}
-.extensionBadge[data-color="purple"] {
-  color: var(--purple-11);
-}
-.extensionBadge[data-color="pink"] {
-  color: var(--pink-11);
-}
-.extensionBadge[data-color="red"] {
-  color: var(--red-11);
-}
-.extensionBadge[data-color="cyan"] {
-  color: var(--cyan-11);
-}
-.extensionBadge[data-color="green"] {
-  color: var(--green-11);
 }
 
 .filename {
-  font-size: 9px;
-  color: var(--gray-11);
-  text-align: center;
+  max-width: 100%;
   overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: 9px;
+  line-height: 1.2;
+  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
-  line-height: 1.2;
 }
 
 .subtitle {
+  color: var(--rf-color-faint);
   font-size: 8px;
-  color: var(--gray-10);
-  line-height: 1;
+  line-height: var(--rf-line-tight);
+}
+
+.removeButton,
+.copyButton {
+  position: absolute;
+  width: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  opacity: 0;
+  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .removeButton {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 14px;
-  height: 14px;
-  min-width: 14px;
-  min-height: 14px;
-  padding: 0;
-  opacity: 0;
-  transition: opacity 0.15s ease;
+  top: var(--rf-space-1);
+  right: var(--rf-space-1);
 }
 
 .copyButton {
-  position: absolute;
-  bottom: 2px;
-  right: 2px;
-  width: 14px;
-  height: 14px;
-  min-width: 14px;
-  min-height: 14px;
-  padding: 0;
-  opacity: 0;
-  transition: opacity 0.15s ease;
+  right: var(--rf-space-1);
+  bottom: var(--rf-space-1);
 }
 
 .tile:hover .removeButton,
-.tile:hover .copyButton {
+.tile:hover .copyButton,
+.tile:focus-within .removeButton,
+.tile:focus-within .copyButton {
   opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile,
+  .removeButton,
+  .copyButton {
+    transition: none;
+  }
 }

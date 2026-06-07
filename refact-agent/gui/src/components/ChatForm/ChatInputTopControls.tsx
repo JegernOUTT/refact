@@ -1,16 +1,14 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, HoverCard } from "@radix-ui/themes";
-import {
-  InfoCircledIcon,
-  LockClosedIcon,
-  LockOpen1Icon,
-  QuestionMarkCircledIcon,
-  Pencil2Icon,
-  ExclamationTriangleIcon,
-  PlusIcon,
-} from "@radix-ui/react-icons";
-import styles from "./ChatInputTopControls.module.css";
 import classNames from "classnames";
+import {
+  CircleHelp,
+  Info,
+  Lock,
+  Pencil,
+  Plus,
+  TriangleAlert,
+  Unlock,
+} from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectAutoApproveEditingTools,
@@ -25,8 +23,10 @@ import {
 import { ProjectInformationDialog } from "./ProjectInformationDialog";
 import { selectHost } from "../../features/Config/configSlice";
 import { Checkbox } from "../Checkbox";
+import { Tooltip } from "../ui";
 import type { Checkbox as CheckboxType } from "./useCheckBoxes";
 import type { useAttachedFiles } from "./useCheckBoxes";
+import styles from "./ChatInputTopControls.module.css";
 
 export type ChatInputTopControlsProps = {
   checkboxes: Record<string, CheckboxType>;
@@ -76,10 +76,10 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
 
   return (
     <>
-      <Flex gap="1" align="center" wrap="wrap">
+      <div className={styles.controlsGroup}>
         <span className={styles.projectInfoControl}>
-          <HoverCard.Root>
-            <HoverCard.Trigger>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
               <button
                 type="button"
                 onClick={() => setDialogOpen(true)}
@@ -90,19 +90,17 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
                   includeProjectInfo && styles.active,
                 )}
               >
-                <InfoCircledIcon />
+                <Info />
               </button>
-            </HoverCard.Trigger>
-            <HoverCard.Content size="1" side="top">
-              <Text as="p" size="2">
-                Project info: {includeProjectInfo ? "ON" : "OFF"}
-              </Text>
-            </HoverCard.Content>
-          </HoverCard.Root>
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              Project info: {includeProjectInfo ? "ON" : "OFF"}
+            </Tooltip.Content>
+          </Tooltip>
         </span>
 
-        <HoverCard.Root>
-          <HoverCard.Trigger>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
             <button
               type="button"
               onClick={() => handleEditingChange(!autoApproveEditing)}
@@ -114,18 +112,16 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
                 autoApproveEditing && styles.active,
               )}
             >
-              <Pencil2Icon />
+              <Pencil />
             </button>
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            <Text as="p" size="2">
-              Auto-approve edits: {autoApproveEditing ? "ON" : "OFF"}
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            Auto-approve edits: {autoApproveEditing ? "ON" : "OFF"}
+          </Tooltip.Content>
+        </Tooltip>
 
-        <HoverCard.Root>
-          <HoverCard.Trigger>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
             <button
               type="button"
               onClick={() => handleDangerousChange(!autoApproveDangerous)}
@@ -137,20 +133,18 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
                 autoApproveDangerous && styles.danger,
               )}
             >
-              <ExclamationTriangleIcon />
+              <TriangleAlert />
             </button>
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            <Text as="p" size="2">
-              Auto-approve dangerous: {autoApproveDangerous ? "ON" : "OFF"}
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            Auto-approve dangerous: {autoApproveDangerous ? "ON" : "OFF"}
+          </Tooltip.Content>
+        </Tooltip>
 
         {showSelectedLines && (
           <>
             <span className={styles.divider}>|</span>
-            <Flex align="center" gap="1" className={styles.selectedLinesGroup}>
+            <div className={styles.selectedLinesGroup}>
               <Checkbox
                 size="1"
                 name={selectedLinesCheckbox.name}
@@ -160,7 +154,7 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
                   onCheckedChange(selectedLinesCheckbox.name, value)
                 }
               >
-                <Text size="1">{selectedLinesCheckbox.label}</Text>
+                <span>{selectedLinesCheckbox.label}</span>
               </Checkbox>
               <button
                 type="button"
@@ -176,36 +170,34 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
                   selectedLinesCheckbox.locked ? "Locked" : "Unlocked"
                 }
               >
-                {selectedLinesCheckbox.locked && <LockClosedIcon />}
-                {selectedLinesCheckbox.locked === false && <LockOpen1Icon />}
+                {selectedLinesCheckbox.locked ? <Lock /> : <Unlock />}
               </button>
               {selectedLinesCheckbox.info && (
-                <HoverCard.Root>
-                  <HoverCard.Trigger>
+                <Tooltip>
+                  <Tooltip.Trigger asChild>
                     <button
                       type="button"
                       className={styles.helpButton}
                       disabled={isDisabled}
+                      aria-label="Selected lines information"
                     >
-                      <QuestionMarkCircledIcon />
+                      <CircleHelp />
                     </button>
-                  </HoverCard.Trigger>
-                  <HoverCard.Content maxWidth="240px" size="1">
-                    <Text as="div" size="1">
-                      {selectedLinesCheckbox.info.text}
-                    </Text>
-                  </HoverCard.Content>
-                </HoverCard.Root>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content maxWidth="240px">
+                    {selectedLinesCheckbox.info.text}
+                  </Tooltip.Content>
+                </Tooltip>
               )}
-            </Flex>
+            </div>
           </>
         )}
 
         {showAttachButton && (
           <>
             <span className={styles.divider}>|</span>
-            <HoverCard.Root>
-              <HoverCard.Trigger>
+            <Tooltip>
+              <Tooltip.Trigger asChild>
                 <button
                   type="button"
                   onClick={attachedFiles.addFile}
@@ -216,18 +208,16 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
                     attachedFiles.attached && styles.active,
                   )}
                 >
-                  <PlusIcon />
+                  <Plus />
                 </button>
-              </HoverCard.Trigger>
-              <HoverCard.Content size="1" side="top">
-                <Text as="p" size="2">
-                  Attach: {attachedFiles.activeFile.name}
-                </Text>
-              </HoverCard.Content>
-            </HoverCard.Root>
+              </Tooltip.Trigger>
+              <Tooltip.Content>
+                Attach: {attachedFiles.activeFile.name}
+              </Tooltip.Content>
+            </Tooltip>
           </>
         )}
-      </Flex>
+      </div>
 
       <ProjectInformationDialog
         open={dialogOpen}

@@ -1,12 +1,12 @@
-import React, { createContext, useCallback } from "react";
-import { Button, Slot, Flex, HoverCard, Text } from "@radix-ui/themes";
-import { Cross1Icon, ImageIcon } from "@radix-ui/react-icons";
-import styles from "./Dropzone.module.css";
+import React, { createContext, isValidElement, useCallback } from "react";
+import { Image, X } from "lucide-react";
 import { DropzoneInputProps, FileRejection, useDropzone } from "react-dropzone";
-import { useAttachedImages } from "../../hooks/useAttachedImages";
-import { TruncateLeft } from "../Text";
 import { useCapsForToolUse } from "../../hooks";
+import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { useAttachedFiles } from "../ChatForm/useCheckBoxes";
+import { TruncateLeft } from "../Text";
+import { Button, Icon, IconButton, Tooltip } from "../ui";
+import styles from "./Dropzone.module.css";
 
 export const FileUploadContext = createContext<{
   open: () => void;
@@ -63,7 +63,6 @@ export const DropzoneProvider: React.FC<
     ],
   );
 
-  // TODO: disable when chat is busy
   const dropzone = useDropzone({
     disabled: false,
     noClick: true,
@@ -71,7 +70,20 @@ export const DropzoneProvider: React.FC<
     onDrop,
   });
 
-  const Comp = asChild ? Slot : "div";
+  const rootProps = dropzone.getRootProps();
+  const children = props.children;
+  const root =
+    asChild && isValidElement<{ className?: string }>(children) ? (
+      React.cloneElement(children, {
+        ...rootProps,
+        ...children.props,
+        className: [rootProps.className, children.props.className]
+          .filter(Boolean)
+          .join(" "),
+      })
+    ) : (
+      <div {...rootProps} {...props} />
+    );
 
   return (
     <FileUploadContext.Provider
@@ -80,7 +92,7 @@ export const DropzoneProvider: React.FC<
         getInputProps: dropzone.getInputProps,
       }}
     >
-      <Comp {...dropzone.getRootProps()} {...props} />
+      {root}
     </FileUploadContext.Provider>
   );
 };
@@ -99,33 +111,29 @@ export const AttachImagesButton = () => {
     },
     [],
   );
+
   return (
     <DropzoneConsumer>
       {({ open, getInputProps }) => {
         const inputProps = getInputProps();
         return (
           <>
-            <input {...inputProps} style={{ display: "none" }} />
-            <HoverCard.Root>
-              <HoverCard.Trigger>
-                <button
-                  type="button"
-                  className={styles.iconButton}
+            <input {...inputProps} className={styles.hiddenInput} />
+            <Tooltip>
+              <Tooltip.Trigger asChild>
+                <IconButton
+                  aria-label="Attach images"
                   disabled={inputProps.disabled}
+                  icon={Image}
+                  size="sm"
+                  variant="plain"
                   onClick={(event) => {
                     attachFileOnClick(event, open);
                   }}
-                  aria-label="Attach images"
-                >
-                  <ImageIcon />
-                </button>
-              </HoverCard.Trigger>
-              <HoverCard.Content size="1" side="top">
-                <Text as="p" size="2">
-                  Attach images
-                </Text>
-              </HoverCard.Content>
-            </HoverCard.Root>
+                />
+              </Tooltip.Trigger>
+              <Tooltip.Content>Attach images</Tooltip.Content>
+            </Tooltip>
           </>
         );
       }}
@@ -136,11 +144,12 @@ export const AttachImagesButton = () => {
 type FileListProps = {
   attachedFiles: ReturnType<typeof useAttachedFiles>;
 };
+
 export const FileList: React.FC<FileListProps> = ({ attachedFiles }) => {
   const { images, removeImage } = useAttachedImages();
   if (images.length === 0 && attachedFiles.files.length === 0) return null;
   return (
-    <Flex wrap="wrap" gap="1" data-testid="attached_file_list">
+    <div className={styles.fileList} data-testid="attached_file_list">
       {images.map((file, index) => {
         const key = `image-${file.name}-${index}`;
         return (
@@ -161,7 +170,7 @@ export const FileList: React.FC<FileListProps> = ({ attachedFiles }) => {
           />
         );
       })}
-    </Flex>
+    </div>
   );
 };
 
@@ -171,15 +180,14 @@ const FileButton: React.FC<{ fileName: string; onClick: () => void }> = ({
 }) => {
   return (
     <Button
+      className={styles.fileChip}
+      size="sm"
       type="button"
       variant="soft"
-      radius="full"
-      size="1"
       onClick={onClick}
-      style={{ maxWidth: "100%" }}
     >
-      <TruncateLeft wrap="wrap">{fileName}</TruncateLeft>{" "}
-      <Cross1Icon width="10" style={{ flexShrink: 0 }} />
+      <TruncateLeft wrap="wrap">{fileName}</TruncateLeft>
+      <Icon className={styles.fileChipIcon} icon={X} size="sm" tone="muted" />
     </Button>
   );
 };

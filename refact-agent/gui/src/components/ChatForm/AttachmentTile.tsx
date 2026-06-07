@@ -1,6 +1,6 @@
-import React, { useCallback, useState, useEffect } from "react";
-import { Box, Text, IconButton, Dialog, Tooltip } from "@radix-ui/themes";
-import { Cross1Icon, CopyIcon, CheckIcon } from "@radix-ui/react-icons";
+import React, { useCallback, useEffect, useState } from "react";
+import { Check, Copy, X } from "lucide-react";
+import { Dialog, IconButton, Tooltip } from "../ui";
 import styles from "./AttachmentTile.module.css";
 
 const isMac =
@@ -9,29 +9,25 @@ const isMac =
 const copyShortcut = isMac ? "⌘C" : "Ctrl+C";
 
 async function copyToClipboard(text: string): Promise<boolean> {
-  // Try modern clipboard API first
   try {
     await navigator.clipboard.writeText(text);
     return true;
   } catch {
-    // Fall through to fallback
-  }
-
-  // Fallback for iframes and older browsers
-  try {
-    const textArea = document.createElement("textarea");
-    textArea.value = text;
-    textArea.style.position = "fixed";
-    textArea.style.left = "-9999px";
-    textArea.style.top = "-9999px";
-    document.body.appendChild(textArea);
-    textArea.focus();
-    textArea.select();
-    const success = document.execCommand("copy");
-    document.body.removeChild(textArea);
-    return success;
-  } catch {
-    return false;
+    try {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      textArea.style.top = "-9999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      const success = document.execCommand("copy");
+      document.body.removeChild(textArea);
+      return success;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -142,40 +138,41 @@ const ImageTile: React.FC<{
   onRemove?: () => void;
 }> = ({ src, name, onRemove }) => {
   return (
-    <Box className={styles.tile}>
-      <Dialog.Root>
-        <Dialog.Trigger>
-          <img
-            src={src}
-            alt={name}
-            className={styles.imageThumbnail}
-            title={name}
-          />
+    <div className={`${styles.tile} rf-enter`}>
+      <Dialog>
+        <Dialog.Trigger asChild>
+          <button
+            aria-label={`Preview ${name}`}
+            className={styles.imageTrigger}
+            type="button"
+          >
+            <img
+              src={src}
+              alt={name}
+              className={styles.imageThumbnail}
+              title={name}
+            />
+          </button>
         </Dialog.Trigger>
         <Dialog.Content maxWidth="800px">
-          <img
-            style={{ objectFit: "contain", width: "100%" }}
-            src={src}
-            alt={name}
-          />
+          <img className={styles.previewImage} src={src} alt={name} />
         </Dialog.Content>
-      </Dialog.Root>
+      </Dialog>
       {onRemove && (
         <IconButton
-          type="button"
-          size="1"
-          variant="solid"
-          color="gray"
+          aria-label="Remove image"
           className={styles.removeButton}
+          icon={X}
+          size="sm"
+          type="button"
+          variant="soft"
           onClick={(e) => {
             e.stopPropagation();
             onRemove();
           }}
-        >
-          <Cross1Icon width={10} height={10} />
-        </IconButton>
+        />
       )}
-    </Box>
+    </div>
   );
 };
 
@@ -230,54 +227,47 @@ const FileTile: React.FC<{
   }, [onOpen]);
 
   return (
-    <Tooltip content={`${copyShortcut} to copy path`}>
-      <Box
-        className={`${styles.tile} ${styles.fileTile}`}
-        data-color={colorKey}
-        tabIndex={0}
-        onKeyDown={handleKeyDown}
-        onClick={handleClick}
-        title={`${name}${subtitle ? ` ${subtitle}` : ""}`}
-        role="button"
-        aria-label={`File: ${name}${subtitle ? ` ${subtitle}` : ""}`}
-      >
-        <Text className={styles.extensionBadge} data-color={colorKey}>
-          .{ext}
-        </Text>
-        <Text className={styles.filename}>{displayName}</Text>
-        {subtitle && <Text className={styles.subtitle}>{subtitle}</Text>}
-        <IconButton
-          type="button"
-          size="1"
-          variant="ghost"
-          color={copied ? "green" : "gray"}
-          className={styles.copyButton}
-          onClick={(e) => void handleCopy(e)}
-          aria-label={copied ? "Copied!" : "Copy path"}
+    <Tooltip>
+      <Tooltip.Trigger asChild>
+        <div
+          className={`${styles.tile} ${styles.fileTile} rf-enter`}
+          data-color={colorKey}
+          tabIndex={0}
+          onKeyDown={handleKeyDown}
+          onClick={handleClick}
+          title={`${name}${subtitle ? ` ${subtitle}` : ""}`}
+          role="button"
+          aria-label={`File: ${name}${subtitle ? ` ${subtitle}` : ""}`}
         >
-          {copied ? (
-            <CheckIcon width={10} height={10} />
-          ) : (
-            <CopyIcon width={10} height={10} />
-          )}
-        </IconButton>
-        {onRemove && (
+          <span className={styles.extensionBadge}>.{ext}</span>
+          <span className={styles.filename}>{displayName}</span>
+          {subtitle && <span className={styles.subtitle}>{subtitle}</span>}
           <IconButton
+            aria-label={copied ? "Copied!" : "Copy path"}
+            className={styles.copyButton}
+            icon={copied ? Check : Copy}
+            size="sm"
             type="button"
-            size="1"
-            variant="solid"
-            color="gray"
-            className={styles.removeButton}
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove();
-            }}
-            aria-label="Remove"
-          >
-            <Cross1Icon width={10} height={10} />
-          </IconButton>
-        )}
-      </Box>
+            variant="plain"
+            onClick={(e) => void handleCopy(e)}
+          />
+          {onRemove && (
+            <IconButton
+              aria-label="Remove"
+              className={styles.removeButton}
+              icon={X}
+              size="sm"
+              type="button"
+              variant="soft"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemove();
+              }}
+            />
+          )}
+        </div>
+      </Tooltip.Trigger>
+      <Tooltip.Content>{`${copyShortcut} to copy path`}</Tooltip.Content>
     </Tooltip>
   );
 };
@@ -318,37 +308,34 @@ const PlainTextTile: React.FC<{
   );
 
   return (
-    <Tooltip content={copied ? "Copied!" : `${copyShortcut} to copy`}>
-      <Box
-        className={`${styles.tile} ${styles.plainTextTile}`}
-        tabIndex={0}
-        onKeyDown={handleKeyDown}
-        title={
-          preview.length > 100 ? `${preview.substring(0, 100)}...` : preview
-        }
-        role="button"
-        aria-label="Plain text content"
-      >
-        <Text className={styles.extensionBadge} data-color="gray">
-          TXT
-        </Text>
-        <Text className={styles.filename}>{label}</Text>
-        <IconButton
-          type="button"
-          size="1"
-          variant="ghost"
-          color={copied ? "green" : "gray"}
-          className={styles.copyButton}
-          onClick={(e) => void handleCopy(e)}
-          aria-label={copied ? "Copied!" : "Copy content"}
+    <Tooltip>
+      <Tooltip.Trigger asChild>
+        <div
+          className={`${styles.tile} ${styles.plainTextTile} rf-enter`}
+          tabIndex={0}
+          onKeyDown={handleKeyDown}
+          title={
+            preview.length > 100 ? `${preview.substring(0, 100)}...` : preview
+          }
+          role="button"
+          aria-label="Plain text content"
         >
-          {copied ? (
-            <CheckIcon width={10} height={10} />
-          ) : (
-            <CopyIcon width={10} height={10} />
-          )}
-        </IconButton>
-      </Box>
+          <span className={styles.extensionBadge}>TXT</span>
+          <span className={styles.filename}>{label}</span>
+          <IconButton
+            aria-label={copied ? "Copied!" : "Copy content"}
+            className={styles.copyButton}
+            icon={copied ? Check : Copy}
+            size="sm"
+            type="button"
+            variant="plain"
+            onClick={(e) => void handleCopy(e)}
+          />
+        </div>
+      </Tooltip.Trigger>
+      <Tooltip.Content>
+        {copied ? "Copied!" : `${copyShortcut} to copy`}
+      </Tooltip.Content>
     </Tooltip>
   );
 };

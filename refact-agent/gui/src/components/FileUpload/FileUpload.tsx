@@ -1,5 +1,5 @@
 import React from "react";
-import { Checkbox, Flex, Text } from "@radix-ui/themes";
+import styles from "./FileUpload.module.css";
 
 export type FileUploadProps = {
   onClick: (value: boolean) => void;
@@ -11,19 +11,21 @@ export type FileUploadProps = {
 export const FileUpload: React.FC<FileUploadProps> = ({
   onClick,
   fileName,
-  ...props
+  checked,
+  disabled,
 }) => {
   return (
-    <Text as="label" size="2">
-      <Flex gap="2">
-        <Checkbox
-          {...props}
-          onCheckedChange={() => {
-            onClick(!props.checked);
-          }}
-        />{" "}
-        Attach {fileName ?? "a file"}
-      </Flex>
-    </Text>
+    <label className={styles.label}>
+      <input
+        checked={checked}
+        className={styles.checkbox}
+        disabled={disabled}
+        type="checkbox"
+        onChange={() => {
+          onClick(!checked);
+        }}
+      />
+      <span className={styles.text}>Attach {fileName ?? "a file"}</span>
+    </label>
   );
 };

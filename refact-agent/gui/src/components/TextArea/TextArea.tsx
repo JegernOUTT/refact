@@ -5,14 +5,21 @@ import React, {
   useLayoutEffect,
   useCallback,
 } from "react";
-import { TextArea as RadixTextArea } from "@radix-ui/themes";
 import classNames from "classnames";
 import { useUndoRedo } from "../../hooks";
 import { createSyntheticEvent } from "../../utils/createSyntheticEvent";
 import styles from "./TextArea.module.css";
 
-export type TextAreaProps = React.ComponentProps<typeof RadixTextArea> &
-  React.JSX.IntrinsicElements["textarea"] & {
+type ComboboxInjectedProps = {
+  ref?: React.Ref<HTMLTextAreaElement>;
+  onSubmit?: React.KeyboardEventHandler<HTMLTextAreaElement>;
+};
+
+export type TextAreaProps = Omit<
+  React.TextareaHTMLAttributes<HTMLTextAreaElement>,
+  "onChange"
+> &
+  ComboboxInjectedProps & {
     onTextAreaHeightChange?: (scrollHeight: number) => void;
     onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
   };
@@ -105,7 +112,7 @@ export const TextArea = React.forwardRef<HTMLTextAreaElement, TextAreaProps>(
     }, [callChange, undoRedo.state, onChange, value]);
 
     return (
-      <RadixTextArea
+      <textarea
         {...props}
         value={value}
         onKeyDown={handleKeyDown}

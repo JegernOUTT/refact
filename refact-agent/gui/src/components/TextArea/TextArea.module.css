@@ -1,49 +1,27 @@
-/* The .textarea class is applied to the RadixTextArea component,
-   which renders as rt-TextAreaRoot > rt-TextAreaInput.
-   The className goes to the ROOT element (rt-TextAreaRoot), not the input. */
 .textarea {
-  border: none;
-  box-shadow: none;
-  outline: none;
-  background-color: transparent;
-  /* JB doesn't support dvh */
+  width: 100%;
+  min-width: 0;
   max-height: 50vh;
   max-height: 50dvh;
-}
-
-/* Override Radix variant-surface background */
-.textarea:global(.rt-variant-surface) {
-  background-color: transparent;
+  resize: none;
+  border: 0;
+  outline: 0;
   box-shadow: none;
+  background: transparent;
+  color: var(--rf-color-fg);
+  font: 400 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
-/* Override Radix TextArea inner elements */
-.textarea :global(.rt-TextAreaChrome),
-.textarea :global(.rt-TextAreaInput) {
-  background-color: transparent;
+.textarea::placeholder {
+  color: var(--rf-color-faint);
 }
 
-.textarea :global(.rt-TextAreaInput) {
-  outline: none;
+.textarea:focus-visible {
+  outline: 0;
 }
 
-.textarea :global(.rt-TextAreaInput[readonly]) {
-  color: var(--gray-12);
-  -webkit-text-fill-color: var(--gray-12);
+.textarea[readonly] {
+  color: var(--rf-color-fg);
+  -webkit-text-fill-color: var(--rf-color-fg);
   opacity: 1;
-  background-color: transparent !important;
-}
-
-.textarea:has(:global(.rt-TextAreaInput[readonly])),
-.textarea:has(:global(.rt-TextAreaInput[readonly])) :global(*) {
-  background-color: transparent !important;
-  background: transparent !important;
-}
-
-:global(.rt-TextAreaRoot) > .textarea {
-  background-color: unset;
-}
-
-.textarea :global(.rt-TextAreaChrome) {
-  box-shadow: none;
 }

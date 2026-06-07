@@ -1,5 +1,4 @@
 import React from "react";
-import { Box } from "@radix-ui/themes";
 import styles from "./ChatForm.module.css";
 import { ScrollArea } from "../ScrollArea";
 
@@ -13,7 +12,7 @@ export const Form: React.FC<
   }>
 > = ({ onSubmit, ...props }) => {
   return (
-    <Box mt="1" className={styles.chatForm}>
+    <div className={styles.chatFormShell}>
       <ScrollArea scrollbars="vertical">
         <form
           onSubmit={(event) => {
@@ -23,6 +22,6 @@ export const Form: React.FC<
           {...props}
         />
       </ScrollArea>
-    </Box>
+    </div>
   );
 };

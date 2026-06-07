@@ -1,21 +1,62 @@
-/* Use shared iconButton with variants */
+.controlsGroup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
 .iconButton {
-  composes: iconButton from "../shared/iconButton.module.css";
+  display: inline-flex;
+  width: var(--rf-control-h-sm);
+  min-width: var(--rf-control-h-sm);
+  min-height: var(--rf-control-h-sm);
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.iconButton:hover:not(:disabled) {
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+}
+
+.iconButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.iconButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.iconButton svg {
+  width: var(--rf-icon-md);
+  height: var(--rf-icon-md);
 }
 
 .active {
-  composes: active from "../shared/iconButton.module.css";
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
 }
 
 .danger {
-  composes: danger from "../shared/iconButton.module.css";
+  color: var(--rf-color-danger);
+  background: color-mix(in srgb, var(--rf-color-danger) 14%, transparent);
 }
 
 .divider {
-  color: var(--gray-8);
-  font-size: 12px;
+  margin: 0 var(--rf-space-1);
+  color: var(--rf-color-faint);
+  font-size: var(--rf-text-2);
   user-select: none;
-  margin: 0 var(--space-1);
 }
 
 .projectInfoControl {
@@ -24,44 +65,66 @@
 }
 
 .selectedLinesGroup {
-  height: 24px;
+  height: var(--rf-control-h-sm);
+}
+.selectedLinesGroup {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.lockButton,
+.helpButton {
+  display: flex;
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.lockButton svg,
+.helpButton svg {
+  width: var(--rf-icon-md);
+  height: var(--rf-icon-md);
+}
+
+.lockButton:hover:not(:disabled),
+.helpButton:hover:not(:disabled) {
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+}
+
+.lockButton:focus-visible,
+.helpButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.lockButton:disabled,
+.helpButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lockButton,
+  .helpButton {
+    transition: none;
+  }
 }
 
 @container (max-width: 340px) {
   .projectInfoControl {
     display: none;
   }
-}
-
-.lockButton,
-.helpButton {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--gray-10);
-  cursor: pointer;
-  transition: filter 0.15s ease;
-  flex-shrink: 0;
-}
-
-.lockButton svg,
-.helpButton svg {
-  width: 14px;
-  height: 14px;
-}
-
-.lockButton:hover:not(:disabled),
-.helpButton:hover:not(:disabled) {
-  filter: brightness(1.5);
-}
-
-.lockButton:disabled,
-.helpButton:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }
