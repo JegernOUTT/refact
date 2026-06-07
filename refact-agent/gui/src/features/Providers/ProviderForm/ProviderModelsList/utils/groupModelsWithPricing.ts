@@ -219,6 +219,22 @@ export function attachPricingAndCapabilities(
   const capsModels =
     modelType === "chat" ? caps.chat_models : caps.completion_models;
 
+  if (modelType === "embedding") {
+    return models.map((m) => {
+      const isDefault =
+        caps.embedding_model?.id === m.name ||
+        caps.embedding_model?.name === m.name;
+      const nCtx = isDefault ? caps.embedding_model?.n_ctx : undefined;
+      return {
+        ...m,
+        modelType,
+        nCtx,
+        nCtxLabel: nCtx ? formatContextWindow(nCtx) : undefined,
+        isDefault,
+      };
+    });
+  }
+
   return models.map((m) => {
     const capsModelKey = resolveCapsModelKey(capsModels, m.name, providerName);
     const capsModel = capsModelKey ? capsModels[capsModelKey] : undefined;
@@ -310,7 +326,11 @@ export function groupModelsWithPricing(
       {
         id: "all",
         title:
-          options.modelType === "chat" ? "Chat models" : "Completion models",
+          options.modelType === "chat"
+            ? "Chat models"
+            : options.modelType === "completion"
+              ? "Completion models"
+              : "Embedding models",
         models: decorated,
       },
     ];
@@ -370,7 +390,11 @@ export function groupModelsWithPricing(
       {
         id: "all",
         title:
-          options.modelType === "chat" ? "Chat models" : "Completion models",
+          options.modelType === "chat"
+            ? "Chat models"
+            : options.modelType === "completion"
+              ? "Completion models"
+              : "Embedding models",
         models: decorated,
       },
     ];

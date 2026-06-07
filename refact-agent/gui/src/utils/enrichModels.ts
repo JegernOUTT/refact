@@ -2,6 +2,8 @@ import type { CapCost, CapsResponse } from "../services/refact";
 import type { ModelCapabilities } from "../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import { extractProvider, getProviderDisplayName } from "./modelProviders";
 
+export type ModelSelectorCapability = "chat" | "completion" | "embedding";
+
 export type EnrichedModel = {
   value: string;
   displayName: string;
@@ -9,6 +11,7 @@ export type EnrichedModel = {
   pricing?: CapCost;
   nCtx?: number;
   capabilities?: ModelCapabilities;
+  metadata?: string[];
   isDefault?: boolean;
   isChat2?: boolean;
   isTaskPlannerAgent?: boolean;
@@ -55,7 +58,6 @@ export function pricingForModel(
 function extractCapabilities(
   capsModel: CapsResponse["chat_models"][string] | undefined,
 ): ModelCapabilities | undefined {
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (typeof capsModel !== "object" || !capsModel) return undefined;
 
   return {
@@ -78,17 +80,40 @@ function getPricing(
 }
 
 function getContextWindow(
-  capsModel: CapsResponse["chat_models"][string] | undefined,
+  capsModel:
+    | CapsResponse["chat_models"][string]
+    | CapsResponse["completion_models"][string]
+    | CapsResponse["embedding_model"]
+    | undefined,
 ): number | undefined {
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (typeof capsModel !== "object" || !capsModel) return undefined;
-  if ("n_ctx" in capsModel) return capsModel.n_ctx as number | undefined;
-  return undefined;
+  return capsModel.n_ctx;
+}
+
+function completionMetadata(
+  capsModel: CapsResponse["completion_models"][string] | undefined,
+): string[] | undefined {
+  if (!capsModel) return undefined;
+  return [capsModel.model_family, capsModel.name]
+    .filter((value): value is string => Boolean(value))
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+function embeddingMetadata(
+  capsModel: CapsResponse["embedding_model"] | undefined,
+): string[] | undefined {
+  if (!capsModel) return undefined;
+  return [
+    `${capsModel.embedding_size} dims`,
+    `batch ${capsModel.embedding_batch}`,
+    `threshold ${capsModel.rejection_threshold}`,
+  ];
 }
 
 export function enrichModels(
   usableModels: UsableModel[],
   caps: CapsResponse | undefined,
+  capability: ModelSelectorCapability = "chat",
 ): EnrichedModel[] {
   if (!caps) {
     return usableModels.map((model) => ({
@@ -102,8 +127,38 @@ export function enrichModels(
   return usableModels.map((model) => {
     const modelKey = model.value;
     const displayName = model.textValue;
-    const capsModel = caps.chat_models[modelKey];
 
+    if (capability === "completion") {
+      const capsModel = caps.completion_models[modelKey];
+      return {
+        value: modelKey,
+        displayName,
+        disabled: model.disabled,
+        pricing: getPricing(modelKey, displayName, caps),
+        nCtx: getContextWindow(capsModel),
+        metadata: completionMetadata(capsModel),
+        isDefault: caps.completion_default_model === modelKey,
+        provider: extractProvider(modelKey),
+      };
+    }
+
+    if (capability === "embedding") {
+      const capsModel =
+        caps.embedding_model?.id === modelKey
+          ? caps.embedding_model
+          : undefined;
+      return {
+        value: modelKey,
+        displayName,
+        disabled: model.disabled,
+        nCtx: getContextWindow(capsModel),
+        metadata: embeddingMetadata(capsModel),
+        isDefault: caps.embedding_model?.id === modelKey,
+        provider: extractProvider(modelKey),
+      };
+    }
+
+    const capsModel = caps.chat_models[modelKey];
     return {
       value: modelKey,
       displayName,
@@ -143,7 +198,6 @@ function sortModelsInGroup(models: EnrichedModel[]): EnrichedModel[] {
 export function groupModelsByProvider(models: EnrichedModel[]): ModelGroup[] {
   const groups = models.reduce<Record<string, EnrichedModel[]>>(
     (acc, model) => {
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (!acc[model.provider]) {
         acc[model.provider] = [];
       }
@@ -170,7 +224,8 @@ export function groupModelsByProvider(models: EnrichedModel[]): ModelGroup[] {
 export function enrichAndGroupModels(
   usableModels: UsableModel[],
   caps: CapsResponse | undefined,
+  capability: ModelSelectorCapability = "chat",
 ): ModelGroup[] {
-  const enriched = enrichModels(usableModels, caps);
+  const enriched = enrichModels(usableModels, caps, capability);
   return groupModelsByProvider(enriched);
 }

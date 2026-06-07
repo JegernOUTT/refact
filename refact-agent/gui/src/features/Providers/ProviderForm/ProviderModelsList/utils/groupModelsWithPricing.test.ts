@@ -4,7 +4,10 @@ import type {
   CodeChatModel,
   SimplifiedModel,
 } from "../../../../../services/refact";
-import { attachPricingAndCapabilities } from "./groupModelsWithPricing";
+import {
+  attachPricingAndCapabilities,
+  groupModelsWithPricing,
+} from "./groupModelsWithPricing";
 
 function chatModel(id: string, name: string): CodeChatModel {
   return {
@@ -117,5 +120,26 @@ describe("attachPricingAndCapabilities", () => {
     expect(model.pricing?.prompt).toBe(1);
     expect(model.isDefault).toBe(true);
     expect(model.isTaskPlannerAgent).toBe(false);
+  });
+
+  it("labels embedding-only groups distinctly", () => {
+    const groups = groupModelsWithPricing(
+      [
+        {
+          name: "openai/thenlper/gte-base",
+          enabled: true,
+          removable: false,
+          user_configured: false,
+        },
+      ],
+      {
+        caps: capsWithOpenAiModel(),
+        modelType: "embedding",
+        providerName: "openai",
+      },
+    );
+
+    expect(groups[0].title).toBe("Embedding models");
+    expect(groups[0].models[0].modelType).toBe("embedding");
   });
 });

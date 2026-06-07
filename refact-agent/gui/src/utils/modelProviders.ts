@@ -11,6 +11,11 @@ export function isLegacyRefactModel(modelName: string): boolean {
 export function extractProvider(modelName: string): string {
   const name = modelName.toLowerCase();
 
+  const qualifiedProvider = name.split("/")[0];
+  if (qualifiedProvider && qualifiedProvider !== name) {
+    return qualifiedProvider;
+  }
+
   if (name.includes("gpt") || name.includes("o1") || name.includes("o3")) {
     return "openai";
   }

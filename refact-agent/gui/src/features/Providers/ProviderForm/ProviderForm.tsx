@@ -11,7 +11,6 @@ import type {
   ProviderStatus,
   ClaudeCodeUsageWindow,
   OpenAICodexUsageWindow,
-  ModelTypeDefaults,
   ProviderDefaults,
 } from "../../../services/refact";
 import { ModelSelector } from "../../../components/Chat/ModelSelector";
@@ -162,7 +161,9 @@ type DefaultModelKey =
   | "task_planner_agent_model"
   | "chat_light"
   | "chat_thinking"
-  | "chat_buddy";
+  | "chat_buddy"
+  | "completion_model"
+  | "embedding_model";
 
 const DEFAULT_MODEL_FIELDS: {
   key: DefaultModelKey;
@@ -199,6 +200,16 @@ const DEFAULT_MODEL_FIELDS: {
     label: "Companion",
     description: "Background companion model.",
   },
+  {
+    key: "completion_model",
+    label: "Completion",
+    description: "Default model for code completion.",
+  },
+  {
+    key: "embedding_model",
+    label: "Embedding",
+    description: "Default model for semantic embeddings.",
+  },
 ];
 
 function normalizeProviderDefaults(
@@ -214,6 +225,32 @@ function normalizeProviderDefaults(
     completion_model: defaults?.completion_model,
     embedding_model: defaults?.embedding_model,
   };
+}
+
+function getModelCapability(key: DefaultModelKey) {
+  if (key === "completion_model") return "completion";
+  if (key === "embedding_model") return "embedding";
+  return "chat";
+}
+
+function getDefaultModelValue(
+  defaults: ProviderDefaults,
+  key: DefaultModelKey,
+): string | undefined {
+  const value = defaults[key];
+  if (typeof value === "string") return value;
+  return value?.model;
+}
+
+function updateDefaultModelValue(
+  defaults: ProviderDefaults,
+  key: DefaultModelKey,
+  model: string,
+): ProviderDefaults {
+  if (key === "completion_model" || key === "embedding_model") {
+    return { ...defaults, [key]: model };
+  }
+  return { ...defaults, [key]: { ...(defaults[key] ?? {}), model } };
 }
 
 const ProviderDefaultModelsSetup: React.FC = () => {
@@ -246,16 +283,15 @@ const ProviderDefaultModelsSetup: React.FC = () => {
       chat_light: caps?.chat_light_model ?? "",
       chat_thinking: caps?.chat_thinking_model ?? "",
       chat_buddy: caps?.chat_buddy_model ?? "",
+      completion_model: caps?.completion_default_model ?? "",
+      embedding_model: caps?.embedding_model?.id ?? "",
     }),
     [caps],
   );
 
   const handleModelChange = useCallback(
     (key: DefaultModelKey, model: string) => {
-      setLocalDefaults((prev) => ({
-        ...prev,
-        [key]: { ...(prev[key] ?? {}), model } as ModelTypeDefaults,
-      }));
+      setLocalDefaults((prev) => updateDefaultModelValue(prev, key, model));
       setHasChanges(true);
       setSaveError(null);
     },
@@ -318,13 +354,14 @@ const ProviderDefaultModelsSetup: React.FC = () => {
                 </Text>
               </Flex>
               <ModelSelector
-                value={localDefaults[key]?.model}
+                value={getDefaultModelValue(localDefaults, key)}
                 onValueChange={(model) => handleModelChange(key, model)}
                 defaultValue={capsDefaults[key]}
                 showLabel={false}
                 compact={false}
                 allowUnset
                 unsetLabel="None"
+                capability={getModelCapability(key)}
                 disabled={isLoading || isSaving}
               />
             </Flex>

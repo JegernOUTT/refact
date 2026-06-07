@@ -2,7 +2,10 @@ import React, { useCallback, useMemo } from "react";
 import { Select, Text, Flex } from "@radix-ui/themes";
 import { useGetCapsQuery } from "../../hooks";
 import { RichModelSelectItem } from "../Select/RichModelSelectItem";
-import { enrichAndGroupModels } from "../../utils/enrichModels";
+import {
+  enrichAndGroupModels,
+  type ModelSelectorCapability,
+} from "../../utils/enrichModels";
 import { isLegacyRefactModel } from "../../utils/modelProviders";
 import styles from "../Select/select.module.css";
 
@@ -16,6 +19,7 @@ export type ModelSelectorProps = {
   defaultValue?: string;
   allowUnset?: boolean;
   unsetLabel?: string;
+  capability?: ModelSelectorCapability;
 };
 
 const UNSET_MODEL_VALUE = "__refact_unset_model__";
@@ -30,10 +34,31 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   defaultValue,
   allowUnset = false,
   unsetLabel = "None",
+  capability = "chat",
 }) => {
   const { data: caps } = useGetCapsQuery(undefined);
 
   const usableModels = useMemo(() => {
+    if (capability === "completion") {
+      return Object.keys(caps?.completion_models ?? {}).map((model) => ({
+        value: model,
+        disabled: false,
+        textValue: model,
+      }));
+    }
+
+    if (capability === "embedding") {
+      const embeddingModel = caps?.embedding_model;
+      if (!embeddingModel) return [];
+      return [
+        {
+          value: embeddingModel.id,
+          disabled: false,
+          textValue: embeddingModel.id,
+        },
+      ];
+    }
+
     return Object.keys(caps?.chat_models ?? {})
       .filter((model) => !isLegacyRefactModel(model))
       .map((model) => ({
@@ -41,14 +66,26 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         disabled: false,
         textValue: model,
       }));
-  }, [caps?.chat_models]);
+  }, [
+    capability,
+    caps?.chat_models,
+    caps?.completion_models,
+    caps?.embedding_model,
+  ]);
 
   const groupedModels = useMemo(
-    () => enrichAndGroupModels(usableModels, caps),
-    [usableModels, caps],
+    () => enrichAndGroupModels(usableModels, caps, capability),
+    [usableModels, caps, capability],
   );
 
-  const defaultModel = defaultValue ?? caps?.chat_default_model ?? "";
+  const defaultModel =
+    defaultValue ??
+    (capability === "completion"
+      ? caps?.completion_default_model
+      : capability === "embedding"
+        ? caps?.embedding_model?.id
+        : caps?.chat_default_model) ??
+    "";
   const effectiveValue = value ?? defaultModel;
   const firstModelValue = groupedModels[0]?.models[0]?.value ?? "";
   const selectValue =
@@ -69,6 +106,59 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
       onValueChange(nextValue === UNSET_MODEL_VALUE ? "" : nextValue);
     },
     [onValueChange],
+  );
+
+  const renderModelItem = (
+    model: (typeof groupedModels)[number]["models"][number],
+  ) => (
+    <Select.Item
+      key={model.value}
+      value={model.value}
+      disabled={model.disabled}
+      textValue={model.value}
+    >
+      <span className={styles.trigger_only}>{model.value}</span>
+      <span className={styles.dropdown_only}>
+        <RichModelSelectItem
+          displayName={model.value}
+          pricing={model.pricing}
+          nCtx={model.nCtx}
+          capabilities={model.capabilities}
+          metadata={model.metadata}
+          isDefault={model.isDefault}
+          isChat2={model.isChat2}
+          isTaskPlannerAgent={model.isTaskPlannerAgent}
+          isThinking={model.isThinking}
+          isLight={model.isLight}
+          isBuddy={model.isBuddy}
+        />
+      </span>
+    </Select.Item>
+  );
+
+  const renderContent = () => (
+    <Select.Content position="popper">
+      {showUnavailableValue && (
+        <Select.Item value={effectiveValue} disabled textValue={effectiveValue}>
+          <span className={styles.trigger_only}>{effectiveValue}</span>
+          <span className={styles.dropdown_only}>
+            Unavailable: {effectiveValue}
+          </span>
+        </Select.Item>
+      )}
+      {allowUnset && (
+        <Select.Item value={UNSET_MODEL_VALUE} textValue={unsetLabel}>
+          <span className={styles.trigger_only}>{unsetLabel}</span>
+          <span className={styles.dropdown_only}>{unsetLabel}</span>
+        </Select.Item>
+      )}
+      {groupedModels.map((group) => (
+        <Select.Group key={group.provider}>
+          <Select.Label>{group.displayName}</Select.Label>
+          {group.models.map(renderModelItem)}
+        </Select.Group>
+      ))}
+    </Select.Content>
   );
 
   if (!caps || groupedModels.length === 0) {
@@ -153,55 +243,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
               opacity: disabled ? 0.5 : 1,
             }}
           />
-          <Select.Content position="popper">
-            {showUnavailableValue && (
-              <Select.Item
-                value={effectiveValue}
-                disabled
-                textValue={effectiveValue}
-              >
-                <span className={styles.trigger_only}>{effectiveValue}</span>
-                <span className={styles.dropdown_only}>
-                  Unavailable: {effectiveValue}
-                </span>
-              </Select.Item>
-            )}
-            {allowUnset && (
-              <Select.Item value={UNSET_MODEL_VALUE} textValue={unsetLabel}>
-                <span className={styles.trigger_only}>{unsetLabel}</span>
-                <span className={styles.dropdown_only}>{unsetLabel}</span>
-              </Select.Item>
-            )}
-            {groupedModels.map((group) => (
-              <Select.Group key={group.provider}>
-                <Select.Label>{group.displayName}</Select.Label>
-                {group.models.map((model) => (
-                  <Select.Item
-                    key={model.value}
-                    value={model.value}
-                    disabled={model.disabled}
-                    textValue={model.value}
-                  >
-                    <span className={styles.trigger_only}>{model.value}</span>
-                    <span className={styles.dropdown_only}>
-                      <RichModelSelectItem
-                        displayName={model.value}
-                        pricing={model.pricing}
-                        nCtx={model.nCtx}
-                        capabilities={model.capabilities}
-                        isDefault={model.isDefault}
-                        isChat2={model.isChat2}
-                        isTaskPlannerAgent={model.isTaskPlannerAgent}
-                        isThinking={model.isThinking}
-                        isLight={model.isLight}
-                        isBuddy={model.isBuddy}
-                      />
-                    </span>
-                  </Select.Item>
-                ))}
-              </Select.Group>
-            ))}
-          </Select.Content>
+          {renderContent()}
         </Select.Root>
       </Flex>
     );
@@ -221,55 +263,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         size="2"
       >
         <Select.Trigger style={{ width: "100%" }} />
-        <Select.Content position="popper">
-          {showUnavailableValue && (
-            <Select.Item
-              value={effectiveValue}
-              disabled
-              textValue={effectiveValue}
-            >
-              <span className={styles.trigger_only}>{effectiveValue}</span>
-              <span className={styles.dropdown_only}>
-                Unavailable: {effectiveValue}
-              </span>
-            </Select.Item>
-          )}
-          {allowUnset && (
-            <Select.Item value={UNSET_MODEL_VALUE} textValue={unsetLabel}>
-              <span className={styles.trigger_only}>{unsetLabel}</span>
-              <span className={styles.dropdown_only}>{unsetLabel}</span>
-            </Select.Item>
-          )}
-          {groupedModels.map((group) => (
-            <Select.Group key={group.provider}>
-              <Select.Label>{group.displayName}</Select.Label>
-              {group.models.map((model) => (
-                <Select.Item
-                  key={model.value}
-                  value={model.value}
-                  disabled={model.disabled}
-                  textValue={model.value}
-                >
-                  <span className={styles.trigger_only}>{model.value}</span>
-                  <span className={styles.dropdown_only}>
-                    <RichModelSelectItem
-                      displayName={model.value}
-                      pricing={model.pricing}
-                      nCtx={model.nCtx}
-                      capabilities={model.capabilities}
-                      isDefault={model.isDefault}
-                      isChat2={model.isChat2}
-                      isTaskPlannerAgent={model.isTaskPlannerAgent}
-                      isThinking={model.isThinking}
-                      isLight={model.isLight}
-                      isBuddy={model.isBuddy}
-                    />
-                  </span>
-                </Select.Item>
-              ))}
-            </Select.Group>
-          ))}
-        </Select.Content>
+        {renderContent()}
       </Select.Root>
     </Flex>
   );
