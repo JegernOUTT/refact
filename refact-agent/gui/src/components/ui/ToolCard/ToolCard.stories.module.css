@@ -1,0 +1,50 @@
+.storyShell {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: var(--rf-space-4);
+  min-width: 0;
+  min-height: 100dvh;
+  padding: var(--rf-space-5);
+  color: var(--rf-color-fg);
+  background: var(--color-background, transparent);
+  font-family: var(--rf-font-ui);
+}
+
+.panel {
+  display: grid;
+  align-content: start;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  padding: var(--rf-space-4);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--rf-text-5);
+  line-height: var(--rf-line);
+}
+
+.gallery {
+  display: grid;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.copy {
+  margin: 0;
+}
+
+.codeBlock {
+  min-width: 520px;
+  margin: 0;
+  padding: var(--rf-space-3);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+  border-radius: var(--rf-radius-ctl);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}

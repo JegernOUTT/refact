@@ -83,6 +83,7 @@ export { Switch } from "./Switch";
 export type { SwitchProps } from "./Switch";
 export { Tabs } from "./Tabs";
 export type { TabsContentProps, TabsListProps, TabsProps, TabsTriggerProps } from "./Tabs";
+export * from "./ToolCard";
 export { Tooltip } from "./Tooltip";
 export type {
   TooltipContentProps,
