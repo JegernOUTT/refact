@@ -377,6 +377,9 @@ pub async fn handle_v1_links(
 }
 
 fn failed_integration_names_after_last_user_message(messages: &[ChatMessage]) -> Vec<String> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
     let last_user_msg_index = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
     let tool_calls = messages[last_user_msg_index..]
         .iter()
@@ -400,4 +403,71 @@ fn failed_integration_names_after_last_user_message(messages: &[ChatMessage]) ->
     result.sort();
     result.dedup();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+
+    fn message(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn assistant_tool_call(id: &str, name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            tool_calls: Some(vec![ChatToolCall {
+                id: id.to_string(),
+                index: Some(0),
+                function: ChatToolFunction {
+                    arguments: "{}".to_string(),
+                    name: name.to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn tool_result(id: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(content.to_string()),
+            tool_call_id: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failed_integration_names_empty_messages_returns_empty() {
+        assert!(failed_integration_names_after_last_user_message(&[]).is_empty());
+    }
+
+    #[test]
+    fn failed_integration_names_keeps_non_empty_behavior_after_last_user_message() {
+        let before_last_user = "github";
+        let after_last_user = "gitlab";
+        let messages = vec![
+            message("user", "first"),
+            assistant_tool_call("call_before", before_last_user),
+            tool_result(
+                "call_before",
+                &go_to_configuration_message(before_last_user),
+            ),
+            message("user", "second"),
+            assistant_tool_call("call_after", after_last_user),
+            tool_result("call_after", &go_to_configuration_message(after_last_user)),
+        ];
+
+        assert_eq!(
+            failed_integration_names_after_last_user_message(&messages),
+            vec![after_last_user.to_string()]
+        );
+    }
 }
