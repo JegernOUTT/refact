@@ -11,7 +11,6 @@ module.exports = {
     "declaration-property-value-disallowed-list": {
       "/^(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left))?-color|outline-color|box-shadow|text-shadow|fill|stroke)$/":
         ["/#(?:[0-9a-f]{3,8})\\b/i", "/rgba?\\(/i"],
-      "min-width": ["/^\\d+(?:\\.\\d+)?px$/"],
     },
   },
 };
