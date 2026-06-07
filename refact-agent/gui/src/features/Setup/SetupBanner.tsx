@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Button, Flex, Text } from "@radix-ui/themes";
-import { Cross1Icon } from "@radix-ui/react-icons";
+import { X } from "lucide-react";
+import { Button, IconButton } from "../../components/ui";
 import { CalloutFromTop } from "../../components/Callout/Callout";
 import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
@@ -60,26 +60,24 @@ export const SetupBanner: React.FC = () => {
 
   return (
     <CalloutFromTop>
-      <Flex direction={{ initial: "column", sm: "row" }} gap="3" align="center">
-        <Text size="2" className={styles.text}>
+      <div className={styles.content}>
+        <p className={styles.text}>
           This project hasn&apos;t been set up for Refact yet. Run setup to
           generate guidelines, integrations, and toolbox commands.
-        </Text>
-        <Flex gap="2" align="center" style={{ flexShrink: 0 }}>
-          <Button size="2" onClick={openSetupChat}>
+        </p>
+        <div className={styles.actions}>
+          <Button size="sm" variant="primary" onClick={openSetupChat}>
             Run Setup
           </Button>
-          <Button
-            size="1"
+          <IconButton
+            size="sm"
             variant="ghost"
-            color="gray"
             onClick={handleDismiss}
             aria-label="Dismiss"
-          >
-            <Cross1Icon width={12} height={12} />
-          </Button>
-        </Flex>
-      </Flex>
+            icon={X}
+          />
+        </div>
+      </div>
     </CalloutFromTop>
   );
 };

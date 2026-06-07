@@ -1,0 +1,17 @@
+.status {
+  margin-left: auto;
+  font-size: var(--rf-text-1);
+  font-weight: 650;
+}
+
+.ADDED {
+  color: var(--rf-color-success);
+}
+
+.MODIFIED {
+  color: var(--rf-color-warning);
+}
+
+.DELETED {
+  color: var(--rf-color-danger);
+}

@@ -1,12 +1,72 @@
 .CheckpointsDialog {
-  width: calc(100vw - var(--space-8));
-  max-width: 500px;
-  /* padding: var(--space-4) var(--space-4); */
-  position: relative;
+  width: min(500px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
-.CheckpointsRevertedDate {
-  position: absolute;
-  top: 10px;
-  right: 10px;
+.fileScroll {
+  max-height: min(300px, calc(100dvh - 260px));
+}
+
+.fileList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.fileRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+  padding: var(--rf-space-2);
+}
+
+.fileInfo {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+}
+
+.filePathWrap {
+  max-width: 50%;
+  min-width: 0;
+}
+
+.deletedLink {
+  text-decoration: line-through;
+}
+
+.workspaceFolder {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  opacity: 0.8;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.restoreOptions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  margin-top: var(--rf-space-4);
+}
+
+.optionTitle {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: var(--rf-space-3);
+  margin-top: var(--rf-space-4);
 }

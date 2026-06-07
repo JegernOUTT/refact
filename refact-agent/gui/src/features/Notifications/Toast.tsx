@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Button, Card, Flex, Text } from "@radix-ui/themes";
-import { Cross1Icon } from "@radix-ui/react-icons";
+import { CheckCircle2, CircleX, OctagonX, X } from "lucide-react";
 
 import { Portal } from "../../components/Portal";
+import { Badge, Button, Icon, IconButton, Surface } from "../../components/ui";
+import type { IconProps } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { popBackTo, push } from "../Pages/pagesSlice";
 import { switchToThread } from "../Chat/Thread";
@@ -18,12 +19,20 @@ const AUTO_DISMISS_MS = 8000;
 const SCROLL_RETRY_MS = 80;
 const SCROLL_ATTEMPTS = 20;
 
-function statusIcon(notification: ProcessCompletedNotification): string {
-  if (notification.status === "killed") return "🛑";
+function statusIcon(notification: ProcessCompletedNotification): IconProps["icon"] {
+  if (notification.status === "killed") return OctagonX;
   if (notification.status === "exited" && notification.exitCode === 0) {
-    return "✅";
+    return CheckCircle2;
   }
-  return "❌";
+  return CircleX;
+}
+
+function statusTone(notification: ProcessCompletedNotification): IconProps["tone"] {
+  if (notification.status === "killed") return "warning";
+  if (notification.status === "exited" && notification.exitCode === 0) {
+    return "success";
+  }
+  return "danger";
 }
 
 function exitCodeLabel(notification: ProcessCompletedNotification): string {
@@ -48,12 +57,12 @@ function scrollToProcessCard(processId: string, attempts = SCROLL_ATTEMPTS) {
   );
 }
 
-type ProcessCompletedToastProps = {
+interface ProcessCompletedToastProps {
   notification: ProcessCompletedNotification;
   onDismiss: (notification: ProcessCompletedNotification) => void;
   onView: (notification: ProcessCompletedNotification) => void;
   onAutoDismiss: (id: string) => void;
-};
+}
 
 const ProcessCompletedToast: React.FC<ProcessCompletedToastProps> = ({
   notification,
@@ -70,55 +79,60 @@ const ProcessCompletedToast: React.FC<ProcessCompletedToastProps> = ({
   }, [notification.id, onAutoDismiss]);
 
   return (
-    <Card
+    <Surface
       className={styles.toast}
       data-testid="process-completed-toast"
       data-notification-id={notification.id}
+      variant="overlay"
     >
-      <Flex gap="3" align="start">
-        <Text size="4" className={styles.icon} aria-hidden="true">
-          {statusIcon(notification)}
-        </Text>
-        <Flex direction="column" gap="2" className={styles.body}>
-          <Flex gap="2" align="center">
-            <Text size="2" weight="bold" truncate className={styles.title}>
+      <div className={styles.layout}>
+        <span className={styles.legacyIcon} aria-hidden="true">
+          {notification.status === "killed"
+            ? "🛑"
+            : notification.status === "exited" && notification.exitCode === 0
+              ? "✅"
+              : "❌"}
+        </span>
+        <Icon
+          icon={statusIcon(notification)}
+          tone={statusTone(notification)}
+          size="lg"
+          className={styles.icon}
+        />
+        <div className={styles.body}>
+          <div className={styles.titleRow}>
+            <strong className={styles.title}>
               {notification.shortDescription.trim() || "Process completed"}
-            </Text>
-            <Badge size="1" variant="soft" color="gray">
-              {exitCodeLabel(notification)}
-            </Badge>
-          </Flex>
-          <Text size="1" color="gray" truncate>
-            {notification.processId}
-          </Text>
-          <Flex gap="2" align="center">
+            </strong>
+            <Badge tone="muted">{exitCodeLabel(notification)}</Badge>
+          </div>
+          <span className={styles.processId}>{notification.processId}</span>
+          <div className={styles.actions}>
             <Button
-              size="1"
+              size="sm"
               variant="soft"
               onClick={() => onView(notification)}
             >
               View
             </Button>
             <Button
-              size="1"
+              size="sm"
               variant="ghost"
-              color="gray"
               onClick={() => onDismiss(notification)}
             >
               Dismiss
             </Button>
-          </Flex>
-        </Flex>
-        <button
-          type="button"
-          className={styles.closeButton}
+          </div>
+        </div>
+        <IconButton
+          size="sm"
+          variant="ghost"
           aria-label="Dismiss process completion notification"
           onClick={() => onDismiss(notification)}
-        >
-          <Cross1Icon width={12} height={12} />
-        </button>
-      </Flex>
-    </Card>
+          icon={X}
+        />
+      </div>
+    </Surface>
   );
 };
 

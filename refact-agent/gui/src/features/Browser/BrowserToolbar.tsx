@@ -1,13 +1,7 @@
 import { useCallback, useState } from "react";
 import classNames from "classnames";
-import { Tooltip } from "@radix-ui/themes";
-import {
-  PlayIcon,
-  StopIcon,
-  CameraIcon,
-  ImageIcon,
-  ViewGridIcon,
-} from "@radix-ui/react-icons";
+import { Camera, Columns3, Image, Play, Square } from "lucide-react";
+import { IconButton, Tooltip } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { browserApi } from "../../services/refact/browser";
 import {
@@ -67,8 +61,6 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
   const handleStart = useCallback(() => {
     void withLoading("start", async () => {
       const result = await browserStart({ chat_id: chatId }).unwrap();
-      // Only reset runtime state if this is a genuinely new session or the runtime_id changed.
-      // If already_running with the same id, preserve existing timeline/flags set by SSE.
       if (
         result.status !== "already_running" ||
         runtime?.runtime_id !== result.runtime_id
@@ -87,7 +79,6 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
     void withLoading("stop", async () => {
       await browserStop({ chat_id: chatId }).unwrap();
       dispatch(removeBrowserRuntime({ chatId }));
-      // Close the panel — requirement: panels disappear when session ends
       dispatch(closeBrowserUi({ chatId }));
     });
   }, [browserStop, chatId, dispatch, withLoading]);
@@ -125,81 +116,89 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
   return (
     <div className={styles.browserToolbar}>
       {!isConnected ? (
-        <Tooltip content="Start browser">
-          <button
-            type="button"
-            className={styles.toolbarIconButton}
-            onClick={handleStart}
-            disabled={loading.start}
-            aria-label="Start browser"
-          >
-            <PlayIcon />
-          </button>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
+            <IconButton
+              className={styles.toolbarIconButton}
+              onClick={handleStart}
+              disabled={loading.start}
+              aria-label="Start browser"
+              icon={Play}
+              size="sm"
+            />
+          </Tooltip.Trigger>
+          <Tooltip.Content>Start browser</Tooltip.Content>
         </Tooltip>
       ) : (
-        <Tooltip content="Stop browser">
-          <button
-            type="button"
-            className={classNames(
-              styles.toolbarIconButton,
-              styles.toolbarIconButtonDanger,
-            )}
-            onClick={handleStop}
-            disabled={loading.stop}
-            aria-label="Stop browser"
-          >
-            <StopIcon />
-          </button>
+        <Tooltip>
+          <Tooltip.Trigger asChild>
+            <IconButton
+              className={classNames(
+                styles.toolbarIconButton,
+                styles.toolbarIconButtonDanger,
+              )}
+              onClick={handleStop}
+              disabled={loading.stop}
+              aria-label="Stop browser"
+              icon={Square}
+              size="sm"
+            />
+          </Tooltip.Trigger>
+          <Tooltip.Content>Stop browser</Tooltip.Content>
         </Tooltip>
       )}
 
       <div className={styles.toolbarSeparator} />
 
-      <Tooltip content="Screenshot (viewport)">
-        <button
-          type="button"
-          className={styles.toolbarIconButton}
-          onClick={() => handleScreenshot(false)}
-          disabled={!isConnected || loading.screenshot}
-          aria-label="Screenshot"
-        >
-          <CameraIcon />
-        </button>
+      <Tooltip>
+        <Tooltip.Trigger asChild>
+          <IconButton
+            className={styles.toolbarIconButton}
+            onClick={() => handleScreenshot(false)}
+            disabled={!isConnected || loading.screenshot}
+            aria-label="Screenshot"
+            icon={Camera}
+            size="sm"
+          />
+        </Tooltip.Trigger>
+        <Tooltip.Content>Screenshot (viewport)</Tooltip.Content>
       </Tooltip>
 
-      <Tooltip content="Screenshot (full page)">
-        <button
-          type="button"
-          className={styles.toolbarIconButton}
-          onClick={() => handleScreenshot(true)}
-          disabled={!isConnected || loading.fullpage}
-          aria-label="Full page screenshot"
-        >
-          <ImageIcon />
-        </button>
+      <Tooltip>
+        <Tooltip.Trigger asChild>
+          <IconButton
+            className={styles.toolbarIconButton}
+            onClick={() => handleScreenshot(true)}
+            disabled={!isConnected || loading.fullpage}
+            aria-label="Full page screenshot"
+            icon={Image}
+            size="sm"
+          />
+        </Tooltip.Trigger>
+        <Tooltip.Content>Screenshot (full page)</Tooltip.Content>
       </Tooltip>
 
       <div className={styles.toolbarSeparator} />
 
-      <Tooltip
-        content={
-          runtime?.attach_screenshot_on_send
+      <Tooltip>
+        <Tooltip.Trigger asChild>
+          <IconButton
+            className={classNames(styles.toolbarIconButton, {
+              [styles.toolbarIconButtonActive]:
+                runtime?.attach_screenshot_on_send ?? false,
+            })}
+            onClick={handleToggleScreenshotOnSend}
+            disabled={!isConnected}
+            aria-label="Auto-screenshot on send"
+            icon={Columns3}
+            size="sm"
+          />
+        </Tooltip.Trigger>
+        <Tooltip.Content>
+          {runtime?.attach_screenshot_on_send
             ? "Auto-screenshot on send: ON"
-            : "Auto-screenshot on send: OFF"
-        }
-      >
-        <button
-          type="button"
-          className={classNames(styles.toolbarIconButton, {
-            [styles.toolbarIconButtonActive]:
-              runtime?.attach_screenshot_on_send ?? false,
-          })}
-          onClick={handleToggleScreenshotOnSend}
-          disabled={!isConnected}
-          aria-label="Auto-screenshot on send"
-        >
-          <ViewGridIcon />
-        </button>
+            : "Auto-screenshot on send: OFF"}
+        </Tooltip.Content>
       </Tooltip>
     </div>
   );

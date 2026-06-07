@@ -1,144 +1,135 @@
 .timelineContainer {
   display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--gray-a4);
-  max-height: 240px;
   min-height: 0;
+  flex-direction: column;
+  border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
 .timelineHeader {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  background: var(--gray-a2);
-  border-bottom: 1px solid var(--gray-a4);
-  font-size: 12px;
-  color: var(--gray-11);
-  flex-shrink: 0;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-1);
 }
 
 .timelineTitle {
-  font-weight: 600;
-  flex-shrink: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 650;
 }
 
 .filterGroup {
   display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  margin-left: auto;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
 }
 
 .filterButton {
-  padding: 1px var(--space-1);
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
   background: transparent;
-  color: var(--gray-10);
-  font-size: 11px;
+  color: var(--rf-color-muted);
   cursor: pointer;
-  transition: background-color 0.15s ease;
+  font-size: var(--rf-text-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
 }
 
 .filterButton:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-2);
 }
 
 .filterButtonActive {
-  background: var(--accent-a4);
-  border-color: var(--accent-8);
-  color: var(--accent-11);
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
 .timelineList {
-  flex: 1;
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  max-height: 220px;
   overflow-y: auto;
-  min-height: 0;
 }
 
 .timelineEntry {
-  display: flex;
-  flex-direction: column;
-  padding: var(--space-1) var(--space-2);
-  border-bottom: 1px solid var(--gray-a3);
   cursor: pointer;
-  transition: background-color 0.1s ease;
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .timelineEntry:hover {
-  background: var(--gray-a2);
+  background: var(--rf-surface-1);
 }
 
 .timelineEntryRow {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-2);
-  min-height: 22px;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
 }
 
 .entryTimestamp {
-  font-size: 10px;
-  color: var(--gray-9);
-  flex-shrink: 0;
-  font-family: monospace;
+  color: var(--rf-color-faint);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
 }
 
 .entryIcon {
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  display: flex;
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  font-weight: 650;
 }
 
 .entryIconUser {
-  background: var(--blue-a4);
-  color: var(--blue-11);
+  background: color-mix(in srgb, var(--rf-color-success) 16%, transparent);
+  color: var(--rf-color-success);
 }
 
 .entryIconAgent {
-  background: var(--green-a4);
-  color: var(--green-11);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
 .entryType {
-  font-size: 10px;
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-1);
-  background: var(--gray-a3);
-  color: var(--gray-11);
-  flex-shrink: 0;
-  text-transform: lowercase;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  font-weight: 600;
 }
 
 .entrySummary {
-  font-size: 12px;
-  color: var(--gray-12);
-  flex: 1;
   min-width: 0;
   overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .entryDetails {
-  padding: var(--space-1) 0 0 34px;
-  font-size: 11px;
-  color: var(--gray-10);
-  font-family: monospace;
+  margin: 0 var(--rf-space-2) var(--rf-space-2);
+  overflow: auto;
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  padding: var(--rf-space-2);
   white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 120px;
-  overflow-y: auto;
 }
 
 .emptyTimeline {
-  padding: var(--space-3);
+  padding: var(--rf-space-3);
+  color: var(--rf-color-faint);
+  font-size: var(--rf-text-2);
   text-align: center;
-  color: var(--gray-9);
-  font-size: 12px;
 }

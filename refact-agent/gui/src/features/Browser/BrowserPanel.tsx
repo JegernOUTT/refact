@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import classNames from "classnames";
-import { Cross1Icon } from "@radix-ui/react-icons";
+import { X } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectBrowserRuntime,
@@ -118,7 +118,7 @@ export const BrowserPanel = ({ chatId }: BrowserPanelProps) => {
             onClick={handleDismissNotification}
             aria-label="Dismiss browser notification"
           >
-            <Cross1Icon />
+            <X size={13} />
           </button>
         </div>
       )}

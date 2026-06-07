@@ -1,0 +1,104 @@
+.flex {
+  display: flex;
+  min-width: 0;
+}
+
+.box {
+  min-width: 0;
+}
+
+.grid {
+  display: grid;
+  min-width: 0;
+}
+
+.text {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  line-height: var(--rf-line);
+}
+
+.textMuted {
+  color: var(--rf-color-muted);
+}
+
+.textDanger {
+  color: var(--rf-color-danger);
+}
+
+.textWarning {
+  color: var(--rf-color-warning);
+}
+
+.heading {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.card {
+  min-width: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+  padding: var(--rf-space-4);
+}
+
+.input,
+.textarea {
+  width: 100%;
+  min-width: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+  font: inherit;
+  font-size: var(--rf-text-3);
+  outline: none;
+}
+
+.input {
+  min-height: var(--rf-control-h);
+  padding: 0 var(--rf-space-3);
+}
+
+.textarea {
+  min-height: 84px;
+  resize: vertical;
+  padding: var(--rf-space-2) var(--rf-space-3);
+}
+
+.input:focus-visible,
+.textarea:focus-visible {
+  border-color: var(--rf-focus-ring);
+  box-shadow: 0 0 0 var(--rf-focus-ring-w) color-mix(in srgb, var(--rf-focus-ring) 24%, transparent);
+}
+
+.callout {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+  padding: var(--rf-space-3);
+  color: var(--rf-color-muted);
+}
+
+.calloutDanger {
+  border-color: color-mix(in srgb, var(--rf-color-danger) 34%, transparent);
+  color: var(--rf-color-danger);
+}
+
+.calloutWarning {
+  border-color: color-mix(in srgb, var(--rf-color-warning) 34%, transparent);
+  color: var(--rf-color-warning);
+}
+
+.calloutAccent {
+  border-color: color-mix(in srgb, var(--rf-color-accent) 34%, transparent);
+  color: var(--rf-color-accent);
+}

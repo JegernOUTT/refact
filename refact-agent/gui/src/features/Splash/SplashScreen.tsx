@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { Flex, Heading, Text } from "@radix-ui/themes";
 import { RefactIcon } from "../../images";
 import { LogoAnimation } from "../../components/LogoAnimation";
 import styles from "./SplashScreen.module.css";
@@ -59,14 +58,10 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
           <RefactIcon className={styles.logo} aria-hidden="true" />
         </div>
 
-        <Flex direction="column" align="center" gap="2">
-          <Heading as="h1" size="7" className={styles.title}>
-            Refact
-          </Heading>
-          <Text size="2" color="gray" className={styles.caption}>
-            {message}
-          </Text>
-        </Flex>
+        <div className={styles.copy}>
+          <h1 className={styles.title}>Refact</h1>
+          <p className={styles.caption}>{message}</p>
+        </div>
 
         {!reducedMotion && (
           <div className={styles.animation} aria-hidden="true">
