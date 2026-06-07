@@ -1,24 +1,17 @@
-/* Shared design tokens - imported globally in Theme.tsx */
+/* Compatibility token shim - imported globally in Theme.tsx. */
 
-/* Z-index scale */
 :root {
-  --z-base: 0;
-  --z-dropdown: 100;
-  --z-popover: 200;
-  --z-tooltip: 300;
+  --z-base: var(--rf-z-base, 0);
+  --z-dropdown: var(--rf-z-dropdown, 100);
+  --z-popover: var(--rf-z-popover, 200);
+  --z-tooltip: var(--rf-z-tooltip, 300);
   --z-fixed: 400;
-  --z-modal: 500;
-  --z-overlay: 600;
-}
+  --z-modal: var(--rf-z-modal, 500);
+  --z-overlay: var(--rf-z-overlay, 600);
 
-/* Motion/animation timing */
-:root {
-  --motion-fast: 150ms;
-  --motion-medium: 200ms;
-  --motion-slow: 300ms;
-}
+  --motion-fast: var(--rf-dur-fast, 150ms);
+  --motion-medium: var(--rf-dur-med, 200ms);
+  --motion-slow: var(--rf-dur-slow, 300ms);
 
-/* Disabled state */
-:root {
   --disabled-opacity: 0.5;
 }

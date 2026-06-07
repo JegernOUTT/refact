@@ -1,6 +1,9 @@
 import React from "react";
 import { Theme as RadixTheme } from "@radix-ui/themes";
 import "@radix-ui/themes/styles.css";
+import "../../styles/tokens.css";
+import "../../styles/motion.css";
+import "../../styles/responsive.css";
 import "./theme-config.css";
 import "../shared/tokens.css";
 import { useAppearance, useConfig } from "../../hooks";
