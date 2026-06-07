@@ -5,6 +5,8 @@ export { Button, ButtonGroup } from "./Button";
 export type { ButtonGroupProps, ButtonProps, ButtonSize, ButtonVariant } from "./Button";
 export * from "./Card";
 export * from "./Chip";
+export { Combobox } from "./Combobox";
+export type { ComboboxItemOption, ComboboxProps } from "./Combobox";
 export { Dialog } from "./Dialog";
 export type {
   DialogCloseProps,
@@ -37,6 +39,19 @@ export type {
   PopoverProps,
   PopoverTriggerProps,
 } from "./Popover";
+export { SegmentedControl } from "./SegmentedControl";
+export type { SegmentedControlOption, SegmentedControlProps } from "./SegmentedControl";
+export { Select } from "./Select";
+export type {
+  SelectContentProps,
+  SelectGroupProps,
+  SelectItemProps,
+  SelectLabelProps,
+  SelectProps,
+  SelectSeparatorProps,
+  SelectTriggerProps,
+  SelectValueProps,
+} from "./Select";
 export { Sheet } from "./Sheet";
 export type {
   SheetCloseProps,
@@ -47,9 +62,15 @@ export type {
   SheetTitleProps,
   SheetTriggerProps,
 } from "./Sheet";
+export { Slider } from "./Slider";
+export type { SliderProps } from "./Slider";
 export * from "./Skeleton";
 export * from "./StatusDot";
 export * from "./Surface";
+export { Switch } from "./Switch";
+export type { SwitchProps } from "./Switch";
+export { Tabs } from "./Tabs";
+export type { TabsContentProps, TabsListProps, TabsProps, TabsTriggerProps } from "./Tabs";
 export { Tooltip } from "./Tooltip";
 export type {
   TooltipContentProps,
