@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, GoalAutonomy, GoalLedger, GoalStatus, MemoKind,
-    validate_goal_for_create, validate_goal_status_transition,
+    PublicConductorGoal, validate_goal_for_create, validate_goal_status_transition,
 };
 use refact_buddy_core::conductor_store::{load_goal_ledger, mutate_goal_ledger, MissingGoalBehavior};
 use refact_chat_api::{ChatCommand, MessageOrigin};
@@ -319,7 +319,9 @@ fn ensure_steer_chat_owned(
 async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: &GoalLedger) {
     let goal = hydrate_goal_spent(gcx.clone(), goal_from_ledger(goal_id, ledger.clone())).await;
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
-        let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
+            goal: PublicConductorGoal::from(&goal),
+        });
     }
     let status = match goal.status {
         GoalStatus::Paused => "paused",

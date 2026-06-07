@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, ConductorWakeReason, GoalBudgetSpent, GoalLedger, GoalStatus,
-    LearningOutcome, MemoKind,
+    LearningOutcome, MemoKind, PublicConductorGoal,
 };
 use refact_buddy_core::conductor_store::{load_goal_ledger, mutate_goal_ledger, MissingGoalBehavior};
 use uuid::Uuid;
@@ -564,7 +564,9 @@ async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal: &ConductorGoal) {
     }
     let goal = hydrate_goal_spent(gcx.clone(), goal.clone()).await;
     if let Some(tx) = gcx.buddy_events_tx.as_ref() {
-        let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
+            goal: PublicConductorGoal::from(&goal),
+        });
     }
     let event = make_runtime_event(
         "conductor_goal_updated",

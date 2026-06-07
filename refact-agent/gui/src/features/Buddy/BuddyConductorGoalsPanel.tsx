@@ -3,15 +3,9 @@ import { Text } from "@radix-ui/themes";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { push, openScheduler } from "../Pages/pagesSlice";
-import { openBuddyChat } from "../Chat/Thread";
 import { selectConductorGoals } from "./buddySlice";
 import { conductorStateView, goalToConductorState } from "./conductorMood";
-import type {
-  BuddyGhostMessage,
-  ConductorGoal,
-  ConductorMemo,
-  GoalStatus,
-} from "./types";
+import type { ConductorGoal, GoalStatus } from "./types";
 import styles from "./BuddyConductorGoalsPanel.module.css";
 
 type GoalFilter = "all" | "active" | GoalStatus;
@@ -21,6 +15,8 @@ type Props = {
 };
 
 const ACTIVE_STATUSES = new Set<GoalStatus>([
+  "proposed",
+  "active",
   "planned",
   "running",
   "waiting_for_human",
@@ -59,36 +55,13 @@ function goalMatchesFilter(goal: ConductorGoal, filter: GoalFilter): boolean {
   return goal.status === filter;
 }
 
-function firstChatId(goal: ConductorGoal): string | undefined {
-  return goal.ledger.chat_ids[0];
-}
-
 function formatBudgetPercent(spent: number, budget: number | null | undefined) {
   if (!budget || budget <= 0) return "—";
   return `${Math.min(999, Math.round((spent / budget) * 100))}%`;
 }
 
-function latestMemo(goal: ConductorGoal): ConductorMemo | undefined {
-  return [...goal.ledger.memos].sort((left, right) =>
-    right.created_at.localeCompare(left.created_at),
-  )[0];
-}
-
-function latestGhost(goal: ConductorGoal): BuddyGhostMessage | undefined {
-  return [...goal.ledger.ghost_messages].sort((left, right) =>
-    right.created_at.localeCompare(left.created_at),
-  )[0];
-}
-
 function GoalCard({ goal }: { goal: ConductorGoal }) {
-  const dispatch = useAppDispatch();
-  const chatId = firstChatId(goal);
-  const plannerTaskId = goal.ledger.planner_task_id;
-  const primaryTaskId = plannerTaskId ?? goal.ledger.task_ids[0];
   const stateView = conductorStateView(goalToConductorState(goal));
-  const memo = latestMemo(goal);
-  const ghost = latestGhost(goal);
-  const hasRecent = [memo, ghost].some((item) => item != null);
   const tokenBudgetPercent = formatBudgetPercent(
     goal.spent.total_tokens,
     goal.budget.total_tokens,
@@ -117,12 +90,14 @@ function GoalCard({ goal }: { goal: ConductorGoal }) {
       <div className={styles.metaGrid}>
         <div className={styles.metaItem}>
           <span className={styles.metaLabel}>Planner</span>
-          <span className={styles.metaValue}>{plannerTaskId ?? "—"}</span>
+          <span className={styles.metaValue}>
+            {goal.summary.has_planner_task ? "linked" : "—"}
+          </span>
         </div>
         <div className={styles.metaItem}>
           <span className={styles.metaLabel}>Planners / Agents</span>
           <span className={styles.metaValue}>
-            {plannerTaskId ? 1 : 0} / {goal.ledger.task_ids.length}
+            {goal.summary.has_planner_task ? 1 : 0} / {goal.summary.task_count}
           </span>
         </div>
         <div className={styles.metaItem}>
@@ -153,7 +128,7 @@ function GoalCard({ goal }: { goal: ConductorGoal }) {
         <div className={styles.metaItem}>
           <span className={styles.metaLabel}>Questions</span>
           <span className={styles.metaValue}>
-            {goal.ledger.pending_questions.filter((q) => !q.answer).length} open
+            {goal.summary.open_question_count} open
           </span>
         </div>
         <div className={styles.metaItem}>
@@ -165,52 +140,16 @@ function GoalCard({ goal }: { goal: ConductorGoal }) {
         </div>
       </div>
 
-      {hasRecent ? (
+      {goal.summary.memo_count > 0 || goal.summary.ghost_message_count > 0 ? (
         <div className={styles.recentRail}>
-          {memo && (
-            <div className={styles.recentItem}>
-              <span className={styles.metaLabel}>Recent memo</span>
-              <span className={styles.recentText}>
-                {memo.kind}: {memo.content}
-              </span>
-            </div>
-          )}
-          {ghost && (
-            <div className={styles.recentItem}>
-              <span className={styles.metaLabel}>Recent ghost</span>
-              <span className={styles.recentText}>
-                {ghost.role}: {ghost.content}
-              </span>
-            </div>
-          )}
+          <div className={styles.recentItem}>
+            <span className={styles.metaLabel}>Activity summary</span>
+            <span className={styles.recentText}>
+              {goal.summary.memo_count} memos · {goal.summary.ghost_message_count} ghost messages · {goal.summary.learning_record_count} lessons
+            </span>
+          </div>
         </div>
       ) : null}
-
-      <div className={styles.linkRow}>
-        {primaryTaskId && (
-          <button
-            type="button"
-            className={styles.chip}
-            onClick={() =>
-              dispatch(push({ name: "task workspace", taskId: primaryTaskId }))
-            }
-          >
-            Open primary task
-          </button>
-        )}
-        {chatId && (
-          <button
-            type="button"
-            className={classNames(styles.chip, styles.chipPrimary)}
-            onClick={() => {
-              dispatch(openBuddyChat({ chat_id: chatId, title: goal.title }));
-              dispatch(push({ name: "chat" }));
-            }}
-          >
-            Open conductor log
-          </button>
-        )}
-      </div>
 
       <div className={styles.controlsArea}>
         <Text size="1" color="gray" weight="bold">

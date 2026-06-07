@@ -5,6 +5,7 @@ use chrono::Utc;
 use hyper::StatusCode;
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorWakeReason, GoalLedger, GoalStatus, PendingQuestion,
+    PublicConductorGoal,
 };
 use refact_buddy_core::conductor_store::{mutate_goal_ledger, MissingGoalBehavior};
 use refact_buddy_core::types::{BuddyGhostMessage, BuddyGhostMessageRole};
@@ -243,7 +244,9 @@ async fn emit_goal_updated(gcx: Arc<GlobalContext>, goal_id: &str, ledger: GoalL
             ConductorGoal::from_ledger(goal_id.to_string(), ledger),
         )
         .await;
-        let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal });
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
+            goal: PublicConductorGoal::from(goal),
+        });
     }
 }
 
@@ -430,10 +433,8 @@ mod tests {
                 assert_eq!(goal.title, "Answerable goal");
                 assert_eq!(goal.budget.wall_clock_secs, Some(120));
                 assert_eq!(goal.spent.no_progress_wakes, 1);
-                assert_eq!(
-                    goal.ledger.pending_questions[0].answer.as_deref(),
-                    Some("Yes")
-                );
+                assert_eq!(goal.summary.pending_question_count, 1);
+                assert_eq!(goal.summary.open_question_count, 0);
             }
             other => panic!("expected ConductorGoalUpdated, got {other:?}"),
         }

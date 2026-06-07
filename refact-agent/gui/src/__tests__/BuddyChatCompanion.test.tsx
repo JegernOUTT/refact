@@ -103,6 +103,19 @@ function makeGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       usd: null,
       no_progress_wakes: 0,
     },
+    summary: {
+      task_count: 2,
+      chat_count: 2,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
     ledger: {
       status: "running",
       autonomy: "governed",
@@ -191,7 +204,20 @@ describe("BuddyChatCompanion conductor cockpit", () => {
           conductor_goals: [
             makeGoal({
               status: "waiting_for_human",
-              ledger: {
+              summary: {
+      task_count: 2,
+      chat_count: 2,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 1,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
                 ...makeGoal().ledger,
                 status: "waiting_for_human",
                 pending_questions: [
@@ -292,7 +318,20 @@ describe("BuddyChatCompanion conductor cockpit", () => {
         makeSnapshot({
           conductor_goals: [
             makeGoal({
-              ledger: {
+              summary: {
+      task_count: 2,
+      chat_count: 2,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
                 ...makeGoal().ledger,
                 chat_ids: ["conductor-log-chat"],
               },
@@ -308,10 +347,7 @@ describe("BuddyChatCompanion conductor cockpit", () => {
     );
 
     await waitFor(() => {
-      expect(store.getState().chat.current_thread_id).toBe(
-        "conductor-log-chat",
-      );
-      expect(store.getState().pages.at(-1)?.name).toBe("chat");
+      expect(store.getState().pages.at(-1)).toEqual({ name: "conductor" });
     });
   });
 });

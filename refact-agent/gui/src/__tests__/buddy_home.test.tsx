@@ -291,6 +291,19 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       usd: 0.12,
       no_progress_wakes: 0,
     },
+    summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
     ledger: {
       status: "running",
       autonomy: "full_auto",
@@ -1268,12 +1281,9 @@ describe("BuddyConductorGoalsPanel", () => {
     expect(screen.getByText("$0.12 / $2.00")).toBeInTheDocument();
     expect(screen.getByText("P 100 · C 50")).toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: "Open conductor log" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Recurring controls" }));
 
-    expect(store.getState().chat.current_thread_id).toBe("conductor-chat-1");
-    expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+    expect(store.getState().pages.at(-1)).toEqual({ name: "scheduler" });
   });
 
   it("home panel navigates to dedicated conductor page", async () => {

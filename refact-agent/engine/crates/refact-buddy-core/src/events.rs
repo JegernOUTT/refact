@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::conductor::ConductorGoal;
+use crate::conductor::PublicConductorGoal;
 use crate::settings::BuddySettings;
 use crate::types::*;
 
@@ -54,7 +54,7 @@ pub enum BuddyEvent<Diagnostic = serde_json::Value> {
         draft_id: String,
     },
     ConductorGoalUpdated {
-        goal: ConductorGoal,
+        goal: PublicConductorGoal,
     },
     ConductorGhostMessage {
         ghost: BuddyGhostMessage,
@@ -97,10 +97,10 @@ mod tests {
 
     #[test]
     fn conductor_goal_updated_round_trips() {
-        let goal = ConductorGoal {
+        let goal = PublicConductorGoal {
             id: "goal-1".to_string(),
             title: "Buddy Conductor".to_string(),
-            ..ConductorGoal::default()
+            ..PublicConductorGoal::default()
         };
         let event = BuddyEvent::<serde_json::Value>::ConductorGoalUpdated { goal };
         let json = serde_json::to_string(&event).unwrap();

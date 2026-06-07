@@ -6,8 +6,8 @@ export function conductorGoalCounts(goal: ConductorGoal): {
   agents: number;
 } {
   return {
-    planners: goal.ledger.planner_task_id ? 1 : 0,
-    cards: goal.ledger.task_ids.length,
-    agents: goal.ledger.chat_ids.length,
+    planners: goal.summary.has_planner_task ? 1 : 0,
+    cards: goal.summary.task_count,
+    agents: goal.summary.chat_count,
   };
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, ConductorRecurring, ConductorWakeReason, GoalLedger, GoalStatus,
-    MemoKind,
+    PublicConductorGoal, MemoKind,
 };
 use refact_buddy_core::conductor_store::{list_goal_ledgers, mutate_goal_ledger, MissingGoalBehavior};
 use uuid::Uuid;
@@ -269,7 +269,9 @@ async fn mutate_and_emit(
             ConductorGoal::from_ledger(goal_id.to_string(), ledger.clone()),
         )
         .await;
-        let _ = tx.send(BuddyEvent::ConductorGoalUpdated { goal });
+        let _ = tx.send(BuddyEvent::ConductorGoalUpdated {
+            goal: PublicConductorGoal::from(goal),
+        });
     }
     Ok(Some(ledger))
 }

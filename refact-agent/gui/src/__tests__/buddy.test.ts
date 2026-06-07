@@ -437,6 +437,19 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       usd: 0.1,
       no_progress_wakes: 1,
     },
+    summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
     ledger: {
       status,
       autonomy: "full_auto",
@@ -2125,7 +2138,20 @@ describe("buddy conductor goal state", () => {
     const ghost = makeGhostMessage({ id: "ghost-ledger", role: "memo" });
     const goal = makeConductorGoal({
       id: "goal-ghost-ledger",
-      ledger: {
+      summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
         ...makeConductorGoal().ledger,
         ghost_messages: [ghost],
       },
@@ -2188,7 +2214,20 @@ describe("buddy conductor goal state", () => {
   test("selectGoalForChat resolves by chat and task ownership", () => {
     const goal = makeConductorGoal({
       id: "goal-owned",
-      ledger: {
+      summary: {
+      task_count: 1,
+      chat_count: 1,
+      memo_count: 0,
+      learning_record_count: 0,
+      pending_question_count: 0,
+      open_question_count: 0,
+      ghost_message_count: 0,
+      no_progress_wakes: 0,
+      turn_failures: 0,
+      has_planner_task: true,
+      has_conductor_chat: true,
+    },
+    ledger: {
         ...makeConductorGoal().ledger,
         planner_task_id: "planner-task-owned",
         task_ids: ["task-owned"],
@@ -2243,6 +2282,21 @@ describe("buddy conductor goal state", () => {
     const escalated = makeConductorGoal({
       id: "escalated",
       status: "escalated",
+      summary: {
+        task_count: 1,
+        chat_count: 1,
+        memo_count: 1,
+        escalation_memo_count: 1,
+        surgery_memo_count: 0,
+        learning_record_count: 0,
+        pending_question_count: 0,
+        open_question_count: 0,
+        ghost_message_count: 0,
+        no_progress_wakes: 0,
+        turn_failures: 0,
+        has_planner_task: true,
+        has_conductor_chat: true,
+      },
       ledger: {
         ...makeConductorGoal().ledger,
         memos: [
@@ -2273,7 +2327,7 @@ describe("buddy conductor goal state", () => {
 
     expect(screen.getByText("🆘 Escalated")).toBeInTheDocument();
     expect(
-      screen.getByText(/escalation: Need human rescue/u),
+      screen.getByText("1 memos · 0 ghost messages · 0 lessons"),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Abandoned" }));
@@ -2287,6 +2341,21 @@ describe("buddy conductor goal state", () => {
   test("surgery and done conductor states render dashboard labels", () => {
     const surgery = makeConductorGoal({
       id: "goal-surgery",
+      summary: {
+        task_count: 1,
+        chat_count: 1,
+        memo_count: 1,
+        escalation_memo_count: 0,
+        surgery_memo_count: 1,
+        learning_record_count: 0,
+        pending_question_count: 0,
+        open_question_count: 0,
+        ghost_message_count: 1,
+        no_progress_wakes: 0,
+        turn_failures: 0,
+        has_planner_task: true,
+        has_conductor_chat: true,
+      },
       ledger: {
         ...makeConductorGoal().ledger,
         memos: [
@@ -2325,7 +2394,7 @@ describe("buddy conductor goal state", () => {
     expect(screen.getByText(/Surgery audit/u)).toBeInTheDocument();
     expect(screen.getAllByText(/Done/u).length).toBeGreaterThan(1);
     expect(
-      screen.getByText(/memo: Cleaned agent transcript/u),
+      screen.getByText("1 memos · 1 ghost messages · 0 lessons"),
     ).toBeInTheDocument();
   });
 

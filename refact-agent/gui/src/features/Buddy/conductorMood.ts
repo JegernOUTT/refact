@@ -1,7 +1,6 @@
 import type {
   AnimType,
   ConductorGoal,
-  ConductorMemo,
   GoalStatus,
   MoodType,
 } from "./types";
@@ -113,11 +112,8 @@ const MOOD_VIEWS: Record<ConductorDashboardState, ConductorMoodView> = {
   },
 };
 
-function memoHas(memo: ConductorMemo, needle: string): boolean {
-  return memo.content.toLowerCase().includes(needle);
-}
-
 function statusToState(status: GoalStatus): ConductorDashboardState {
+  if (status === "active" || status === "proposed") return "conducting";
   if (status === "escalated") return "escalated";
   if (status === "abandoned") return "abandoned";
   if (status === "waiting_for_human") return "waiting_human";
@@ -130,13 +126,10 @@ function statusToState(status: GoalStatus): ConductorDashboardState {
 export function goalToConductorState(
   goal: ConductorGoal,
 ): ConductorDashboardState {
-  const memos = goal.ledger.memos;
   const state = statusToState(goal.status);
   if (state === "escalated" || state === "abandoned") return state;
-  if (memos.some((memo) => memo.kind === "escalation")) return "escalated";
-  if (memos.some((memo) => memo.kind === "surgery")) return "surgery";
-  if (memos.some((memo) => memoHas(memo, "merge"))) return "merging";
-  if (memos.some((memo) => memoHas(memo, "review"))) return "review";
+  if ((goal.summary.surgery_memo_count ?? 0) > 0) return "surgery";
+  if (goal.summary.open_question_count > 0) return "waiting_human";
   return state;
 }
 

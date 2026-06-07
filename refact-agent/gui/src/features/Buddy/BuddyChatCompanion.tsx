@@ -31,7 +31,7 @@ import {
   clearExpiredChatBubbleSnooze,
   type BuddyChatBubbleClass,
 } from "./buddySlice";
-import { openBuddyChat, startBuddyInvestigation } from "../Chat/Thread";
+import { startBuddyInvestigation } from "../Chat/Thread";
 import { selectApiKey, selectConfig } from "../Config/configSlice";
 import { sendUserMessage } from "../../services/refact/chatCommands";
 import { push } from "../Pages/pagesSlice";
@@ -650,9 +650,7 @@ function usdLabel(goal: ConductorGoal): string {
 }
 
 function waitingQuestions(goal: ConductorGoal): number {
-  return goal.ledger.pending_questions.filter(
-    (question) => !question.answered_at,
-  ).length;
+  return goal.summary.open_question_count;
 }
 
 export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
@@ -1246,20 +1244,16 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
 
   const openConductorLog = useCallback(() => {
     if (!conductorGoal) return;
-    const logChatId = conductorGoal.ledger.chat_ids[0] ?? chatId;
-    dispatch(openBuddyChat({ chat_id: logChatId, title: conductorGoal.title }));
-    dispatch(push({ name: "chat" }));
-  }, [chatId, conductorGoal, dispatch]);
+    dispatch(push({ name: "conductor" }));
+  }, [conductorGoal, dispatch]);
 
   const openConductorPage = useCallback(() => {
     dispatch(push({ name: "conductor" }));
   }, [dispatch]);
 
   const openPlannerTask = useCallback(() => {
-    const taskId = conductorGoal?.ledger.planner_task_id;
-    if (!taskId) return;
-    dispatch(push({ name: "task workspace", taskId }));
-  }, [conductorGoal, dispatch]);
+    dispatch(push({ name: "conductor" }));
+  }, [dispatch]);
 
   const handleControl = useCallback(
     async (ctrl: BuddyControl) => {
@@ -1565,7 +1559,11 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
               type="button"
               className={styles.controlButton}
               onClick={() => void handleGoalAction("resume")}
-              disabled={pending || conductorGoal.status === "running"}
+              disabled={
+                pending ||
+                conductorGoal.status === "running" ||
+                conductorGoal.status === "active"
+              }
             >
               Resume
             </button>
@@ -1589,7 +1587,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
               type="button"
               className={styles.controlButton}
               onClick={openPlannerTask}
-              disabled={!conductorGoal.ledger.planner_task_id}
+              disabled={!conductorGoal.summary.has_planner_task}
             >
               Spawn planner
             </button>

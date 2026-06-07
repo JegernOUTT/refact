@@ -3,8 +3,8 @@ use axum::response::Result;
 use chrono::Utc;
 use hyper::StatusCode;
 use refact_buddy_core::conductor::{
-    ConductorGoal, ConductorWakeReason, GoalAutonomy, GoalStatus, validate_goal_for_create,
-    validate_goal_status_transition,
+    ConductorGoal, ConductorWakeReason, GoalAutonomy, GoalStatus, PublicConductorGoal,
+    validate_goal_for_create, validate_goal_status_transition,
 };
 use refact_buddy_core::conductor_store::{
     ConductorStoreError, list_goal_ledgers, load_goal_ledger, save_goal_ledger,
@@ -20,7 +20,7 @@ use crate::custom_error::ScratchError;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ConductorGoalsResponse {
-    pub goals: Vec<ConductorGoal>,
+    pub goals: Vec<PublicConductorGoal>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,13 +85,12 @@ pub async fn handle_v1_buddy_conductor_goals_list(
         .map_err(store_error)?;
     let mut goals = Vec::with_capacity(stored_goals.len());
     for stored in stored_goals {
-        goals.push(
-            hydrate_goal_spent(
-                app.gcx.clone(),
-                ConductorGoal::from_ledger(stored.goal_id, stored.ledger),
-            )
-            .await,
-        );
+        let goal = hydrate_goal_spent(
+            app.gcx.clone(),
+            ConductorGoal::from_ledger(stored.goal_id, stored.ledger),
+        )
+        .await;
+        goals.push(PublicConductorGoal::from(goal));
     }
     Ok(axum::Json(ConductorGoalsResponse { goals }))
 }
@@ -99,7 +98,7 @@ pub async fn handle_v1_buddy_conductor_goals_list(
 pub async fn handle_v1_buddy_conductor_goal_create(
     State(app): State<AppState>,
     axum::Json(req): axum::Json<CreateConductorGoalRequest>,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
     let project_root = project_root(&app).await?;
     let now = Utc::now().to_rfc3339();
     let id = normalized_goal_id(req.id).unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -140,21 +139,23 @@ pub async fn handle_v1_buddy_conductor_goal_create(
         .await
         .map_err(store_error)?;
     let goal = refresh_targets_and_emit(app, goal, Some(ConductorWakeReason::GoalCreated)).await;
-    Ok(axum::Json(goal))
+    Ok(axum::Json(PublicConductorGoal::from(goal)))
 }
 
 pub async fn handle_v1_buddy_conductor_goal_get(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
-    Ok(axum::Json(load_goal(&app, &goal_id).await?))
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
+    Ok(axum::Json(PublicConductorGoal::from(
+        load_goal(&app, &goal_id).await?,
+    )))
 }
 
 pub async fn handle_v1_buddy_conductor_goal_patch(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
     axum::Json(req): axum::Json<PatchConductorGoalRequest>,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
     let project_root = project_root(&app).await?;
     let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
     if let Some(title) = req.title {
@@ -189,27 +190,27 @@ pub async fn handle_v1_buddy_conductor_goal_patch(
     validate_active_operation(&goal)?;
     persist_goal(&project_root, &mut goal).await?;
     let goal = refresh_targets_and_emit(app, goal, None).await;
-    Ok(axum::Json(goal))
+    Ok(axum::Json(PublicConductorGoal::from(goal)))
 }
 
 pub async fn handle_v1_buddy_conductor_goal_pause(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
     set_goal_status(app, goal_id, GoalStatus::Paused).await
 }
 
 pub async fn handle_v1_buddy_conductor_goal_resume(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
     set_goal_status(app, goal_id, GoalStatus::Active).await
 }
 
 pub async fn handle_v1_buddy_conductor_goal_stop(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
     set_goal_status(app, goal_id, GoalStatus::Abandoned).await
 }
 
@@ -217,7 +218,7 @@ pub async fn handle_v1_buddy_conductor_goal_autonomy(
     State(app): State<AppState>,
     Path(goal_id): Path<String>,
     axum::Json(req): axum::Json<AutonomyRequest>,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
     let project_root = project_root(&app).await?;
     let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
     goal.autonomy = req.autonomy;
@@ -229,7 +230,7 @@ pub async fn handle_v1_buddy_conductor_goal_autonomy(
     }
     persist_goal(&project_root, &mut goal).await?;
     let goal = refresh_targets_and_emit(app, goal, None).await;
-    Ok(axum::Json(goal))
+    Ok(axum::Json(PublicConductorGoal::from(goal)))
 }
 
 pub async fn handle_v1_buddy_conductor_goal_manual_wake(
@@ -281,7 +282,7 @@ async fn set_goal_status(
     app: AppState,
     goal_id: String,
     status: GoalStatus,
-) -> Result<axum::Json<ConductorGoal>, ScratchError> {
+) -> Result<axum::Json<PublicConductorGoal>, ScratchError> {
     let project_root = project_root(&app).await?;
     let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
     validate_goal_transition(goal.status, status)?;
@@ -291,7 +292,7 @@ async fn set_goal_status(
     }
     persist_goal(&project_root, &mut goal).await?;
     let goal = refresh_targets_and_emit(app, goal, None).await;
-    Ok(axum::Json(goal))
+    Ok(axum::Json(PublicConductorGoal::from(goal)))
 }
 async fn load_goal(app: &AppState, goal_id: &str) -> Result<ConductorGoal, ScratchError> {
     let project_root = project_root(app).await?;
@@ -367,7 +368,9 @@ async fn refresh_targets_and_emit(
     let _ = app
         .buddy
         .buddy_events_tx
-        .send(BuddyEvent::ConductorGoalUpdated { goal: goal.clone() });
+        .send(BuddyEvent::ConductorGoalUpdated {
+            goal: PublicConductorGoal::from(&goal),
+        });
     goal
 }
 
@@ -522,7 +525,7 @@ mod tests {
         }
     }
 
-    async fn create_goal(app: AppState, id: &str) -> ConductorGoal {
+    async fn create_goal(app: AppState, id: &str) -> PublicConductorGoal {
         handle_v1_buddy_conductor_goal_create(State(app), axum::Json(create_req(id)))
             .await
             .unwrap()
@@ -581,6 +584,93 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    fn sensitive_ledger() -> GoalLedger {
+        GoalLedger {
+            title: Some("Sensitive public goal".to_string()),
+            plan_doc_slug: Some("sensitive-plan".to_string()),
+            plan_markdown: Some("# Safe public plan".to_string()),
+            done_when: Some(DoneWhen {
+                summary: "Safe done when".to_string(),
+                checklist: vec!["safe checklist".to_string()],
+            }),
+            budget: Some(GoalBudget {
+                wall_clock_secs: Some(60),
+                no_progress_wakes: Some(2),
+                ..GoalBudget::default()
+            }),
+            status: Some(GoalStatus::Active),
+            autonomy: Some(GoalAutonomy::FullAuto),
+            planner_task_id: Some("raw-planner-task-secret".to_string()),
+            task_ids: vec!["raw-task-secret".to_string()],
+            chat_ids: vec!["raw-chat-secret".to_string()],
+            memos: vec![refact_buddy_core::conductor::ConductorMemo {
+                id: "memo-secret-id".to_string(),
+                kind: refact_buddy_core::conductor::MemoKind::Decision,
+                content: "raw memo secret text".to_string(),
+                created_at: "2026-06-03T00:00:00Z".to_string(),
+                source_chat_id: Some("memo-chat-secret".to_string()),
+                related_task_id: Some("memo-task-secret".to_string()),
+            }],
+            learning_records: vec![refact_buddy_core::conductor::ConductorLearningRecord {
+                id: "learning-secret-id".to_string(),
+                summary: "raw learning secret text".to_string(),
+                ..Default::default()
+            }],
+            ghost_messages: vec![refact_buddy_core::types::BuddyGhostMessage {
+                id: "ghost-secret-id".to_string(),
+                goal_id: Some("goal-redacted".to_string()),
+                role: refact_buddy_core::types::BuddyGhostMessageRole::Say,
+                content: "raw ghost secret text".to_string(),
+                created_at: "2026-06-03T00:00:00Z".to_string(),
+                source_chat_id: Some("ghost-chat-secret".to_string()),
+                question_id: None,
+            }],
+            pending_questions: vec![refact_buddy_core::conductor::PendingQuestion {
+                id: "question-secret-id".to_string(),
+                question: "raw question secret text".to_string(),
+                asked_at: "2026-06-03T00:00:01Z".to_string(),
+                source_chat_id: Some("question-chat-secret".to_string()),
+                blocking: true,
+                answer: Some("raw answer secret text".to_string()),
+                answered_at: Some("2026-06-03T00:00:02Z".to_string()),
+            }],
+            no_progress_wakes: 7,
+            turn_failures: 3,
+            last_wake_at: Some("2026-06-03T00:00:04Z".to_string()),
+            last_progress_at: Some("2026-06-03T00:00:03Z".to_string()),
+            last_wake_reason: Some(ConductorWakeReason::HumanSteering),
+            ..Default::default()
+        }
+    }
+
+    fn assert_public_goal_redacted(value: &Value) {
+        let encoded = serde_json::to_string(value).unwrap();
+        for forbidden in [
+            "ledger",
+            "memos",
+            "pending_questions",
+            "ghost_messages",
+            "learning_records",
+            "raw memo secret text",
+            "raw question secret text",
+            "raw answer secret text",
+            "raw ghost secret text",
+            "raw learning secret text",
+            "raw-chat-secret",
+            "raw-task-secret",
+            "raw-planner-task-secret",
+            "memo-chat-secret",
+            "memo-task-secret",
+            "question-chat-secret",
+            "ghost-chat-secret",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "leaked {forbidden}: {encoded}"
+            );
+        }
     }
 
     async fn write_trajectory(
@@ -673,6 +763,48 @@ mod tests {
         .0;
         assert_eq!(patched.title, "Updated conductor routes");
         assert_eq!(patched.autonomy, GoalAutonomy::Governed);
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_return_public_redacted_goals() {
+        let (app, dir) = test_app().await;
+        save_goal_ledger(dir.path(), "goal-redacted", &sensitive_ledger())
+            .await
+            .unwrap();
+
+        let listed = handle_v1_buddy_conductor_goals_list(State(app.clone()))
+            .await
+            .unwrap()
+            .0;
+        let fetched = handle_v1_buddy_conductor_goal_get(
+            State(app.clone()),
+            Path("goal-redacted".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let created = create_goal(app, "goal-created-redacted").await;
+
+        let listed_value = serde_json::to_value(&listed).unwrap();
+        let fetched_value = serde_json::to_value(&fetched).unwrap();
+        let created_value = serde_json::to_value(&created).unwrap();
+
+        assert_public_goal_redacted(&listed_value);
+        assert_public_goal_redacted(&fetched_value);
+        assert_public_goal_redacted(&created_value);
+        assert_eq!(listed.goals[0].summary.task_count, 1);
+        assert_eq!(listed.goals[0].summary.chat_count, 1);
+        assert_eq!(listed.goals[0].summary.memo_count, 1);
+        assert_eq!(listed.goals[0].summary.learning_record_count, 1);
+        assert_eq!(listed.goals[0].summary.pending_question_count, 1);
+        assert_eq!(listed.goals[0].summary.open_question_count, 0);
+        assert_eq!(listed.goals[0].summary.ghost_message_count, 1);
+        assert_eq!(listed.goals[0].summary.no_progress_wakes, 7);
+        assert_eq!(listed.goals[0].summary.turn_failures, 3);
+        assert!(listed.goals[0].summary.has_planner_task);
+        assert!(listed.goals[0].summary.has_conductor_chat);
+        assert_eq!(fetched.summary.memo_count, 1);
+        assert!(created_value.get("ledger").is_none());
     }
 
     #[tokio::test]

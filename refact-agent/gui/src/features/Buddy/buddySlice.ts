@@ -537,6 +537,8 @@ export interface BuddySliceState {
 const EMPTY_BUDDY_ACTIVITIES: BuddyActivityEntry[] = [];
 const EMPTY_BUDDY_SUGGESTIONS: BuddySuggestion[] = [];
 const ACTIVE_CONDUCTOR_GOAL_STATUSES = new Set<GoalStatus>([
+  "proposed",
+  "active",
   "planned",
   "running",
   "waiting_for_human",
@@ -558,9 +560,9 @@ function upsertConductorGoalEntry(
   return next;
 }
 
-function ghostMessagesFromGoals(goals: ConductorGoal[]): BuddyGhostMessage[] {
+function legacyGhostMessagesFromGoals(goals: ConductorGoal[]): BuddyGhostMessage[] {
   return goals
-    .flatMap((goal) => goal.ledger.ghost_messages)
+    .flatMap((goal) => goal.ledger?.ghost_messages ?? [])
     .sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
@@ -658,10 +660,6 @@ function syncSnapshotConductorGoals(state: BuddySliceState) {
   }
 }
 
-function syncGhostMessagesFromGoals(state: BuddySliceState) {
-  state.ghostMessages = ghostMessagesFromGoals(state.conductorGoals);
-}
-
 const selectUnreadOpportunitiesFromSlice = createSelector(
   [(state: BuddySliceState) => state.opportunities],
   (opportunities) =>
@@ -686,7 +684,7 @@ export const buddySlice = createSlice({
       state.pulse = snapshot.pulse ?? defaultBuddyPulse();
       state.activeDrafts = snapshot.active_drafts ?? [];
       state.conductorGoals = snapshot.conductor_goals ?? [];
-      syncGhostMessagesFromGoals(state);
+      state.ghostMessages = legacyGhostMessagesFromGoals(state.conductorGoals);
     },
     /** Called when SSE snapshot reports buddy as disabled/not-ready (no state). */
     setBuddyUnavailable: (state) => {
@@ -985,7 +983,6 @@ export const buddySlice = createSlice({
         state.conductorGoals,
         action.payload,
       );
-      syncGhostMessagesFromGoals(state);
       syncSnapshotConductorGoals(state);
     },
     addConductorGhostMessage: (
@@ -1197,11 +1194,11 @@ export const selectGoalForChat = (
   const taskId = owner.taskId?.trim();
   if (!chatId && !taskId) return undefined;
   return state.buddy.conductorGoals.find((goal) => {
-    if (chatId && goal.ledger.chat_ids.includes(chatId)) return true;
+    if (chatId && goal.ledger?.chat_ids?.includes(chatId)) return true;
     if (!taskId) return false;
     return (
-      goal.ledger.planner_task_id === taskId ||
-      goal.ledger.task_ids.includes(taskId)
+      goal.ledger?.planner_task_id === taskId ||
+      goal.ledger?.task_ids?.includes(taskId) === true
     );
   });
 };

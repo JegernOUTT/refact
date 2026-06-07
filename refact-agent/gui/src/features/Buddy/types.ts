@@ -951,6 +951,8 @@ export interface BuddyStorageMetadata {
 }
 
 export type GoalStatus =
+  | "proposed"
+  | "active"
   | "planned"
   | "running"
   | "waiting_for_human"
@@ -1068,14 +1070,33 @@ export interface GoalLedger {
   status?: GoalStatus | null;
   autonomy?: GoalAutonomy | null;
   planner_task_id?: string | null;
-  task_ids: string[];
-  chat_ids: string[];
-  memos: ConductorMemo[];
-  learning_records: ConductorLearningRecord[];
-  pending_questions: PendingQuestion[];
-  ghost_messages: BuddyGhostMessage[];
+  task_ids?: string[];
+  chat_ids?: string[];
+  memos?: ConductorMemo[];
+  learning_records?: ConductorLearningRecord[];
+  pending_questions?: PendingQuestion[];
+  ghost_messages?: BuddyGhostMessage[];
+  no_progress_wakes?: number;
+  turn_failures?: number;
+  last_wake_at?: string | null;
+  last_progress_at?: string | null;
+  last_wake_reason?: ConductorWakeReason | null;
+}
+
+export interface PublicConductorGoalSummary {
+  task_count: number;
+  chat_count: number;
+  memo_count: number;
+  escalation_memo_count?: number;
+  surgery_memo_count?: number;
+  learning_record_count: number;
+  pending_question_count: number;
+  open_question_count: number;
+  ghost_message_count: number;
   no_progress_wakes: number;
   turn_failures: number;
+  has_planner_task: boolean;
+  has_conductor_chat: boolean;
   last_wake_at?: string | null;
   last_progress_at?: string | null;
   last_wake_reason?: ConductorWakeReason | null;
@@ -1091,7 +1112,8 @@ export interface ConductorGoal {
   autonomy: GoalAutonomy;
   budget: GoalBudget;
   spent: GoalBudgetSpent;
-  ledger: GoalLedger;
+  summary: PublicConductorGoalSummary;
+  ledger?: GoalLedger;
   created_at?: string | null;
   updated_at?: string | null;
   completed_at?: string | null;

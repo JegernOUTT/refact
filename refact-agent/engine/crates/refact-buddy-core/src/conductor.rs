@@ -463,6 +463,110 @@ impl ConductorGoal {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct PublicConductorGoalSummary {
+    pub task_count: usize,
+    pub chat_count: usize,
+    pub memo_count: usize,
+    pub escalation_memo_count: usize,
+    pub surgery_memo_count: usize,
+    pub learning_record_count: usize,
+    pub pending_question_count: usize,
+    pub open_question_count: usize,
+    pub ghost_message_count: usize,
+    pub no_progress_wakes: u32,
+    pub turn_failures: u32,
+    pub has_planner_task: bool,
+    pub has_conductor_chat: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wake_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wake_reason: Option<ConductorWakeReason>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PublicConductorGoal {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_doc_slug: Option<String>,
+    pub plan_markdown: String,
+    pub done_when: DoneWhen,
+    pub status: GoalStatus,
+    pub autonomy: GoalAutonomy,
+    pub budget: GoalBudget,
+    pub spent: GoalBudgetSpent,
+    pub summary: PublicConductorGoalSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+}
+
+impl From<&ConductorGoal> for PublicConductorGoal {
+    fn from(goal: &ConductorGoal) -> Self {
+        Self {
+            id: goal.id.clone(),
+            title: goal.title.clone(),
+            plan_doc_slug: goal.plan_doc_slug.clone(),
+            plan_markdown: goal.plan_markdown.clone(),
+            done_when: goal.done_when.clone(),
+            status: goal.status,
+            autonomy: goal.autonomy,
+            budget: goal.budget.clone(),
+            spent: goal.spent.clone(),
+            summary: PublicConductorGoalSummary {
+                task_count: goal.ledger.task_ids.len(),
+                chat_count: goal.ledger.chat_ids.len(),
+                memo_count: goal.ledger.memos.len(),
+                escalation_memo_count: goal
+                    .ledger
+                    .memos
+                    .iter()
+                    .filter(|memo| memo.kind == MemoKind::Escalation)
+                    .count(),
+                surgery_memo_count: goal
+                    .ledger
+                    .memos
+                    .iter()
+                    .filter(|memo| memo.kind == MemoKind::Surgery)
+                    .count(),
+                learning_record_count: goal.ledger.learning_records.len(),
+                pending_question_count: goal.ledger.pending_questions.len(),
+                open_question_count: goal
+                    .ledger
+                    .pending_questions
+                    .iter()
+                    .filter(|question| question.answer.is_none() && question.answered_at.is_none())
+                    .count(),
+                ghost_message_count: goal.ledger.ghost_messages.len(),
+                no_progress_wakes: goal.ledger.no_progress_wakes,
+                turn_failures: goal.ledger.turn_failures,
+                has_planner_task: goal.ledger.planner_task_id.is_some(),
+                has_conductor_chat: !goal.ledger.chat_ids.is_empty(),
+                last_wake_at: goal.ledger.last_wake_at.clone(),
+                last_progress_at: goal.ledger.last_progress_at.clone(),
+                last_wake_reason: goal.ledger.last_wake_reason,
+            },
+            created_at: goal.created_at.clone(),
+            updated_at: goal.updated_at.clone(),
+            completed_at: goal.completed_at.clone(),
+        }
+    }
+}
+
+impl From<ConductorGoal> for PublicConductorGoal {
+    fn from(goal: ConductorGoal) -> Self {
+        Self::from(&goal)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct PendingQuestion {
     pub id: String,
     pub question: String,
