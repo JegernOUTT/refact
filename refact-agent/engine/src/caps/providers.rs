@@ -298,7 +298,6 @@ fn add_running_models(provider: &mut CapsProvider) {
         &provider.chat_light_model,
         &provider.chat_thinking_model,
         &provider.chat_buddy_model,
-        &provider.completion_default_model,
     ];
 
     for model in models_to_add {
@@ -368,6 +367,15 @@ pub fn add_models_to_caps(
             base_model_rec.supports_cache_control && provider.supports_cache_control;
     }
 
+    fn add_provider_details_to_model_preserving_endpoint(
+        base_model_rec: &mut BaseModelRecord,
+        provider: &CapsProvider,
+        model_name: &str,
+    ) {
+        let endpoint = base_model_rec.endpoint.clone();
+        add_provider_details_to_model(base_model_rec, provider, model_name, &endpoint);
+    }
+
     for mut provider in providers {
         if !provider.enabled {
             continue;
@@ -420,6 +428,12 @@ pub fn add_models_to_caps(
                     &provider,
                     &model_name,
                     &provider.chat_endpoint,
+                );
+            } else {
+                add_provider_details_to_model_preserving_endpoint(
+                    &mut model_rec.base,
+                    &provider,
+                    &model_name,
                 );
             }
 
@@ -764,6 +778,20 @@ fn augment_completion_model_from_preset(
 fn populate_model_records(provider: &mut CapsProvider, experimental: bool) {
     let completion_presets = get_completion_presets();
     let embedding_presets = get_embedding_presets();
+
+    if provider.supports_completion && !provider.completion_default_model.is_empty() {
+        let model_name = provider.completion_default_model.clone();
+        if !provider.completion_models.contains_key(&model_name) {
+            if let Some(model_rec) = find_model_match(
+                &model_name,
+                &provider.completion_models,
+                &completion_presets.completion_models,
+                experimental,
+            ) {
+                provider.completion_models.insert(model_name, model_rec);
+            }
+        }
+    }
 
     for model_name in &provider.running_models {
         if provider.supports_completion {
@@ -1112,6 +1140,7 @@ mod tests {
                 document_prefix: String::new(),
                 rejection_threshold: 0.0,
                 embedding_batch: 0,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1357,6 +1386,75 @@ mod tests {
     }
 
     #[test]
+    fn completion_only_custom_provider_does_not_create_chat_model() {
+        let mut provider = CapsProvider {
+            name: "custom".to_string(),
+            base_provider: "custom".to_string(),
+            completion_endpoint: "https://completion.example/v1/completions".to_string(),
+            completion_default_model: "qwen2.5/coder/1.5b/base".to_string(),
+            ..Default::default()
+        };
+        post_process_provider(&mut provider, false, false);
+
+        let mut caps = CodeAssistantCaps::default();
+        add_models_to_caps(&mut caps, vec![provider]);
+
+        assert!(caps
+            .completion_models
+            .contains_key("custom/qwen2.5/coder/1.5b/base"));
+        assert!(!caps
+            .chat_models
+            .contains_key("custom/qwen2.5/coder/1.5b/base"));
+        assert_eq!(
+            caps.defaults.completion_default_model,
+            "custom/qwen2.5/coder/1.5b/base"
+        );
+    }
+
+    #[test]
+    fn explicit_chat_model_endpoint_inherits_provider_runtime_details() {
+        let mut provider = CapsProvider {
+            name: "custom".to_string(),
+            base_provider: "custom".to_string(),
+            api_key: "sk-provider".to_string(),
+            tokenizer_api_key: "tok-provider".to_string(),
+            endpoint_style: "anthropic".to_string(),
+            wire_format: WireFormat::AnthropicMessages,
+            supports_cache_control: false,
+            extra_headers: HashMap::from([("X-Test".to_string(), "header-value".to_string())]),
+            chat_models: IndexMap::from([(
+                "custom-chat".to_string(),
+                ChatModelRecord {
+                    base: BaseModelRecord {
+                        endpoint: "https://model.example/v1/messages".to_string(),
+                        supports_cache_control: true,
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        post_process_provider(&mut provider, false, false);
+
+        let mut caps = CodeAssistantCaps::default();
+        add_models_to_caps(&mut caps, vec![provider]);
+
+        let model = caps.chat_models.get("custom/custom-chat").unwrap();
+        assert_eq!(model.base.endpoint, "https://model.example/v1/messages");
+        assert_eq!(model.base.api_key, "sk-provider");
+        assert_eq!(model.base.tokenizer_api_key, "tok-provider");
+        assert_eq!(model.base.endpoint_style, "anthropic");
+        assert_eq!(model.base.wire_format, WireFormat::AnthropicMessages);
+        assert_eq!(
+            model.base.extra_headers.get("X-Test").map(String::as_str),
+            Some("header-value")
+        );
+        assert!(!model.base.supports_cache_control);
+    }
+
+    #[test]
     fn explicit_custom_role_config_exposes_completion_and_embedding_defaults() {
         let provider = CapsProvider {
             name: "custom".to_string(),
@@ -1403,7 +1501,6 @@ mod tests {
             "custom/text-embedding-3-small"
         );
     }
-
     async fn write_provider_config(temp: &tempfile::TempDir, file_name: &str, yaml: &str) {
         let providers_dir = temp.path().join("providers.d");
         tokio::fs::create_dir_all(&providers_dir).await.unwrap();
