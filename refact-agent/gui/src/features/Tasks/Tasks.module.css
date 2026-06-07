@@ -1,35 +1,42 @@
 .kanbanBoard {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
-  gap: var(--space-3);
-  justify-content: center;
-  align-items: flex-start;
-  padding: var(--space-2);
+  gap: var(--rf-space-3);
+  align-items: stretch;
+  padding: var(--rf-space-2);
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .kanbanColumn {
-  flex: 0 0 200px;
-  min-width: 160px;
-  background: var(--gray-2);
-  border-radius: var(--radius-3);
-  border-top: 3px solid var(--gray-5);
+  flex: 1 1 0;
+  min-width: 0;
+  border-top: 3px solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-card);
   display: flex;
   flex-direction: column;
+  background: var(--rf-surface-1);
 }
 
 .kanbanColumnContent {
-  padding: var(--space-1);
+  padding: var(--rf-space-1);
+  min-width: 0;
 }
 
 .kanbanCard {
-  background: var(--color-background);
-  transition: transform 0.1s ease;
-  padding: var(--space-2);
+  background: transparent;
+  transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+  padding: var(--rf-space-2);
+  min-width: 0;
 }
 
 .kanbanCard:hover {
   transform: translateY(-1px);
+  background: var(--rf-surface-1);
+}
+
+.kanbanCardClickable {
+  cursor: pointer;
 }
 
 .kanbanCardTopRow {
@@ -57,12 +64,25 @@
 }
 
 .agentBadgeButton:hover {
-  background: var(--blue-4);
+  background: var(--rf-color-accent-soft);
 }
 
 .kanbanColumnHeader {
-  padding: var(--space-1) var(--space-2);
-  border-bottom: 1px solid var(--gray-4);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-bottom: 1px solid var(--rf-border);
+}
+
+@media (max-width: 680px) {
+  .kanbanBoard {
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .kanbanColumn {
+    flex: 0 0 auto;
+    width: 100%;
+  }
 }
 
 .taskWorkspace {
@@ -77,6 +97,31 @@
   flex: 0 0 auto;
   min-height: 80px;
   overflow: auto;
+}
+
+.emptyState {
+  flex: 1;
+}
+
+.fullHeightEmptyState {
+  height: 100%;
+}
+
+.finalReportSection {
+  background: color-mix(in oklab, var(--rf-color-success) 12%, transparent);
+}
+
+.notificationToast {
+  position: fixed;
+  bottom: var(--rf-space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--rf-color-accent);
+  color: var(--rf-bg);
+  padding: var(--rf-space-3) var(--rf-space-4);
+  border-radius: var(--rf-radius-card);
+  z-index: var(--rf-z-fixed);
+  box-shadow: var(--rf-elev-overlay);
 }
 
 .workspaceChromeCollapse {
@@ -96,18 +141,18 @@
   align-items: center;
   flex-shrink: 0;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   background: transparent;
   user-select: none;
   min-height: 28px;
   box-sizing: border-box;
-  padding: 0 var(--space-3);
+  padding: 0 var(--rf-space-3);
 }
 
 .panelsSection {
   display: flex;
-  gap: var(--space-4);
-  padding: var(--space-2) var(--space-3);
+  gap: var(--rf-space-4);
+  padding: var(--rf-space-2) var(--rf-space-3);
   min-height: 120px;
   max-height: 240px;
   overflow: hidden;
@@ -132,22 +177,22 @@
   width: 18px;
   height: 18px;
   padding: 0;
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
   background: transparent;
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .sectionHeaderActionButton:hover,
 .sectionHeaderActionButton:focus-visible {
-  background: var(--gray-a3);
-  border-color: var(--gray-a7);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border-strong);
 }
 
 .sectionHeaderActionButton:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: 2px solid var(--rf-focus-ring);
   outline-offset: 1px;
 }
 
@@ -206,12 +251,12 @@
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: var(--radius-2);
-  color: var(--gray-11);
+  border-radius: var(--rf-radius-ctl);
+  color: var(--rf-color-muted);
   cursor: pointer;
   font: inherit;
   padding: 0;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   min-width: 0;
   flex: 1;
   text-align: left;
@@ -222,7 +267,7 @@
 }
 
 .sectionHeaderToggle:focus-visible {
-  outline: 2px solid var(--accent-8);
+  outline: 2px solid var(--rf-focus-ring);
   outline-offset: 1px;
 }
 
@@ -250,23 +295,23 @@
 
 .panelItem {
   padding: 2px 0;
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
 }
 
 .panelItem:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
 }
 
 .panelItemSelected {
-  background: var(--accent-a3);
+  background: var(--rf-color-accent-soft);
 }
 
 .panelItemSelected:hover {
-  background: var(--accent-a4);
+  background: var(--rf-surface-2);
 }
 
 .panelItemLead {
@@ -290,11 +335,12 @@
 
 .cardDetailSection {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  background: var(--gray-2);
-  border-radius: var(--radius-2);
-  padding: var(--space-2);
-  margin-top: var(--space-1);
-  max-height: 240px;
+  background: var(--rf-surface-1);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  padding: var(--rf-space-2);
+  margin-top: var(--rf-space-1);
+  max-height: min(240px, calc(100dvh - var(--rf-space-6) * 4));
   overflow-y: auto;
 }
 
@@ -302,28 +348,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--space-1);
-}
-
-.cardDetailOverlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
-
-.cardDetail {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  background: var(--color-background);
-  border-radius: var(--radius-4);
-  padding: var(--space-4);
-  max-width: 600px;
-  max-height: 80vh;
-  overflow: auto;
-  width: 90%;
+  gap: var(--rf-space-1);
 }
 
 @keyframes pulseBlue {
@@ -382,6 +407,22 @@
 
 .agentDotFailed {
   background-color: var(--red-9);
+}
+
+@media (max-width: 680px) {
+  .panelsSection {
+    flex-direction: column;
+    max-height: min(360px, 40dvh);
+  }
+
+  .panelsHeader,
+  .chatHeader {
+    padding-inline: var(--rf-space-2);
+  }
+
+  .sectionHeaderMeta {
+    min-width: 0;
+  }
 }
 
 .plannerWaitingChips {

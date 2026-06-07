@@ -1,13 +1,7 @@
 import React, { useCallback } from "react";
-import {
-  Flex,
-  Box,
-  Text,
-  Card,
-  Badge,
-  Heading,
-  Tooltip,
-} from "@radix-ui/themes";
+import { Flex, Box, Text, Card, Heading, Tooltip } from "@radix-ui/themes";
+import classNames from "classnames";
+import { Badge } from "../../components/ui";
 import type {
   TaskBoard,
   BoardCard,
@@ -17,10 +11,12 @@ import { FileTextIcon, Link2Icon, PersonIcon } from "@radix-ui/react-icons";
 import { BranchIcon } from "../Worktrees/BranchIcon";
 import styles from "./Tasks.module.css";
 
-const getPriorityColor = (priority: string): "red" | "orange" | "gray" => {
-  if (priority === "P0") return "red";
-  if (priority === "P1") return "orange";
-  return "gray";
+type BadgeTone = React.ComponentProps<typeof Badge>["tone"];
+
+const priorityTone = (priority: string): BadgeTone => {
+  if (priority === "P0") return "danger";
+  if (priority === "P1") return "warning";
+  return "muted";
 };
 
 function compactWorktreeLabel(label: string): string {
@@ -37,10 +33,10 @@ function cardWorktreeLabel(card: BoardCard): string | null {
 }
 
 const columnColors: Record<string, string> = {
-  planned: "var(--gray-5)",
-  doing: "var(--blue-5)",
-  done: "var(--green-5)",
-  failed: "var(--red-5)",
+  planned: "var(--rf-border-strong)",
+  doing: "var(--rf-color-accent)",
+  done: "var(--rf-color-success)",
+  failed: "var(--rf-color-danger)",
 };
 
 interface KanbanCardProps {
@@ -74,9 +70,11 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
 
   return (
     <Card
-      className={styles.kanbanCard}
+      className={classNames(
+        styles.kanbanCard,
+        onClick && styles.kanbanCardClickable,
+      )}
       onClick={handleClick}
-      style={{ cursor: onClick ? "pointer" : "default" }}
     >
       <Flex direction="column" gap="2">
         <Flex
@@ -84,12 +82,8 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
           align="center"
           className={styles.kanbanCardTopRow}
         >
-          <Badge size="1" color="gray" variant="soft">
-            {card.id}
-          </Badge>
-          <Badge color={getPriorityColor(card.priority)} size="1">
-            {card.priority}
-          </Badge>
+          <Badge tone="muted">{card.id}</Badge>
+          <Badge tone={priorityTone(card.priority)}>{card.priority}</Badge>
         </Flex>
 
         <Text size="2" weight="medium" className={styles.kanbanCardTitle}>
@@ -99,44 +93,45 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
         <Flex gap="1" wrap="wrap" className={styles.kanbanCardBadges}>
           {hasAgent && (
             <Tooltip content={`Agent: ${card.assignee}`}>
-              <Badge
-                size="1"
-                color="blue"
-                variant="soft"
-                asChild={Boolean(card.agent_chat_id)}
-              >
-                {card.agent_chat_id ? (
-                  <button
-                    type="button"
-                    className={styles.agentBadgeButton}
-                    onClick={handleAgentClick}
-                  >
-                    <PersonIcon /> Agent
-                  </button>
-                ) : (
-                  <span>
-                    <PersonIcon /> Agent
-                  </span>
-                )}
-              </Badge>
+              <span>
+                <Badge tone="accent">
+                  {card.agent_chat_id ? (
+                    <button
+                      type="button"
+                      className={styles.agentBadgeButton}
+                      onClick={handleAgentClick}
+                    >
+                      <PersonIcon /> Agent
+                    </button>
+                  ) : (
+                    <span>
+                      <PersonIcon /> Agent
+                    </span>
+                  )}
+                </Badge>
+              </span>
             </Tooltip>
           )}
           {worktree && (
             <Tooltip content={`Worktree: ${worktree}`}>
-              <Badge size="1" color="green" variant="soft">
-                <BranchIcon /> {worktree}
-              </Badge>
+              <span>
+                <Badge tone="success">
+                  <BranchIcon /> {worktree}
+                </Badge>
+              </span>
             </Tooltip>
           )}
           {hasDeps && (
             <Tooltip content={`Depends on: ${card.depends_on.join(", ")}`}>
-              <Badge size="1" color="gray" variant="soft">
-                <Link2Icon /> {card.depends_on.length}
-              </Badge>
+              <span>
+                <Badge tone="muted">
+                  <Link2Icon /> {card.depends_on.length}
+                </Badge>
+              </span>
             </Tooltip>
           )}
           {card.status_updates.length > 0 && (
-            <Badge size="1" color="gray" variant="soft">
+            <Badge tone="muted">
               <FileTextIcon /> {card.status_updates.length}
             </Badge>
           )}
@@ -163,7 +158,7 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
     <Flex
       direction="column"
       className={styles.kanbanColumn}
-      style={{ borderTopColor: columnColors[column.id] || "var(--gray-5)" }}
+      style={{ borderTopColor: columnColors[column.id] || "var(--rf-border-strong)" }}
     >
       <Flex
         justify="between"
@@ -171,7 +166,7 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
         className={styles.kanbanColumnHeader}
       >
         <Heading size="1">{column.title}</Heading>
-        <Badge size="1" color="gray">
+        <Badge tone="muted">
           {cards.length}
         </Badge>
       </Flex>

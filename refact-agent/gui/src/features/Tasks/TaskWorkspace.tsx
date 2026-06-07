@@ -3,19 +3,15 @@ import {
   Flex,
   Box,
   Text,
-  Button,
   Badge,
   Dialog,
   Checkbox,
   Tooltip,
   Tabs,
 } from "@radix-ui/themes";
-import {
-  PlusIcon,
-  Cross2Icon,
-  ChevronDownIcon,
-  FileTextIcon,
-} from "@radix-ui/react-icons";
+import { Button, IconButton } from "../../components/ui";
+import { PlusIcon, ChevronDownIcon, FileTextIcon } from "@radix-ui/react-icons";
+import { X } from "lucide-react";
 import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
@@ -274,18 +270,18 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
         </Flex>
       )}
       <Tooltip content="Delete planner chat">
-        <Button
-          size="1"
-          variant="ghost"
-          color="gray"
-          aria-label="Delete planner chat"
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-        >
-          <Cross2Icon />
-        </Button>
+        <span>
+          <IconButton
+            size="sm"
+            variant="ghost"
+            aria-label="Delete planner chat"
+            icon={X}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove();
+            }}
+          />
+        </span>
       </Tooltip>
     </Box>
   );
@@ -301,7 +297,7 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
     <Box className={styles.panelList}>
       <Box className={styles.panelContent}>
         {plannerChats.length === 0 ? (
-          <Flex align="center" justify="center" style={{ flex: 1 }}>
+          <Flex align="center" justify="center" className={styles.emptyState}>
             <Text size="1" color="gray">
               No planner chats yet
             </Text>
@@ -387,7 +383,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
         {activeAgents.length === 0 &&
         completedAgents.length === 0 &&
         failedAgents.length === 0 ? (
-          <Flex align="center" justify="center" style={{ flex: 1 }}>
+          <Flex align="center" justify="center" className={styles.emptyState}>
             <Text size="1" color="gray">
               No agents yet
             </Text>
@@ -538,7 +534,7 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 {wrapWorktreeAction(
                   <Button
                     type="button"
-                    size="1"
+                    size="sm"
                     variant="soft"
                     disabled={worktreeActionsDisabled}
                     title={worktreeActionsTooltip}
@@ -550,7 +546,7 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 {wrapWorktreeAction(
                   <Button
                     type="button"
-                    size="1"
+                    size="sm"
                     variant="soft"
                     disabled={worktreeActionsDisabled}
                     title={worktreeActionsTooltip}
@@ -562,9 +558,8 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 {wrapWorktreeAction(
                   <Button
                     type="button"
-                    size="1"
+                    size="sm"
                     variant="soft"
-                    color="gray"
                     disabled={worktreeActionsDisabled}
                     title={worktreeActionsTooltip}
                     onClick={() => invokeWorktreeAction(onOpenWorktree)}
@@ -575,9 +570,8 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 {wrapWorktreeAction(
                   <Button
                     type="button"
-                    size="1"
-                    variant="soft"
-                    color="red"
+                    size="sm"
+                    variant="danger"
                     disabled={worktreeActionsDisabled}
                     title={worktreeActionsTooltip}
                     onClick={() => invokeWorktreeAction(onDeleteWorktree)}
@@ -622,8 +616,7 @@ const CardDetail: React.FC<CardDetailProps> = ({
               Final Report
             </Text>
             <Box
-              className={styles.cardDetailSection}
-              style={{ background: "var(--green-2)" }}
+              className={`${styles.cardDetailSection} ${styles.finalReportSection}`}
             >
               <Markdown canHaveInteractiveElements={false}>
                 {card.final_report}
@@ -1564,7 +1557,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                   <Flex
                     align="center"
                     justify="center"
-                    style={{ height: "100%" }}
+                    className={styles.fullHeightEmptyState}
                   >
                     <Text color="gray">
                       Create a planner chat to get started
@@ -1681,7 +1674,6 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               <Button
                 type="button"
                 variant="soft"
-                color="gray"
                 disabled={deleteWorktreeState.isLoading}
               >
                 Cancel
@@ -1689,7 +1681,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
             </Dialog.Close>
             <Button
               type="button"
-              color="red"
+              variant="danger"
               disabled={!deleteTarget || deleteWorktreeState.isLoading}
               onClick={() => void handleConfirmDeleteCardWorktree()}
             >
@@ -1705,18 +1697,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         <Box
           role="status"
           aria-live="polite"
-          style={{
-            position: "fixed",
-            bottom: "var(--space-4)",
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "var(--accent-9)",
-            color: "white",
-            padding: "var(--space-3) var(--space-4)",
-            borderRadius: "var(--radius-3)",
-            zIndex: 50,
-            boxShadow: "0 4px 12px rgba(0, 0, 0, 0.15)",
-          }}
+          className={styles.notificationToast}
         >
           <Text size="2">{notification}</Text>
         </Box>
