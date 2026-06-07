@@ -1106,11 +1106,11 @@ mod tests {
                     ..Default::default()
                 },
                 embedding_size: 0,
-                rejection_threshold: 0.0,
-                embedding_batch: 0,
                 dimensions: None,
                 query_prefix: String::new(),
                 document_prefix: String::new(),
+                rejection_threshold: 0.0,
+                embedding_batch: 0,
             },
             ..Default::default()
         };
@@ -1551,6 +1551,94 @@ extra_headers:
         assert_eq!(
             model.base.extra_headers.get("X-Tenant").map(String::as_str),
             Some("team-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_embedding_provider_selection_preserves_embedding_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let providers_dir = temp.path().join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("custom.yaml"),
+            r#"
+enabled: true
+api_key: sk-embed
+embedding_endpoint: https://embedding.example/v1/embeddings
+embedding_endpoint_style: openai
+extra_headers:
+  X-Embedding-Tenant: tenant-a
+embedding_model:
+  name: upstream-embed-name
+  embedding_size: 384
+  dimensions: 384
+  query_prefix: "query: "
+  document_prefix: "passage: "
+  embedding_batch: 4
+"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            providers_dir.join("custom_2.yaml"),
+            r#"
+base_provider: custom
+enabled: true
+api_key: sk-other
+embedding_endpoint: https://other.example/v1/embeddings
+embedding_model:
+  name: other-embed
+  embedding_size: 999
+"#,
+        )
+        .await
+        .unwrap();
+
+        let (mut providers, errors) = read_providers_d(Vec::new(), temp.path(), false).await;
+        assert!(errors.is_empty(), "{}", errors.len());
+        providers.sort_by(|a, b| a.name.cmp(&b.name));
+        for provider in &mut providers {
+            post_process_provider(provider, false, false);
+        }
+        let mut caps = CodeAssistantCaps::default();
+        let embedding_models = add_models_to_caps(&mut caps, providers);
+
+        assert_eq!(embedding_models.len(), 2);
+        let selected = embedding_models
+            .iter()
+            .find(|model| model.base.id == "custom/upstream-embed-name")
+            .unwrap();
+        assert_eq!(
+            selected.base.endpoint,
+            "https://embedding.example/v1/embeddings"
+        );
+        assert_eq!(selected.base.name, "upstream-embed-name");
+        assert_eq!(selected.base.api_key, "sk-embed");
+        assert_eq!(selected.base.embedding_endpoint_style, "openai");
+        assert_eq!(
+            selected
+                .base
+                .extra_headers
+                .get("X-Embedding-Tenant")
+                .map(String::as_str),
+            Some("tenant-a")
+        );
+        assert_eq!(selected.dimensions, Some(384));
+        assert_eq!(selected.query_prefix, "query: ");
+        assert_eq!(selected.document_prefix, "passage: ");
+        let selected_config = refact_core::vecdb_types::EmbeddingModelConfig::from(selected);
+        assert_eq!(selected_config.model_name, "upstream-embed-name");
+        assert_eq!(
+            selected_config.endpoint,
+            "https://embedding.example/v1/embeddings"
+        );
+        assert_eq!(selected_config.api_key, "sk-embed");
+        assert_eq!(
+            selected_config
+                .extra_headers
+                .get("X-Embedding-Tenant")
+                .map(String::as_str),
+            Some("tenant-a")
         );
     }
 

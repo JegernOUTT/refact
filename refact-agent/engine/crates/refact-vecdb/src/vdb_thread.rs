@@ -122,8 +122,7 @@ async fn vectorize_batch_from_q(
     let mut send_to_cache = vec![];
     for (i, data_res) in batch.iter().enumerate() {
         if batch_result[i].is_empty() {
-            info!("skipping an empty embedding split");
-            continue;
+            return Err("vectorize: embedding validation returned empty vector".to_string());
         }
         ready_to_vecdb.push(VecdbRecord {
             vector: Some(batch_result[i].clone()),
