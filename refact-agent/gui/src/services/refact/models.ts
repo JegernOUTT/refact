@@ -293,6 +293,9 @@ export type CodeChatModel = {
 export type CodeCompletionModel = {
   n_ctx: number;
   name: string;
+  id?: string;
+  tokenizer?: string;
+  completion_endpoint_style?: string;
   model_family: string | null;
   type: "completion";
   enabled: boolean;
@@ -303,8 +306,12 @@ export type EmbeddingModel = {
   name: string;
   id: string;
   tokenizer: string;
+  embedding_endpoint_style?: string;
 
   embedding_size: number;
+  dimensions?: number | null;
+  query_prefix?: string;
+  document_prefix?: string;
   rejection_threshold: number;
   embedding_batch: number;
 
@@ -314,7 +321,6 @@ export type EmbeddingModel = {
 };
 
 export function isModelsResponse(data: unknown): data is ModelsResponse {
-  // Check if data is an object
   if (typeof data !== "object" || data === null) return false;
 
   if (
@@ -322,6 +328,13 @@ export function isModelsResponse(data: unknown): data is ModelsResponse {
     !hasProperty(data, "chat_models") ||
     !hasProperty(data, "embedding_model")
   )
+    return false;
+
+  if (!Array.isArray(data.completion_models)) return false;
+  if (!data.completion_models.every(isSimplifiedModel)) return false;
+  if (!Array.isArray(data.chat_models)) return false;
+  if (!data.chat_models.every(isSimplifiedModel)) return false;
+  if (data.embedding_model !== null && !isSimplifiedModel(data.embedding_model))
     return false;
 
   return true;
@@ -368,6 +381,13 @@ export function isCodeCompletionModel(
 
   if (!("n_ctx" in data) || typeof data.n_ctx !== "number") return false;
   if (!("name" in data) || typeof data.name !== "string") return false;
+  if ("id" in data && typeof data.id !== "string") return false;
+  if ("tokenizer" in data && typeof data.tokenizer !== "string") return false;
+  if (
+    "completion_endpoint_style" in data &&
+    typeof data.completion_endpoint_style !== "string"
+  )
+    return false;
   if (
     "model_family" in data &&
     typeof data.model_family !== "string" &&
@@ -384,10 +404,26 @@ export function isEmbeddingModel(data: unknown): data is EmbeddingModel {
 
   if (!("n_ctx" in data) || typeof data.n_ctx !== "number") return false;
   if (!("name" in data) || typeof data.name !== "string") return false;
+  if (!("id" in data) || typeof data.id !== "string") return false;
   if (!("tokenizer" in data) || typeof data.tokenizer !== "string")
+    return false;
+  if (
+    "embedding_endpoint_style" in data &&
+    typeof data.embedding_endpoint_style !== "string"
+  )
     return false;
 
   if (!("embedding_size" in data) || typeof data.embedding_size !== "number")
+    return false;
+  if (
+    "dimensions" in data &&
+    typeof data.dimensions !== "number" &&
+    data.dimensions !== null
+  )
+    return false;
+  if ("query_prefix" in data && typeof data.query_prefix !== "string")
+    return false;
+  if ("document_prefix" in data && typeof data.document_prefix !== "string")
     return false;
   if (
     !("rejection_threshold" in data) ||
@@ -408,6 +444,19 @@ export function isModel(data: unknown): data is Model {
     isCodeCompletionModel(data) ||
     isEmbeddingModel(data)
   );
+}
+
+export function isSimplifiedModel(data: unknown): data is SimplifiedModel {
+  if (!data || typeof data !== "object") return false;
+
+  if (!("name" in data) || typeof data.name !== "string") return false;
+  if (!("enabled" in data) || typeof data.enabled !== "boolean") return false;
+  if (!("removable" in data) || typeof data.removable !== "boolean")
+    return false;
+  if (!("user_configured" in data) || typeof data.user_configured !== "boolean")
+    return false;
+
+  return true;
 }
 
 export type CompletionModelFamiliesResponse = { model_families: string[] };
