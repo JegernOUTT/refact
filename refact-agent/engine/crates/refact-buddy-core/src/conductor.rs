@@ -55,7 +55,7 @@ pub enum GoalStatus {
 }
 
 impl GoalStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Proposed => "proposed",
             Self::Active => "active",
@@ -80,6 +80,48 @@ impl GoalStatus {
 
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Done | Self::Escalated | Self::Abandoned)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalTransitionError {
+    pub from: GoalStatus,
+    pub to: GoalStatus,
+}
+
+impl fmt::Display for GoalTransitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid conductor goal status transition: {} -> {}",
+            self.from.as_str(),
+            self.to.as_str()
+        )
+    }
+}
+
+impl std::error::Error for GoalTransitionError {}
+
+pub fn validate_goal_status_transition(
+    from: GoalStatus,
+    to: GoalStatus,
+) -> Result<(), GoalTransitionError> {
+    let allowed = match from {
+        GoalStatus::Proposed => matches!(
+            to,
+            GoalStatus::Active | GoalStatus::Paused | GoalStatus::Abandoned
+        ),
+        GoalStatus::Active => matches!(
+            to,
+            GoalStatus::Paused | GoalStatus::Done | GoalStatus::Escalated | GoalStatus::Abandoned
+        ),
+        GoalStatus::Paused => matches!(to, GoalStatus::Active | GoalStatus::Abandoned),
+        GoalStatus::Done | GoalStatus::Escalated | GoalStatus::Abandoned => to == from,
+    };
+    if allowed || from == to {
+        Ok(())
+    } else {
+        Err(GoalTransitionError { from, to })
     }
 }
 
@@ -855,6 +897,39 @@ done_when:
         assert!(GoalStatus::Done.is_terminal());
         assert!(GoalStatus::Escalated.is_terminal());
         assert!(GoalStatus::Abandoned.is_terminal());
+    }
+
+    #[test]
+    fn goal_status_transition_validator_accepts_allowed_transitions() {
+        for (from, to) in [
+            (GoalStatus::Proposed, GoalStatus::Active),
+            (GoalStatus::Proposed, GoalStatus::Paused),
+            (GoalStatus::Proposed, GoalStatus::Abandoned),
+            (GoalStatus::Active, GoalStatus::Paused),
+            (GoalStatus::Active, GoalStatus::Done),
+            (GoalStatus::Active, GoalStatus::Escalated),
+            (GoalStatus::Active, GoalStatus::Abandoned),
+            (GoalStatus::Paused, GoalStatus::Active),
+            (GoalStatus::Paused, GoalStatus::Abandoned),
+            (GoalStatus::Done, GoalStatus::Done),
+        ] {
+            validate_goal_status_transition(from, to).unwrap();
+        }
+    }
+
+    #[test]
+    fn goal_status_transition_validator_rejects_invalid_transitions() {
+        for (from, to) in [
+            (GoalStatus::Proposed, GoalStatus::Done),
+            (GoalStatus::Paused, GoalStatus::Done),
+            (GoalStatus::Done, GoalStatus::Active),
+            (GoalStatus::Escalated, GoalStatus::Paused),
+            (GoalStatus::Abandoned, GoalStatus::Active),
+        ] {
+            let error = validate_goal_status_transition(from, to).unwrap_err();
+            assert_eq!(error.from, from);
+            assert_eq!(error.to, to);
+        }
     }
 
     #[test]

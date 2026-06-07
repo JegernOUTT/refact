@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorMemo, GoalAutonomy, GoalLedger, GoalStatus, MemoKind,
+    validate_goal_for_create, validate_goal_status_transition,
 };
 use refact_buddy_core::conductor_store::{load_goal_ledger, mutate_goal_ledger, MissingGoalBehavior};
 use refact_chat_api::{ChatCommand, MessageOrigin};
@@ -145,6 +146,16 @@ fn is_done_status(args: &HashMap<String, Value>) -> bool {
     args.get("status")
         .and_then(Value::as_str)
         .is_some_and(|status| status == "done")
+}
+
+fn validate_ledger_transition(ledger: &GoalLedger, to: GoalStatus) -> Result<(), String> {
+    validate_goal_status_transition(ledger.status.unwrap_or_default(), to)
+        .map_err(|error| error.to_string())
+}
+
+fn validate_active_ledger(goal_id: &str, ledger: &GoalLedger) -> Result<(), String> {
+    validate_goal_for_create(&goal_from_ledger(goal_id, ledger.clone()))
+        .map_err(|error| format!("invalid conductor goal: {error}"))
 }
 
 fn apply_ledger_status(ledger: &mut GoalLedger, status: GoalStatus) {
@@ -507,11 +518,17 @@ impl Tool for ToolConductorSetAutonomy {
         if ledger_autonomy(&ledger) == GoalAutonomy::ReadOnly {
             return Err("read-only conductor goals cannot change autonomy".to_string());
         }
+        if matches!(autonomy, GoalAutonomy::Governed | GoalAutonomy::FullAuto) {
+            validate_active_ledger(&goal_id, &ledger)?;
+        }
         let reason = optional_string(args, "reason")
             .unwrap_or_else(|| format!("Conductor autonomy set to {autonomy:?}"));
         let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
             if ledger_autonomy(ledger) == GoalAutonomy::ReadOnly {
                 return Err("read-only conductor goals cannot change autonomy".to_string());
+            }
+            if matches!(autonomy, GoalAutonomy::Governed | GoalAutonomy::FullAuto) {
+                validate_active_ledger(&goal_id, ledger)?;
             }
             ledger.autonomy = Some(autonomy);
             push_memo(ledger, MemoKind::Decision, reason, None);
@@ -552,6 +569,7 @@ impl Tool for ToolConductorEscalate {
         let reason = required_string(args, "reason")?;
         let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
             ensure_can_mutate(ledger, "escalate")?;
+            validate_ledger_transition(ledger, GoalStatus::Escalated)?;
             apply_ledger_status(ledger, GoalStatus::Escalated);
             push_memo(ledger, MemoKind::Escalation, reason, None);
             Ok(())
@@ -593,6 +611,10 @@ impl Tool for ToolConductorGoalStatus {
         let (ledger, ()) = mutate_existing_ledger(gcx.clone(), &goal_id, |ledger| {
             if status != GoalStatus::Done {
                 ensure_can_mutate(ledger, "change status")?;
+            }
+            validate_ledger_transition(ledger, status)?;
+            if status == GoalStatus::Active {
+                validate_active_ledger(&goal_id, ledger)?;
             }
             apply_ledger_status(ledger, status);
             if status == GoalStatus::Done {
@@ -899,6 +921,23 @@ mod tests {
             created_at: Some("2026-06-03T00:00:00Z".to_string()),
             updated_at: Some("2026-06-03T00:00:01Z".to_string()),
             no_progress_wakes: 2,
+            ..Default::default()
+        }
+    }
+
+    fn active_valid_ledger() -> GoalLedger {
+        GoalLedger {
+            done_when: Some(refact_buddy_core::conductor::DoneWhen {
+                summary: "Ready".to_string(),
+                checklist: Vec::new(),
+            }),
+            budget: Some(refact_buddy_core::conductor::GoalBudget {
+                wall_clock_secs: Some(60),
+                no_progress_wakes: Some(1),
+                ..Default::default()
+            }),
+            status: Some(GoalStatus::Active),
+            autonomy: Some(GoalAutonomy::FullAuto),
             ..Default::default()
         }
     }
@@ -1305,6 +1344,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_conductor_terminal_goal_cannot_be_reactivated() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-reactivate",
+            &GoalLedger {
+                status: Some(GoalStatus::Done),
+                ..active_valid_ledger()
+            },
+        )
+        .await
+        .unwrap();
+        let mock = Arc::new(MockChatFacade::new(conductor_thread("goal-reactivate")));
+        let mut tool = ToolConductorGoalStatus::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-reactivate")),
+                    ("status", json!("active")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("invalid conductor goal status transition"),
+            "{error}"
+        );
+        let ledger = load_goal_ledger(dir.path(), "goal-reactivate")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.status, Some(GoalStatus::Done));
+    }
+
+    #[tokio::test]
+    async fn tool_conductor_full_auto_rejects_invalid_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = gcx(dir.path()).await;
+        save_goal_ledger(
+            dir.path(),
+            "goal-invalid-autonomy",
+            &GoalLedger {
+                status: Some(GoalStatus::Active),
+                autonomy: Some(GoalAutonomy::Governed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mock = Arc::new(MockChatFacade::new(conductor_thread(
+            "goal-invalid-autonomy",
+        )));
+        let mut tool = ToolConductorSetAutonomy::new();
+
+        let error = tool
+            .tool_execute(
+                ccx(gcx, mock).await,
+                &"call".to_string(),
+                &args(&[
+                    ("goal_id", json!("goal-invalid-autonomy")),
+                    ("autonomy", json!("full_auto")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("done_when"), "{error}");
+        let ledger = load_goal_ledger(dir.path(), "goal-invalid-autonomy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.autonomy, Some(GoalAutonomy::Governed));
+    }
+
+    #[tokio::test]
     async fn tool_conductor_goal_status_sets_escalated_distinctly() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
@@ -1430,9 +1549,8 @@ mod tests {
             dir.path(),
             "goal-full-auto",
             &GoalLedger {
-                autonomy: Some(GoalAutonomy::FullAuto),
                 chat_ids: vec!["agent-chat-1".to_string()],
-                ..Default::default()
+                ..active_valid_ledger()
             },
         )
         .await
@@ -1584,7 +1702,7 @@ mod tests {
     async fn concurrent_conductor_ledger_mutations_preserve_updates() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = gcx(dir.path()).await;
-        save_goal_ledger(dir.path(), "goal-concurrent", &GoalLedger::default())
+        save_goal_ledger(dir.path(), "goal-concurrent", &active_valid_ledger())
             .await
             .unwrap();
         let first_mock = Arc::new(MockChatFacade::new(conductor_thread("goal-concurrent")));

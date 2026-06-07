@@ -4,6 +4,7 @@ use chrono::Utc;
 use hyper::StatusCode;
 use refact_buddy_core::conductor::{
     ConductorGoal, ConductorWakeReason, GoalAutonomy, GoalStatus, validate_goal_for_create,
+    validate_goal_status_transition,
 };
 use refact_buddy_core::conductor_store::{
     ConductorStoreError, list_goal_ledgers, load_goal_ledger, save_goal_ledger,
@@ -132,12 +133,7 @@ pub async fn handle_v1_buddy_conductor_goal_create(
         updated_at: Some(now),
         ..ConductorGoal::default()
     };
-    validate_goal_for_create(&goal).map_err(|error| {
-        ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            format!("invalid conductor goal: {error}"),
-        )
-    })?;
+    validate_active_operation(&goal)?;
     let metadata = goal.clone();
     goal.ledger.apply_goal_metadata(&metadata);
     save_goal_ledger(&project_root, &goal.id, &goal.ledger)
@@ -184,17 +180,13 @@ pub async fn handle_v1_buddy_conductor_goal_patch(
         goal.autonomy = autonomy;
     }
     if let Some(status) = req.status {
+        validate_goal_transition(goal.status, status)?;
         apply_goal_status(&mut goal, status);
     }
     if let Some(budget) = req.budget {
         goal.budget = budget;
     }
-    validate_goal_for_create(&goal).map_err(|error| {
-        ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            format!("invalid conductor goal: {error}"),
-        )
-    })?;
+    validate_active_operation(&goal)?;
     persist_goal(&project_root, &mut goal).await?;
     let goal = refresh_targets_and_emit(app, goal, None).await;
     Ok(axum::Json(goal))
@@ -229,6 +221,12 @@ pub async fn handle_v1_buddy_conductor_goal_autonomy(
     let project_root = project_root(&app).await?;
     let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
     goal.autonomy = req.autonomy;
+    if matches!(
+        req.autonomy,
+        GoalAutonomy::Governed | GoalAutonomy::FullAuto
+    ) {
+        validate_active_operation(&goal)?;
+    }
     persist_goal(&project_root, &mut goal).await?;
     let goal = refresh_targets_and_emit(app, goal, None).await;
     Ok(axum::Json(goal))
@@ -239,6 +237,7 @@ pub async fn handle_v1_buddy_conductor_goal_manual_wake(
     Path(goal_id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
     let goal = load_goal(&app, &goal_id).await?;
+    validate_active_operation(&goal)?;
     let enqueued = crate::buddy::conductor::wake::enqueue_goal_wake(
         app.gcx.clone(),
         &goal.id,
@@ -249,7 +248,6 @@ pub async fn handle_v1_buddy_conductor_goal_manual_wake(
         json!({ "enqueued": enqueued, "goal_id": goal.id }),
     ))
 }
-
 pub async fn handle_v1_buddy_conductor_answer(
     State(app): State<AppState>,
     axum::Json(req): axum::Json<ConductorAnswerRequest>,
@@ -286,12 +284,15 @@ async fn set_goal_status(
 ) -> Result<axum::Json<ConductorGoal>, ScratchError> {
     let project_root = project_root(&app).await?;
     let mut goal = load_goal_from_root(&project_root, &goal_id).await?;
+    validate_goal_transition(goal.status, status)?;
     apply_goal_status(&mut goal, status);
+    if status == GoalStatus::Active {
+        validate_active_operation(&goal)?;
+    }
     persist_goal(&project_root, &mut goal).await?;
     let goal = refresh_targets_and_emit(app, goal, None).await;
     Ok(axum::Json(goal))
 }
-
 async fn load_goal(app: &AppState, goal_id: &str) -> Result<ConductorGoal, ScratchError> {
     let project_root = project_root(app).await?;
     let goal = load_goal_from_root(&project_root, goal_id).await?;
@@ -321,6 +322,20 @@ async fn persist_goal(
     save_goal_ledger(project_root, &goal.id, &goal.ledger)
         .await
         .map_err(store_error)
+}
+
+fn validate_goal_transition(from: GoalStatus, to: GoalStatus) -> Result<(), ScratchError> {
+    validate_goal_status_transition(from, to)
+        .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error.to_string()))
+}
+
+fn validate_active_operation(goal: &ConductorGoal) -> Result<(), ScratchError> {
+    validate_goal_for_create(goal).map_err(|error| {
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid conductor goal: {error}"),
+        )
+    })
 }
 
 fn apply_goal_status(goal: &mut ConductorGoal, status: GoalStatus) {
@@ -514,6 +529,26 @@ mod tests {
             .0
     }
 
+    async fn save_legacy_invalid_goal(
+        root: &std::path::Path,
+        id: &str,
+        status: GoalStatus,
+        autonomy: GoalAutonomy,
+    ) {
+        save_goal_ledger(
+            root,
+            id,
+            &GoalLedger {
+                title: Some(id.to_string()),
+                status: Some(status),
+                autonomy: Some(autonomy),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     async fn write_task_meta(root: &std::path::Path, task_id: &str, goal_id: &str) {
         let task_dir = root.join(".refact").join("tasks").join(task_id);
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
@@ -604,6 +639,11 @@ mod tests {
         let created = create_goal(app.clone(), "goal-crud").await;
         assert_eq!(created.id, "goal-crud");
         assert_eq!(created.title, "Ship conductor routes");
+        assert_eq!(created.status, GoalStatus::Active);
+        assert_eq!(
+            serde_json::to_value(&created).unwrap()["status"],
+            json!("active")
+        );
 
         let listed = handle_v1_buddy_conductor_goals_list(State(app.clone()))
             .await
@@ -708,6 +748,190 @@ mod tests {
 
         assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
         assert!(error.message.contains("done_when"));
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_patch_accepts_canonical_and_legacy_active() {
+        let (app, dir) = test_app().await;
+        save_legacy_invalid_goal(
+            dir.path(),
+            "goal-patch-active",
+            GoalStatus::Proposed,
+            GoalAutonomy::ReadOnly,
+        )
+        .await;
+
+        let active = handle_v1_buddy_conductor_goal_patch(
+            State(app.clone()),
+            Path("goal-patch-active".to_string()),
+            axum::Json(PatchConductorGoalRequest {
+                status: Some(GoalStatus::Active),
+                done_when: Some(DoneWhen {
+                    summary: "Ready".to_string(),
+                    checklist: Vec::new(),
+                }),
+                budget: Some(GoalBudget {
+                    wall_clock_secs: Some(60),
+                    no_progress_wakes: Some(1),
+                    ..GoalBudget::default()
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(active.status, GoalStatus::Active);
+        assert_eq!(
+            serde_json::to_value(&active).unwrap()["status"],
+            json!("active")
+        );
+
+        save_legacy_invalid_goal(
+            dir.path(),
+            "goal-patch-proposed",
+            GoalStatus::Proposed,
+            GoalAutonomy::ReadOnly,
+        )
+        .await;
+        let proposed = handle_v1_buddy_conductor_goal_patch(
+            State(app.clone()),
+            Path("goal-patch-proposed".to_string()),
+            axum::Json(PatchConductorGoalRequest {
+                status: Some(GoalStatus::Proposed),
+                done_when: Some(DoneWhen {
+                    summary: "Ready later".to_string(),
+                    checklist: Vec::new(),
+                }),
+                budget: Some(GoalBudget {
+                    wall_clock_secs: Some(60),
+                    no_progress_wakes: Some(1),
+                    ..GoalBudget::default()
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(proposed.status, GoalStatus::Proposed);
+        assert_eq!(
+            serde_json::to_value(&proposed).unwrap()["status"],
+            json!("proposed")
+        );
+
+        let status: GoalStatus = serde_json::from_value(json!("running")).unwrap();
+        let active_again = handle_v1_buddy_conductor_goal_patch(
+            State(app),
+            Path("goal-patch-active".to_string()),
+            axum::Json(PatchConductorGoalRequest {
+                status: Some(status),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(active_again.status, GoalStatus::Active);
+        assert_eq!(
+            serde_json::to_value(&active_again).unwrap()["status"],
+            json!("active")
+        );
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_terminal_resume_and_patch_active_conflict() {
+        let (app, _dir) = test_app().await;
+        create_goal(app.clone(), "goal-terminal-active").await;
+        let _ = handle_v1_buddy_conductor_goal_stop(
+            State(app.clone()),
+            Path("goal-terminal-active".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let resume_error = handle_v1_buddy_conductor_goal_resume(
+            State(app.clone()),
+            Path("goal-terminal-active".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(resume_error.status_code, StatusCode::CONFLICT);
+
+        let patch_error = handle_v1_buddy_conductor_goal_patch(
+            State(app),
+            Path("goal-terminal-active".to_string()),
+            axum::Json(PatchConductorGoalRequest {
+                status: Some(GoalStatus::Active),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(patch_error.status_code, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_manual_wake_rejects_invalid_goal_without_enqueueing() {
+        let (app, dir) = test_app().await;
+        save_legacy_invalid_goal(
+            dir.path(),
+            "goal-invalid-wake",
+            GoalStatus::Active,
+            GoalAutonomy::FullAuto,
+        )
+        .await;
+
+        let error = handle_v1_buddy_conductor_goal_manual_wake(
+            State(app.clone()),
+            Path("goal-invalid-wake".to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("done_when"));
+        assert!(app
+            .buddy
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-invalid-wake")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_full_auto_rejects_invalid_goal_without_enqueueing() {
+        let (app, dir) = test_app().await;
+        save_legacy_invalid_goal(
+            dir.path(),
+            "goal-invalid-full-auto",
+            GoalStatus::Active,
+            GoalAutonomy::ReadOnly,
+        )
+        .await;
+
+        let error = handle_v1_buddy_conductor_goal_autonomy(
+            State(app.clone()),
+            Path("goal-invalid-full-auto".to_string()),
+            axum::Json(AutonomyRequest {
+                autonomy: GoalAutonomy::FullAuto,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("done_when"));
+        assert!(app
+            .buddy
+            .conductor_wake_bus
+            .lock()
+            .await
+            .mailbox("goal-invalid-full-auto")
+            .is_none());
     }
 
     #[tokio::test]
