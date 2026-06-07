@@ -18,6 +18,26 @@ use crate::scratchpad_abstract::ScratchpadPromptInput;
 
 const CODE_COMPLETION_TOP_N: usize = 5;
 
+fn normalize_code_completion_post(
+    code_completion_post: &mut CodeCompletionPost,
+    model_rec: &crate::caps::CompletionModelRecord,
+) -> Result<(), ScratchError> {
+    if code_completion_post.use_vecdb {
+        return Err(ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Code completion use_vecdb is not supported yet; use use_ast for completion RAG"
+                .to_string(),
+        ));
+    }
+    if code_completion_post.parameters.max_new_tokens == 0 {
+        code_completion_post.parameters.max_new_tokens = 50;
+    }
+    code_completion_post.model = model_rec.base.id.clone();
+    code_completion_post.parameters.temperature =
+        Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
+    Ok(())
+}
+
 pub async fn handle_v1_code_completion(
     app: AppState,
     code_completion_post: &mut CodeCompletionPost,
@@ -36,16 +56,11 @@ pub async fn handle_v1_code_completion(
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await?;
     let model_rec = resolve_completion_model(caps, &code_completion_post.model)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    if code_completion_post.parameters.max_new_tokens == 0 {
-        code_completion_post.parameters.max_new_tokens = 50;
-    }
-    code_completion_post.model = model_rec.base.id.clone();
+    normalize_code_completion_post(code_completion_post, &model_rec)?;
     info!(
         "chosen completion model: {}, scratchpad: {}",
         code_completion_post.model, model_rec.scratchpad
     );
-    code_completion_post.parameters.temperature =
-        Some(code_completion_post.parameters.temperature.unwrap_or(0.2));
     let cache_arc = { gcx.completions_cache.clone() };
     if !code_completion_post.no_cache {
         let cache_key = completion_cache::cache_key_from_post(&code_completion_post);
@@ -139,6 +154,7 @@ pub async fn handle_v1_code_completion_prompt(
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await?;
     let model_rec = resolve_completion_model(caps, &post.model)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    normalize_code_completion_post(&mut post, &model_rec)?;
 
     // don't need cache, but go along
     let cache_arc = { gcx.completions_cache.clone() };
@@ -190,4 +206,48 @@ pub async fn handle_v1_code_completion_prompt(
         .body(Body::from(body))
         .unwrap();
     return Ok(response);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn post(model: &str) -> CodeCompletionPost {
+        CodeCompletionPost {
+            inputs: crate::call_validation::CodeCompletionInputs::default(),
+            parameters: crate::call_validation::SamplingParameters::default(),
+            model: model.to_string(),
+            stream: false,
+            no_cache: false,
+            use_ast: false,
+            use_vecdb: false,
+            rag_tokens_n: 0,
+        }
+    }
+
+    fn model_rec() -> crate::caps::CompletionModelRecord {
+        let mut record = crate::caps::CompletionModelRecord::default();
+        record.base.id = "provider/model".to_string();
+        record
+    }
+
+    #[test]
+    fn code_completion_prompt_uses_real_completion_normalization() {
+        let mut post = post("");
+        normalize_code_completion_post(&mut post, &model_rec()).unwrap();
+
+        assert_eq!(post.model, "provider/model");
+        assert_eq!(post.parameters.max_new_tokens, 50);
+        assert_eq!(post.parameters.temperature, Some(0.2));
+    }
+
+    #[test]
+    fn code_completion_use_vecdb_is_explicitly_rejected() {
+        let mut post = post("");
+        post.use_vecdb = true;
+        let err = normalize_code_completion_post(&mut post, &model_rec()).unwrap_err();
+
+        assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(err.message.contains("use_vecdb"));
+    }
 }

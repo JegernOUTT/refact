@@ -26,7 +26,17 @@ pub async fn create_code_completion_scratchpad(
     pp_context: Arc<dyn PPContextTrait>,
     project_dirs: Vec<PathBuf>,
 ) -> Result<Box<dyn ScratchpadAbstract>, String> {
-    let mut result: Box<dyn ScratchpadAbstract> = if scratchpad_name == "FIM-PSM" {
+    let mut result: Box<dyn ScratchpadAbstract> = if scratchpad_name == "plain" {
+        Box::new(code_completion_fim::FillInTheMiddleScratchpad::new(
+            tokenizer,
+            post,
+            "plain".to_string(),
+            cache_arc,
+            ast_index,
+            pp_context,
+            project_dirs,
+        ))
+    } else if scratchpad_name == "FIM-PSM" {
         Box::new(code_completion_fim::FillInTheMiddleScratchpad::new(
             tokenizer,
             post,
@@ -48,7 +58,7 @@ pub async fn create_code_completion_scratchpad(
         ))
     } else {
         return Err(format!(
-            "Unsupported completion scratchpad '{}'. Only FIM-PSM and FIM-SPM are supported.",
+            "Unsupported completion scratchpad '{}'. Only plain, FIM-PSM and FIM-SPM are supported.",
             scratchpad_name
         ));
     };

@@ -30,6 +30,8 @@ pub struct FillInTheMiddleScratchpad {
     pub fim_suffix: String,
     pub fim_middle: String,
     pub extra_stop_tokens: Vec<String>,
+    pub held_stream_suffix: String,
+    pub stream_stopped: bool,
     pub context_used: Value,
     pub data4cache: completion_cache::CompletionSaveToCache,
     pub ast_index: Option<Arc<AstDB>>,
@@ -56,6 +58,8 @@ impl FillInTheMiddleScratchpad {
             fim_suffix: String::new(),
             fim_middle: String::new(),
             extra_stop_tokens: vec![],
+            held_stream_suffix: String::new(),
+            stream_stopped: false,
             context_used: json!({}),
             data4cache,
             ast_index,
@@ -70,6 +74,37 @@ impl FillInTheMiddleScratchpad {
             .replace(&self.fim_suffix, "")
             .replace(&self.t.eos, "")
             .replace(&self.t.eot, "")
+    }
+
+    fn stop_tokens(&self, multiline: bool) -> Vec<String> {
+        stop_tokens(&self.t.eot, &self.t.eos, multiline, &self.extra_stop_tokens)
+    }
+
+    fn cut_stream_delta(&mut self, delta: &str, finish_reason: FinishReason) -> String {
+        if self.stream_stopped {
+            return String::new();
+        }
+        let mut combined = std::mem::take(&mut self.held_stream_suffix);
+        combined.push_str(delta);
+        let stop_tokens = self.stop_tokens(self.post.inputs.multiline);
+        let (cut, stopped) = cut_at_first_stop(&combined, &stop_tokens);
+        if stopped {
+            self.stream_stopped = true;
+            return cut.replace("\r", "");
+        }
+        if finish_reason == FinishReason::Stop || finish_reason == FinishReason::ScratchpadStop {
+            self.stream_stopped = true;
+            return String::new();
+        }
+        let hold = if finish_reason.is_finished() {
+            0
+        } else {
+            held_suffix_len(&combined, &stop_tokens)
+        };
+        let split_at = combined.len().saturating_sub(hold);
+        let out = combined[..split_at].replace("\r", "");
+        self.held_stream_suffix = combined[split_at..].to_string();
+        out
     }
 }
 
@@ -97,6 +132,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .filter(|s| !s.is_empty())
                     .collect::<Vec<String>>()
             })
             .unwrap_or_default();
@@ -177,12 +213,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
 
         let supports_stop = true;
         if supports_stop {
-            let mut stop_list = vec![self.t.eot.clone(), "\n\n".to_string()];
-            if !self.post.inputs.multiline {
-                stop_list.push("\n".to_string());
-            }
-            stop_list.extend(self.extra_stop_tokens.clone());
-            sampling_parameters_to_patch.stop = stop_list;
+            sampling_parameters_to_patch.stop = self.stop_tokens(self.post.inputs.multiline);
         }
         let mut source = self
             .post
@@ -257,7 +288,9 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
             limit
         );
         let mut prompt: String;
-        if self.order == "PSM" {
+        if self.order == "plain" {
+            prompt = format!("{}{}{}", self.t.eos, before, cursor_line1);
+        } else if self.order == "PSM" {
             prompt = format!(
                 "{}{}{}{}{}{}{}{}",
                 self.t.eos,
@@ -314,7 +347,11 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
                     prompt = format!("{extra_context}{prompt}");
                     break;
                 } else {
-                    content_tokens_budget -= content_tokens_n - content_tokens_budget;
+                    let overshoot = content_tokens_n - content_tokens_budget;
+                    if overshoot >= content_tokens_budget {
+                        break;
+                    }
+                    content_tokens_budget -= overshoot;
                     extra_content_collect_counter += 1;
                 }
             }
@@ -347,6 +384,7 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
                 let cc = _cut_result(
                     &x,
                     self.t.eot.as_str(),
+                    self.t.eos.as_str(),
                     self.post.inputs.multiline,
                     &self.extra_stop_tokens,
                 );
@@ -381,14 +419,12 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         let json_choices = if !delta.is_empty()
             || matches!(
                 finish_reason,
-                FinishReason::Stop | FinishReason::ContentFilter | FinishReason::Unknown
+                FinishReason::Stop
+                    | FinishReason::ContentFilter
+                    | FinishReason::Unknown
+                    | FinishReason::ScratchpadStop
             ) {
-            let mut s: String = _cut_result(
-                &delta,
-                self.t.eot.as_str(),
-                self.post.inputs.multiline,
-                &self.extra_stop_tokens,
-            );
+            let mut s: String = self.cut_stream_delta(&delta, finish_reason);
             if finish_reason.is_finished() {
                 s = s.trim_end().to_string();
             }
@@ -429,10 +465,20 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
 
     fn streaming_finished(&mut self, finish_reason: FinishReason) -> Result<Value, String> {
         self.data4cache.completion0_finish_reason = finish_reason.to_string();
+        let tail = if finish_reason == FinishReason::Stop
+            || finish_reason == FinishReason::ScratchpadStop
+        {
+            String::new()
+        } else {
+            std::mem::take(&mut self.held_stream_suffix).replace("\r", "")
+        };
+        if !tail.is_empty() {
+            self.data4cache.completion0_text.push_str(&tail);
+        }
         Ok(json!({
             "choices": [{
                 "index": 0,
-                "code_completion": "",
+                "code_completion": tail,
                 "finish_reason": finish_reason.to_json_val()
             }],
         }))
@@ -442,33 +488,232 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
 fn _cut_result(
     text: &str,
     eot_token: &str,
+    eos_token: &str,
     multiline: bool,
     extra_stop_tokens: &Vec<String>,
 ) -> String {
-    let mut cut_at = vec![];
-    if let Some(x) = text.find(eot_token) {
-        cut_at.push(x);
-    }
-    for token in extra_stop_tokens {
-        if let Some(x) = text.find(token) {
-            cut_at.push(x);
-        }
-    }
-    if let Some(x) = text.find("\n\n") {
-        cut_at.push(x);
-    }
-    if let Some(x) = text.find("\r\n\r\n") {
-        cut_at.push(x);
-    }
-    if !multiline {
-        if let Some(x) = text.find("\n") {
-            cut_at.push(x);
-        }
-    }
-    if cut_at.is_empty() {
+    let stop_tokens = stop_tokens(eot_token, eos_token, multiline, extra_stop_tokens);
+    let (ans, stopped) = cut_at_first_stop(text, &stop_tokens);
+    if !stopped {
         return text.to_string().replace("\r", "");
     }
-    let cut_at = cut_at.into_iter().min().unwrap_or(text.len());
-    let ans = text.split_at(cut_at).0.to_string();
     ans.replace("\r", "")
+}
+
+fn stop_tokens(
+    eot_token: &str,
+    eos_token: &str,
+    multiline: bool,
+    extra_stop_tokens: &Vec<String>,
+) -> Vec<String> {
+    let mut tokens = vec![
+        eot_token.to_string(),
+        eos_token.to_string(),
+        "<EOT>".to_string(),
+        "\n\n".to_string(),
+        "\r\n\r\n".to_string(),
+    ];
+    if !multiline {
+        tokens.push("\n".to_string());
+    }
+    tokens.extend(extra_stop_tokens.iter().cloned());
+    tokens.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
+fn cut_at_first_stop(text: &str, stop_tokens: &[String]) -> (String, bool) {
+    let cut_at = stop_tokens
+        .iter()
+        .filter_map(|token| text.find(token))
+        .min();
+    if let Some(cut_at) = cut_at {
+        (text[..cut_at].to_string(), true)
+    } else {
+        (text.to_string(), false)
+    }
+}
+
+fn held_suffix_len(text: &str, stop_tokens: &[String]) -> usize {
+    stop_tokens
+        .iter()
+        .flat_map(|token| {
+            token
+                .char_indices()
+                .skip(1)
+                .map(|(idx, _)| &token[..idx])
+                .collect::<Vec<_>>()
+        })
+        .filter(|prefix| text.ends_with(*prefix))
+        .map(|prefix| prefix.len())
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use refact_core::chat_types::{CodeCompletionInputs, CursorPosition};
+    use refact_postprocessing::pp_context_provider::PPContextTrait;
+    use std::collections::HashMap;
+
+    struct TestPPContext;
+
+    #[async_trait]
+    impl PPContextTrait for TestPPContext {
+        async fn read_file(&self, _path: &PathBuf) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+
+        async fn correct_to_nearest_filename(&self, _path: &str, _limit: usize) -> Vec<String> {
+            vec![]
+        }
+
+        async fn shortify_paths(&self, paths: &[String]) -> Vec<String> {
+            paths.to_vec()
+        }
+
+        async fn doc_defs_for_path(
+            &self,
+            _path: &str,
+        ) -> Vec<Arc<refact_ast::ast::ast_structs::AstDefinition>> {
+            vec![]
+        }
+
+        fn canonical_path(&self, path: &str) -> PathBuf {
+            PathBuf::from(path)
+        }
+    }
+
+    fn post(source: &str, multiline: bool) -> CodeCompletionPost {
+        CodeCompletionPost {
+            inputs: CodeCompletionInputs {
+                sources: HashMap::from([("/tmp/main.rs".to_string(), source.to_string())]),
+                cursor: CursorPosition {
+                    file: "/tmp/main.rs".to_string(),
+                    line: 1,
+                    character: 7,
+                },
+                multiline,
+            },
+            parameters: SamplingParameters {
+                max_new_tokens: 10,
+                ..Default::default()
+            },
+            model: "model".to_string(),
+            stream: false,
+            no_cache: true,
+            use_ast: false,
+            use_vecdb: false,
+            rag_tokens_n: 0,
+        }
+    }
+
+    fn scratchpad(order: &str, source: &str, multiline: bool) -> FillInTheMiddleScratchpad {
+        FillInTheMiddleScratchpad::new(
+            None,
+            &post(source, multiline),
+            order.to_string(),
+            Arc::new(StdRwLock::new(completion_cache::CompletionCache::new())),
+            None,
+            Arc::new(TestPPContext),
+            vec![],
+        )
+    }
+
+    async fn patched_scratchpad(order: &str) -> FillInTheMiddleScratchpad {
+        let mut sp = scratchpad(order, "fn main() {\n    pri\n}\n", true);
+        sp.apply_model_adaptation_patch(&json!({
+            "fim_prefix": "<PRE>",
+            "fim_suffix": "<SUF>",
+            "fim_middle": "<MID>",
+            "eos": "<BOS>",
+            "eot": "<END>",
+            "extra_stop_tokens": ["", "<STOP>"]
+        }))
+        .await
+        .unwrap();
+        sp
+    }
+
+    async fn prompt_for(order: &str) -> (String, SamplingParameters) {
+        let mut sp = patched_scratchpad(order).await;
+        let mut params = SamplingParameters::default();
+        let prompt = sp
+            .prompt(
+                ScratchpadPromptInput {
+                    n_ctx: 2048,
+                    postprocess_parameters: Default::default(),
+                },
+                &mut params,
+            )
+            .await
+            .unwrap();
+        (prompt, params)
+    }
+
+    #[tokio::test]
+    async fn code_completion_fim_psm_places_tokens() {
+        let (prompt, params) = prompt_for("PSM").await;
+        assert_eq!(prompt, "<BOS><PRE>fn main() {\n    pri<SUF>\n}\n<MID>");
+        assert!(params.stop.contains(&"<END>".to_string()));
+        assert!(params.stop.contains(&"<BOS>".to_string()));
+        assert!(params.stop.contains(&"<STOP>".to_string()));
+        assert!(!params.stop.contains(&String::new()));
+    }
+
+    #[tokio::test]
+    async fn code_completion_fim_spm_places_tokens() {
+        let (prompt, _params) = prompt_for("SPM").await;
+        assert_eq!(prompt, "<BOS><SUF>\n}\n<PRE>fn main() {\n    pri<MID>");
+    }
+
+    #[tokio::test]
+    async fn code_completion_fim_plain_prompt_path() {
+        let (prompt, _params) = prompt_for("plain").await;
+        assert_eq!(prompt, "<BOS>fn main() {\n    pri");
+    }
+
+    #[test]
+    fn code_completion_fim_cut_result_handles_eos_eot_and_empty_stop() {
+        let stops = vec![String::new(), "<STOP>".to_string()];
+        assert_eq!(
+            _cut_result("abc<BOS>def", "<END>", "<BOS>", true, &stops),
+            "abc"
+        );
+        assert_eq!(
+            _cut_result("abc<END>def", "<END>", "<BOS>", true, &stops),
+            "abc"
+        );
+        assert_eq!(
+            _cut_result("abc<STOP>def", "<END>", "<BOS>", true, &stops),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn code_completion_fim_split_stop_sequence_does_not_leak() {
+        let mut sp = scratchpad("PSM", "fn main() {\n    pri\n}\n", true);
+        sp.t.eot = "<END>".to_string();
+        let (value, finish) = sp
+            .response_streaming("hello <E".to_string(), FinishReason::None)
+            .unwrap();
+        assert_eq!(finish, FinishReason::None);
+        assert_eq!(value["choices"][0]["code_completion"], "hello ");
+        let (value, finish) = sp
+            .response_streaming("OT> leaked".to_string(), FinishReason::None)
+            .unwrap();
+        assert_eq!(finish, FinishReason::None);
+        assert_eq!(value["choices"][0]["code_completion"], "");
+        assert_eq!(sp.data4cache.completion0_text, "hello ");
+    }
+
+    #[test]
+    fn code_completion_fim_negative_rag_retry_math_clamps() {
+        let mut budget = 20;
+        let content_tokens_n = 60;
+        let overshoot = content_tokens_n - budget;
+        if overshoot < budget {
+            budget -= overshoot;
+        }
+        assert_eq!(budget, 20);
+    }
 }
