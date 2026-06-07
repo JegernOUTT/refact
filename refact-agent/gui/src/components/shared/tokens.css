@@ -5,7 +5,7 @@
   --z-dropdown: var(--rf-z-dropdown, 100);
   --z-popover: var(--rf-z-popover, 200);
   --z-tooltip: var(--rf-z-tooltip, 300);
-  --z-fixed: 400;
+  --z-fixed: var(--rf-z-fixed, 400);
   --z-modal: var(--rf-z-modal, 500);
   --z-overlay: var(--rf-z-overlay, 600);
 

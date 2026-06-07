@@ -48,8 +48,16 @@ export type ThemeProps = {
 };
 
 export const Theme: React.FC<ThemeProps> = (props) => {
-  const { themeProps } = useConfig();
+  const { host, themeProps } = useConfig();
   const { appearance } = useAppearance();
 
-  return <RadixTheme {...themeProps} {...props} appearance={appearance} />;
+  return (
+    <RadixTheme
+      {...themeProps}
+      {...props}
+      appearance={appearance}
+      data-host={host}
+      data-appearance={appearance}
+    />
+  );
 };

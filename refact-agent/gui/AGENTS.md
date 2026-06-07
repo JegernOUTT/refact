@@ -265,8 +265,8 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 ### Tokens are the only visual truth
 
 - Use `var(--rf-*)` tokens for colors, spacing, radii, shadows, typography, sizing, z-index, blur, and motion. Components must not introduce hardcoded colors, spacing, or radii.
-- `src/styles/tokens.css` is canonical. It defines primitive tokens, semantic light/dark values, and theme adapters including `[data-host="jetbrains"]`.
-- The accent token binds to Radix via `--rf-color-accent: var(--accent-9, ...)`.
+- `src/styles/tokens.css` is canonical. It defines primitive tokens, semantic light/dark values, and theme adapters including `[data-host="jetbrains"]`; the Theme root carries both `data-host` and `data-appearance` so these selectors activate deterministically.
+- The accent token binds to Radix via `--rf-color-accent: var(--accent-9, ...)`; `color-mix(...)` token overrides must keep static fallback values declared first for older engines.
 - Canvas, chart, graph, or third-party theme code must read tokens through `useToken` / `useTokens` instead of duplicating visual constants.
 - Legacy aliases such as `--z-*` and `--motion-*` may remain only as adapters to `--rf-*` tokens.
 

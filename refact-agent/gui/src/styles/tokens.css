@@ -15,16 +15,12 @@
   --rf-border: rgba(255, 255, 255, 0.08);
   --rf-border-strong: rgba(255, 255, 255, 0.14);
   --rf-color-accent: var(--accent-9, #6f8bff);
-  --rf-color-accent-soft: color-mix(
-    in oklab,
-    var(--rf-color-accent) 16%,
-    transparent
-  );
+  --rf-color-accent-soft: rgba(111, 139, 255, 0.16);
   --rf-color-success: #5fae8b;
   --rf-color-warning: #cda04e;
   --rf-color-danger: #d8736d;
   --rf-color-info: var(--rf-color-accent);
-  --rf-focus-ring: color-mix(in oklab, var(--rf-color-accent) 70%, transparent);
+  --rf-focus-ring: rgba(111, 139, 255, 0.7);
   --rf-radius-chip: 6px;
   --rf-radius-ctl: 8px;
   --rf-radius-card: 10px;
@@ -46,6 +42,7 @@
   --rf-z-dropdown: 100;
   --rf-z-popover: 200;
   --rf-z-tooltip: 300;
+  --rf-z-fixed: 400;
   --rf-z-modal: 500;
   --rf-z-overlay: 600;
   --rf-elev-overlay: 0 14px 40px rgba(0, 0, 0, 0.4);
@@ -75,6 +72,23 @@
   --rf-overlay-tooltip-max: 280px;
 }
 
+@supports (--rf-color-accent-soft: color-mix(in oklab, #000 16%, transparent)) {
+  :root,
+  .dark,
+  [data-appearance="dark"] {
+    --rf-color-accent-soft: color-mix(
+      in oklab,
+      var(--rf-color-accent) 16%,
+      transparent
+    );
+    --rf-focus-ring: color-mix(
+      in oklab,
+      var(--rf-color-accent) 70%,
+      transparent
+    );
+  }
+}
+
 /* Semantic tokens */
 .light,
 [data-appearance="light"] {
@@ -95,4 +109,18 @@
 [data-host="jetbrains"] {
   --rf-blur-overlay: 0px;
   --rf-surface-overlay: var(--color-panel-solid, #16181d);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root,
+  .dark,
+  [data-appearance="dark"] {
+    --rf-blur-overlay: 0px;
+    --rf-surface-overlay: #16181d;
+  }
+
+  .light,
+  [data-appearance="light"] {
+    --rf-surface-overlay: #fff;
+  }
 }
