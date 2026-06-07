@@ -225,6 +225,8 @@ impl LspBackend {
             use_ast: params.parameters.use_ast,
             use_vecdb: params.parameters.use_vecdb,
             rag_tokens_n: params.parameters.rag_tokens_n,
+            cache_salt: String::new(),
+            cache_generation: 0,
         })
     }
 

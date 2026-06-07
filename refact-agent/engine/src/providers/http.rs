@@ -4,6 +4,7 @@ use hyper::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,9 +38,11 @@ fn json_response(
 }
 
 async fn invalidate_caps(gcx: Arc<GlobalContext>) {
+    crate::completion_cache::cache_bump_generation(gcx.completions_cache.clone());
+    gcx.completion_cache_generation
+        .fetch_add(1, Ordering::Relaxed);
     let caps_state = gcx.caps_state.clone();
     let mut caps_state = caps_state.write().await;
-    caps_state.caps = None;
     caps_state.last_attempted_ts = 0;
 }
 use crate::providers::config::ProviderDefaults;
@@ -3771,6 +3774,42 @@ extra_headers:
         };
         assert!(has_main);
         assert!(!has_alias);
+    }
+
+    #[tokio::test]
+    async fn provider_update_bumps_completion_cache_generation_and_preserves_caps() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let old_caps = Arc::new(crate::caps::CodeAssistantCaps::default());
+        {
+            let mut state = gcx.caps_state.write().await;
+            state.caps = Some(old_caps.clone());
+            state.last_attempted_ts = 42;
+        }
+
+        let response = handle_v1_provider_update(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "custom".to_string(),
+            }),
+            hyper::body::Bytes::from(
+                serde_json::to_vec(&json!({
+                    "api_key": "sk-new",
+                    "completion_endpoint": "https://example.com/v1/completions",
+                    "completion_endpoint_style": "openai_completions",
+                    "enabled": true,
+                    "enabled_models": ["qwen"]
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(gcx.completion_cache_generation.load(Ordering::Relaxed), 1);
+        let state = gcx.caps_state.read().await;
+        assert_eq!(state.last_attempted_ts, 0);
+        assert!(Arc::ptr_eq(state.caps.as_ref().unwrap(), &old_caps));
     }
 
     #[tokio::test]

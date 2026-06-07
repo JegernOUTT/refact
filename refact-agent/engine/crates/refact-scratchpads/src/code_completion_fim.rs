@@ -604,6 +604,8 @@ mod tests {
             use_ast: false,
             use_vecdb: false,
             rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
         }
     }
 

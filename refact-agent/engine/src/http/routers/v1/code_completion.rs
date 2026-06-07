@@ -1,9 +1,12 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::Mutex as AMutex;
 
 use axum::extract::State;
 use axum::response::Result;
 use hyper::{Body, Response, StatusCode};
+use refact_core::llm_types::BaseModelRecord;
+use sha2::{Digest, Sha256};
 use tracing::info;
 use crate::call_validation::{CodeCompletionPost, code_completion_post_validate};
 use crate::caps::resolve_completion_model;
@@ -38,6 +41,43 @@ fn normalize_code_completion_post(
     Ok(())
 }
 
+fn safe_hash(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn completion_cache_salt(
+    model: &BaseModelRecord,
+    scratchpad: &str,
+    scratchpad_patch: &serde_json::Value,
+) -> String {
+    let mut headers: Vec<_> = model.extra_headers.iter().collect();
+    headers.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let header_hashes: Vec<_> = headers
+        .into_iter()
+        .map(|(key, value)| serde_json::json!({"key": key, "value_sha256": safe_hash(value)}))
+        .collect();
+    serde_json::json!({
+        "model_id": model.id,
+        "upstream_model": model.name,
+        "endpoint": model.endpoint,
+        "endpoint_style": model.endpoint_style,
+        "completion_endpoint_style": model.completion_endpoint_style,
+        "wire_format": model.wire_format,
+        "api_key_sha256": safe_hash(&model.api_key),
+        "auth_token_sha256": safe_hash(&model.auth_token),
+        "tokenizer_api_key_sha256": safe_hash(&model.tokenizer_api_key),
+        "extra_headers": header_hashes,
+        "scratchpad": scratchpad,
+        "scratchpad_patch": scratchpad_patch,
+    })
+    .to_string()
+}
+
 pub async fn handle_v1_code_completion(
     app: AppState,
     code_completion_post: &mut CodeCompletionPost,
@@ -62,6 +102,12 @@ pub async fn handle_v1_code_completion(
         code_completion_post.model, model_rec.scratchpad
     );
     let cache_arc = { gcx.completions_cache.clone() };
+    code_completion_post.cache_generation = gcx.completion_cache_generation.load(Ordering::Relaxed);
+    code_completion_post.cache_salt = completion_cache_salt(
+        &model_rec.base,
+        &model_rec.scratchpad,
+        &model_rec.scratchpad_patch,
+    );
     if !code_completion_post.no_cache {
         let cache_key = completion_cache::cache_key_from_post(&code_completion_post);
         let cached_maybe = completion_cache::cache_get(cache_arc.clone(), cache_key.clone());
@@ -211,6 +257,8 @@ pub async fn handle_v1_code_completion_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_core::llm_types::{BaseModelRecord, WireFormat};
+    use std::collections::HashMap;
 
     fn post(model: &str) -> CodeCompletionPost {
         CodeCompletionPost {
@@ -222,6 +270,8 @@ mod tests {
             use_ast: false,
             use_vecdb: false,
             rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
         }
     }
 
@@ -229,6 +279,24 @@ mod tests {
         let mut record = crate::caps::CompletionModelRecord::default();
         record.base.id = "provider/model".to_string();
         record
+    }
+
+    fn test_model(
+        endpoint: &str,
+        api_key: &str,
+        headers: HashMap<String, String>,
+    ) -> BaseModelRecord {
+        BaseModelRecord {
+            id: "custom/qwen".to_string(),
+            name: "qwen".to_string(),
+            endpoint: endpoint.to_string(),
+            endpoint_style: "openai".to_string(),
+            completion_endpoint_style: "openai_completions".to_string(),
+            wire_format: WireFormat::OpenaiChatCompletions,
+            api_key: api_key.to_string(),
+            extra_headers: headers,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -249,5 +317,75 @@ mod tests {
 
         assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(err.message.contains("use_vecdb"));
+    }
+
+    #[test]
+    fn completion_cache_salt_changes_with_endpoint_and_auth() {
+        let first = completion_cache_salt(
+            &test_model(
+                "https://one.example/v1/completions",
+                "sk-one",
+                HashMap::new(),
+            ),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+        let second = completion_cache_salt(
+            &test_model(
+                "https://two.example/v1/completions",
+                "sk-one",
+                HashMap::new(),
+            ),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+        let third = completion_cache_salt(
+            &test_model(
+                "https://one.example/v1/completions",
+                "sk-two",
+                HashMap::new(),
+            ),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+
+        assert_ne!(first, second);
+        assert_ne!(first, third);
+        assert!(!third.contains("sk-two"));
+    }
+
+    #[test]
+    fn completion_cache_salt_hashes_extra_header_values() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer secret-token".to_string(),
+        );
+        let salt = completion_cache_salt(
+            &test_model("https://one.example/v1/completions", "", headers),
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+
+        assert!(salt.contains("Authorization"));
+        assert!(!salt.contains("secret-token"));
+        assert!(!salt.contains("Bearer secret-token"));
+    }
+
+    #[test]
+    fn completion_cache_salt_changes_with_scratchpad_patch() {
+        let model = test_model("https://one.example/v1/completions", "", HashMap::new());
+        let first = completion_cache_salt(
+            &model,
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "chat"}),
+        );
+        let second = completion_cache_salt(
+            &model,
+            "FIM-PSM",
+            &serde_json::json!({"context_format": "plain"}),
+        );
+
+        assert_ne!(first, second);
     }
 }
