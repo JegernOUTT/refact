@@ -44,4 +44,5 @@ export * from "./useProvidersQuery";
 export * from "./useBrowserOnlineStatus";
 export * from "./useLoadMoreHistory";
 export * from "./useThinking";
+export * from "./useReducedMotion";
 export * from "./useShiki";
