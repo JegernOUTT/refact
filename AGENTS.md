@@ -209,6 +209,7 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 - **Linting**: ESLint strict-type-checked, 0 warnings. Prettier enforced in CI.
 - **State**: Redux Toolkit + RTK Query. Always use selectors from `features/Chat/Thread/selectors.ts`. Never access `state.chat.threads[id]` directly.
 - **Styling**: Radix UI primitives + CSS Modules + design tokens. No inline styles, no hardcoded colors, no magic numbers.
+- **Design system**: GUI design-system architecture, tokens, motion, responsiveness, overlays, and guardrails are defined in `refact-agent/gui/AGENTS.md` → `## Design System (Refact UI)`.
 - **File naming**: `PascalCase.tsx` (components), `useCamelCase.ts` (hooks), `camelCase.ts` (utils), `PascalCase.module.css`.
 - **No `any` types.**
 

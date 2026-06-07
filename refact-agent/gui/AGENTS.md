@@ -251,6 +251,91 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 - Prefer shared utilities `.rf-min-w-0`, `.rf-truncate`, `.rf-wrap-anywhere`, and `.rf-container-fluid` before adding one-off responsive CSS.
 - Do not relayout feature surfaces while adding responsive infrastructure; feature migrations need their own characterization/parity tests.
 
+## Design System (Refact UI)
+
+Refact UI rules are contributor contracts. Any change that introduces a new design-system rule, primitive, token, or guardrail MUST update this section in the same PR/card.
+
+### Architecture and boundary
+
+- Reusable kit code lives in `src/components/ui/*`; design tokens and shared global utilities live in `src/styles/*`.
+- `src/components/ui/**` and `src/styles/**` MUST NOT import from `features`, `services`, or `app`. This is enforced by `npm run lint:boundaries` through the scoped ESLint override in `.eslintrc.cjs`.
+- Connected widgets must split into presentational kit pieces in `src/components/ui/*` and feature-connected wrappers in the owning feature folder.
+- Redesign the skin, keep the behavior: do not rewrite Redux selectors, RTK Query services, SSE contracts, virtualization, backend contracts, or tool execution logic as part of visual migration. Risky surfaces migrate only after characterization/parity tests pass.
+
+### Tokens are the only visual truth
+
+- Use `var(--rf-*)` tokens for colors, spacing, radii, shadows, typography, sizing, z-index, blur, and motion. Components must not introduce hardcoded colors, spacing, or radii.
+- `src/styles/tokens.css` is canonical. It defines primitive tokens, semantic light/dark values, and theme adapters including `[data-host="jetbrains"]`.
+- The accent token binds to Radix via `--rf-color-accent: var(--accent-9, ...)`.
+- Canvas, chart, graph, or third-party theme code must read tokens through `useToken` / `useTokens` instead of duplicating visual constants.
+- Legacy aliases such as `--z-*` and `--motion-*` may remain only as adapters to `--rf-*` tokens.
+
+### Surface model
+
+- Panel-less by default: inline content, especially tool cards and transcript content, should not gain boxes, fills, or heavy borders.
+- Surfaces are reserved for overlays, fields, selected/active state, and true containment. When used, keep them barely visible with tokenized borders/backgrounds.
+- JCEF/JetBrains (`[data-host="jetbrains"]`) forces solid overlay surfaces and disables blur for performance.
+
+### Motion
+
+- Prefer CSS-only motion. Chat transcript hot paths must not use JS animation.
+- Animate `transform` and `opacity` first; `grid-template-rows` is allowed for expand/collapse.
+- Motion must use `--rf-dur-*`, `--rf-ease-*`, and `--rf-stagger`, and must honor both `prefers-reduced-motion` and `prefers-reduced-transparency`.
+- Shared utilities live in `src/styles/motion.css`: `.rf-enter`, `.rf-enter-rise`, `.rf-stagger`, `.rf-popover-motion`, `.rf-expand-grid`, `.rf-pressable`, `.rf-status-pulse`, and `.rf-shimmer`.
+- Use `useReducedMotion()` only for rare JS-side decisions that cannot be expressed in CSS.
+
+### Icons
+
+- Use Lucide outline icons through the `<Icon>` wrapper.
+- Icons inherit `currentColor` and use `strokeWidth={1.5}`. State is communicated by icon color only; do not add icon fills.
+- Do not use emoji as icons. Data/content emoji are exempt, such as UserInput `🗜️` detection and TaskDocuments `★` content markers.
+
+### Responsiveness doctrine
+
+- No stray page-level horizontal scroll ever. The Playwright gate checks dashboard and chat at `240`, `360`, `768`, and `1280` px.
+- Every shrinkable flex/grid child gets `min-width: 0`; grids use `minmax(0, 1fr)` where columns must shrink.
+- Do not put `min-width: <N>px` on layout containers, cards, or tables.
+- Do not use `nowrap` without truncation.
+- Overlays clamp with viewport-aware sizing such as `width: min(ideal, calc(100vw - 2 * gutter))` and `max-height: min(ideal, calc(100dvh - gutter))`; narrow layouts should become a Sheet.
+- `overflow-x` belongs only inside explicit `.scrollX` islands for code, diffs, tables, and kanban-like content.
+- Prefer container queries for component layout changes.
+- App-level horizontal overflow safety belongs in `src/styles/responsive.css` and the app root only; do not add global `*`, `body`, or `html` overflow clamps.
+- Prefer shared utilities `.rf-min-w-0`, `.rf-truncate`, `.rf-wrap-anywhere`, and `.rf-container-fluid` before adding one-off responsive CSS.
+
+### Overlays
+
+- Use five overlay primitives only: Tooltip, Popover, Menu, Dialog, and Sheet.
+- Overlay implementations must provide viewport clamping, focus trap/restore, Escape handling, and Portal-into-theme-root behavior.
+- Overlay blur uses `--rf-blur-overlay` and must have a reduced-transparency fallback; JetBrains host mode disables blur.
+
+### Sizing contract
+
+| Item        | Values                                                                 |
+| ----------- | ---------------------------------------------------------------------- |
+| Controls    | default `30px`, small `26px`, large `36px`                             |
+| Icons       | default `15px`, small `13px`, large `18px`, tap target at least `28px` |
+| Spacing     | `4 / 8 / 12 / 16 / 22 / 32px`                                          |
+| Radii       | chip `6px`, control `8px`, card/popover `10px`, pill `999px`           |
+| Lines/rings | hairline `1px`, focus ring `2px`                                       |
+| Type        | `11.5 / 12.5 / 13.5 / 15 / 19px`                                       |
+| Layout      | nav `220px` with `180px` min, content max `640px`                      |
+| Overlays    | popover `210–360px`, dialog `340px`, tooltip max `280px`               |
+
+### Guardrails and verification
+
+These scripts exist in `refact-agent/gui/package.json` and are the current merged guardrails:
+
+| Command                   | Purpose                                                                                                                 |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `npm run types`           | TypeScript `tsc --noEmit`                                                                                               |
+| `npm run lint`            | Strict ESLint over TS/TSX with zero warnings                                                                            |
+| `npm run lint:css`        | Stylelint scoped to `src/components/ui/**/*.css` and `src/styles/*.css` for now; global CSS expansion belongs to DS-704 |
+| `npm run lint:boundaries` | ESLint boundary check for `src/components/ui/**/*.{ts,tsx}` and `src/styles/**/*.{ts,tsx}`                              |
+| `npm run test`            | Vitest unit suite excluding integration tests                                                                           |
+| `npm run build`           | TypeScript and Vite chat/events builds                                                                                  |
+| `npm run build-storybook` | Storybook static build                                                                                                  |
+| `npm run test:e2e`        | Playwright no-horizontal-scroll gate via `tests/e2e/no-horizontal-scroll.spec.ts`                                       |
+
 ## IDE Integration (postMessage)
 
 **Host modes**: `web` | `vscode` | `jetbrains` | `ide`
