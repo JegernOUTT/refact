@@ -2,21 +2,26 @@ import React, {
   useCallback,
   useMemo,
   useState,
-  useRef,
   useEffect,
 } from "react";
 import {
   Flex,
   Text,
-  Popover,
   Separator,
   Skeleton,
   Slider,
-  Badge,
   Switch,
   Callout,
 } from "@radix-ui/themes";
-import { ChevronDownIcon, Cross1Icon } from "@radix-ui/react-icons";
+import { Cross1Icon } from "@radix-ui/react-icons";
+import {
+  Brain,
+  ChevronDown,
+  Images,
+  MousePointer2,
+  Rocket,
+  Wrench,
+} from "lucide-react";
 import classNames from "classnames";
 import {
   useAppSelector,
@@ -46,6 +51,13 @@ import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { useThinking } from "../../hooks/useThinking";
 import { formatContextWindow } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import { ReasoningIcon } from "../../features/Providers/ProviderForm/ProviderModelsList/components/CapabilityIcons";
+import type { ModelCapabilities } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
+import {
+  Icon,
+  ModelSelector as KitModelSelector,
+  Popover as KitPopover,
+} from "../ui";
+import type { ModelOption, ModelSelectorBadge } from "../ui";
 import styles from "./ChatSettingsDropdown.module.css";
 
 const MIN_OUTPUT_TOKENS = 1024;
@@ -76,6 +88,50 @@ function formatPricingDetailed(cost: CapCost): {
     prompt: formatUsdPrice(cost.prompt),
     output: formatUsdPrice(cost.generated),
   };
+}
+
+function modelBadges(model: {
+  isDefault?: boolean;
+  isThinking?: boolean;
+  isLight?: boolean;
+  isBuddy?: boolean;
+  isTaskPlannerAgent?: boolean;
+  isChat2?: boolean;
+}): ModelSelectorBadge[] {
+  return [
+    model.isDefault ? "default" : null,
+    model.isThinking ? "reasoning" : null,
+    model.isLight ? "light" : null,
+    model.isBuddy ? "buddy" : null,
+    model.isTaskPlannerAgent ? "task-agent" : null,
+    model.isChat2 ? "chat2" : null,
+  ].filter((badge): badge is ModelSelectorBadge => badge !== null);
+}
+
+function CapabilityIcons({ capabilities }: { capabilities?: ModelCapabilities }) {
+  if (!capabilities) return null;
+
+  return (
+    <span className={styles.capabilityIcons}>
+      {capabilities.supportsTools && (
+        <Icon icon={Wrench} size="sm" tone="muted" aria-label="Supports tools" />
+      )}
+      {capabilities.supportsMultimodality && (
+        <Icon icon={Images} size="sm" tone="muted" aria-label="Supports images" />
+      )}
+      {capabilities.supportsClicks && (
+        <Icon icon={MousePointer2} size="sm" tone="muted" aria-label="Computer use" />
+      )}
+      {capabilities.supportsAgent && (
+        <Icon icon={Rocket} size="sm" tone="muted" aria-label="Agent mode" />
+      )}
+      {(!!capabilities.reasoningEffortOptions?.length ||
+        !!capabilities.supportsThinkingBudget ||
+        !!capabilities.supportsAdaptiveThinkingBudget) && (
+        <Icon icon={Brain} size="sm" tone="accent" aria-label="Reasoning" />
+      )}
+    </span>
+  );
 }
 
 type ChatSettingsDropdownProps = {
@@ -122,40 +178,35 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     },
     [onOpenChange],
   );
-  const selectedModelRef = useRef<HTMLButtonElement>(null);
-  const modelListRef = useRef<HTMLDivElement>(null);
-
   const groupedModels = useMemo(() => {
     return enrichAndGroupModels(caps.usableModelsForPlan, caps.data);
   }, [caps.usableModelsForPlan, caps.data]);
 
-  useEffect(() => {
-    if (!isOpen) return;
+  const modelSelectorGroups = useMemo(
+    () =>
+      groupedModels.map((group) => ({
+        id: group.provider,
+        label: group.displayName,
+      })),
+    [groupedModels],
+  );
 
-    const scrollToSelected = () => {
-      const container = modelListRef.current;
-      const selected = selectedModelRef.current;
-      if (container && selected && container.clientHeight > 0) {
-        const containerHeight = container.clientHeight;
-        const selectedTop = selected.offsetTop;
-        const selectedHeight = selected.offsetHeight;
-        container.scrollTop =
-          selectedTop - containerHeight / 2 + selectedHeight / 2;
-        return true;
-      }
-      return false;
-    };
-
-    let attempts = 0;
-    const maxAttempts = 10;
-    const tryScroll = () => {
-      if (scrollToSelected() || attempts >= maxAttempts) return;
-      attempts++;
-      requestAnimationFrame(tryScroll);
-    };
-
-    requestAnimationFrame(tryScroll);
-  }, [isOpen]);
+  const modelSelectorOptions = useMemo<ModelOption[]>(
+    () =>
+      groupedModels.flatMap((group) =>
+        group.models.map((model) => ({
+          value: model.value,
+          displayName: model.value,
+          group: group.provider,
+          disabled: model.disabled || isInteractionDisabled,
+          badges: modelBadges(model),
+          pricing: model.pricing ? formatPricingDetailed(model.pricing) : undefined,
+          contextWindow: model.nCtx ? formatContextWindow(model.nCtx) : undefined,
+          capabilities: <CapabilityIcons capabilities={model.capabilities} />,
+        })),
+      ),
+    [groupedModels, isInteractionDisabled],
+  );
 
   const selectedModelDetail = useMemo(() => {
     if (!caps.currentModel) return null;
@@ -228,13 +279,17 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   // Handlers
   const handleModelSelect = useCallback(
     (modelValue: string) => {
-      if (modelValue === "add-new-model") {
-        dispatch(push({ name: "providers page" }));
-        return;
-      }
+      if (!modelValue) return;
       caps.setCapModel(modelValue);
     },
-    [caps, dispatch],
+    [caps],
+  );
+
+  const handleAddNewModel = useCallback(
+    () => {
+      dispatch(push({ name: "providers page" }));
+    },
+    [dispatch],
   );
 
   const noop = useCallback(() => {
@@ -277,7 +332,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
       <Skeleton>
         <div className={styles.trigger}>
           <Text size="1">Loading...</Text>
-          <ChevronDownIcon />
+          <Icon icon={ChevronDown} size="sm" tone="muted" />
         </div>
       </Skeleton>
     );
@@ -309,13 +364,13 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           </Text>
         </>
       )}
-      <ChevronDownIcon className={styles.chevron} />
+      <Icon icon={ChevronDown} className={styles.chevron} size="sm" tone="muted" />
     </Flex>
   );
 
   return (
-    <Popover.Root open={isOpen} onOpenChange={handleOpenChange}>
-      <Popover.Trigger>
+    <KitPopover open={isOpen} onOpenChange={handleOpenChange}>
+      <KitPopover.Trigger asChild>
         <button
           className={classNames(
             styles.trigger,
@@ -327,76 +382,26 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
         >
           {triggerContent}
         </button>
-      </Popover.Trigger>
+      </KitPopover.Trigger>
 
-      <Popover.Content className={styles.content} side="top" sideOffset={8}>
-        {/* Model Section */}
+      <KitPopover.Content
+        align="end"
+        className={styles.content}
+        maxHeight="min(640px, calc(100dvh - 2 * var(--rf-space-5)))"
+        maxWidth="440px"
+        side="top"
+        sideOffset={8}
+      >
         <div className={`${styles.section} ${styles.modelSection}`}>
-          <div className={styles.modelList} ref={modelListRef}>
-            {groupedModels.map((group, groupIndex) => (
-              <React.Fragment key={group.provider}>
-                {groupIndex > 0 && (
-                  <Separator size="4" className={styles.groupSeparator} />
-                )}
-                <Text size="1" color="gray" className={styles.groupHeader}>
-                  {group.displayName}
-                </Text>
-                {group.models.map((model) => {
-                  const isSelected = caps.currentModel === model.value;
-                  return (
-                    <button
-                      key={model.value}
-                      ref={isSelected ? selectedModelRef : undefined}
-                      className={`${styles.item} ${
-                        isSelected ? styles.itemSelected : ""
-                      } ${model.disabled ? styles.itemDisabled : ""}`}
-                      onClick={() => handleModelSelect(model.value)}
-                      disabled={isInteractionDisabled || model.disabled}
-                      type="button"
-                    >
-                      <Flex align="center" gap="1">
-                        <Text
-                          size="1"
-                          weight="medium"
-                          className={styles.itemModelName}
-                        >
-                          {model.value}
-                        </Text>
-                        {model.isDefault && (
-                          <Badge
-                            size="1"
-                            color="blue"
-                            variant="soft"
-                            className={styles.badge}
-                          >
-                            Default
-                          </Badge>
-                        )}
-                        {model.isThinking && (
-                          <Badge
-                            size="1"
-                            color="purple"
-                            variant="soft"
-                            className={styles.badge}
-                          >
-                            Reasoning
-                          </Badge>
-                        )}
-                      </Flex>
-                    </button>
-                  );
-                })}
-              </React.Fragment>
-            ))}
-            <Separator size="4" className={styles.groupSeparator} />
-            <button
-              className={styles.item}
-              onClick={() => handleModelSelect("add-new-model")}
-              type="button"
-            >
-              <Text size="1">Add new model...</Text>
-            </button>
-          </div>
+          <KitModelSelector
+            disabled={isInteractionDisabled}
+            groups={modelSelectorGroups}
+            models={modelSelectorOptions}
+            value={caps.currentModel}
+            variant="inline"
+            onAddNewModel={handleAddNewModel}
+            onSelect={handleModelSelect}
+          />
         </div>
 
         {/* Model Details */}
@@ -590,8 +595,8 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
             )}
           </div>
         )}
-      </Popover.Content>
-    </Popover.Root>
+      </KitPopover.Content>
+    </KitPopover>
   );
 };
 

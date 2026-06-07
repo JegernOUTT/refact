@@ -216,7 +216,7 @@ function ModelSelectorList({
           }}
         >
           <Icon icon={Plus} size="sm" tone="accent" />
-          <span>Add new model…</span>
+          <span>Add new model...</span>
         </button>
       ) : null}
     </div>

@@ -1,41 +1,47 @@
 .trigger {
   display: flex;
-  align-items: center;
-  gap: var(--space-1);
   min-width: 0;
-  padding: var(--space-1) var(--space-2);
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-fg);
   background: transparent;
-  border: none;
-  border-radius: var(--radius-2);
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
   cursor: pointer;
-  color: var(--gray-12);
-  transition: background-color 0.15s ease;
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .trigger:hover:not(.disabled) {
-  background-color: var(--gray-a3);
+  background: var(--rf-surface-1);
+}
+
+.trigger:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .compactTrigger {
   max-width: 100%;
-  padding: 0 var(--space-1);
+  padding: 0 var(--rf-space-1);
 }
 
 .trigger.disabled {
-  opacity: 0.5;
+  color: var(--rf-color-faint);
   cursor: default;
+  opacity: 0.58;
 }
 
 .triggerContent {
-  max-width: 320px;
+  max-width: min(320px, calc(100vw - 2 * var(--rf-space-5)));
   min-width: 0;
 }
 
 .modelName {
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 140px;
 }
 
 .compactTrigger .modelName {
@@ -44,25 +50,20 @@
 
 .chevron {
   flex-shrink: 0;
-  color: var(--gray-9);
-  width: 12px;
-  height: 12px;
 }
 
 .content {
-  min-width: 300px;
-  max-width: 400px;
-  max-height: 600px;
-  overflow: visible;
-  padding: var(--space-2);
+  width: min(440px, calc(100vw - 2 * var(--rf-space-3)));
+  max-width: min(440px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
 .modelSection {
-  overflow: hidden;
+  min-width: 0;
 }
 
 .section {
-  padding: var(--space-2) 0;
+  min-width: 0;
+  padding: var(--rf-space-3) 0;
 }
 
 .section:first-child {
@@ -75,141 +76,103 @@
 
 .sectionHeader {
   display: block;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  font-weight: 700;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  font-size: 10px;
 }
 
-.groupHeader {
-  display: block;
-  padding: var(--space-1) var(--space-2);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-  opacity: 0.7;
-}
-
-.groupSeparator {
-  margin: var(--space-1) 0;
-}
-
-.modelList {
-  composes: scrollbarThin from "../shared/scrollbar.module.css";
-  display: flex;
-  flex-direction: column;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.item {
-  display: flex;
+.capabilityIcons {
+  display: inline-flex;
+  min-width: 0;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-2);
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-  transition: background-color 0.15s ease;
-}
-
-.item:hover:not(:disabled):not(.itemDisabled) {
-  background-color: var(--gray-a3);
-}
-
-.item:disabled,
-.item.itemDisabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.itemSelected {
-  background-color: var(--accent-a3);
-}
-
-.itemSelected:hover:not(:disabled):not(.itemDisabled) {
-  background-color: var(--accent-a4);
-}
-
-.itemModelName {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: monospace;
-  font-size: 11px;
-}
-
-.badge {
-  font-size: 9px;
-  flex-shrink: 0;
+  gap: var(--rf-space-1);
 }
 
 .sliderContainer {
-  padding: 0 var(--space-1);
+  min-width: 0;
+  padding: 0 var(--rf-space-1);
 }
 
 .slider {
   flex: 1;
+  min-width: 0;
 }
 
 .resetButton {
-  display: flex;
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
   padding: 0;
+  color: var(--rf-color-muted);
   background: transparent;
-  border: none;
-  border-radius: var(--radius-1);
+  border: 0;
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
-  color: var(--gray-9);
-  font-size: 10px;
-  line-height: 1;
   transition:
-    background-color 0.15s ease,
-    color 0.15s ease;
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .resetButton:hover:not(:disabled) {
-  background-color: var(--gray-a4);
-  color: var(--gray-12);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+}
+
+.resetButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .resetButton:disabled {
-  opacity: 0.5;
+  color: var(--rf-color-faint);
   cursor: default;
+  opacity: 0.58;
 }
 
 .effortButton {
-  padding: var(--space-1) var(--space-2);
-  background: var(--gray-a3);
-  border: 1px solid var(--gray-a6);
-  border-radius: var(--radius-2);
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
-  color: var(--gray-11);
-  transition: all 0.15s ease;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .effortButton:hover:not(:disabled) {
-  background: var(--gray-a4);
-  border-color: var(--gray-a8);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border-strong);
+}
+
+.effortButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .effortButton:disabled {
-  opacity: 0.5;
+  color: var(--rf-color-faint);
   cursor: default;
+  opacity: 0.58;
 }
 
 .effortButtonActive {
-  background: var(--accent-a4);
-  border-color: var(--accent-a8);
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
 }
 
 .effortButtonActive:hover:not(:disabled) {
-  background: var(--accent-a5);
-  border-color: var(--accent-a9);
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-color-accent);
 }
