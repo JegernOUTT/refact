@@ -244,6 +244,13 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 
 **Rules**: Use Radix primitives (`Flex`, `Box`, `Text`, `Card`, `Button`). Use design tokens (`var(--space-3)`, `var(--accent-9)`). CSS Modules for custom styles. No inline styles, no magic numbers, no hardcoded colors, no global CSS.
 
+### Responsive doctrine
+
+- App-level horizontal overflow safety belongs in `src/styles/responsive.css` and the app root only; do not add global `*`, `body`, or `html` overflow clamps.
+- `.scrollX` is the only sanctioned horizontal-overflow escape hatch for code, diff, table, and kanban islands.
+- Prefer shared utilities `.rf-min-w-0`, `.rf-truncate`, `.rf-wrap-anywhere`, and `.rf-container-fluid` before adding one-off responsive CSS.
+- Do not relayout feature surfaces while adding responsive infrastructure; feature migrations need their own characterization/parity tests.
+
 ## IDE Integration (postMessage)
 
 **Host modes**: `web` | `vscode` | `jetbrains` | `ide`

@@ -1,4 +1,33 @@
-/* Refact UI responsive doctrine stub. DS-003 fills this file. */
+#refact-chat,
+[data-element="app-root"] {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+}
 
-:root {
+.scrollX {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.rf-min-w-0 {
+  min-width: 0;
+}
+
+.rf-truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rf-wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.rf-container-fluid {
+  width: 100%;
+  min-width: 0;
 }
