@@ -312,6 +312,13 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 - Overlay content clamps with `width: min(ideal, calc(100vw - 2 * var(--rf-space-3)))` and `max-height: min(ideal, calc(100dvh - var(--rf-space-5)))`; vertical overflow stays inside the overlay and horizontal overflow must use explicit `.scrollX` islands.
 - `Popover` is responsive by default and renders as a bottom `Sheet` below the narrow viewport threshold; callers may set `responsive={false}` or `forceSheet` for deterministic behavior.
 
+### Model selector
+
+- `ModelSelector` in `src/components/ui/ModelSelector` is the reusable presentational selector for model picking. It accepts only prop data and callbacks: `models`, `value`, `onSelect`, optional `groups`, `allowUnset`, `disabled`, `onAddNewModel`, and `variant: "popover" | "inline"`.
+- `ModelOption` carries render-ready fields only: `value`, `displayName`, optional `group`, `disabled`, `pricing: { prompt, output }`, `contextWindow`, `badges: Array<"default" | "reasoning" | "light" | "buddy" | "task-agent" | "chat2">`, and `capabilities: ReactNode`.
+- The kit selector must stay pure: no caps hooks, Redux, RTK Query, services, provider utilities, or feature imports. Connected feature code owns enrichment, grouping, pricing formatting, capability icons, and persistence.
+- Use `variant="popover"` for compact pickers backed by the kit `Popover` responsive Sheet behavior, and `variant="inline"` for settings surfaces that render the searchable list directly.
+
 ### Sizing contract
 
 | Item        | Values                                                                 |

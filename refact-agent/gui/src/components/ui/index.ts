@@ -32,6 +32,13 @@ export type {
   MenuSeparatorProps,
   MenuTriggerProps,
 } from "./Menu";
+export { ModelSelector } from "./ModelSelector";
+export type {
+  ModelOption,
+  ModelSelectorBadge,
+  ModelSelectorGroup,
+  ModelSelectorProps,
+} from "./ModelSelector";
 export { Popover } from "./Popover";
 export type {
   PopoverCloseProps,
