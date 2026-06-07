@@ -1,20 +1,15 @@
 import React, { useEffect, useState } from "react";
+import classNames from "classnames";
+import { AlertTriangle, File, Globe } from "lucide-react";
+import type { ExtensionMarketplaceItem } from "../../services/refact/extensionsMarketplace";
 import {
   Badge,
   Button,
-  Callout,
   Dialog,
-  Flex,
+  FieldText,
+  Icon,
   SegmentedControl,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
-import {
-  ExclamationTriangleIcon,
-  FileIcon,
-  GlobeIcon,
-} from "@radix-ui/react-icons";
-import type { ExtensionMarketplaceItem } from "../../services/refact/extensionsMarketplace";
+} from "../../components/ui";
 import styles from "./ExtensionsMarketplace.module.css";
 
 type MarketplaceInstallDialogProps = {
@@ -76,143 +71,131 @@ export const MarketplaceInstallDialog: React.FC<
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content className={styles.installDialogContent}>
         <Dialog.Title>Install {item?.kind}</Dialog.Title>
-        <Flex direction="column" gap="3">
-          <Flex direction="column" gap="1">
-            <Text size="3" weight="bold">
-              {item?.name}
-            </Text>
-            <Text size="2" color="gray">
+        <div className={styles.dialogStack}>
+          <div className={styles.dialogStack}>
+            <p className={styles.text}>{item?.name}</p>
+            <p className={styles.mutedText}>
               {item?.description && item.description.length > 0
                 ? item.description
                 : "No description"}
-            </Text>
+            </p>
             {item?.kind === "subagent" && (
-              <Text size="1" color="gray">
+              <p className={styles.smallText}>
                 Installs as editable Refact YAML under `.refact/subagents` or
                 your global config.
-              </Text>
+              </p>
             )}
-          </Flex>
+          </div>
 
-          <Flex gap="2" wrap="wrap">
-            <Badge variant="soft">{item?.source_label}</Badge>
+          <div className={styles.filterRow}>
+            <Badge tone="accent">{item?.source_label}</Badge>
             {item?.tags.map((tag) => (
-              <Badge key={tag} variant="soft" color="gray">
+              <Badge key={tag} tone="muted">
                 {tag}
               </Badge>
             ))}
-          </Flex>
+          </div>
 
-          <Flex direction="column" gap="1" className={styles.installScope}>
-            <Text size="1">Install to:</Text>
+          <div className={styles.installScope}>
+            <p className={styles.smallText}>Install to:</p>
             {hasProjectRoot ? (
-              <SegmentedControl.Root
-                size="1"
+              <SegmentedControl
+                size="sm"
                 value={scope}
                 onValueChange={(value) => setScope(value as "local" | "global")}
-              >
-                <SegmentedControl.Item value="global">
-                  <Flex align="center" gap="1">
-                    <GlobeIcon width={12} height={12} />
-                    Global
-                  </Flex>
-                </SegmentedControl.Item>
-                <SegmentedControl.Item value="local">
-                  <Flex align="center" gap="1">
-                    <FileIcon width={12} height={12} />
-                    Project
-                  </Flex>
-                </SegmentedControl.Item>
-              </SegmentedControl.Root>
+                options={[
+                  {
+                    value: "global",
+                    label: (
+                      <span className={styles.dialogHeader}>
+                        <Icon icon={Globe} size="sm" tone="muted" /> Global
+                      </span>
+                    ),
+                  },
+                  {
+                    value: "local",
+                    label: (
+                      <span className={styles.dialogHeader}>
+                        <Icon icon={File} size="sm" tone="muted" /> Project
+                      </span>
+                    ),
+                  },
+                ]}
+              />
             ) : (
-              <Badge size="1" color="blue" variant="soft">
-                <Flex align="center" gap="1">
-                  <GlobeIcon width={10} height={10} />
-                  Global only (no project open)
-                </Flex>
+              <Badge tone="accent">
+                <span className={styles.dialogHeader}>
+                  <Icon icon={Globe} size="sm" tone="accent" /> Global only (no project open)
+                </span>
               </Badge>
             )}
-          </Flex>
+          </div>
 
           {item?.params && item.params.length > 0 && (
-            <Flex direction="column" gap="2">
-              <Text size="1" weight="bold">
-                Parameters
-              </Text>
+            <div className={styles.paramsStack}>
+              <p className={styles.smallText}>Parameters</p>
               {item.params.map((param) => (
-                <Flex key={param.name} direction="column" gap="1">
-                  <Text size="1">
+                <label key={param.name} className={styles.paramField}>
+                  <span className={styles.smallText}>
                     {param.label || param.name}
-                    {param.required && (
-                      <Text color="red" size="1">
-                        {" "}
-                        *
-                      </Text>
-                    )}
-                  </Text>
-                  <TextField.Root
-                    size="1"
+                    {param.required && " *"}
+                  </span>
+                  <FieldText
                     placeholder={param.default ?? `Enter ${param.name}…`}
                     value={paramValues[param.name] ?? ""}
-                    onChange={(e) =>
+                    onChange={(nextValue) =>
                       setParamValues((prev) => ({
                         ...prev,
-                        [param.name]: e.target.value,
+                        [param.name]: nextValue,
                       }))
                     }
                   />
-                </Flex>
+                </label>
               ))}
-            </Flex>
+            </div>
           )}
 
           {isConflict && (
-            <Callout.Root color="amber" size="1">
-              <Callout.Icon>
-                <ExclamationTriangleIcon />
-              </Callout.Icon>
-              <Callout.Text>
-                Already installed in this scope. Click{" "}
-                <strong>Overwrite</strong> to replace it, or switch the scope
-                above.
-              </Callout.Text>
-            </Callout.Root>
+            <div className={classNames(styles.notice, styles.noticeWarning)}>
+              <Icon icon={AlertTriangle} tone="warning" />
+              <p className={styles.smallText}>
+                Already installed in this scope. Click <strong>Overwrite</strong> to replace it,
+                or switch the scope above.
+              </p>
+            </div>
           )}
 
-          {error && !isConflict && (
-            <Text size="2" color="red">
-              {error}
-            </Text>
-          )}
-        </Flex>
+          {error && !isConflict && <p className={styles.errorText}>{error}</p>}
+        </div>
 
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray">
-              Cancel
-            </Button>
+        <div className={styles.cardActionRow}>
+          <Dialog.Close asChild>
+            <Button variant="soft">Cancel</Button>
           </Dialog.Close>
           {isConflict ? (
             <Button
-              color="amber"
+              variant="primary"
               onClick={() => handleInstallClick(true)}
               disabled={!item || isInstalling}
+              loading={isInstalling}
             >
               {isInstalling ? "Overwriting…" : "Overwrite"}
             </Button>
           ) : (
             <Button
+              variant="primary"
               onClick={() => handleInstallClick(false)}
               disabled={!item || isInstalling}
+              loading={isInstalling}
             >
               {isInstalling ? "Installing…" : "Install"}
             </Button>
           )}
-        </Flex>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

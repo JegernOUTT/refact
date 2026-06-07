@@ -1,13 +1,16 @@
 import React, { useMemo, useState } from "react";
-import { Button, Callout, Flex, Heading, Text, TextField } from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  InfoCircledIcon,
-  MagnifyingGlassIcon,
-} from "@radix-ui/react-icons";
+import classNames from "classnames";
+import { ArrowLeft, Info, Search } from "lucide-react";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
-import { EmptyState, ErrorState, LoadingState } from "../../components/ui";
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  FieldText,
+  Icon,
+  LoadingState,
+} from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import type { Config } from "../Config/configSlice";
 import type {
@@ -151,25 +154,24 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
   return (
     <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
-        <Flex direction="column" gap="4">
-          <Flex align="center" gap="3">
-            <Button variant="ghost" size="1" onClick={back}>
-              <ArrowLeftIcon />
+        <div className={styles.pageStack}>
+          <div className={styles.header}>
+            <Button variant="ghost" size="sm" leftIcon={ArrowLeft} onClick={back}>
               Back
             </Button>
-            <Heading size="4">{title}</Heading>
-          </Flex>
+            <h2 className={styles.title}>{title}</h2>
+          </div>
 
-          <TextField.Root
-            size="2"
-            placeholder={`Search ${kind}s…`}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          >
-            <TextField.Slot>
-              <MagnifyingGlassIcon />
-            </TextField.Slot>
-          </TextField.Root>
+          <div className={styles.quickAddRow}>
+            <FieldText
+              aria-label={`Search ${kind}s`}
+              value={search}
+              placeholder={`Search ${kind}s…`}
+              onChange={setSearch}
+              className={styles.grow}
+            />
+            <Icon icon={Search} tone="muted" />
+          </div>
 
           <MarketplaceSourceSelector
             sources={sources}
@@ -178,39 +180,37 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
             onOpenSettings={() => setSettingsOpen(true)}
           />
 
-          <Flex direction="column" gap="2">
-            <Text size="2" weight="bold">
-              Add GitHub Source by URL
-            </Text>
-            <Flex gap="2" className={styles.quickAddRow}>
-              <TextField.Root
-                size="2"
+          <div className={styles.quickAddSection}>
+            <p className={styles.text}>Add GitHub Source by URL</p>
+            <div className={styles.quickAddRow}>
+              <FieldText
+                aria-label="GitHub source URL"
                 placeholder="https://github.com/owner/repo"
                 value={quickAddUrl}
-                onChange={(event) => setQuickAddUrl(event.target.value)}
+                onChange={setQuickAddUrl}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     void handleQuickAdd();
                   }
                 }}
+                className={styles.grow}
               />
               <Button
-                size="2"
+                variant="primary"
                 onClick={() => void handleQuickAdd()}
                 disabled={!quickAddUrl.trim() || isAddingSource}
+                loading={isAddingSource}
               >
                 {isAddingSource ? "Adding…" : "Add"}
               </Button>
-            </Flex>
+            </div>
             {quickAddError && (
-              <Callout.Root color="red" size="1">
-                <Callout.Icon>
-                  <InfoCircledIcon />
-                </Callout.Icon>
-                <Callout.Text>{quickAddError}</Callout.Text>
-              </Callout.Root>
+              <div className={classNames(styles.notice, styles.noticeDanger)}>
+                <Icon icon={Info} tone="danger" />
+                <p className={styles.smallText}>{quickAddError}</p>
+              </div>
             )}
-          </Flex>
+          </div>
 
           {errorMessage && (
             <ErrorState
@@ -247,7 +247,7 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
               ))}
             </div>
           )}
-        </Flex>
+        </div>
       </ScrollArea>
 
       <MarketplaceSourceSettings

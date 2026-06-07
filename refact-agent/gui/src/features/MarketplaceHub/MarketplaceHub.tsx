@@ -1,16 +1,8 @@
 import React from "react";
-import { Button, Flex, Heading, Text } from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  CubeIcon,
-  FileTextIcon,
-  LightningBoltIcon,
-  PersonIcon,
-} from "@radix-ui/react-icons";
+import { ArrowLeft, ArrowRight, Box, FileText, User, Zap } from "lucide-react";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
-import { Surface } from "../../components/ui";
+import { Button, Icon, Surface } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
 import type { Config } from "../Config/configSlice";
@@ -23,13 +15,11 @@ type MarketplaceHubProps = {
 };
 
 type HubCard = {
-  icon: React.ReactNode;
+  icon: React.ComponentProps<typeof Icon>["icon"];
   title: string;
   description: string;
   action: () => void;
 };
-
-const ICON_SIZE = 22;
 
 export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
   host,
@@ -39,28 +29,28 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
 
   const cards: HubCard[] = [
     {
-      icon: <LightningBoltIcon width={ICON_SIZE} height={ICON_SIZE} />,
+      icon: Zap,
       title: "Skills",
       description:
         "Agent skills that run automatically during coding sessions — code review, brainstorming, security checks, and more.",
       action: () => dispatch(push({ name: "skills marketplace" })),
     },
     {
-      icon: <FileTextIcon width={ICON_SIZE} height={ICON_SIZE} />,
+      icon: FileText,
       title: "Commands",
       description:
         "Slash commands you invoke explicitly — /review, /test-plan, /commit-message, and hundreds more.",
       action: () => dispatch(push({ name: "commands marketplace" })),
     },
     {
-      icon: <PersonIcon width={ICON_SIZE} height={ICON_SIZE} />,
+      icon: User,
       title: "Subagents",
       description:
         "Specialized sub-agents that handle complex multi-step tasks — SDLC workflows, DevOps, research, and domain-specific automation.",
       action: () => dispatch(push({ name: "subagents marketplace" })),
     },
     {
-      icon: <CubeIcon width={ICON_SIZE} height={ICON_SIZE} />,
+      icon: Box,
       title: "MCP Servers",
       description:
         "Model Context Protocol servers that extend the agent with external tools — GitHub, Playwright, Notion, Slack, databases, and more.",
@@ -71,49 +61,47 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
   return (
     <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
-        <Flex direction="column" gap="4">
-          <Flex align="center" gap="3">
-            <Button variant="ghost" size="1" onClick={back}>
-              <ArrowLeftIcon />
+        <div className={styles.pageStack}>
+          <div className={styles.header}>
+            <Button variant="ghost" size="sm" leftIcon={ArrowLeft} onClick={back}>
               Back
             </Button>
-            <Heading size="4">Marketplace</Heading>
-          </Flex>
+            <h2 className={styles.title}>Marketplace</h2>
+          </div>
 
-          <Text size="2" color="gray">
+          <p className={styles.description}>
             Browse and install extensions for Refact. Each category is backed by
             curated community sources — enable a source once, then install
             individual items into your project or global config.
-          </Text>
+          </p>
 
           <div className={styles.grid}>
             {cards.map((card) => (
               <Surface
                 as="button"
+                animated
                 variant="surface-1"
                 key={card.title}
                 className={styles.card}
                 onClick={card.action}
                 type="button"
               >
-                <Flex direction="column" gap="2" className={styles.cardBody}>
-                  <Flex align="center" gap="2" className={styles.cardHeader}>
-                    <span className={styles.cardIcon}>{card.icon}</span>
-                    <Text size="3" weight="bold" truncate className={styles.cardTitle}>
-                      {card.title}
-                    </Text>
-                    <span className={styles.cardArrow}>
-                      <ArrowRightIcon width={14} height={14} />
+                <div className={styles.cardBody}>
+                  <div className={styles.cardHeader}>
+                    <span className={styles.cardIcon}>
+                      <Icon icon={card.icon} tone="accent" size="lg" />
                     </span>
-                  </Flex>
-                  <Text size="2" color="gray" className={styles.cardDesc}>
-                    {card.description}
-                  </Text>
-                </Flex>
+                    <p className={styles.cardTitle}>{card.title}</p>
+                    <span className={styles.cardArrow}>
+                      <Icon icon={ArrowRight} tone="muted" size="sm" />
+                    </span>
+                  </div>
+                  <p className={styles.cardDesc}>{card.description}</p>
+                </div>
               </Surface>
             ))}
           </div>
-        </Flex>
+        </div>
       </ScrollArea>
     </PageWrapper>
   );

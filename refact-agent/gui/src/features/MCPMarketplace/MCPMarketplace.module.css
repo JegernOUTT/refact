@@ -1,3 +1,103 @@
+.pageStack,
+.header,
+.searchRow,
+.filterRow,
+.notice,
+.pagination,
+.detailRoot,
+.detailHeader,
+.detailMeta,
+.detailTags,
+.configStack,
+.configField,
+.statusRow,
+.cardColumn,
+.cardTitle,
+.cardMeta,
+.cardFooter,
+.cardActionRow,
+.searchWrap,
+.sourceSelector {
+  min-width: 0;
+}
+
+.pageStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-4);
+}
+
+.header,
+.searchRow,
+.filterRow,
+.pagination,
+.detailHeader,
+.detailMeta,
+.detailTags,
+.statusRow,
+.sourceSelector {
+  display: flex;
+  align-items: center;
+}
+
+.header {
+  gap: var(--rf-space-3);
+}
+
+.searchRow,
+.detailMeta,
+.statusRow,
+.sourceSelector {
+  gap: var(--rf-space-2);
+}
+
+.filterRow,
+.detailTags {
+  gap: var(--rf-space-2);
+  flex-wrap: wrap;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--rf-text-4);
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--rf-color-fg);
+}
+
+.text,
+.mutedText,
+.smallText,
+.detailDescription {
+  margin: 0;
+  line-height: var(--rf-line);
+}
+
+.text,
+.detailDescription {
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-fg);
+}
+
+.mutedText {
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-muted);
+}
+
+.smallText {
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
+}
+
+.searchWrap,
+.grow {
+  flex: 1;
+}
+
+.searchInput {
+  width: 100%;
+}
+
 .serverGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
@@ -11,16 +111,16 @@
   display: flex;
   flex-direction: column;
   padding: var(--rf-space-3);
+  background: transparent;
   transition:
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
     background var(--rf-dur-fast) var(--rf-ease-standard),
     transform var(--rf-dur-fast) var(--rf-ease-standard);
-  animation: marketplace-card-enter var(--rf-dur-slow) var(--rf-ease-standard) both;
 }
 
 .serverCard:hover {
   border-color: var(--rf-color-accent);
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-1);
   transform: translateY(-1px);
 }
 
@@ -47,22 +147,53 @@
 }
 
 .cardColumn,
-.cardTitle,
-.cardMeta,
-.cardFooter,
-.cardActionRow,
-.searchWrap,
-.pagination {
-  min-width: 0;
+.configStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
 }
 
-.searchWrap {
-  flex: 1;
+.cardColumn {
+  height: 100%;
 }
 
 .cardTitle,
 .cardMeta {
   flex: 1;
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.cardTitle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.cardFooter,
+.cardActionRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.cardFooter {
+  margin-top: auto;
+}
+
+.cardActionRow {
+  margin-top: var(--rf-space-2);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .serverIcon {
@@ -73,9 +204,8 @@
   flex-shrink: 0;
 }
 
-.serverIconPlaceholder {
-  width: var(--rf-space-6);
-  height: var(--rf-space-6);
+.serverIconPlaceholder,
+.serverIconPlaceholderLarge {
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-color-accent-soft);
   display: flex;
@@ -83,18 +213,20 @@
   justify-content: center;
   flex-shrink: 0;
   color: var(--rf-color-accent);
+  font-weight: 600;
+}
+
+.serverIconPlaceholder {
+  width: var(--rf-space-6);
+  height: var(--rf-space-6);
+  font-size: var(--rf-text-4);
 }
 
 .serverIconPlaceholderLarge {
-  width: 56px;
-  height: 56px;
+  width: var(--rf-control-h-lg);
+  height: var(--rf-control-h-lg);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-color-accent-soft);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  color: var(--rf-color-accent);
+  font-size: var(--rf-text-5);
 }
 
 .serverDescription {
@@ -103,33 +235,25 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   flex: 1;
-}
-
-.sourceBadge {
   font-size: var(--rf-text-1);
-  padding: 0 var(--rf-space-2);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-color-accent-soft);
-  color: var(--rf-color-accent);
+  line-height: var(--rf-line);
+  color: var(--rf-color-muted);
 }
 
-.sourceTab {
+.sourceTab,
+.tagFilter {
   cursor: pointer;
   user-select: none;
 }
 
-.sourceTab:hover {
-  opacity: 0.8;
+.sourceTab:hover,
+.tagFilter:hover {
+  opacity: 0.86;
 }
 
 .sourceTabDisabled {
   cursor: not-allowed;
   opacity: 0.5;
-  user-select: none;
-}
-
-.tagFilter {
-  cursor: pointer;
   user-select: none;
 }
 
@@ -139,51 +263,74 @@
 
 .verifiedBadge {
   color: var(--rf-color-success);
-  font-size: var(--rf-text-1);
 }
 
 .pagination {
-  display: flex;
-  align-items: center;
   justify-content: center;
   gap: var(--rf-space-3);
-}
-
-.grow {
-  flex: 1;
 }
 
 .successText {
   color: var(--rf-color-success);
 }
 
+.dangerText {
+  color: var(--rf-color-danger);
+}
+
+.notice {
+  display: flex;
+  gap: var(--rf-space-2);
+  align-items: center;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-1);
+}
+
+.noticeSuccess {
+  color: var(--rf-color-success);
+  background: var(--rf-surface-1);
+}
+
+.noticeDanger {
+  color: var(--rf-color-danger);
+  background: var(--rf-surface-1);
+}
+
 .detailRoot {
   height: 100%;
-  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-4);
 }
 
 .detailHeader {
-  min-width: 0;
+  gap: var(--rf-space-3);
 }
 
 .detailTitle {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.configField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
 }
 
 .alignStart {
   align-self: flex-start;
 }
 
-@keyframes marketplace-card-enter {
-  from {
-    opacity: 0;
-    transform: translateY(var(--rf-space-2));
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.iconInline {
+  display: inline-flex;
+  align-items: center;
+  color: currentColor;
 }
 
 @keyframes marketplace-install-pulse {

@@ -1,14 +1,6 @@
 import React, { useState } from "react";
-import {
-  Button,
-  Callout,
-  Dialog,
-  Flex,
-  Switch,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
-import { InfoCircledIcon, ReloadIcon, TrashIcon } from "@radix-ui/react-icons";
+import classNames from "classnames";
+import { Info, RefreshCw, Trash } from "lucide-react";
 import type { ExtensionMarketplaceSource } from "../../services/refact/extensionsMarketplace";
 import {
   useConfigureExtensionMarketplaceSourceMutation,
@@ -16,6 +8,7 @@ import {
   useRefreshExtensionMarketplaceSourceMutation,
   useSaveExtensionMarketplaceSourceMutation,
 } from "../../services/refact/extensionsMarketplace";
+import { Button, Dialog, FieldText, Icon, Switch } from "../../components/ui";
 import styles from "./ExtensionsMarketplace.module.css";
 
 type MarketplaceSourceSettingsProps = {
@@ -47,33 +40,28 @@ const AddSourceForm: React.FC = () => {
   };
 
   return (
-    <Flex direction="column" gap="2" className={styles.addSourceSection}>
-      <Text size="2" weight="bold">
-        Quick-add GitHub Source
-      </Text>
+    <div className={styles.addSourceSection}>
+      <p className={styles.text}>Quick-add GitHub Source</p>
       {error && (
-        <Callout.Root color="red" size="1">
-          <Callout.Icon>
-            <InfoCircledIcon />
-          </Callout.Icon>
-          <Callout.Text>{error}</Callout.Text>
-        </Callout.Root>
+        <div className={classNames(styles.notice, styles.noticeDanger)}>
+          <Icon icon={Info} tone="danger" />
+          <p className={styles.smallText}>{error}</p>
+        </div>
       )}
-      <TextField.Root
-        size="1"
+      <FieldText
         placeholder="https://github.com/owner/repo"
         value={url}
-        onChange={(event) => setUrl(event.target.value)}
+        onChange={setUrl}
         onKeyDown={(event) => {
           if (event.key === "Enter") {
             void handleAdd();
           }
         }}
       />
-      <Button size="1" onClick={() => void handleAdd()} disabled={!url.trim()}>
+      <Button variant="primary" size="sm" onClick={() => void handleAdd()} disabled={!url.trim()}>
         Add by URL
       </Button>
-    </Flex>
+    </div>
   );
 };
 
@@ -86,70 +74,64 @@ export const MarketplaceSourceSettings: React.FC<
     useRefreshExtensionMarketplaceSourceMutation();
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content className={styles.sourceSettingsDialogContent}>
         <Dialog.Title>Marketplace Sources</Dialog.Title>
-        <Flex direction="column" gap="1">
-          {sources.map((source) => (
-            <div className={styles.sourceRow} key={source.id}>
-              <Switch
-                size="1"
-                checked={source.enabled}
-                onCheckedChange={(enabled) =>
-                  void configureSource({ id: source.id, enabled })
-                }
-              />
-              <Flex direction="column" gap="0" className={styles.sourceLabel}>
-                <Text size="2">{source.label}</Text>
-                <Text size="1" color="gray">
-                  {source.description.length > 0
-                    ? source.description
-                    : source.repo_url ?? "Marketplace source"}
-                </Text>
-                {!source.removable && (
-                  <Text size="1" color="gray">
-                    Built-in
-                  </Text>
+        <div className={styles.dialogStack}>
+          <div>
+            {sources.map((source) => (
+              <div className={styles.sourceRow} key={source.id}>
+                <Switch
+                  checked={source.enabled}
+                  onCheckedChange={(enabled) =>
+                    void configureSource({ id: source.id, enabled })
+                  }
+                />
+                <div className={styles.sourceLabel}>
+                  <p className={styles.text}>{source.label}</p>
+                  <p className={styles.smallText}>
+                    {source.description.length > 0
+                      ? source.description
+                      : source.repo_url ?? "Marketplace source"}
+                  </p>
+                  {!source.removable && <p className={styles.smallText}>Built-in</p>}
+                  {source.error && <p className={styles.errorText}>{source.error}</p>}
+                </div>
+                {source.source_kind !== "builtin_embedded" && source.enabled && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isRefreshing}
+                    loading={isRefreshing}
+                    leftIcon={RefreshCw}
+                    onClick={() => void refreshSource({ id: source.id })}
+                    title="Re-sync from source"
+                  >
+                    Sync
+                  </Button>
                 )}
-                {source.error && (
-                  <Text size="1" color="red">
-                    {source.error}
-                  </Text>
+                {source.removable && (
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    leftIcon={Trash}
+                    onClick={() => void deleteSource({ id: source.id })}
+                  >
+                    Remove
+                  </Button>
                 )}
-              </Flex>
-              {source.source_kind !== "builtin_embedded" && source.enabled && (
-                <Button
-                  size="1"
-                  variant="ghost"
-                  color="gray"
-                  disabled={isRefreshing}
-                  onClick={() => void refreshSource({ id: source.id })}
-                  title="Re-sync from source"
-                >
-                  <ReloadIcon />
-                </Button>
-              )}
-              {source.removable && (
-                <Button
-                  size="1"
-                  variant="ghost"
-                  color="red"
-                  onClick={() => void deleteSource({ id: source.id })}
-                >
-                  <TrashIcon />
-                </Button>
-              )}
-            </div>
-          ))}
-        </Flex>
-        <hr className={styles.divider} />
-        <AddSourceForm />
-        <Flex justify="end" mt="4">
-          <Dialog.Close>
-            <Button variant="soft">Close</Button>
-          </Dialog.Close>
-        </Flex>
+              </div>
+            ))}
+          </div>
+          <hr className={styles.divider} />
+          <AddSourceForm />
+          <div className={styles.cardActionRow}>
+            <Dialog.Close asChild>
+              <Button variant="soft">Close</Button>
+            </Dialog.Close>
+          </div>
+        </div>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };

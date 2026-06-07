@@ -1,8 +1,7 @@
 import React from "react";
 import classNames from "classnames";
-import { Badge, Button, Flex, Text } from "@radix-ui/themes";
-import { CheckIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
-import { Card as KitCard } from "../../components/ui";
+import { Check, ExternalLink } from "lucide-react";
+import { Badge, Button, Card as KitCard, Icon } from "../../components/ui";
 import type { ExtensionMarketplaceItem } from "../../services/refact/extensionsMarketplace";
 import styles from "./ExtensionsMarketplace.module.css";
 
@@ -19,90 +18,75 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
 }) => {
   return (
     <KitCard
+      animated
       className={classNames(styles.card, isInstalling && styles.cardInstalling)}
     >
-      <Flex direction="column" gap="2" height="100%" className={styles.cardColumn}>
-        <Flex align="center" gap="2" className={styles.cardMeta}>
-          <Flex direction="column" gap="1" className={styles.cardTitle}>
-            <Text size="2" weight="bold" truncate>
-              {item.name}
-            </Text>
-            <Text size="1" color="gray" truncate>
+      <div className={styles.cardColumn}>
+        <div className={styles.cardMeta}>
+          <div className={styles.cardTitle}>
+            <p className={classNames(styles.text, styles.truncate)}>{item.name}</p>
+            <p className={classNames(styles.smallText, styles.truncate)}>
               {item.publisher}
-            </Text>
-          </Flex>
-          <Badge color="blue" variant="soft" size="1">
-            {item.kind}
-          </Badge>
-        </Flex>
+            </p>
+          </div>
+          <Badge tone="accent">{item.kind}</Badge>
+        </div>
 
-        <Text size="1" color="gray" className={styles.description}>
-          {item.description || "No description"}
-        </Text>
+        <p className={styles.description}>{item.description || "No description"}</p>
 
         {item.body_preview && (
-          <Text size="1" color="gray" className={styles.bodyPreview}>
-            {item.body_preview}
-          </Text>
+          <p className={styles.bodyPreview}>{item.body_preview}</p>
         )}
 
         {item.tags.length > 0 && (
-          <Flex gap="1" wrap="wrap">
+          <div className={styles.filterRow}>
             {item.tags.slice(0, 4).map((tag) => (
-              <Badge key={tag} variant="soft" color="gray" size="1">
+              <Badge key={tag} tone="muted">
                 {tag}
               </Badge>
             ))}
-          </Flex>
+          </div>
         )}
 
-        <Flex
-          gap="2"
-          mt="auto"
-          align="center"
-          wrap="wrap"
-          className={styles.cardFooter}
-        >
-          <Badge
-            color="gray"
-            variant="soft"
-            size="1"
-            className={styles.sourceBadge}
-          >
+        <div className={styles.cardFooter}>
+          <Badge tone="muted" className={styles.sourceBadge}>
             {item.source_label}
           </Badge>
           {item.installed_scopes.length > 0 && (
-            <Flex align="center" gap="1">
-              <CheckIcon color="currentColor" className={styles.successText} />
-              <Text size="1" className={styles.successText}>
+            <span className={classNames(styles.cardActionRow, styles.successText)}>
+              <Icon icon={Check} size="sm" tone="success" />
+              <span className={styles.smallText}>
                 Installed: {item.installed_scopes.join(", ")}
-              </Text>
-            </Flex>
+              </span>
+            </span>
           )}
-        </Flex>
+        </div>
 
-        <Flex gap="2" mt="2" align="center" className={styles.cardActionRow}>
+        <div className={styles.cardActionRow}>
           <Button
-            size="1"
+            size="sm"
+            variant="primary"
             onClick={() => onInstall(item)}
             disabled={isInstalling}
+            loading={isInstalling}
             className={styles.grow}
           >
             {isInstalling ? "Installing…" : "Install"}
           </Button>
           {item.homepage && (
             <Button
-              size="1"
+              size="sm"
               variant="ghost"
+              rightIcon={ExternalLink}
               onClick={() =>
                 window.open(item.homepage, "_blank", "noopener,noreferrer")
               }
             >
-              <ExternalLinkIcon />
+              Source
             </Button>
           )}
-        </Flex>
-      </Flex>
+        </div>
+      </div>
     </KitCard>
   );
 };

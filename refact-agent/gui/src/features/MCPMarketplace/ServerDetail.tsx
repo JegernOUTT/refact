@@ -1,25 +1,12 @@
 import React, { useState } from "react";
-import {
-  Badge,
-  Box,
-  Button,
-  Flex,
-  Text,
-  TextField,
-  Heading,
-  Callout,
-} from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  CheckIcon,
-  ExternalLinkIcon,
-  InfoCircledIcon,
-} from "@radix-ui/react-icons";
+import classNames from "classnames";
+import { ArrowLeft, Check, ExternalLink, Info } from "lucide-react";
 import type { MCPServer } from "../../services/refact/mcpMarketplace";
 import {
   useInstallServerMutation,
   useGetInstalledServersQuery,
 } from "../../services/refact/mcpMarketplace";
+import { Badge, Button, FieldText, Icon } from "../../components/ui";
 import styles from "./MCPMarketplace.module.css";
 
 type ServerDetailProps = {
@@ -66,116 +53,100 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
         : null;
 
   return (
-    <Flex direction="column" gap="4" className={styles.detailRoot}>
-      <Flex align="center" gap="2">
-        <Button variant="ghost" size="1" onClick={onBack}>
-          <ArrowLeftIcon />
+    <div className={styles.detailRoot}>
+      <div className={styles.header}>
+        <Button variant="ghost" size="sm" leftIcon={ArrowLeft} onClick={onBack}>
           Back
         </Button>
-      </Flex>
+      </div>
 
-      <Flex align="center" gap="3" className={styles.detailHeader}>
-        <Box className={styles.serverIconPlaceholderLarge}>
-          <Text size="6" weight="bold">
-            {server.name.charAt(0).toUpperCase()}
-          </Text>
-        </Box>
-        <Flex direction="column" gap="1" className={styles.detailTitle}>
-          <Heading size="4">{server.name}</Heading>
-          <Text size="2" color="gray">
-            by {server.publisher}
-          </Text>
-          <Flex gap="2" align="center">
-            <Badge color="blue" variant="soft">
-              {server.transport}
-            </Badge>
+      <div className={styles.detailHeader}>
+        <div className={styles.serverIconPlaceholderLarge}>
+          {server.name.charAt(0).toUpperCase()}
+        </div>
+        <div className={styles.detailTitle}>
+          <h2 className={styles.title}>{server.name}</h2>
+          <p className={styles.mutedText}>by {server.publisher}</p>
+          <div className={styles.detailMeta}>
+            <Badge tone="accent">{server.transport}</Badge>
             {server.homepage && (
-              <Button size="1" variant="ghost" asChild>
-                <a
-                  href={server.homepage}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <ExternalLinkIcon />
-                  Homepage
-                </a>
+              <Button
+                size="sm"
+                variant="ghost"
+                rightIcon={ExternalLink}
+                onClick={() =>
+                  window.open(server.homepage, "_blank", "noopener,noreferrer")
+                }
+              >
+                Homepage
               </Button>
             )}
-          </Flex>
-        </Flex>
-      </Flex>
+          </div>
+        </div>
+      </div>
 
-      <Text size="2">{server.description}</Text>
+      <p className={styles.detailDescription}>{server.description}</p>
 
       {server.tags.length > 0 && (
-        <Flex gap="2" wrap="wrap">
+        <div className={styles.detailTags}>
           {server.tags.map((tag) => (
-            <Badge key={tag} variant="soft" color="gray">
+            <Badge key={tag} tone="muted">
               {tag}
             </Badge>
           ))}
-        </Flex>
+        </div>
       )}
 
       {Object.keys(defaultEnv).length > 0 && (
-        <Flex direction="column" gap="2">
-          <Text size="2" weight="bold">
-            Configuration
-          </Text>
+        <div className={styles.configStack}>
+          <p className={styles.text}>Configuration</p>
           {Object.keys(defaultEnv).map((key) => (
-            <Flex key={key} direction="column" gap="1">
-              <Text size="1" color="gray">
-                {key}
-              </Text>
-              <TextField.Root
-                size="1"
+            <label key={key} className={styles.configField}>
+              <span className={styles.smallText}>{key}</span>
+              <FieldText
                 value={envValues[key] ?? ""}
-                onChange={(e) =>
-                  setEnvValues((prev) => ({ ...prev, [key]: e.target.value }))
+                onChange={(nextValue) =>
+                  setEnvValues((prev) => ({ ...prev, [key]: nextValue }))
                 }
                 placeholder={defaultEnv[key]}
               />
-            </Flex>
+            </label>
           ))}
-        </Flex>
+        </div>
       )}
 
       {errorMessage && (
-        <Callout.Root color="red" size="1">
-          <Callout.Icon>
-            <InfoCircledIcon />
-          </Callout.Icon>
-          <Callout.Text>{errorMessage}</Callout.Text>
-        </Callout.Root>
+        <div className={classNames(styles.notice, styles.noticeDanger)}>
+          <Icon icon={Info} tone="danger" />
+          <p className={styles.smallText}>{errorMessage}</p>
+        </div>
       )}
 
       {isSuccess && (
-        <Callout.Root color="green" size="1">
-          <Callout.Icon>
-            <CheckIcon />
-          </Callout.Icon>
-          <Callout.Text>Server installed successfully!</Callout.Text>
-        </Callout.Root>
+        <div className={classNames(styles.notice, styles.noticeSuccess)}>
+          <Icon icon={Check} tone="success" />
+          <p className={styles.smallText}>Server installed successfully!</p>
+        </div>
       )}
 
       {isInstalled && !isSuccess && (
-        <Callout.Root color="green" size="1">
-          <Callout.Icon>
-            <CheckIcon />
-          </Callout.Icon>
-          <Callout.Text>Already installed</Callout.Text>
-        </Callout.Root>
+        <div className={classNames(styles.notice, styles.noticeSuccess)}>
+          <Icon icon={Check} tone="success" />
+          <p className={styles.smallText}>Already installed</p>
+        </div>
       )}
 
       {!isInstalled && (
         <Button
+          variant="primary"
           onClick={() => void handleInstall()}
           disabled={isLoading}
+          loading={isLoading}
           className={styles.alignStart}
         >
           {isLoading ? "Installing…" : "Install"}
         </Button>
       )}
-    </Flex>
+    </div>
   );
 };

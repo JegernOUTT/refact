@@ -16,6 +16,9 @@
 }
 
 .apiKeySection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
   padding: var(--rf-space-2) 0 0 var(--rf-space-4);
 }
 
@@ -40,3 +43,6 @@
 }
 
 
+.dialogContent {
+  width: min(480px, calc(100vw - 2 * var(--rf-space-3)));
+}

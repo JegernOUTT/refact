@@ -1,3 +1,49 @@
+.pageStack,
+.header,
+.cardBody,
+.cardHeader,
+.cardTitle {
+  min-width: 0;
+}
+
+.pageStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-4);
+}
+
+.header,
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.header {
+  gap: var(--rf-space-3);
+}
+
+.title,
+.description,
+.cardTitle,
+.cardDesc {
+  margin: 0;
+  line-height: var(--rf-line);
+}
+
+.title {
+  font-size: var(--rf-text-4);
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--rf-color-fg);
+}
+
+.description,
+.cardDesc {
+  font-size: var(--rf-text-2);
+  color: var(--rf-color-muted);
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
@@ -13,16 +59,16 @@
   min-width: 0;
   height: 100%;
   box-sizing: border-box;
+  background: transparent;
   transition:
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
     background var(--rf-dur-fast) var(--rf-ease-standard),
     transform var(--rf-dur-fast) var(--rf-ease-standard);
-  animation: marketplace-card-enter var(--rf-dur-slow) var(--rf-ease-standard) both;
 }
 
 .card:hover {
   border-color: var(--rf-color-accent);
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-1);
   transform: translateY(-1px);
 }
 
@@ -44,13 +90,10 @@
 }
 
 .cardBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
   padding: var(--rf-space-3) var(--rf-space-4);
-  min-width: 0;
-}
-
-.cardHeader {
-  position: relative;
-  min-width: 0;
 }
 
 .cardIcon {
@@ -61,7 +104,13 @@
 }
 
 .cardTitle {
-  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: var(--rf-text-3);
+  font-weight: 600;
+  color: var(--rf-color-fg);
 }
 
 .cardArrow {
@@ -70,22 +119,6 @@
   display: flex;
   align-items: center;
   flex-shrink: 0;
-}
-
-.cardDesc {
-  line-height: var(--rf-line);
-}
-
-@keyframes marketplace-card-enter {
-  from {
-    opacity: 0;
-    transform: translateY(var(--rf-space-2));
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

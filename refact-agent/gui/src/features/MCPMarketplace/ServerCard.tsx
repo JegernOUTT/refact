@@ -1,13 +1,7 @@
 import React, { useState } from "react";
 import classNames from "classnames";
-import { Badge, Box, Button, Flex, Text } from "@radix-ui/themes";
-import {
-  CheckIcon,
-  ExternalLinkIcon,
-  GearIcon,
-  StarFilledIcon,
-} from "@radix-ui/react-icons";
-import { Card as KitCard } from "../../components/ui";
+import { Check, ExternalLink, Settings, Star } from "lucide-react";
+import { Badge, Button, Card as KitCard, Icon } from "../../components/ui";
 import type { MCPServer } from "../../services/refact/mcpMarketplace";
 import styles from "./MCPMarketplace.module.css";
 
@@ -36,13 +30,14 @@ export const ServerCard: React.FC<ServerCardProps> = ({
 
   return (
     <KitCard
+      animated
       className={classNames(
         styles.serverCard,
         isInstalling && styles.serverCardInstalling,
       )}
     >
-      <Flex direction="column" gap="2" height="100%" className={styles.cardColumn}>
-        <Flex align="center" gap="2" className={styles.cardMeta}>
+      <div className={styles.cardColumn}>
+        <div className={styles.cardMeta}>
           {server.icon_url && !imgError ? (
             <img
               src={server.icon_url}
@@ -51,107 +46,87 @@ export const ServerCard: React.FC<ServerCardProps> = ({
               onError={() => setImgError(true)}
             />
           ) : (
-            <Box className={styles.serverIconPlaceholder}>
-              <Text size="4" weight="bold">
-                {server.name.charAt(0).toUpperCase()}
-              </Text>
-            </Box>
+            <div className={styles.serverIconPlaceholder}>
+              {server.name.charAt(0).toUpperCase()}
+            </div>
           )}
-          <Flex direction="column" gap="1" className={styles.cardTitle}>
-            <Text size="2" weight="bold" truncate>
-              {server.name}
-            </Text>
-            <Text size="1" color="gray" truncate>
+          <div className={styles.cardTitle}>
+            <p className={classNames(styles.text, styles.truncate)}>{server.name}</p>
+            <p className={classNames(styles.smallText, styles.truncate)}>
               {server.publisher}
-            </Text>
-          </Flex>
-          <Badge color="blue" variant="soft" size="1">
-            {server.transport}
-          </Badge>
-        </Flex>
+            </p>
+          </div>
+          <Badge tone="accent">{server.transport}</Badge>
+        </div>
 
-        <Text size="1" color="gray" className={styles.serverDescription}>
-          {server.description}
-        </Text>
+        <p className={styles.serverDescription}>{server.description}</p>
 
         {server.tags.length > 0 && (
-          <Flex gap="1" wrap="wrap">
+          <div className={styles.filterRow}>
             {server.tags.slice(0, 4).map((tag) => (
-              <Badge key={tag} variant="soft" color="gray" size="1">
+              <Badge key={tag} tone="muted">
                 {tag}
               </Badge>
             ))}
-          </Flex>
+          </div>
         )}
 
-        <Flex
-          gap="2"
-          mt="auto"
-          align="center"
-          wrap="wrap"
-          className={styles.cardFooter}
-        >
+        <div className={styles.cardFooter}>
           {server.verified && (
-            <Flex align="center" gap="1" className={styles.verifiedBadge}>
-              <StarFilledIcon width={10} height={10} />
-              <Text size="1">Verified</Text>
-            </Flex>
+            <span className={classNames(styles.statusRow, styles.verifiedBadge)}>
+              <Icon icon={Star} size="sm" tone="success" />
+              <span className={styles.smallText}>Verified</span>
+            </span>
           )}
           {server.use_count !== undefined && server.use_count > 0 && (
-            <Text size="1" color="gray">
-              {server.use_count} installs
-            </Text>
+            <span className={styles.smallText}>{server.use_count} installs</span>
           )}
           {sourceLabel && (
-            <Badge
-              color="gray"
-              variant="soft"
-              size="1"
-              className={styles.sourceBadgeInCard}
-            >
+            <Badge tone="muted" className={styles.sourceBadgeInCard}>
               {sourceLabel}
             </Badge>
           )}
-        </Flex>
-        <Flex gap="2" mt="2" align="center" className={styles.cardActionRow}>
+        </div>
+        <div className={styles.cardActionRow}>
           {isInstalled ? (
             <>
-              <Flex align="center" gap="1" className={styles.grow}>
-                <CheckIcon color="currentColor" className={styles.successText} />
-                <Text size="1" className={styles.successText}>
-                  Installed
-                </Text>
-              </Flex>
+              <span className={classNames(styles.statusRow, styles.grow, styles.successText)}>
+                <Icon icon={Check} size="sm" tone="success" />
+                <span className={styles.smallText}>Installed</span>
+              </span>
               {installedConfigPath && onConfigure && (
                 <Button
-                  size="1"
+                  size="sm"
                   variant="ghost"
+                  leftIcon={Settings}
                   onClick={() => onConfigure(installedConfigPath)}
                 >
-                  <GearIcon />
-                  <Text size="1">Configure</Text>
+                  Configure
                 </Button>
               )}
             </>
           ) : (
             <Button
-              size="1"
+              size="sm"
+              variant="primary"
               onClick={() => onInstall(server)}
               disabled={isInstalling}
+              loading={isInstalling}
               className={styles.grow}
             >
               {isInstalling ? "Installing…" : "Install"}
             </Button>
           )}
-          <Button size="1" variant="ghost" onClick={() => onViewDetail(server)}>
-            {server.homepage ? (
-              <ExternalLinkIcon />
-            ) : (
-              <Text size="1">Details</Text>
-            )}
+          <Button
+            size="sm"
+            variant="ghost"
+            rightIcon={server.homepage ? ExternalLink : undefined}
+            onClick={() => onViewDetail(server)}
+          >
+            Details
           </Button>
-        </Flex>
-      </Flex>
+        </div>
+      </div>
     </KitCard>
   );
 };

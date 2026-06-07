@@ -1,22 +1,16 @@
 import React, { useMemo, useState } from "react";
-import {
-  Box,
-  Button,
-  Callout,
-  Flex,
-  Heading,
-  Badge,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
-import {
-  ArrowLeftIcon,
-  InfoCircledIcon,
-  MagnifyingGlassIcon,
-} from "@radix-ui/react-icons";
+import { ArrowLeft, Info, Search } from "lucide-react";
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
-import { EmptyState, ErrorState, LoadingState } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  FieldText,
+  Icon,
+  LoadingState,
+} from "../../components/ui";
 import {
   useGetMarketplaceQuery,
   useGetInstalledServersQuery,
@@ -178,29 +172,26 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   return (
     <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
-        <Flex direction="column" gap="4">
-          <Flex align="center" gap="3">
-            <Button variant="ghost" size="1" onClick={backFromMarketplace}>
-              <ArrowLeftIcon />
+        <div className={styles.pageStack}>
+          <div className={styles.header}>
+            <Button size="sm" variant="ghost" leftIcon={ArrowLeft} onClick={backFromMarketplace}>
               Back
             </Button>
-            <Heading size="4">MCP Marketplace</Heading>
-          </Flex>
+            <h2 className={styles.title}>MCP Marketplace</h2>
+          </div>
 
-          <Flex gap="2" align="center">
-            <Box className={styles.searchWrap}>
-              <TextField.Root
-                size="2"
+          <div className={styles.searchRow}>
+            <div className={styles.searchWrap}>
+              <FieldText
+                aria-label="Search servers"
+                className={styles.searchInput}
                 placeholder="Search servers…"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              >
-                <TextField.Slot>
-                  <MagnifyingGlassIcon />
-                </TextField.Slot>
-              </TextField.Root>
-            </Box>
-          </Flex>
+                onChange={setSearch}
+              />
+            </div>
+            <Icon icon={Search} tone="muted" />
+          </div>
 
           {sources.length > 0 && (
             <SourceSelector
@@ -212,11 +203,12 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           )}
 
           {allTags.length > 0 && (
-            <Flex gap="2" wrap="wrap">
+            <div className={styles.filterRow}>
               <Badge
-                color={selectedTag === null ? "blue" : "gray"}
-                variant={selectedTag === null ? "solid" : "soft"}
+                tone={selectedTag === null ? "accent" : "muted"}
                 className={styles.tagFilter}
+                role="button"
+                tabIndex={0}
                 onClick={() => setSelectedTag(null)}
               >
                 All
@@ -224,9 +216,10 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
               {allTags.map((tag) => (
                 <Badge
                   key={tag}
-                  color={selectedTag === tag ? "blue" : "gray"}
-                  variant={selectedTag === tag ? "solid" : "soft"}
+                  tone={selectedTag === tag ? "accent" : "muted"}
                   className={styles.tagFilter}
+                  role="button"
+                  tabIndex={0}
                   onClick={() =>
                     setSelectedTag(selectedTag === tag ? null : tag)
                   }
@@ -234,25 +227,17 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
                   {tag}
                 </Badge>
               ))}
-            </Flex>
+            </div>
           )}
 
           {smitheryNeedsKey && (
-            <Callout.Root color="blue" size="1">
-              <Callout.Icon>
-                <InfoCircledIcon />
-              </Callout.Icon>
-              <Callout.Text>
-                Smithery source requires an API key.{" "}
-                <Button
-                  variant="ghost"
-                  size="1"
-                  onClick={() => setSettingsOpen(true)}
-                >
-                  Configure
-                </Button>
-              </Callout.Text>
-            </Callout.Root>
+            <div className={styles.notice}>
+              <Icon icon={Info} tone="accent" />
+              <p className={styles.smallText}>Smithery source requires an API key.</p>
+              <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
+                Configure
+              </Button>
+            </div>
           )}
 
           {errorMessage && (
@@ -290,29 +275,27 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           )}
 
           {totalPages > 1 && (
-            <Flex className={styles.pagination}>
+            <div className={styles.pagination}>
               <Button
-                size="1"
+                size="sm"
                 variant="soft"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => p - 1)}
               >
                 Prev
               </Button>
-              <Text size="1" color="gray">
-                Page {page} of {totalPages}
-              </Text>
+              <p className={styles.smallText}>Page {page} of {totalPages}</p>
               <Button
-                size="1"
+                size="sm"
                 variant="soft"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
               >
                 Next
               </Button>
-            </Flex>
+            </div>
           )}
-        </Flex>
+        </div>
       </ScrollArea>
 
       <SourceSettings
