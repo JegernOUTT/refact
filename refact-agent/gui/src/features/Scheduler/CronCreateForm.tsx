@@ -1,14 +1,14 @@
 import React, { FormEvent, useMemo, useState } from "react";
 import {
   Button,
-  Card,
-  Checkbox,
-  Flex,
-  Select,
-  Text,
-  TextArea,
-  TextField,
-} from "@radix-ui/themes";
+  Field,
+  FieldError,
+  FieldSelect,
+  FieldSwitch,
+  FieldText,
+  FieldTextarea,
+  Surface,
+} from "../../components/ui";
 import {
   type CreateCronRequest,
   schedulerErrorMessage,
@@ -33,6 +33,14 @@ const PRESETS: Record<Exclude<CronPreset, "custom">, string> = {
   weekdays: "3 9 * * 1-5",
   "five-min": "*/5 * * * *",
 };
+
+const PRESET_OPTIONS = [
+  { value: "hourly", label: "Hourly" },
+  { value: "daily", label: "Daily 9am" },
+  { value: "weekdays", label: "Weekdays 9am" },
+  { value: "five-min", label: "Every 5 min" },
+  { value: "custom", label: "Custom" },
+];
 
 const CRON_PATTERN = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/;
 
@@ -118,91 +126,81 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
     void handleSubmit(event);
   };
 
+  const errorMessage = localError ?? backendError;
+
   return (
-    <Card>
+    <Surface className={styles.card} variant="surface-1">
       <form className={styles.form} onSubmit={submitForm}>
-        <Text size="4" weight="bold">
-          Create schedule
-        </Text>
-        <div className={styles.inlineFields}>
-          <label className={styles.field}>
-            <Text size="2" weight="medium">
-              Cron expression
-            </Text>
-            <TextField.Root
-              value={cron}
-              onChange={(event) => handleCronChange(event.target.value)}
-              aria-label="Cron expression"
-            />
-          </label>
-          <label className={styles.field}>
-            <Text size="2" weight="medium">
-              Preset
-            </Text>
-            <Select.Root value={preset} onValueChange={setSelectedPreset}>
-              <Select.Trigger aria-label="Cron preset" />
-              <Select.Content>
-                <Select.Item value="hourly">Hourly</Select.Item>
-                <Select.Item value="daily">Daily 9am</Select.Item>
-                <Select.Item value="weekdays">Weekdays 9am</Select.Item>
-                <Select.Item value="five-min">Every 5 min</Select.Item>
-                <Select.Item value="custom">Custom</Select.Item>
-              </Select.Content>
-            </Select.Root>
-          </label>
+        <div className={styles.sectionHeader}>
+          <h2 className={styles.sectionTitle}>Create schedule</h2>
+          <p className={styles.sectionHint}>Schedule a prompt for the current chat.</p>
         </div>
-        <label className={styles.field}>
-          <Text size="2" weight="medium">
-            Description
-          </Text>
-          <TextField.Root
+        <div className={styles.inlineFields}>
+          <Field label="Cron expression" required>
+            <FieldText
+              value={cron}
+              onChange={handleCronChange}
+              aria-label="Cron expression"
+              placeholder="7 * * * *"
+            />
+          </Field>
+          <Field label="Preset">
+            <FieldSelect
+              value={preset}
+              options={PRESET_OPTIONS}
+              onChange={setSelectedPreset}
+              aria-label="Cron preset"
+            />
+          </Field>
+        </div>
+        <Field
+          label="Description"
+          helper={`${description.length}/80`}
+          required
+        >
+          <FieldText
             value={description}
             maxLength={80}
-            onChange={(event) => setDescription(event.target.value)}
+            onChange={setDescription}
             aria-label="Description"
           />
-          <Text size="1" color={description.length > 80 ? "red" : "gray"}>
-            {description.length}/80
-          </Text>
-        </label>
-        <label className={styles.field}>
-          <Text size="2" weight="medium">
-            Prompt
-          </Text>
-          <TextArea
+        </Field>
+        <Field label="Prompt" required>
+          <FieldTextarea
             value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={setPrompt}
             aria-label="Prompt"
             rows={4}
           />
-        </label>
+        </Field>
         <div className={styles.toggles}>
-          <label className={styles.toggle}>
-            <Checkbox
+          <Field label="Recurring" helper="Run on every matching schedule.">
+            <FieldSwitch
               checked={recurring}
-              onCheckedChange={(checked) => setRecurring(checked === true)}
+              onChange={setRecurring}
+              aria-label="Recurring"
             />
-            <Text size="2">Recurring</Text>
-          </label>
-          <label className={styles.toggle}>
-            <Checkbox
+          </Field>
+          <Field label="Durable" helper="Persist this schedule for the project.">
+            <FieldSwitch
               checked={durable}
-              onCheckedChange={(checked) => setDurable(checked === true)}
+              onChange={setDurable}
+              aria-label="Durable"
             />
-            <Text size="2">Durable</Text>
-          </label>
+          </Field>
         </div>
-        {(localError ?? backendError) && (
-          <Text className={styles.error} role="alert" size="2">
-            {localError ?? backendError}
-          </Text>
-        )}
-        <Flex justify="end">
-          <Button type="submit" disabled={isLoading || capExceeded}>
+        {errorMessage ? <FieldError>{errorMessage}</FieldError> : null}
+        <div className={styles.formActions}>
+          <Button
+            type="submit"
+            variant="primary"
+            loading={isLoading}
+            disabled={capExceeded}
+          >
             {isLoading ? "Creating…" : "Create"}
           </Button>
-        </Flex>
+        </div>
       </form>
-    </Card>
+    </Surface>
   );
 };

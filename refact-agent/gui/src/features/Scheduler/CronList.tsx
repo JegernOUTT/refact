@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge, Button, Spinner, Text } from "@radix-ui/themes";
+import { Badge, Button, LoadingState } from "../../components/ui";
 import type { CronTask } from "../../services/refact/schedulerApi";
 import styles from "./Scheduler.module.css";
 
@@ -22,11 +22,7 @@ export const CronList: React.FC<CronListProps> = ({
   onDelete,
 }) => {
   if (isLoading) {
-    return (
-      <div className={styles.empty}>
-        <Spinner />
-      </div>
-    );
+    return <LoadingState label="Loading scheduled prompts" />;
   }
 
   if (tasks.length === 0) {
@@ -34,7 +30,7 @@ export const CronList: React.FC<CronListProps> = ({
   }
 
   return (
-    <div className={styles.tableWrap}>
+    <div className={styles.scrollX}>
       <table className={styles.table}>
         <thead>
           <tr>
@@ -51,30 +47,28 @@ export const CronList: React.FC<CronListProps> = ({
           {tasks.map((task) => (
             <tr key={task.id}>
               <td>
-                <Text weight="medium">{task.human_schedule}</Text>
-                <br />
-                <Text size="1" color="gray">
-                  {task.cron}
-                </Text>
+                <div className={styles.scheduleCell}>
+                  <span className={styles.scheduleTitle}>{task.human_schedule}</span>
+                  <span className={styles.scheduleCron}>{task.cron}</span>
+                </div>
               </td>
               <td>{formatNextFire(task.next_fire_at_ms)}</td>
               <td>{task.fire_count}</td>
               <td>
-                <Badge color={task.durable ? "blue" : "gray"}>
+                <Badge tone={task.durable ? "accent" : "muted"}>
                   {task.durable ? "Durable" : "Session"}
                 </Badge>
               </td>
               <td>
-                <Badge color={task.recurring ? "green" : "orange"}>
+                <Badge tone={task.recurring ? "success" : "warning"}>
                   {task.recurring ? "Recurring" : "One-shot"}
                 </Badge>
               </td>
               <td>{task.description}</td>
               <td className={styles.actions}>
                 <Button
-                  color="red"
-                  variant="soft"
-                  size="1"
+                  variant="danger"
+                  size="sm"
                   disabled={deletingId === task.id}
                   onClick={() => onDelete(task.id)}
                 >

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
-import { Button, Card, Flex, Heading, Text } from "@radix-ui/themes";
-import { ArrowLeftIcon, ReloadIcon } from "@radix-ui/react-icons";
+import { ArrowLeft, RefreshCw } from "lucide-react";
+import { Button, FieldError, Surface } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   type CreateCronRequest,
@@ -72,13 +72,14 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack }) => {
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
-        <Button variant="outline" onClick={onBack}>
-          <ArrowLeftIcon width="16" height="16" />
+        <Button variant="soft" onClick={onBack} leftIcon={ArrowLeft}>
           Back
         </Button>
-        <Heading size="5">⏰ Scheduler</Heading>
-        <Button variant="soft" onClick={() => void refetch()}>
-          <ReloadIcon width="16" height="16" />
+        <div className={styles.titleBlock}>
+          <h1 className={styles.title}>Scheduler</h1>
+          <p className={styles.subtitle}>Create, review, and delete cron prompts.</p>
+        </div>
+        <Button variant="soft" onClick={() => void refetch()} leftIcon={RefreshCw}>
           Refresh
         </Button>
       </div>
@@ -89,36 +90,31 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack }) => {
           error={createState.error}
           taskCount={tasks.length}
         />
-        <Card>
-          <Flex direction="column" gap="3">
-            <Flex justify="between" align="center">
-              <Text size="4" weight="bold">
-                Scheduled prompts
-              </Text>
-              {lastCronFireAt && (
-                <Text size="1" color="gray">
+        <Surface className={styles.card} variant="surface-1">
+          <div className={styles.sectionStack}>
+            <div className={styles.listHeader}>
+              <div className={styles.sectionHeader}>
+                <h2 className={styles.sectionTitle}>Scheduled prompts</h2>
+                <p className={styles.sectionHint}>Human schedule, next fire, scope, and delete actions.</p>
+              </div>
+              {lastCronFireAt ? (
+                <span className={styles.lastFired}>
                   Last fired {new Date(lastCronFireAt).toLocaleTimeString()}
-                </Text>
-              )}
-            </Flex>
-            {error && (
-              <Text className={styles.error} role="alert" size="2">
-                {schedulerErrorMessage(error)}
-              </Text>
-            )}
-            {deleteState.error && (
-              <Text className={styles.error} role="alert" size="2">
-                {schedulerErrorMessage(deleteState.error)}
-              </Text>
-            )}
+                </span>
+              ) : null}
+            </div>
+            {error ? <FieldError>{schedulerErrorMessage(error)}</FieldError> : null}
+            {deleteState.error ? (
+              <FieldError>{schedulerErrorMessage(deleteState.error)}</FieldError>
+            ) : null}
             <CronList
               tasks={sortedTasks}
               isLoading={isFetching}
               deletingId={deletingId}
               onDelete={deleteTask}
             />
-          </Flex>
-        </Card>
+          </div>
+        </Surface>
       </div>
     </div>
   );
