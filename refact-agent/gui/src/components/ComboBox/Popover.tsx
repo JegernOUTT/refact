@@ -14,22 +14,24 @@ export const Popover: React.FC<
     maxWidth?: number | null;
   }
 > = ({ maxWidth, children, ...props }) => {
-  const style = maxWidth ? { maxWidth: maxWidth + "px" } : {};
+  const style = maxWidth
+    ? ({ "--rf-combobox-anchor-width": `${maxWidth}px` } as React.CSSProperties)
+    : undefined;
+
   return (
     <Box
       asChild
       className={classNames(
         "rt-PopperContent",
         "rt-HoverCardContent",
+        "rf-popover-motion",
         styles.popover,
       )}
       style={style}
     >
       <ComboboxPopover unmountOnHide fitViewport {...props}>
         <ScrollArea scrollbars="vertical" className={styles.popover__scroll}>
-          <Box p="1" className={styles.popover__box}>
-            {children}
-          </Box>
+          <Box className={styles.popover__box}>{children}</Box>
         </ScrollArea>
       </ComboboxPopover>
     </Box>
