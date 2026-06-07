@@ -39,6 +39,32 @@ describe("CronCreateForm", () => {
     });
   });
 
+  it("does not submit edited values on blur before submit", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { user } = render(
+      <CronCreateForm onSubmit={onSubmit} taskCount={0} />,
+    );
+
+    await user.type(screen.getByLabelText("Description"), "Hourly frog check");
+    await user.tab();
+    await user.type(screen.getByLabelText("Prompt"), "Check frogs");
+    await user.tab();
+
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({
+        cron: "7 * * * *",
+        prompt: "Check frogs",
+        recurring: true,
+        durable: false,
+        description: "Hourly frog check",
+      });
+    });
+  });
+
   it("surfaces backend validation errors", () => {
     render(
       <CronCreateForm
