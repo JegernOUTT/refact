@@ -21,7 +21,7 @@ use super::learn::{load_prior_lessons, record_goal_learning};
 use super::packet::{
     build_conductor_packet, ConductorAgentSnapshot, ConductorPacketInput, ConductorTaskSnapshot,
 };
-use super::wake::try_complete_conductor_wake;
+use super::wake::complete_conductor_wake;
 
 const CONDUCTOR_WORKFLOW_ID: &str = "buddy_conductor";
 const MAX_CONDUCTOR_TURN_STEPS: usize = 24;
@@ -278,7 +278,7 @@ pub async fn run_due_conductor_wakes(gcx: Arc<GlobalContext>) {
             if let Err(error) = result {
                 tracing::warn!("conductor wake {} failed: {}", goal_id, error);
             }
-            try_complete_conductor_wake(&gcx_for_turn, &goal_id);
+            complete_conductor_wake(&gcx_for_turn, &goal_id).await;
         });
     }
 }

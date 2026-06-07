@@ -564,10 +564,8 @@ pub fn try_drain_due_conductor_wakes(
     bus.drain_due(now)
 }
 
-pub fn try_complete_conductor_wake(gcx: &SharedGlobalContext, goal_id: &str) -> bool {
-    let Ok(mut bus) = gcx.conductor_wake_bus.try_lock() else {
-        return false;
-    };
+pub async fn complete_conductor_wake(gcx: &SharedGlobalContext, goal_id: &str) -> bool {
+    let mut bus = gcx.conductor_wake_bus.lock().await;
     bus.complete_goal(goal_id)
 }
 
@@ -1448,6 +1446,53 @@ mod tests {
         let mailbox = bus.mailbox("goal-1").unwrap();
         assert_eq!(mailbox.reasons, vec![ConductorWakeReason::HumanSteering]);
         assert!(mailbox.yield_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn complete_conductor_wake_waits_for_locked_bus_and_clears_in_flight() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let now = ts(750);
+        {
+            let mut bus = gcx.conductor_wake_bus.lock().await;
+            bus.enqueue_goal("goal-1", ConductorWakeReason::Manual, now);
+            let due = bus.drain_due(now + Duration::seconds(5));
+            assert_eq!(due.len(), 1);
+            assert!(bus.mailbox("goal-1").unwrap().in_flight);
+        }
+
+        let guard = gcx.conductor_wake_bus.lock().await;
+        let gcx_for_completion = gcx.clone();
+        let completion =
+            tokio::spawn(
+                async move { complete_conductor_wake(&gcx_for_completion, "goal-1").await },
+            );
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), async {
+                while !completion.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err()
+        );
+        assert!(guard.mailbox("goal-1").unwrap().in_flight);
+        drop(guard);
+
+        assert!(completion.await.unwrap());
+        {
+            let mut bus = gcx.conductor_wake_bus.lock().await;
+            assert!(!bus.mailbox("goal-1").unwrap().in_flight);
+            bus.enqueue_goal(
+                "goal-1",
+                ConductorWakeReason::TaskBoard,
+                now + Duration::seconds(6),
+            );
+            let due = bus.drain_due(now + Duration::seconds(11));
+            assert_eq!(due.len(), 1);
+            assert_eq!(due[0].goal_id, "goal-1");
+            assert_eq!(due[0].reasons, vec![ConductorWakeReason::TaskBoard]);
+        }
     }
 
     #[tokio::test]
