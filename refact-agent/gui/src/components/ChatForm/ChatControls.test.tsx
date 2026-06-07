@@ -89,11 +89,11 @@ describe("CapsSelect", () => {
       preloadedState: { chat: chatState(), config },
     });
 
-    await user.click(await screen.findByRole("combobox", { name: "chat model" }));
+    await user.click(await screen.findByRole("button", { name: /chat model/ }));
 
     expect(
       await screen.findByRole("option", {
-        name: /openai\/gpt-4o.*Default.*\$2\.50\/\$10\.00.*128K/s,
+        name: /openai\/gpt-4o.*Default.*\$2\.50\s*\/\s*\$10\.00.*128K/s,
       }),
     ).toBeInTheDocument();
     expect(
@@ -114,7 +114,7 @@ describe("CapsSelect", () => {
       }),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("option", { name: "Add new model" }));
+    await user.click(screen.getByRole("button", { name: "Add new model..." }));
     expect(store.getState().pages.at(-1)).toEqual({ name: "providers page" });
   });
 
@@ -123,7 +123,7 @@ describe("CapsSelect", () => {
       preloadedState: { chat: chatState("openai/o1"), config },
     });
 
-    await user.click(await screen.findByRole("combobox", { name: "chat model" }));
+    await user.click(await screen.findByRole("button", { name: /chat model/ }));
     await user.click(
       await screen.findByRole("option", { name: /openai\/gpt-4o-mini/ }),
     );
