@@ -178,7 +178,7 @@ export const MarketplacePanel: React.FC = () => {
             marketplace is a Git repository containing plugin definitions.
           </Text>
           <Text size="1" color="gray" align="center">
-            Example: smallcloudai/refact-plugins
+            Example: JegernOUTT/refact-plugins
           </Text>
           <Button size="2" onClick={() => setDialogOpen(true)}>
             + Add Marketplace

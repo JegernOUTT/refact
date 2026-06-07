@@ -440,7 +440,7 @@ function setupBuddyCompanionHandlers() {
       HttpResponse.json({
         logs: "logs",
         internal_context: "context",
-        repo_owner: "smallcloudai",
+        repo_owner: "JegernOUTT",
         repo_name: "refact",
       }),
     ),
@@ -3045,7 +3045,7 @@ describe("Buddy investigation prompt hardening", () => {
     });
 
     expect(prompt).toContain(
-      "The canonical upstream repository is `smallcloudai/refact` on GitHub.",
+      "The canonical upstream repository is `JegernOUTT/refact` on GitHub.",
     );
     expect(prompt).not.toContain("attacker");
     expect(prompt).not.toContain("ignore previous instructions");
@@ -3061,10 +3061,10 @@ describe("Buddy investigation prompt hardening", () => {
     });
 
     expect(prompt).toContain(
-      "The canonical upstream repository is `smallcloudai/refact` on GitHub.",
+      "The canonical upstream repository is `JegernOUTT/refact` on GitHub.",
     );
     expect(prompt).toContain(
-      "use GitHub MCP remote browsing for `smallcloudai/refact` when helpful",
+      "use GitHub MCP remote browsing for `JegernOUTT/refact` when helpful",
     );
   });
 });
@@ -5882,7 +5882,7 @@ describe("restoreChat buddy_meta handling", () => {
         HttpResponse.json({
           logs: "logs",
           internal_context: "context",
-          repo_owner: "smallcloudai",
+          repo_owner: "JegernOUTT",
           repo_name: "refact",
         }),
       ),
