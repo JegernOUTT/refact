@@ -18,6 +18,7 @@ export type {
 } from "./Dialog";
 export * from "./EmptyState";
 export * from "./ErrorState";
+export * from "./Field";
 export { Icon } from "./Icon";
 export { IconButton } from "./Button";
 export type { IconButtonProps } from "./Button";
@@ -49,6 +50,8 @@ export type {
 export { SegmentedControl } from "./SegmentedControl";
 export type { SegmentedControlOption, SegmentedControlProps } from "./SegmentedControl";
 export { Select } from "./Select";
+export * from "./SettingItem";
+export * from "./SettingsShell";
 export type {
   SelectContentProps,
   SelectGroupProps,

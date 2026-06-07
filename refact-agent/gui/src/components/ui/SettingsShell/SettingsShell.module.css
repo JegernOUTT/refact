@@ -1,0 +1,131 @@
+.shell {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  min-width: 0;
+  min-height: 420px;
+  gap: var(--rf-space-5);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.sidebar {
+  position: sticky;
+  top: var(--rf-space-3);
+  display: grid;
+  align-self: start;
+  min-width: 0;
+  max-height: calc(100dvh - 2 * var(--rf-space-3));
+  gap: var(--rf-space-3);
+  overflow: auto;
+}
+
+.header,
+.mobileHeader {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.title,
+.description {
+  margin: 0;
+}
+
+.title {
+  color: var(--rf-color-fg);
+  font: 700 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
+}
+
+.description {
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.nav {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
+.navItem {
+  display: flex;
+  min-width: 0;
+  min-height: var(--rf-control-h);
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-3);
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.navItem span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navItem:hover {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border);
+}
+
+.navItem:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.navItem[aria-current="page"] {
+  color: var(--rf-color-fg);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-border-strong);
+}
+
+.content {
+  min-width: 0;
+  overflow: auto;
+}
+
+.mobileNav {
+  display: none;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.sectionSelect {
+  width: min(100%, var(--rf-input-max, 360px));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .navItem {
+    transition: color var(--rf-dur-fast) var(--rf-ease-standard),
+      background-color var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
+@media (width <= 720px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--rf-space-4);
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .mobileNav {
+    display: grid;
+  }
+
+  .content {
+    overflow: visible;
+  }
+}
