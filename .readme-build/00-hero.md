@@ -19,7 +19,7 @@
   </p>
 </div>
 
-**32 agent modes · 50+ tools · 19 provider families · worktree-isolated agent fleets · MCP · skills · subagents · BYOK · 100% local — zero cloud**
+**10+ agent modes · 50+ tools · 20+ provider families · worktree-isolated agent fleets · MCP · skills · subagents · BYOK · 100% local — zero cloud**
 
 Refact is a local-first agentic coding engine built around `refact-lsp`: a Rust core that runs beside your workspace, streams the chat UI from your IDE, and gives autonomous tool-using agents the same concrete surfaces you use every day — files, shells, browser automation, AST search, patches, checkpoints, integrations, and verification loops. It is not just a sidebar chat: the task planner can break big work into cards, launch fleets of task agents in isolated git worktrees, and let Buddy keep a nosy little watch over project memory, diagnostics, docs, dependencies, and opportunities without handing your repo to a hosted control plane.
 
