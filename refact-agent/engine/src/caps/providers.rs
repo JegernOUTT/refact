@@ -993,6 +993,7 @@ pub async fn get_provider_from_template_and_config_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::resolve_completion_model;
     use std::collections::HashMap;
 
     #[test]
@@ -1640,6 +1641,61 @@ embedding_model:
                 .map(String::as_str),
             Some("tenant-a")
         );
+    }
+
+    #[tokio::test]
+    async fn custom_completion_provider_config_reaches_caps_and_default_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let providers_dir = temp.path().join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("custom.yaml"),
+            r#"
+enabled: true
+api_key: sk-test
+completion_endpoint: http://localhost:1234/v1/completions
+completion_endpoint_style: openai_completions
+completion_default_model: upstream-coder
+enabled_models:
+  - upstream-coder
+extra_headers:
+  X-Proxy-Token: secret-token
+completion_models:
+  upstream-coder:
+    n_ctx: 4096
+    scratchpad: plain
+"#,
+        )
+        .await
+        .unwrap();
+
+        let provider =
+            get_provider_from_template_and_config_file(temp.path(), "custom", true, true, false)
+                .await
+                .unwrap();
+        let mut caps = CodeAssistantCaps::default();
+        add_models_to_caps(&mut caps, vec![provider]);
+
+        assert_eq!(
+            caps.defaults.completion_default_model,
+            "custom/upstream-coder"
+        );
+        let model = caps.completion_models.get("custom/upstream-coder").unwrap();
+        assert_eq!(model.base.id, "custom/upstream-coder");
+        assert_eq!(model.base.name, "upstream-coder");
+        assert_eq!(model.base.endpoint, "http://localhost:1234/v1/completions");
+        assert_eq!(model.base.completion_endpoint_style, "openai_completions");
+        assert_eq!(model.scratchpad, "plain");
+        assert_eq!(
+            model
+                .base
+                .extra_headers
+                .get("X-Proxy-Token")
+                .map(String::as_str),
+            Some("secret-token")
+        );
+        let resolved = resolve_completion_model(Arc::new(caps), "").unwrap();
+        assert_eq!(resolved.base.id, "custom/upstream-coder");
     }
 
     #[test]
