@@ -1,5 +1,12 @@
 import React, { useCallback } from "react";
-import { Flex, TextField, Text, Switch, TextArea } from "@radix-ui/themes";
+
+import {
+  Field,
+  FieldSwitch,
+  FieldText,
+  FieldTextarea,
+  SettingsShell,
+} from "../../../components/ui";
 import { MessageListEditor } from "./MessageListEditor";
 import {
   ConfigPatch,
@@ -8,6 +15,7 @@ import {
   safeMessageArray,
   safeSelectionRange,
 } from "./configUtils";
+import styles from "./editors.module.css";
 
 type ToolboxCommandFormProps = {
   config: Record<string, unknown>;
@@ -36,28 +44,27 @@ export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({
   );
 
   return (
-    <Flex direction="column" gap="4">
-      <Flex direction="column" gap="2">
-        <Text size="2" weight="medium">
-          Description
-        </Text>
-        <TextArea
-          value={description}
-          onChange={(e) => patch(["description"], e.target.value)}
-          placeholder="What this command does..."
-          rows={2}
-        />
-      </Flex>
+    <SettingsShell
+      active="toolbox"
+      sections={[{ id: "toolbox", label: "Toolbox" }]}
+      title="Toolbox Command"
+      description="Configure selection rules and command messages."
+      onSectionChange={() => undefined}
+    >
+      <div className={styles.formStack}>
+        <Field label="Description">
+          <FieldTextarea
+            value={description}
+            onChange={(value) => patch(["description"], value)}
+            placeholder="What this command does..."
+            rows={2}
+          />
+        </Field>
 
-      <Flex direction="column" gap="3">
-        <Text size="2" weight="medium">
-          Selection Requirements
-        </Text>
-
-        <Flex align="center" gap="2">
-          <Switch
+        <Field label="Require Selection">
+          <FieldSwitch
             checked={hasSelectionRange}
-            onCheckedChange={(checked) => {
+            onChange={(checked) => {
               if (checked) {
                 patch(["selection_needed"], [1, 10000]);
                 patch(["selection_unwanted"], false);
@@ -66,84 +73,62 @@ export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({
               }
             }}
           />
-          <Text size="2">Require Selection</Text>
-        </Flex>
+        </Field>
 
         {hasSelectionRange && (
-          <Flex gap="3" align="center">
-            <Flex direction="column" gap="1">
-              <Text size="1" color="gray">
-                Min chars
-              </Text>
-              <TextField.Root
+          <div className={styles.switchGrid}>
+            <Field label="Min chars">
+              <FieldText
                 type="number"
                 value={selectionMin.toString()}
-                onChange={(e) => {
-                  const val =
-                    e.target.value === ""
-                      ? undefined
-                      : parseInt(e.target.value);
+                onChange={(value) => {
+                  const val = value === "" ? undefined : parseInt(value, 10);
                   if (val !== undefined) {
                     patch(["selection_needed"], [val, selectionMax]);
                   }
                 }}
-                style={{ width: 100 }}
               />
-            </Flex>
-            <Flex direction="column" gap="1">
-              <Text size="1" color="gray">
-                Max chars
-              </Text>
-              <TextField.Root
+            </Field>
+            <Field label="Max chars">
+              <FieldText
                 type="number"
                 value={selectionMax.toString()}
-                onChange={(e) => {
-                  const val =
-                    e.target.value === ""
-                      ? undefined
-                      : parseInt(e.target.value);
+                onChange={(value) => {
+                  const val = value === "" ? undefined : parseInt(value, 10);
                   if (val !== undefined) {
                     patch(["selection_needed"], [selectionMin, val]);
                   }
                 }}
-                style={{ width: 100 }}
               />
-            </Flex>
-          </Flex>
+            </Field>
+          </div>
         )}
 
         {!hasSelectionRange && (
-          <Flex align="center" gap="2">
-            <Switch
+          <Field
+            label="Selection Unwanted"
+            helper="Hide command when text is selected."
+          >
+            <FieldSwitch
               checked={selectionUnwanted}
-              onCheckedChange={(checked) =>
-                patch(["selection_unwanted"], checked)
-              }
+              onChange={(checked) => patch(["selection_unwanted"], checked)}
             />
-            <Text size="2">Selection Unwanted</Text>
-            <Text size="1" color="gray">
-              (hide command when text is selected)
-            </Text>
-          </Flex>
+          </Field>
         )}
-      </Flex>
 
-      <Flex align="center" gap="2">
-        <Switch
-          checked={insertAtCursor}
-          onCheckedChange={(checked) => patch(["insert_at_cursor"], checked)}
+        <Field label="Insert at Cursor" helper="Insert response at cursor position.">
+          <FieldSwitch
+            checked={insertAtCursor}
+            onChange={(checked) => patch(["insert_at_cursor"], checked)}
+          />
+        </Field>
+
+        <MessageListEditor
+          value={messages}
+          onChange={(msgs) => patch(["messages"], msgs)}
+          label="Messages"
         />
-        <Text size="2">Insert at Cursor</Text>
-        <Text size="1" color="gray">
-          (insert response at cursor position)
-        </Text>
-      </Flex>
-
-      <MessageListEditor
-        value={messages}
-        onChange={(msgs) => patch(["messages"], msgs)}
-        label="Messages"
-      />
-    </Flex>
+      </div>
+    </SettingsShell>
   );
 };

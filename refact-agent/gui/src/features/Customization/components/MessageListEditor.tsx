@@ -1,20 +1,14 @@
 import React, { useCallback, useState, useEffect } from "react";
+import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
+
 import {
-  Flex,
   Button,
-  TextField,
+  Field,
+  FieldSelect,
+  FieldText,
+  FieldTextarea,
   IconButton,
-  TextArea,
-  Text,
-  DropdownMenu,
-} from "@radix-ui/themes";
-import {
-  PlusIcon,
-  TrashIcon,
-  ChevronUpIcon,
-  ChevronDownIcon,
-  ChevronDownIcon as DropdownIcon,
-} from "@radix-ui/react-icons";
+} from "../../../components/ui";
 import styles from "./editors.module.css";
 
 export type MessageTemplate = {
@@ -31,6 +25,7 @@ type MessageListEditorProps = {
 };
 
 const COMMON_ROLES = ["system", "user", "assistant", "tool", "developer"];
+const ROLE_OPTIONS = COMMON_ROLES.map((role) => ({ value: role, label: role }));
 
 let idCounter = 0;
 const generateId = () => `msg_${++idCounter}_${Date.now()}`;
@@ -100,90 +95,64 @@ export const MessageListEditor: React.FC<MessageListEditorProps> = ({
   );
 
   return (
-    <Flex direction="column" gap="2">
-      <Flex justify="between" align="center">
-        <Text size="2" weight="medium">
-          {label}
-        </Text>
-        <Button size="1" variant="soft" onClick={addMessage}>
-          <PlusIcon /> Add
+    <Field label={label}>
+      <div className={styles.messageListStack}>
+        {value.length === 0 && <p className={styles.emptyText}>No messages defined</p>}
+        {internal.map((msg, index) => (
+          <div key={msg._id} className={styles.messageItem}>
+            <div className={styles.messageToolbar}>
+              {COMMON_ROLES.includes(msg.role) ? (
+                <FieldSelect
+                  options={ROLE_OPTIONS}
+                  value={msg.role}
+                  onChange={(role) => updateMessage(msg._id, "role", role)}
+                />
+              ) : (
+                <FieldText
+                  value={msg.role}
+                  onChange={(role) => updateMessage(msg._id, "role", role)}
+                  placeholder="Role"
+                />
+              )}
+              <div className={styles.iconGroup}>
+                <IconButton
+                  aria-label={`Move message ${index + 1} up`}
+                  icon={ChevronUp}
+                  size="sm"
+                  variant="ghost"
+                  disabled={index === 0}
+                  onClick={() => moveMessage(msg._id, -1)}
+                />
+                <IconButton
+                  aria-label={`Move message ${index + 1} down`}
+                  icon={ChevronDown}
+                  size="sm"
+                  variant="ghost"
+                  disabled={index === internal.length - 1}
+                  onClick={() => moveMessage(msg._id, 1)}
+                />
+                <IconButton
+                  aria-label={`Remove message ${index + 1}`}
+                  icon={Trash2}
+                  size="sm"
+                  variant="danger"
+                  onClick={() => removeMessage(msg._id)}
+                />
+              </div>
+            </div>
+            <FieldTextarea
+              value={msg.content}
+              onChange={(content) => updateMessage(msg._id, "content", content)}
+              placeholder="Message content..."
+              rows={2}
+              className={styles.messageContent}
+            />
+          </div>
+        ))}
+        <Button leftIcon={Plus} size="sm" variant="soft" onClick={addMessage}>
+          Add
         </Button>
-      </Flex>
-      {value.length === 0 && (
-        <Text size="1" color="gray">
-          No messages defined
-        </Text>
-      )}
-      {internal.map((msg, index) => (
-        <Flex
-          key={msg._id}
-          direction="column"
-          gap="2"
-          className={styles.messageItem}
-        >
-          <Flex gap="2" align="center" wrap="wrap">
-            <Flex gap="1" align="center">
-              <TextField.Root
-                size="1"
-                value={msg.role}
-                onChange={(e) => updateMessage(msg._id, "role", e.target.value)}
-                placeholder="Role"
-                style={{ width: 90 }}
-              />
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger>
-                  <IconButton size="1" variant="ghost">
-                    <DropdownIcon />
-                  </IconButton>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content>
-                  {COMMON_ROLES.map((role) => (
-                    <DropdownMenu.Item
-                      key={role}
-                      onSelect={() => updateMessage(msg._id, "role", role)}
-                    >
-                      {role}
-                    </DropdownMenu.Item>
-                  ))}
-                </DropdownMenu.Content>
-              </DropdownMenu.Root>
-            </Flex>
-            <Flex gap="1" ml="auto">
-              <IconButton
-                size="1"
-                variant="ghost"
-                disabled={index === 0}
-                onClick={() => moveMessage(msg._id, -1)}
-              >
-                <ChevronUpIcon />
-              </IconButton>
-              <IconButton
-                size="1"
-                variant="ghost"
-                disabled={index === internal.length - 1}
-                onClick={() => moveMessage(msg._id, 1)}
-              >
-                <ChevronDownIcon />
-              </IconButton>
-              <IconButton
-                size="1"
-                variant="ghost"
-                color="red"
-                onClick={() => removeMessage(msg._id)}
-              >
-                <TrashIcon />
-              </IconButton>
-            </Flex>
-          </Flex>
-          <TextArea
-            value={msg.content}
-            onChange={(e) => updateMessage(msg._id, "content", e.target.value)}
-            placeholder="Message content..."
-            rows={2}
-            className={styles.messageContent}
-          />
-        </Flex>
-      ))}
-    </Flex>
+      </div>
+    </Field>
   );
 };

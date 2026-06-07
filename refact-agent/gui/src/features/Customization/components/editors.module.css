@@ -1,129 +1,187 @@
-.messageItem {
-  padding: var(--space-2);
-  border: 1px solid var(--gray-6);
-  border-radius: var(--radius-2);
-  background-color: var(--gray-2);
+.formStack,
+.formStackShrink,
+.messageListStack,
+.stringListStack,
+.tableEditorStack,
+.extraFieldStack {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.formStackShrink {
+  flex-shrink: 0;
+}
+
+.messageItem,
+.modelDefaultsSection {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.messageToolbar,
+.addRow,
+.iconGroup {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.messageToolbar {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.iconGroup {
+  margin-left: auto;
+}
+
+.messageContent,
+.promptTextarea,
+.promptTextareaExpand,
+.extraFieldsEditor {
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
 }
 
 .messageContent {
-  font-family: var(--code-font-family);
-  font-size: var(--font-size-1);
   min-height: 60px;
-}
-
-.tagBadge {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding-right: var(--space-1);
-}
-
-.tagRemove {
-  width: 14px;
-  height: 14px;
-  min-width: 14px;
-  min-height: 14px;
-}
-
-.suggestions {
-  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 40px;
-  max-height: 150px;
-  overflow-y: auto;
-  background-color: var(--gray-1);
-  border: 1px solid var(--gray-6);
-  border-radius: var(--radius-2);
-  z-index: 100;
-  box-shadow: var(--shadow-3);
-}
-
-.suggestionItem {
-  display: block;
-  width: 100%;
-  padding: var(--space-1) var(--space-2);
-  text-align: left;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: var(--font-size-1);
-  color: var(--gray-12);
-}
-
-.suggestionItem:hover {
-  background-color: var(--accent-a3);
-}
-
-.formSection {
-  padding: var(--space-2);
-  border: 1px solid var(--gray-5);
-  border-radius: var(--radius-2);
-  background-color: var(--gray-1);
 }
 
 .promptTextarea {
   min-height: 100px;
-  font-family: var(--code-font-family);
-  font-size: var(--font-size-1);
 }
 
 .promptTextareaExpand {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   flex: 1;
   min-height: 100px;
-  font-family: var(--code-font-family);
-  font-size: var(--font-size-1);
   resize: none;
   overflow-y: auto;
 }
 
-.formTabContent {
-  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+.extraFieldsEditor {
+  min-height: 80px;
+}
+
+.chipList {
   display: flex;
-  flex-direction: column;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.addRow {
+  position: relative;
+}
+
+.addRow > :first-child {
+  flex: 1;
+}
+
+.suggestions {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  position: absolute;
+  top: calc(100% + var(--rf-space-1));
+  left: 0;
+  right: 5rem;
+  z-index: var(--rf-z-popover);
+  max-height: 150px;
+  overflow-y: auto;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
+}
+
+.suggestionItem {
+  display: block;
+  width: 100%;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border: 0;
+  background: transparent;
+  color: var(--rf-color-fg);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.suggestionItem:hover {
+  background: var(--rf-surface-1);
+}
+
+.formTabContent,
+.formTabContentExpanding {
+  display: flex;
   flex: 1;
   min-height: 0;
-  gap: var(--space-3);
-  padding-top: var(--space-3);
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.formTabContent {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   overflow-y: auto;
 }
 
 .formTabContentExpanding {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  gap: var(--space-3);
-  padding-top: var(--space-3);
   overflow: hidden;
 }
 
 .expandingField {
   display: flex;
-  flex-direction: column;
   flex: 1;
   min-height: 100px;
-  gap: var(--space-1);
   overflow: hidden;
 }
 
-.extraFieldsEditor {
-  min-height: 80px;
-  font-family: var(--code-font-family);
-  font-size: var(--font-size-1);
-}
-
-.compactField {
+.switchGrid,
+.fieldGrid {
+  display: grid;
   min-width: 0;
+  gap: var(--rf-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
 }
 
-.fieldRow {
-  flex-wrap: wrap;
-  gap: var(--space-2);
+.parameterGrid {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
 }
 
-.fieldRow > * {
-  min-width: 80px;
+.parameterRow {
+  display: grid;
+  min-width: 0;
+  align-items: end;
+  gap: var(--rf-space-2);
+  grid-template-columns: minmax(8rem, 0.8fr) minmax(7rem, 0.6fr) minmax(10rem, 1fr) minmax(5rem, auto) auto;
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  font-weight: 500;
+}
+
+.emptyText {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+@media (max-width: 560px) {
+  .parameterRow {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
 }

@@ -1,17 +1,17 @@
 import React, { useState, useCallback, useEffect } from "react";
-import {
-  Flex,
-  TextField,
-  Text,
-  Switch,
-  TextArea,
-  Tabs,
-  Button,
-} from "@radix-ui/themes";
+import { Bot, Code2, MessageSquare, Settings, Workflow } from "lucide-react";
 import { StringListEditor } from "./StringListEditor";
 import { ToolParametersEditor, ToolParameter } from "./ToolParametersEditor";
 import { toInputSchema, fromInputSchema } from "../../../utils/toolSchema";
 import { MessageListEditor } from "./MessageListEditor";
+import {
+  Button,
+  Field,
+  FieldSwitch,
+  FieldText,
+  FieldTextarea,
+  SettingsShell,
+} from "../../../components/ui";
 import {
   ConfigPatch,
   extractSubagentExtra,
@@ -34,6 +34,14 @@ type SubagentFormProps = {
   onPatch: (patch: ConfigPatch) => void;
   availableTools?: string[];
 };
+
+const SUBAGENT_SECTIONS = [
+  { id: "basic", label: "Basic", icon: Bot },
+  { id: "tool", label: "Tool Schema", icon: Code2 },
+  { id: "subchat", label: "Subchat", icon: Workflow },
+  { id: "messages", label: "Messages", icon: MessageSquare },
+  { id: "advanced", label: "Advanced", icon: Settings },
+];
 
 export const SubagentForm: React.FC<SubagentFormProps> = ({
   config,
@@ -109,16 +117,14 @@ export const SubagentForm: React.FC<SubagentFormProps> = ({
   }, [extraJson, extra, onPatch]);
 
   return (
-    <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
-      <Tabs.List>
-        <Tabs.Trigger value="basic">Basic</Tabs.Trigger>
-        <Tabs.Trigger value="tool">Tool Schema</Tabs.Trigger>
-        <Tabs.Trigger value="subchat">Subchat</Tabs.Trigger>
-        <Tabs.Trigger value="messages">Messages</Tabs.Trigger>
-        <Tabs.Trigger value="advanced">Advanced</Tabs.Trigger>
-      </Tabs.List>
-
-      <Flex direction="column" gap="4" pt="4">
+    <SettingsShell
+      active={activeTab}
+      sections={SUBAGENT_SECTIONS}
+      title="Subagent"
+      description="Configure subagent metadata, tool schema, prompts, and execution defaults."
+      onSectionChange={setActiveTab}
+    >
+      <div className={styles.formTabContent}>
         {activeTab === "basic" && (
           <BasicTab
             title={title}
@@ -151,8 +157,8 @@ export const SubagentForm: React.FC<SubagentFormProps> = ({
             patch={patch}
           />
         )}
-      </Flex>
-    </Tabs.Root>
+      </div>
+    </SettingsShell>
   );
 };
 
@@ -178,52 +184,43 @@ const BasicTab: React.FC<{
   availableTools,
 }) => (
   <>
-    <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">
-        Title
-      </Text>
-      <TextField.Root
+    <Field label="Title">
+      <FieldText
         value={title}
-        onChange={(e) => patch(["title"], e.target.value)}
+        onChange={(value) => patch(["title"], value)}
         placeholder="Display name"
       />
-    </Flex>
+    </Field>
 
-    <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">
-        Description
-      </Text>
-      <TextArea
+    <Field label="Description">
+      <FieldTextarea
         value={description}
-        onChange={(e) => patch(["description"], e.target.value)}
+        onChange={(value) => patch(["description"], value)}
         placeholder="What this subagent does..."
         rows={2}
       />
-    </Flex>
+    </Field>
 
-    <Flex gap="4" wrap="wrap">
-      <Flex align="center" gap="2">
-        <Switch
+    <div className={styles.switchGrid}>
+      <Field label="Internal Only">
+        <FieldSwitch
           checked={specific}
-          onCheckedChange={(c) => patch(["specific"], c)}
+          onChange={(checked) => patch(["specific"], checked)}
         />
-        <Text size="2">Internal Only</Text>
-      </Flex>
-      <Flex align="center" gap="2">
-        <Switch
+      </Field>
+      <Field label="Expose as Tool">
+        <FieldSwitch
           checked={exposeAsTool}
-          onCheckedChange={(c) => patch(["expose_as_tool"], c)}
+          onChange={(checked) => patch(["expose_as_tool"], checked)}
         />
-        <Text size="2">Expose as Tool</Text>
-      </Flex>
-      <Flex align="center" gap="2">
-        <Switch
+      </Field>
+      <Field label="Has Code">
+        <FieldSwitch
           checked={hasCode}
-          onCheckedChange={(c) => patch(["has_code"], c)}
+          onChange={(checked) => patch(["has_code"], checked)}
         />
-        <Text size="2">Has Code</Text>
-      </Flex>
-    </Flex>
+      </Field>
+    </div>
 
     <StringListEditor
       value={tools}
@@ -264,10 +261,10 @@ const ToolTab: React.FC<{
 
   return (
     <>
-      <Flex align="center" gap="2">
-        <Switch
+      <Field label="Define Custom Tool Schema">
+        <FieldSwitch
           checked={hasTool}
-          onCheckedChange={(checked) => {
+          onChange={(checked) => {
             if (checked) {
               patch(["tool"], {
                 description: "",
@@ -280,44 +277,39 @@ const ToolTab: React.FC<{
             }
           }}
         />
-        <Text size="2">Define Custom Tool Schema</Text>
-      </Flex>
+      </Field>
 
       {hasTool && (
         <>
-          <Flex direction="column" gap="2">
-            <Text size="2" weight="medium">
-              Tool Description
-            </Text>
-            <TextArea
+          <Field label="Tool Description">
+            <FieldTextarea
               value={toolDesc}
-              onChange={(e) => patch(["tool", "description"], e.target.value)}
+              onChange={(value) => patch(["tool", "description"], value)}
               placeholder="Description shown to the LLM..."
               rows={2}
             />
-          </Flex>
+          </Field>
 
-          <Flex align="center" gap="2">
-            <Switch
-              checked={agentic}
-              onCheckedChange={(c) => patch(["tool", "agentic"], c)}
-            />
-            <Text size="2">Agentic</Text>
-            <Text size="1" color="gray">
-              (tool can make multiple calls)
-            </Text>
-          </Flex>
+          <div className={styles.switchGrid}>
+            <Field label="Agentic" helper="Tool can make multiple calls.">
+              <FieldSwitch
+                checked={agentic}
+                onChange={(checked) => patch(["tool", "agentic"], checked)}
+              />
+            </Field>
 
-          <Flex align="center" gap="2">
-            <Switch
-              checked={allowParallel}
-              onCheckedChange={(c) => patch(["tool", "allow_parallel"], c)}
-            />
-            <Text size="2">Allow Parallel</Text>
-            <Text size="1" color="gray">
-              (tool can run concurrently with other parallel tools)
-            </Text>
-          </Flex>
+            <Field
+              label="Allow Parallel"
+              helper="Tool can run concurrently with other parallel tools."
+            >
+              <FieldSwitch
+                checked={allowParallel}
+                onChange={(checked) =>
+                  patch(["tool", "allow_parallel"], checked)
+                }
+              />
+            </Field>
+          </div>
 
           <ToolParametersEditor
             parameters={parameters}
@@ -337,123 +329,91 @@ const SubchatTab: React.FC<{
 }> = ({ subchat, patch }) => {
   return (
     <>
-      <Flex gap="4">
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Context Mode
-          </Text>
-          <TextField.Root
+      <div className={styles.fieldGrid}>
+        <Field label="Context Mode">
+          <FieldText
             value={safeString(subchat.context_mode) || "bare"}
-            onChange={(e) => patch(["subchat", "context_mode"], e.target.value)}
+            onChange={(value) => patch(["subchat", "context_mode"], value)}
             placeholder="bare / full / ..."
           />
-        </Flex>
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Model
-          </Text>
-          <TextField.Root
+        </Field>
+        <Field label="Model">
+          <FieldText
             value={safeString(subchat.model)}
-            onChange={(e) =>
-              patch(["subchat", "model"], e.target.value || undefined)
-            }
+            onChange={(value) => patch(["subchat", "model"], value || undefined)}
             placeholder="Default"
           />
-        </Flex>
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Model Type
-          </Text>
-          <TextField.Root
+        </Field>
+        <Field label="Model Type">
+          <FieldText
             value={safeString(subchat.model_type)}
-            onChange={(e) =>
-              patch(["subchat", "model_type"], e.target.value || undefined)
+            onChange={(value) =>
+              patch(["subchat", "model_type"], value || undefined)
             }
             placeholder="Default"
           />
-        </Flex>
-      </Flex>
+        </Field>
+      </div>
 
-      <Flex align="center" gap="2">
-        <Switch
+      <Field label="Stateful">
+        <FieldSwitch
           checked={safeBoolean(subchat.stateful)}
-          onCheckedChange={(c) => patch(["subchat", "stateful"], c)}
+          onChange={(checked) => patch(["subchat", "stateful"], checked)}
         />
-        <Text size="2">Stateful</Text>
-      </Flex>
+      </Field>
 
-      <Flex gap="4">
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Max Steps
-          </Text>
-          <TextField.Root
+      <div className={styles.fieldGrid}>
+        <Field label="Max Steps">
+          <FieldText
             type="number"
             value={safeNumber(subchat.max_steps)?.toString() ?? ""}
-            onChange={(e) =>
-              patch(["subchat", "max_steps"], parseIntSafe(e.target.value))
+            onChange={(value) =>
+              patch(["subchat", "max_steps"], parseIntSafe(value))
             }
             placeholder="Default"
           />
-        </Flex>
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            N Context
-          </Text>
-          <TextField.Root
+        </Field>
+        <Field label="N Context">
+          <FieldText
             type="number"
             value={safeNumber(subchat.n_ctx)?.toString() ?? ""}
-            onChange={(e) =>
-              patch(["subchat", "n_ctx"], parseIntSafe(e.target.value))
-            }
+            onChange={(value) => patch(["subchat", "n_ctx"], parseIntSafe(value))}
             placeholder="Default"
           />
-        </Flex>
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Max New Tokens
-          </Text>
-          <TextField.Root
+        </Field>
+        <Field label="Max New Tokens">
+          <FieldText
             type="number"
             value={safeNumber(subchat.max_new_tokens)?.toString() ?? ""}
-            onChange={(e) =>
-              patch(["subchat", "max_new_tokens"], parseIntSafe(e.target.value))
+            onChange={(value) =>
+              patch(["subchat", "max_new_tokens"], parseIntSafe(value))
             }
             placeholder="Default"
           />
-        </Flex>
-      </Flex>
+        </Field>
+      </div>
 
-      <Flex gap="4">
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Reasoning Effort
-          </Text>
-          <TextField.Root
+      <div className={styles.fieldGrid}>
+        <Field label="Reasoning Effort">
+          <FieldText
             value={safeString(subchat.reasoning_effort)}
-            onChange={(e) =>
-              patch(
-                ["subchat", "reasoning_effort"],
-                e.target.value || undefined,
-              )
+            onChange={(value) =>
+              patch(["subchat", "reasoning_effort"], value || undefined)
             }
             placeholder="low / medium / high / xhigh / max"
           />
-        </Flex>
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="2" weight="medium">
-            Tokens for RAG
-          </Text>
-          <TextField.Root
+        </Field>
+        <Field label="Tokens for RAG">
+          <FieldText
             type="number"
             value={safeNumber(subchat.tokens_for_rag)?.toString() ?? ""}
-            onChange={(e) =>
-              patch(["subchat", "tokens_for_rag"], parseIntSafe(e.target.value))
+            onChange={(value) =>
+              patch(["subchat", "tokens_for_rag"], parseIntSafe(value))
             }
             placeholder="Default"
           />
-        </Flex>
-      </Flex>
+        </Field>
+      </div>
     </>
   );
 };
@@ -464,33 +424,27 @@ const MessagesTab: React.FC<{
   patch: PatchFn;
 }> = ({ messages, prompts, patch }) => (
   <>
-    <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">
-        System Prompt
-      </Text>
-      <TextArea
+    <Field label="System Prompt">
+      <FieldTextarea
         value={safeString(messages.system_prompt)}
-        onChange={(e) =>
-          patch(["messages", "system_prompt"], e.target.value || undefined)
+        onChange={(value) =>
+          patch(["messages", "system_prompt"], value || undefined)
         }
         placeholder="System prompt..."
         className={styles.promptTextarea}
       />
-    </Flex>
+    </Field>
 
-    <Flex direction="column" gap="2">
-      <Text size="2" weight="medium">
-        User Template
-      </Text>
-      <TextArea
+    <Field label="User Template">
+      <FieldTextarea
         value={safeString(messages.user_template)}
-        onChange={(e) =>
-          patch(["messages", "user_template"], e.target.value || undefined)
+        onChange={(value) =>
+          patch(["messages", "user_template"], value || undefined)
         }
         placeholder="User message template..."
         rows={3}
       />
-    </Flex>
+    </Field>
 
     <MessageListEditor
       value={safeMessageArray(messages.pre_messages)}
@@ -504,30 +458,27 @@ const MessagesTab: React.FC<{
       label="Post-Messages"
     />
 
-    <Text size="2" weight="medium" mt="2">
-      Prompts
-    </Text>
-    {(
-      [
-        "solver",
-        "reviewer",
-        "guardrails",
-        "gather_system",
-        "gather_retry",
-      ] as const
-    ).map((key) => (
-      <Flex key={key} direction="column" gap="1">
-        <Text size="1" color="gray">
-          {key.replace("_", " ")}
-        </Text>
-        <TextArea
-          value={safeString(prompts[key])}
-          onChange={(e) => patch(["prompts", key], e.target.value || undefined)}
-          placeholder={`${key} prompt...`}
-          rows={2}
-        />
-      </Flex>
-    ))}
+    <section className={styles.modelDefaultsSection}>
+      <h3 className={styles.sectionTitle}>Prompts</h3>
+      {(
+        [
+          "solver",
+          "reviewer",
+          "guardrails",
+          "gather_system",
+          "gather_retry",
+        ] as const
+      ).map((key) => (
+        <Field key={key} label={key.replace("_", " ")}>
+          <FieldTextarea
+            value={safeString(prompts[key])}
+            onChange={(value) => patch(["prompts", key], value || undefined)}
+            placeholder={`${key} prompt...`}
+            rows={2}
+          />
+        </Field>
+      ))}
+    </section>
   </>
 );
 
@@ -554,16 +505,13 @@ const AdvancedTab: React.FC<{
 }) => {
   return (
     <>
-      <Flex direction="column" gap="2">
-        <Text size="2" weight="medium">
-          Base Subagent
-        </Text>
-        <TextField.Root
+      <Field label="Base Subagent">
+        <FieldText
           value={base ?? ""}
-          onChange={(e) => patch(["base"], e.target.value || undefined)}
+          onChange={(value) => patch(["base"], value || undefined)}
           placeholder="Inherit from another subagent"
         />
-      </Flex>
+      </Field>
 
       <StringListEditor
         value={matchModels ?? []}
@@ -572,76 +520,60 @@ const AdvancedTab: React.FC<{
         placeholder="Model pattern..."
       />
 
-      <Text size="2" weight="medium">
-        Gather Files
-      </Text>
-      <Flex gap="4">
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="1" color="gray">
-            Subagent
-          </Text>
-          <TextField.Root
-            value={safeString(gatherFiles.subagent)}
-            onChange={(e) =>
-              patch(["gather_files", "subagent"], e.target.value || undefined)
-            }
-            placeholder="Subagent name"
-          />
-        </Flex>
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="1" color="gray">
-            Max Files
-          </Text>
-          <TextField.Root
-            type="number"
-            value={safeNumber(gatherFiles.max_files)?.toString() ?? ""}
-            onChange={(e) =>
-              patch(["gather_files", "max_files"], parseIntSafe(e.target.value))
-            }
-            placeholder="Default"
-          />
-        </Flex>
-        <Flex direction="column" gap="2" style={{ flex: 1 }}>
-          <Text size="1" color="gray">
-            Max Steps
-          </Text>
-          <TextField.Root
-            type="number"
-            value={safeNumber(gatherFiles.max_steps)?.toString() ?? ""}
-            onChange={(e) =>
-              patch(["gather_files", "max_steps"], parseIntSafe(e.target.value))
-            }
-            placeholder="Default"
-          />
-        </Flex>
-      </Flex>
+      <section className={styles.modelDefaultsSection}>
+        <h3 className={styles.sectionTitle}>Gather Files</h3>
+        <div className={styles.fieldGrid}>
+          <Field label="Subagent">
+            <FieldText
+              value={safeString(gatherFiles.subagent)}
+              onChange={(value) =>
+                patch(["gather_files", "subagent"], value || undefined)
+              }
+              placeholder="Subagent name"
+            />
+          </Field>
+          <Field label="Max Files">
+            <FieldText
+              type="number"
+              value={safeNumber(gatherFiles.max_files)?.toString() ?? ""}
+              onChange={(value) =>
+                patch(["gather_files", "max_files"], parseIntSafe(value))
+              }
+              placeholder="Default"
+            />
+          </Field>
+          <Field label="Max Steps">
+            <FieldText
+              type="number"
+              value={safeNumber(gatherFiles.max_steps)?.toString() ?? ""}
+              onChange={(value) =>
+                patch(["gather_files", "max_steps"], parseIntSafe(value))
+              }
+              placeholder="Default"
+            />
+          </Field>
+        </div>
+      </section>
 
-      <Flex direction="column" gap="2">
-        <Flex justify="between" align="center">
-          <Text size="2" weight="medium">
-            Extra Fields (JSON)
-          </Text>
+      <Field
+        label="Extra Fields (JSON)"
+        helper="Unknown/custom fields at top level."
+        error={extraJsonError}
+      >
+        <div className={styles.extraFieldStack}>
+          <FieldTextarea
+            value={extraJson}
+            onChange={onExtraChange}
+            placeholder="{}"
+            className={styles.extraFieldsEditor}
+          />
           {extraJsonDirty && (
-            <Button size="1" variant="soft" onClick={onExtraApply}>
+            <Button size="sm" variant="soft" onClick={onExtraApply}>
               Apply
             </Button>
           )}
-        </Flex>
-        <Text size="1" color="gray">
-          Unknown/custom fields at top level
-        </Text>
-        <TextArea
-          value={extraJson}
-          onChange={(e) => onExtraChange(e.target.value)}
-          placeholder="{}"
-          className={styles.extraFieldsEditor}
-        />
-        {extraJsonError && (
-          <Text size="1" color="red">
-            {extraJsonError}
-          </Text>
-        )}
-      </Flex>
+        </div>
+      </Field>
     </>
   );
 };
