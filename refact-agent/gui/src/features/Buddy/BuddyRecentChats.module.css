@@ -72,6 +72,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   min-width: 0;
 }
 
@@ -117,6 +120,21 @@
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-2);
+}
+
+@keyframes buddy-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.buttonSpinner {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  border: 1px solid var(--rf-border-strong);
+  border-top-color: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+  animation: buddy-spin var(--rf-dur-slow) linear infinite;
 }
 
 @media (max-width: 520px) {

@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo } from "react";
-import { Card, Flex, Spinner, Text } from "@radix-ui/themes";
-import { ChatBubbleIcon } from "@radix-ui/react-icons";
+import { MessageCircle } from "lucide-react";
+import { Card, Icon, LoadingState, Surface, Text } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import { openExistingBuddyChat } from "../Chat/Thread";
 import { useGetBuddyConversationsQuery } from "../../services/refact/buddy";
@@ -78,75 +78,63 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
   );
 
   return (
-    <Flex direction="column" gap="3" data-testid="autonomous-chats">
-      <Flex direction="column" gap="1">
-        <Text size="2" weight="bold">
+    <section className={styles.root} data-testid="autonomous-chats">
+      <div className={styles.header}>
+        <Text as="strong" size="2" weight="bold">
           Autonomous chats
         </Text>
-        <Text size="1" color="gray">
+        <Text as="p" size="1" color="gray">
           Workflow-driven Buddy conversations grouped by workflow.
         </Text>
-      </Flex>
+      </div>
 
       {isLoading && conversations === undefined && (
-        <Flex align="center" justify="center" py="3">
-          <Spinner size="2" />
-        </Flex>
+        <LoadingState label="Loading autonomous chats" variant="compact" />
       )}
 
       {!isLoading && groups.length === 0 && (
-        <Card className={styles.emptyCard}>
-          <Flex align="center" gap="2">
-            <ChatBubbleIcon width={16} height={16} />
-            <Text size="1" color="gray">
-              No autonomous chats yet
-            </Text>
-          </Flex>
-        </Card>
+        <Surface className={styles.emptyCard} variant="plain" animated="rise">
+          <Icon icon={MessageCircle} size="md" tone="muted" />
+          <Text size="1" color="gray">
+            No autonomous chats yet
+          </Text>
+        </Surface>
       )}
 
       {groups.map((group) => (
-        <Card key={group.workflowId} className={styles.groupCard}>
-          <Flex direction="column" gap="2">
-            <Flex align="center" justify="between" gap="2">
-              <Flex align="center" gap="2" minWidth="0">
-                <Text size="3" className={styles.groupIcon}>
-                  ⚙️
-                </Text>
-                <Text size="2" weight="bold" className={styles.groupTitle}>
-                  {workflowTitle(group.workflowId)}
-                </Text>
-              </Flex>
-              <Text size="1" color="gray" className={styles.groupCount}>
-                {group.entries.length} chats
+        <Card key={group.workflowId} className={styles.groupCard} animated="rise">
+          <div className={styles.groupHeader}>
+            <div className={styles.groupTitleWrap}>
+              <span className={styles.groupIcon}>⚙️</span>
+              <Text as="strong" size="2" weight="bold" className={styles.groupTitle}>
+                {workflowTitle(group.workflowId)}
               </Text>
-            </Flex>
-            <div className={styles.chatList}>
-              {group.entries.map((entry) => (
-                <button
-                  key={entry.id}
-                  type="button"
-                  className={styles.chatRow}
-                  onClick={() => handleOpen(entry)}
-                >
-                  <span className={styles.chatIcon}>{entry.icon}</span>
-                  <span className={styles.chatContent}>
-                    <span className={styles.chatTitle}>
-                      {entry.title || "Untitled"}
-                    </span>
-                    <span className={styles.chatMeta}>
-                      {entry.message_count} entries · {entry.status}
-                    </span>
-                  </span>
-                  <span className={styles.chatTime}>
-                    {relativeTime(entry.updated_at)}
-                  </span>
-                </button>
-              ))}
             </div>
-          </Flex>
+            <Text size="1" color="gray" className={styles.groupCount}>
+              {group.entries.length} chats
+            </Text>
+          </div>
+          <div className={styles.chatList}>
+            {group.entries.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                className={styles.chatRow}
+                onClick={() => handleOpen(entry)}
+              >
+                <span className={styles.chatIcon}>{entry.icon}</span>
+                <span className={styles.chatContent}>
+                  <span className={styles.chatTitle}>{entry.title || "Untitled"}</span>
+                  <span className={styles.chatMeta}>
+                    {entry.message_count} entries · {entry.status}
+                  </span>
+                </span>
+                <span className={styles.chatTime}>{relativeTime(entry.updated_at)}</span>
+              </button>
+            ))}
+          </div>
         </Card>
       ))}
-    </Flex>
+    </section>
   );
 };

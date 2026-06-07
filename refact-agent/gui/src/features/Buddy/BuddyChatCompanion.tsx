@@ -6,7 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Button, Text } from "@radix-ui/themes";
+import { Button, Text } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectBuddySnapshot,

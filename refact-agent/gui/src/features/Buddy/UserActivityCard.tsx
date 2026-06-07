@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { Flex, Spinner, Text } from "@radix-ui/themes";
+import { Flex, LoadingState, Text } from "../../components/ui";
 import { Card, Chip } from "../../components/ui";
 import {
   useGetUserActivityQuery,
@@ -71,7 +71,9 @@ export const UserActivityCard: React.FC<UserActivityCardProps> = ({
               Last {hours} hours
             </Text>
           </Flex>
-          {isLoading && activity === undefined && <Spinner size="1" />}
+          {isLoading && activity === undefined && (
+            <LoadingState label="Loading activity" variant="compact" />
+          )}
         </Flex>
 
         <div

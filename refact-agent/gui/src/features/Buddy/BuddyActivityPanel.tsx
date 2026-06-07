@@ -1,5 +1,5 @@
 import React from "react";
-import { Text, Tooltip } from "@radix-ui/themes";
+import { Text, Tooltip } from "../../components/ui";
 import { SegmentedControl, Surface } from "../../components/ui";
 import classNames from "classnames";
 import type { BuddyActivityEntry } from "./types";

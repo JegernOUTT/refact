@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Switch, Text, TextArea } from "@radix-ui/themes";
 import classNames from "classnames";
+import {
+  Button,
+  FieldTextarea,
+  Switch,
+  Text,
+} from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   selectBuddySettings,
@@ -395,12 +400,11 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
         <Text size="1" weight="bold" color="gray" className={styles.label}>
           PERSONALITY PROMPT
         </Text>
-        <TextArea
-          size="1"
+        <FieldTextarea
           rows={3}
           placeholder="Custom personality instructions…"
           value={promptDraft}
-          onChange={(e) => handlePromptChange(e.target.value)}
+          onChange={handlePromptChange}
           onFocus={() => setPromptFocused(true)}
           onBlur={handlePromptBlur}
           aria-label="personality prompt"
@@ -408,7 +412,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
         />
         {promptDraft ? (
           <Button
-            size="1"
+            size="sm"
             variant="ghost"
             onClick={handlePromptClear}
             data-testid="buddy-clear-prompt"
@@ -508,7 +512,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
 
       {onClose ? (
         <div className={styles.footer}>
-          <Button size="1" variant="ghost" onClick={onClose}>
+          <Button size="sm" variant="ghost" onClick={onClose}>
             Close
           </Button>
         </div>

@@ -13,6 +13,7 @@ import styles from "./Tooltip.module.css";
 export interface TooltipProps extends OverlayRootProps {
   delayDuration?: number;
   skipDelayDuration?: number;
+  content?: React.ReactNode;
 }
 export type TooltipTriggerProps = TooltipPrimitive.TooltipTriggerProps;
 export type TooltipContentProps = AnchoredOverlayContentProps;
@@ -21,14 +22,24 @@ const TooltipRoot: React.FC<TooltipProps> = ({
   delayDuration = 350,
   skipDelayDuration = 150,
   children,
+  content,
   ...props
 }) => {
+  const wrappedChildren = content ? (
+    <>
+      <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
+      <TooltipContent>{content}</TooltipContent>
+    </>
+  ) : (
+    children
+  );
+
   return (
     <TooltipPrimitive.Provider
       delayDuration={delayDuration}
       skipDelayDuration={skipDelayDuration}
     >
-      <TooltipPrimitive.Root {...props}>{children}</TooltipPrimitive.Root>
+      <TooltipPrimitive.Root {...props}>{wrappedChildren}</TooltipPrimitive.Root>
     </TooltipPrimitive.Provider>
   );
 };

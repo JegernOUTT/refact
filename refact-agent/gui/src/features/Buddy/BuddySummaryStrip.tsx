@@ -1,5 +1,5 @@
 import React from "react";
-import { Text } from "@radix-ui/themes";
+import { Text } from "../../components/ui";
 import classNames from "classnames";
 import { formatCompactNumber } from "./buddyUtils";
 import type { BuddyPetState, Stage } from "./types";

@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { Button, Flex, Text } from "@radix-ui/themes";
+import { Flex, Button, Text } from "../../components/ui";
 import { CheckIcon, CopyIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
 import { useAppSelector, useCopyToClipboard } from "../../hooks";
 import { selectCurrentThreadId, selectThread } from "../Chat/Thread/selectors";
@@ -168,7 +168,7 @@ const ChatCrashReportPanel: React.FC = () => {
     <Flex align="center" justify="center" className={styles.root}>
       <div className={styles.card} role="alert">
         <Flex direction="column" gap="2">
-          <Text size="4" weight="bold" color="red">
+          <Text size="4" weight="bold">
             The chat frontend crashed.
           </Text>
           <Text size="2" color="gray">
@@ -210,7 +210,7 @@ const ChatCrashReportPanel: React.FC = () => {
           {copyAllError && (
             <Text
               size="1"
-              color="red"
+             
               data-testid="copy-crash-thread-json-error"
             >
               {copyAllError}
@@ -219,7 +219,7 @@ const ChatCrashReportPanel: React.FC = () => {
         </Flex>
 
         <Flex gap="2" wrap="wrap" justify="center">
-          <Button type="button" color="red" onClick={handleRefresh}>
+          <Button type="button" variant="danger" onClick={handleRefresh}>
             Refresh
           </Button>
           <Button asChild variant="outline">

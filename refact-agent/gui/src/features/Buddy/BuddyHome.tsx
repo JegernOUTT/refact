@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Flex, Spinner, Text } from "@radix-ui/themes";
+import { Flex, Button, LoadingState, Text } from "../../components/ui";
 import { ArrowLeftIcon, GearIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -159,10 +159,7 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
   if (isLoading) {
     return (
       <div className={classNames(styles.panel, styles.draftPanel)}>
-        <Flex align="center" gap="2">
-          <Spinner size="1" />
-          <Text size="2">Loading Buddy draft…</Text>
-        </Flex>
+        <LoadingState label="Loading Buddy draft…" variant="compact" />
       </div>
     );
   }
@@ -667,9 +664,7 @@ export const BuddyHome: React.FC = () => {
   if (!loaded) {
     return (
       <div className={styles.page}>
-        <Flex align="center" justify="center" style={{ flex: 1 }}>
-          <Spinner size="3" />
-        </Flex>
+        <LoadingState label="Loading Buddy" variant="full" />
       </div>
     );
   }

@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, Spinner } from "@radix-ui/themes";
+import { Flex, LoadingState, Text } from "../../components/ui";
 import { ChatBubbleIcon, PlusIcon } from "@radix-ui/react-icons";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
@@ -61,7 +61,7 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
       <span className={styles.entryIcon}>{entry.icon}</span>
       <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
         <Flex align="center" gap="1" style={{ minWidth: 0 }}>
-          <Text size="1" weight="medium" className={styles.entryTitle} truncate>
+          <Text size="1" weight="medium" className={styles.entryTitle}>
             {entry.title || "Untitled"}
           </Text>
           {entry.badge && <span className={styles.badge}>{entry.badge}</span>}
@@ -190,7 +190,7 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
               disabled={isCreating}
             >
               {isCreating ? (
-                <Spinner size="1" />
+                <span className={styles.buttonSpinner} aria-hidden="true" />
               ) : (
                 <PlusIcon width={12} height={12} />
               )}
@@ -216,11 +216,7 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
         </Flex>
       )}
 
-      {isLoading && (
-        <Flex align="center" justify="center" py="3">
-          <Spinner size="2" />
-        </Flex>
-      )}
+      {isLoading && <LoadingState label="Loading recent chats" variant="compact" />}
 
       {!isLoading && conversations.length === 0 && (
         <Flex

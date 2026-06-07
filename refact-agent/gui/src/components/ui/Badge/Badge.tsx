@@ -12,6 +12,8 @@ export type BadgeTone =
 
 export interface BadgeProps extends React.ComponentPropsWithoutRef<"span"> {
   tone?: BadgeTone;
+  size?: string;
+  variant?: string;
 }
 
 const toneClass: Record<BadgeTone, string> = {
@@ -23,7 +25,13 @@ const toneClass: Record<BadgeTone, string> = {
   muted: styles.muted,
 };
 
-export function Badge({ tone = "default", className, ...props }: BadgeProps) {
+export function Badge({
+  tone = "default",
+  className,
+  size: _size,
+  variant: _variant,
+  ...props
+}: BadgeProps) {
   return (
     <span className={classNames(styles.badge, toneClass[tone], className)} {...props} />
   );

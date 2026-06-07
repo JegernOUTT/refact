@@ -1,5 +1,5 @@
 import React from "react";
-import { Text } from "@radix-ui/themes";
+import { Text } from "../../components/ui";
 import { Button, Surface } from "../../components/ui";
 import classNames from "classnames";
 import { SKILLS } from "./constants";

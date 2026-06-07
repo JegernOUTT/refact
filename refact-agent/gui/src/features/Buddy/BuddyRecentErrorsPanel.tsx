@@ -1,5 +1,5 @@
 import React from "react";
-import { Text, Tooltip } from "@radix-ui/themes";
+import { Text, Tooltip } from "../../components/ui";
 import { Button, Surface } from "../../components/ui";
 import classNames from "classnames";
 import type { BuddyRuntimeEvent } from "./types";

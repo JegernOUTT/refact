@@ -1,5 +1,5 @@
 import React from "react";
-import { Text, Spinner } from "@radix-ui/themes";
+import { LoadingState, Text } from "../../components/ui";
 import { Surface } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { selectPulse } from "./buddySlice";
@@ -14,9 +14,7 @@ export const BuddyPulseCard: React.FC = () => {
         <Text size="1" weight="bold" color="gray" className={styles.label}>
           PULSE
         </Text>
-        <div className={styles.loading}>
-          <Spinner size="1" />
-        </div>
+        <LoadingState label="Loading pulse" variant="compact" />
       </Surface>
     );
   }

@@ -5,13 +5,21 @@ import { LoaderCircle } from "lucide-react";
 import { Icon } from "../Icon";
 import styles from "./Button.module.css";
 
-export type ButtonVariant = "ghost" | "soft" | "primary" | "danger" | "plain";
-export type ButtonSize = "sm" | "md" | "lg";
+export type ButtonVariant =
+  | "ghost"
+  | "soft"
+  | "primary"
+  | "danger"
+  | "plain"
+  | "solid"
+  | "outline";
+export type ButtonSize = "sm" | "md" | "lg" | "1" | "2" | "3";
 
 export interface ButtonProps extends React.ComponentPropsWithoutRef<"button"> {
   variant?: ButtonVariant;
   size?: ButtonSize;
   loading?: boolean;
+  asChild?: boolean;
   leftIcon?: LucideIcon;
   rightIcon?: LucideIcon;
 }
@@ -29,7 +37,21 @@ export interface ButtonGroupProps extends React.ComponentProps<"div"> {
   children?: React.ReactNode;
 }
 
+function normalizeVariant(variant: ButtonVariant): Exclude<ButtonVariant, "solid" | "outline"> {
+  if (variant === "solid") return "primary";
+  if (variant === "outline") return "soft";
+  return variant;
+}
+
+function normalizeSize(size: ButtonSize): Exclude<ButtonSize, "1" | "2" | "3"> {
+  if (size === "1") return "sm";
+  if (size === "3") return "lg";
+  if (size === "2") return "md";
+  return size;
+}
+
 function getIconTone(variant: ButtonVariant): React.ComponentProps<typeof Icon>["tone"] {
+  variant = normalizeVariant(variant);
   if (variant === "primary") {
     return "accent";
   }
@@ -42,6 +64,7 @@ function getIconTone(variant: ButtonVariant): React.ComponentProps<typeof Icon>[
 }
 
 function getIconSize(size: ButtonSize): React.ComponentProps<typeof Icon>["size"] {
+  size = normalizeSize(size);
   if (size === "sm") {
     return "sm";
   }
@@ -57,6 +80,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   (
     {
       children,
+      asChild: _asChild,
       className,
       disabled,
       leftIcon,
@@ -70,8 +94,10 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     ref,
   ) => {
     const isDisabled = disabled === true || loading;
-    const iconTone = getIconTone(variant);
-    const iconSize = getIconSize(size);
+    const normalizedVariant = normalizeVariant(variant);
+    const normalizedSize = normalizeSize(size);
+    const iconTone = getIconTone(normalizedVariant);
+    const iconSize = getIconSize(normalizedSize);
 
     return (
       <button
@@ -80,8 +106,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         aria-busy={loading ? true : props["aria-busy"]}
         className={classNames(
           styles.button,
-          styles[`variant-${variant}`],
-          styles[`size-${size}`],
+          styles[`variant-`],
+          styles[`size-`],
           "rf-pressable",
           className,
         )}
@@ -129,8 +155,10 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
     ref,
   ) => {
     const isDisabled = disabled === true || loading;
-    const iconTone = getIconTone(variant);
-    const iconSize = getIconSize(size);
+    const normalizedVariant = normalizeVariant(variant);
+    const normalizedSize = normalizeSize(size);
+    const iconTone = getIconTone(normalizedVariant);
+    const iconSize = getIconSize(normalizedSize);
 
     return (
       <button
@@ -140,8 +168,8 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
         aria-label={ariaLabel}
         className={classNames(
           styles.iconButton,
-          styles[`variant-${variant}`],
-          styles[`size-${size}`],
+          styles[`variant-`],
+          styles[`size-`],
           "rf-pressable",
           className,
         )}

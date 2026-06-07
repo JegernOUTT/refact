@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import { Text } from "@radix-ui/themes";
+import { Text } from "../../components/ui";
 import { Badge, Button, Surface } from "../../components/ui";
 import classNames from "classnames";
 import type { BuddyOpportunity } from "./types";

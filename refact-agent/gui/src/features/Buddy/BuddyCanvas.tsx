@@ -1,6 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
-import { Badge } from "@radix-ui/themes";
-import { useTokens } from "../../components/ui";
+import { Badge, useTokens } from "../../components/ui";
 import { createInitialAnimState } from "./state";
 import { renderFrame } from "./canvas/render";
 import {

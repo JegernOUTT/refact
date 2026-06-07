@@ -21,6 +21,7 @@ export * from "./EditableTable";
 export * from "./EmptyState";
 export * from "./ErrorState";
 export * from "./Field";
+export * from "./Flex";
 export { Icon } from "./Icon";
 export { IconButton } from "./Button";
 export type { IconButtonProps } from "./Button";
@@ -83,6 +84,7 @@ export { Switch } from "./Switch";
 export type { SwitchProps } from "./Switch";
 export { Tabs } from "./Tabs";
 export type { TabsContentProps, TabsListProps, TabsProps, TabsTriggerProps } from "./Tabs";
+export * from "./Text";
 export * from "./ToolCard";
 export { Tooltip } from "./Tooltip";
 export type {

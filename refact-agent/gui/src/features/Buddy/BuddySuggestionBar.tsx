@@ -1,5 +1,5 @@
 import React, { useCallback } from "react";
-import { Flex, Text, Button } from "@radix-ui/themes";
+import { Flex, Button, Text } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useDismissBuddySuggestionMutation } from "../../services/refact/buddy";
 import { selectBuddySuggestions, dismissBuddySuggestion } from "./buddySlice";

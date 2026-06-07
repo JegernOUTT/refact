@@ -1,0 +1,88 @@
+.flex {
+  display: flex;
+  min-width: 0;
+}
+
+.direction-row {
+  flex-direction: row;
+}
+
+.direction-column {
+  flex-direction: column;
+}
+
+.align-start {
+  align-items: flex-start;
+}
+
+.align-center {
+  align-items: center;
+}
+
+.align-end {
+  align-items: flex-end;
+}
+
+.align-stretch {
+  align-items: stretch;
+}
+
+.justify-start {
+  justify-content: flex-start;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.justify-end {
+  justify-content: flex-end;
+}
+
+.justify-between {
+  justify-content: space-between;
+}
+
+.gap-0 {
+  gap: 0;
+}
+
+.gap-1 {
+  gap: var(--rf-space-1);
+}
+
+.gap-2 {
+  gap: var(--rf-space-2);
+}
+
+.gap-3 {
+  gap: var(--rf-space-3);
+}
+
+.gap-4 {
+  gap: var(--rf-space-4);
+}
+
+.py-1 {
+  padding-block: var(--rf-space-1);
+}
+
+.py-2 {
+  padding-block: var(--rf-space-2);
+}
+
+.py-3 {
+  padding-block: var(--rf-space-3);
+}
+
+.py-4 {
+  padding-block: var(--rf-space-4);
+}
+
+.wrap-nowrap {
+  flex-wrap: nowrap;
+}
+
+.wrap-wrap {
+  flex-wrap: wrap;
+}
