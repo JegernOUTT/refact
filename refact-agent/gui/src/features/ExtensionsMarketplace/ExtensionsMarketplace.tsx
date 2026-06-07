@@ -1,12 +1,5 @@
 import React, { useMemo, useState } from "react";
-import {
-  Button,
-  Callout,
-  Flex,
-  Heading,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
+import { Button, Callout, Flex, Heading, Text, TextField } from "@radix-ui/themes";
 import {
   ArrowLeftIcon,
   InfoCircledIcon,
@@ -14,7 +7,7 @@ import {
 } from "@radix-ui/react-icons";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
-import { Spinner } from "../../components/Spinner";
+import { EmptyState, ErrorState, LoadingState } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import type { Config } from "../Config/configSlice";
 import type {
@@ -156,7 +149,7 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
   };
 
   return (
-    <PageWrapper host={host} style={{ padding: "var(--space-4)" }}>
+    <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
         <Flex direction="column" gap="4">
           <Flex align="center" gap="3">
@@ -189,7 +182,7 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
             <Text size="2" weight="bold">
               Add GitHub Source by URL
             </Text>
-            <Flex gap="2">
+            <Flex gap="2" className={styles.quickAddRow}>
               <TextField.Root
                 size="2"
                 placeholder="https://github.com/owner/repo"
@@ -220,20 +213,19 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
           </Flex>
 
           {errorMessage && (
-            <Callout.Root color="red" size="1">
-              <Callout.Icon>
-                <InfoCircledIcon />
-              </Callout.Icon>
-              <Callout.Text>{errorMessage}</Callout.Text>
-            </Callout.Root>
+            <ErrorState
+              title={`Failed to load ${kind}s marketplace`}
+              description={errorMessage}
+            />
           )}
 
-          {isLoading && <Spinner spinning />}
+          {isLoading && <LoadingState label={`Loading ${kind}s marketplace`} />}
 
           {!isLoading && !errorMessage && filteredItems.length === 0 && (
-            <Text size="2" color="gray" align="center">
-              No {kind}s found
-            </Text>
+            <EmptyState
+              title={`No ${kind}s found`}
+              description="Try another search term or source."
+            />
           )}
 
           {!isLoading && filteredItems.length > 0 && (

@@ -16,6 +16,7 @@ import {
 } from "@radix-ui/react-icons";
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
+import { EmptyState, ErrorState, LoadingState } from "../../components/ui";
 import {
   useGetMarketplaceQuery,
   useGetInstalledServersQuery,
@@ -31,7 +32,6 @@ import { SourceSelector } from "./SourceSelector";
 import { SourceSettings } from "./SourceSettings";
 import styles from "./MCPMarketplace.module.css";
 import type { Config } from "../Config/configSlice";
-import { Spinner } from "../../components/Spinner";
 import { useAppDispatch } from "../../hooks";
 import { integrationsApi } from "../../services/refact/integrations";
 import { change } from "../Pages/pagesSlice";
@@ -164,7 +164,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
 
   if (selectedServer) {
     return (
-      <PageWrapper host={host} style={{ padding: "var(--space-4)" }}>
+      <PageWrapper host={host}>
         <ScrollArea scrollbars="vertical" fullHeight>
           <ServerDetail
             server={selectedServer}
@@ -176,7 +176,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   }
 
   return (
-    <PageWrapper host={host} style={{ padding: "var(--space-4)" }}>
+    <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
         <Flex direction="column" gap="4">
           <Flex align="center" gap="3">
@@ -188,7 +188,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           </Flex>
 
           <Flex gap="2" align="center">
-            <Box style={{ flex: 1 }}>
+            <Box className={styles.searchWrap}>
               <TextField.Root
                 size="2"
                 placeholder="Search servers…"
@@ -216,7 +216,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
               <Badge
                 color={selectedTag === null ? "blue" : "gray"}
                 variant={selectedTag === null ? "solid" : "soft"}
-                style={{ cursor: "pointer" }}
+                className={styles.tagFilter}
                 onClick={() => setSelectedTag(null)}
               >
                 All
@@ -226,7 +226,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
                   key={tag}
                   color={selectedTag === tag ? "blue" : "gray"}
                   variant={selectedTag === tag ? "solid" : "soft"}
-                  style={{ cursor: "pointer" }}
+                  className={styles.tagFilter}
                   onClick={() =>
                     setSelectedTag(selectedTag === tag ? null : tag)
                   }
@@ -256,20 +256,19 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           )}
 
           {errorMessage && (
-            <Callout.Root color="red" size="1">
-              <Callout.Icon>
-                <InfoCircledIcon />
-              </Callout.Icon>
-              <Callout.Text>{errorMessage}</Callout.Text>
-            </Callout.Root>
+            <ErrorState
+              title="Failed to load MCP marketplace"
+              description={errorMessage}
+            />
           )}
 
-          {isLoading && <Spinner spinning />}
+          {isLoading && <LoadingState label="Loading MCP marketplace" />}
 
           {!isLoading && !errorMessage && filteredServers.length === 0 && (
-            <Text size="2" color="gray" align="center">
-              No servers found
-            </Text>
+            <EmptyState
+              title="No servers found"
+              description="Try another search term, tag, or source."
+            />
           )}
 
           {!isLoading && filteredServers.length > 0 && (

@@ -66,7 +66,7 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
         : null;
 
   return (
-    <Flex direction="column" gap="4" style={{ height: "100%" }}>
+    <Flex direction="column" gap="4" className={styles.detailRoot}>
       <Flex align="center" gap="2">
         <Button variant="ghost" size="1" onClick={onBack}>
           <ArrowLeftIcon />
@@ -74,13 +74,13 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
         </Button>
       </Flex>
 
-      <Flex align="center" gap="3">
+      <Flex align="center" gap="3" className={styles.detailHeader}>
         <Box className={styles.serverIconPlaceholderLarge}>
           <Text size="6" weight="bold">
             {server.name.charAt(0).toUpperCase()}
           </Text>
         </Box>
-        <Flex direction="column" gap="1">
+        <Flex direction="column" gap="1" className={styles.detailTitle}>
           <Heading size="4">{server.name}</Heading>
           <Text size="2" color="gray">
             by {server.publisher}
@@ -171,7 +171,7 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
         <Button
           onClick={() => void handleInstall()}
           disabled={isLoading}
-          style={{ alignSelf: "flex-start" }}
+          className={styles.alignStart}
         >
           {isLoading ? "Installing…" : "Install"}
         </Button>

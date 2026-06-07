@@ -1,54 +1,100 @@
 .serverGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: var(--rf-space-3);
+  min-width: 0;
 }
 
 .serverCard {
-  border: 1px solid var(--gray-5);
-  border-radius: var(--radius-3);
-  padding: var(--space-3);
-  background: var(--color-panel-solid);
   height: 100%;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  padding: var(--rf-space-3);
+  transition:
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+  animation: marketplace-card-enter var(--rf-dur-slow) var(--rf-ease-standard) both;
 }
 
 .serverCard:hover {
-  border-color: var(--accent-8);
+  border-color: var(--rf-color-accent);
+  background: var(--rf-surface-2);
+  transform: translateY(-1px);
+}
+
+.serverCardInstalling {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  animation: marketplace-install-pulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
+}
+
+.serverGrid > *:nth-child(2) {
+  animation-delay: var(--rf-stagger);
+}
+
+.serverGrid > *:nth-child(3) {
+  animation-delay: calc(var(--rf-stagger) * 2);
+}
+
+.serverGrid > *:nth-child(4) {
+  animation-delay: calc(var(--rf-stagger) * 3);
+}
+
+.serverGrid > *:nth-child(n + 5) {
+  animation-delay: calc(var(--rf-stagger) * 4);
+}
+
+.cardColumn,
+.cardTitle,
+.cardMeta,
+.cardFooter,
+.cardActionRow,
+.searchWrap,
+.pagination {
+  min-width: 0;
+}
+
+.searchWrap {
+  flex: 1;
+}
+
+.cardTitle,
+.cardMeta {
+  flex: 1;
 }
 
 .serverIcon {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-2);
+  width: var(--rf-space-6);
+  height: var(--rf-space-6);
+  border-radius: var(--rf-radius-ctl);
   object-fit: contain;
   flex-shrink: 0;
 }
 
 .serverIconPlaceholder {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-2);
-  background: var(--accent-3);
+  width: var(--rf-space-6);
+  height: var(--rf-space-6);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-color-accent-soft);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .serverIconPlaceholderLarge {
   width: 56px;
   height: 56px;
-  border-radius: var(--radius-3);
-  background: var(--accent-3);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-color-accent-soft);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--accent-11);
+  color: var(--rf-color-accent);
 }
 
 .serverDescription {
@@ -60,11 +106,11 @@
 }
 
 .sourceBadge {
-  font-size: var(--font-size-1);
-  padding: 0 var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--accent-3);
-  color: var(--accent-11);
+  font-size: var(--rf-text-1);
+  padding: 0 var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
 .sourceTab {
@@ -76,18 +122,85 @@
   opacity: 0.8;
 }
 
+.sourceTabDisabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  user-select: none;
+}
+
+.tagFilter {
+  cursor: pointer;
+  user-select: none;
+}
+
 .sourceBadgeInCard {
-  font-size: var(--font-size-1);
+  font-size: var(--rf-text-1);
 }
 
 .verifiedBadge {
-  color: var(--green-9);
-  font-size: var(--font-size-1);
+  color: var(--rf-color-success);
+  font-size: var(--rf-text-1);
 }
 
 .pagination {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
+}
+
+.grow {
+  flex: 1;
+}
+
+.successText {
+  color: var(--rf-color-success);
+}
+
+.detailRoot {
+  height: 100%;
+  min-width: 0;
+}
+
+.detailHeader {
+  min-width: 0;
+}
+
+.detailTitle {
+  min-width: 0;
+}
+
+.alignStart {
+  align-self: flex-start;
+}
+
+@keyframes marketplace-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(var(--rf-space-2));
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes marketplace-install-pulse {
+  50% {
+    transform: translateY(-1px) scale(1.01);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .serverCard,
+  .serverCardInstalling,
+  .serverGrid > * {
+    transition: none;
+    animation: none;
+  }
+
+  .serverCard:hover {
+    transform: none;
+  }
 }

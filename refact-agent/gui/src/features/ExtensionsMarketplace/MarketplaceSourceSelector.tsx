@@ -40,12 +40,13 @@ export const MarketplaceSourceSelector: React.FC<
                 : "gray"
           }
           variant={selectedSource === source.id ? "solid" : "soft"}
-          className={styles.sourceTab}
+          className={
+            source.enabled ? styles.sourceTab : styles.sourceTabDisabled
+          }
           onClick={() =>
             source.enabled &&
             onSelectSource(selectedSource === source.id ? null : source.id)
           }
-          style={{ opacity: source.enabled ? 1 : 0.5 }}
         >
           {source.label}
           {source.item_count !== undefined && ` (${source.item_count})`}

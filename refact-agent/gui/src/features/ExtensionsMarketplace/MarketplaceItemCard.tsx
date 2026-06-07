@@ -1,6 +1,8 @@
 import React from "react";
-import { Badge, Box, Button, Flex, Text } from "@radix-ui/themes";
+import classNames from "classnames";
+import { Badge, Button, Flex, Text } from "@radix-ui/themes";
 import { CheckIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
+import { Card as KitCard } from "../../components/ui";
 import type { ExtensionMarketplaceItem } from "../../services/refact/extensionsMarketplace";
 import styles from "./ExtensionsMarketplace.module.css";
 
@@ -16,10 +18,12 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
   onInstall,
 }) => {
   return (
-    <Box className={styles.card}>
-      <Flex direction="column" gap="2" height="100%">
-        <Flex align="center" gap="2">
-          <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
+    <KitCard
+      className={classNames(styles.card, isInstalling && styles.cardInstalling)}
+    >
+      <Flex direction="column" gap="2" height="100%" className={styles.cardColumn}>
+        <Flex align="center" gap="2" className={styles.cardMeta}>
+          <Flex direction="column" gap="1" className={styles.cardTitle}>
             <Text size="2" weight="bold" truncate>
               {item.name}
             </Text>
@@ -52,7 +56,13 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
           </Flex>
         )}
 
-        <Flex gap="2" mt="auto" align="center" wrap="wrap">
+        <Flex
+          gap="2"
+          mt="auto"
+          align="center"
+          wrap="wrap"
+          className={styles.cardFooter}
+        >
           <Badge
             color="gray"
             variant="soft"
@@ -63,20 +73,20 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
           </Badge>
           {item.installed_scopes.length > 0 && (
             <Flex align="center" gap="1">
-              <CheckIcon color="var(--green-9)" />
-              <Text size="1" color="green">
+              <CheckIcon color="currentColor" className={styles.successText} />
+              <Text size="1" className={styles.successText}>
                 Installed: {item.installed_scopes.join(", ")}
               </Text>
             </Flex>
           )}
         </Flex>
 
-        <Flex gap="2" mt="2" align="center">
+        <Flex gap="2" mt="2" align="center" className={styles.cardActionRow}>
           <Button
             size="1"
             onClick={() => onInstall(item)}
             disabled={isInstalling}
-            style={{ flex: 1 }}
+            className={styles.grow}
           >
             {isInstalling ? "Installing…" : "Install"}
           </Button>
@@ -93,6 +103,6 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
           )}
         </Flex>
       </Flex>
-    </Box>
+    </KitCard>
   );
 };

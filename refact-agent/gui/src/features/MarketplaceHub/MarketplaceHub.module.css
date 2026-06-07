@@ -1,7 +1,8 @@
 .grid {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: var(--rf-space-3);
+  min-width: 0;
 }
 
 .card {
@@ -9,40 +10,92 @@
   cursor: pointer;
   display: block;
   width: 100%;
-  border: 1px solid var(--gray-a5);
-  border-radius: var(--radius-3);
-  background: var(--color-surface);
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
   transition:
-    border-color 0.15s,
-    background 0.15s;
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+  animation: marketplace-card-enter var(--rf-dur-slow) var(--rf-ease-standard) both;
 }
 
 .card:hover {
-  border-color: var(--accent-a8);
-  background: var(--gray-a2);
+  border-color: var(--rf-color-accent);
+  background: var(--rf-surface-2);
+  transform: translateY(-1px);
+}
+
+.card:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-space-1);
+}
+
+.grid > *:nth-child(2) {
+  animation-delay: var(--rf-stagger);
+}
+
+.grid > *:nth-child(3) {
+  animation-delay: calc(var(--rf-stagger) * 2);
+}
+
+.grid > *:nth-child(4) {
+  animation-delay: calc(var(--rf-stagger) * 3);
 }
 
 .cardBody {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--rf-space-3) var(--rf-space-4);
+  min-width: 0;
 }
 
 .cardHeader {
   position: relative;
+  min-width: 0;
 }
 
 .cardIcon {
-  color: var(--accent-9);
+  color: var(--rf-color-accent);
   display: flex;
   align-items: center;
+  flex-shrink: 0;
+}
+
+.cardTitle {
+  min-width: 0;
 }
 
 .cardArrow {
   margin-left: auto;
-  color: var(--gray-a9);
+  color: var(--rf-color-muted);
   display: flex;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .cardDesc {
-  line-height: 1.5;
+  line-height: var(--rf-line);
+}
+
+@keyframes marketplace-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(var(--rf-space-2));
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .grid > * {
+    transition: none;
+    animation: none;
+  }
+
+  .card:hover {
+    transform: none;
+  }
 }

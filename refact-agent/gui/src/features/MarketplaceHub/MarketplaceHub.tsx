@@ -10,6 +10,7 @@ import {
 } from "@radix-ui/react-icons";
 import { PageWrapper } from "../../components/PageWrapper";
 import { ScrollArea } from "../../components/ScrollArea";
+import { Surface } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
 import type { Config } from "../Config/configSlice";
@@ -68,7 +69,7 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
   ];
 
   return (
-    <PageWrapper host={host} style={{ padding: "var(--space-4)" }}>
+    <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
         <Flex direction="column" gap="4">
           <Flex align="center" gap="3">
@@ -87,7 +88,9 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
 
           <div className={styles.grid}>
             {cards.map((card) => (
-              <button
+              <Surface
+                as="button"
+                variant="surface-1"
                 key={card.title}
                 className={styles.card}
                 onClick={card.action}
@@ -96,7 +99,7 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
                 <Flex direction="column" gap="2" className={styles.cardBody}>
                   <Flex align="center" gap="2" className={styles.cardHeader}>
                     <span className={styles.cardIcon}>{card.icon}</span>
-                    <Text size="3" weight="bold">
+                    <Text size="3" weight="bold" truncate className={styles.cardTitle}>
                       {card.title}
                     </Text>
                     <span className={styles.cardArrow}>
@@ -107,7 +110,7 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
                     {card.description}
                   </Text>
                 </Flex>
-              </button>
+              </Surface>
             ))}
           </div>
         </Flex>

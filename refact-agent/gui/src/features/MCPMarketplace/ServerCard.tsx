@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import classNames from "classnames";
 import { Badge, Box, Button, Flex, Text } from "@radix-ui/themes";
 import {
   CheckIcon,
@@ -6,6 +7,7 @@ import {
   GearIcon,
   StarFilledIcon,
 } from "@radix-ui/react-icons";
+import { Card as KitCard } from "../../components/ui";
 import type { MCPServer } from "../../services/refact/mcpMarketplace";
 import styles from "./MCPMarketplace.module.css";
 
@@ -33,9 +35,14 @@ export const ServerCard: React.FC<ServerCardProps> = ({
   const [imgError, setImgError] = useState(false);
 
   return (
-    <Box className={styles.serverCard}>
-      <Flex direction="column" gap="2" height="100%">
-        <Flex align="center" gap="2">
+    <KitCard
+      className={classNames(
+        styles.serverCard,
+        isInstalling && styles.serverCardInstalling,
+      )}
+    >
+      <Flex direction="column" gap="2" height="100%" className={styles.cardColumn}>
+        <Flex align="center" gap="2" className={styles.cardMeta}>
           {server.icon_url && !imgError ? (
             <img
               src={server.icon_url}
@@ -50,7 +57,7 @@ export const ServerCard: React.FC<ServerCardProps> = ({
               </Text>
             </Box>
           )}
-          <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
+          <Flex direction="column" gap="1" className={styles.cardTitle}>
             <Text size="2" weight="bold" truncate>
               {server.name}
             </Text>
@@ -77,7 +84,13 @@ export const ServerCard: React.FC<ServerCardProps> = ({
           </Flex>
         )}
 
-        <Flex gap="2" mt="auto" align="center" wrap="wrap">
+        <Flex
+          gap="2"
+          mt="auto"
+          align="center"
+          wrap="wrap"
+          className={styles.cardFooter}
+        >
           {server.verified && (
             <Flex align="center" gap="1" className={styles.verifiedBadge}>
               <StarFilledIcon width={10} height={10} />
@@ -100,12 +113,12 @@ export const ServerCard: React.FC<ServerCardProps> = ({
             </Badge>
           )}
         </Flex>
-        <Flex gap="2" mt="2" align="center">
+        <Flex gap="2" mt="2" align="center" className={styles.cardActionRow}>
           {isInstalled ? (
             <>
-              <Flex align="center" gap="1" style={{ flex: 1 }}>
-                <CheckIcon color="var(--green-9)" />
-                <Text size="1" color="green">
+              <Flex align="center" gap="1" className={styles.grow}>
+                <CheckIcon color="currentColor" className={styles.successText} />
+                <Text size="1" className={styles.successText}>
                   Installed
                 </Text>
               </Flex>
@@ -125,7 +138,7 @@ export const ServerCard: React.FC<ServerCardProps> = ({
               size="1"
               onClick={() => onInstall(server)}
               disabled={isInstalling}
-              style={{ flex: 1 }}
+              className={styles.grow}
             >
               {isInstalling ? "Installing…" : "Install"}
             </Button>
@@ -139,6 +152,6 @@ export const ServerCard: React.FC<ServerCardProps> = ({
           </Button>
         </Flex>
       </Flex>
-    </Box>
+    </KitCard>
   );
 };

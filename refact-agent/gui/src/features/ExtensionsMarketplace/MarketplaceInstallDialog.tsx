@@ -77,7 +77,7 @@ export const MarketplaceInstallDialog: React.FC<
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 440 }}>
+      <Dialog.Content className={styles.installDialogContent}>
         <Dialog.Title>Install {item?.kind}</Dialog.Title>
         <Flex direction="column" gap="3">
           <Flex direction="column" gap="1">

@@ -87,7 +87,7 @@ export const MarketplaceSourceSettings: React.FC<
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 520 }}>
+      <Dialog.Content className={styles.sourceSettingsDialogContent}>
         <Dialog.Title>Marketplace Sources</Dialog.Title>
         <Flex direction="column" gap="1">
           {sources.map((source) => (

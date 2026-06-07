@@ -73,7 +73,7 @@ const SmitheryKeyForm: React.FC<SmitheryKeyFormProps> = ({ source }) => {
           placeholder="Enter API Key…"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
-          style={{ flex: 1 }}
+          className={styles.grow}
         />
         <Button
           size="1"
@@ -178,7 +178,7 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content style={{ maxWidth: 480 }}>
+      <Dialog.Content className={styles.dialogContent}>
         <Dialog.Title>Marketplace Sources</Dialog.Title>
         <Flex direction="column" gap="1">
           {sources.map((source) => (
