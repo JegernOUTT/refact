@@ -10,7 +10,7 @@ AI coding assistant: Rust engine (LSP/HTTP server) + React chat UI + IDE plugins
 | Agent GUI | `refact-agent/gui/` | TypeScript/React 18 | ✅ `refact-agent/gui/AGENTS.md` |
 | VSCode Extension | `plugins/vscode/` | TypeScript | — |
 | JetBrains Plugin | `plugins/intellij/` | Kotlin, Gradle | — |
-| Documentation | `docs/` | Astro (static site) | — |
+| Documentation | GitHub Wiki | https://github.com/JegernOUTT/refact/wiki | — |
 | IDE metadata | `.idea/` | IntelliJ project config | keep local/editor files out of commits; `.idea/workspace.xml` is ignored by `.gitignore` |
 | Agent notes | `.agents/` | onboarding notes | checked for repo-specific guidance when present |
 | Codex workspace | `.codex/` | Codex config/data | checked for repo-specific guidance when present |
@@ -73,7 +73,6 @@ If you changed **both**: run both sets.
 | `agent_engine_build` | `refact-agent/engine/**` | `cargo test --release` on 7 targets (Win/Linux/macOS × x86_64/aarch64) |
 | `agent_gui_build` | `refact-agent/gui/**` | `npm test` → `format:check` → `types` → `lint` → `build` (Node LTS + latest) |
 | `server_build` | `refact-server/**` | Docker multi-arch build |
-| `docs_build` | `docs/**` | Docker build + push |
 | `plugin_vscode_build` | `plugins/vscode/**`, engine, GUI | VS Code extension packaging against same-commit engine/GUI artifacts |
 | `plugin_intellij_build` | `plugins/intellij/**`, engine, GUI | JetBrains plugin build against same-commit engine/GUI artifacts |
 
@@ -88,7 +87,7 @@ slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
 
 | Script | Purpose |
 |---|---|
-| `changed.sh [base]` | Print changed components (engine/gui/vscode/intellij/docs/infra) vs base (default `origin/main`) |
+| `changed.sh [base]` | Print changed components (engine/gui/vscode/intellij/infra) vs base (default `origin/main`) |
 | `check.sh [components...]` | Run pre-push checks only for changed components. Auto-detects; runs in the current worktree |
 | `ci-status.sh <run-url\|id>` | GitHub Actions run status: per-job pass/fail + pinpointed failed steps |
 | `ci-logs.sh <run-url\|id> [N]` | Tail (default 300) of each **failed** job's log. Use this, not `gh run view --log-failed` (unreliable for reusable-workflow jobs) |

@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Documentation
-    url: https://docs.refact.ai/
+    url: https://github.com/JegernOUTT/refact/wiki
     about: Read the Refact documentation for setup, configuration, and usage guidance.
