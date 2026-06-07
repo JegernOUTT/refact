@@ -17,7 +17,7 @@ import {
   setAutoApproveEditingTools,
 } from "../../features/Chat";
 import { PATCH_LIKE_FUNCTIONS } from "./constants";
-import { Badge, Button, Icon, IconButton, Surface } from "../ui";
+import { Badge, Button, Icon, Surface } from "../ui";
 
 type ToolConfirmationProps = {
   pauseReasons: ToolConfirmationPauseReason[];
@@ -416,13 +416,14 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
               Allow Once
             </Button>
           </div>
-          <IconButton
-            aria-label="Stop"
-            icon={OctagonX}
+          <Button
+            leftIcon={OctagonX}
             variant="danger"
             size="sm"
             onClick={rejectToolUsage}
-          />
+          >
+            Stop
+          </Button>
         </div>
       </div>
     </Surface>

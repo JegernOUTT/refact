@@ -524,12 +524,12 @@ describe("ActivityFeed_filter_chips_filter_by_workflow_prefix", () => {
       { preloadedState: CONFIG_STATE },
     );
 
-    await user.click(screen.getByRole("radio", { name: "refact_* refact_*" }));
+    await user.click(screen.getByRole("radio", { name: "refact_*" }));
 
     expect(screen.getByText("Compile sniffer")).toBeInTheDocument();
     expect(screen.queryByText("Memory garden")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("radio", { name: "buddy_* buddy_*" }));
+    await user.click(screen.getByRole("radio", { name: "buddy_*" }));
 
     expect(screen.queryByText("Compile sniffer")).not.toBeInTheDocument();
     expect(screen.getByText("Memory garden")).toBeInTheDocument();
