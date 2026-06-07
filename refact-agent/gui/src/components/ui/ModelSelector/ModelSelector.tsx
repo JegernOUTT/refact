@@ -248,11 +248,15 @@ function ModelRow({ model, onSelect, selected, selectedRef }: ModelRowProps) {
       <span className={styles.rowContent}>
         <span className={styles.rowHeader}>
           <span className={styles.modelName}>{model.displayName}</span>
-          {model.badges?.map((badge) => (
-            <Badge key={badge} className={styles.badge} tone={badgeTone[badge]}>
-              {badgeLabel[badge]}
-            </Badge>
-          ))}
+          {model.badges?.length ? (
+            <span className={styles.badgeGroup}>
+              {model.badges.map((badge) => (
+                <Badge key={badge} className={styles.badge} tone={badgeTone[badge]}>
+                  {badgeLabel[badge]}
+                </Badge>
+              ))}
+            </span>
+          ) : null}
         </span>
         <span className={styles.metaRow}>
           {model.pricing ? (
@@ -322,7 +326,12 @@ export function ModelSelector({
           <span className={styles.triggerText}>{currentLabel}</span>
         </Button>
       </Popover.Trigger>
-      <Popover.Content align="start" maxHeight="min(520px, calc(100dvh - var(--rf-space-6)))" maxWidth="420px">
+      <Popover.Content
+        align="start"
+        maxHeight="min(520px, calc(100dvh - var(--rf-space-6)))"
+        maxWidth="420px"
+        scrollable={false}
+      >
         <ModelSelectorList
           {...props}
           allowUnset={allowUnset}

@@ -17,6 +17,7 @@ export type SheetTriggerProps = DialogPrimitive.DialogTriggerProps;
 export type SheetCloseProps = DialogPrimitive.DialogCloseProps;
 export interface SheetContentProps extends ModalOverlayContentProps {
   side?: SheetSide;
+  scrollable?: boolean;
 }
 export type SheetTitleProps = DialogPrimitive.DialogTitleProps;
 export type SheetDescriptionProps = DialogPrimitive.DialogDescriptionProps;
@@ -29,7 +30,17 @@ const SheetTrigger = DialogPrimitive.Trigger;
 const SheetClose = DialogPrimitive.Close;
 
 const SheetContent = React.forwardRef<HTMLDivElement, SheetContentProps>(
-  ({ className, maxWidth, maxHeight, side = "bottom", children }, ref) => {
+  (
+    {
+      className,
+      maxWidth,
+      maxHeight,
+      scrollable = true,
+      side = "bottom",
+      children,
+    },
+    ref,
+  ) => {
     return (
       <DialogPrimitive.Portal container={document.body}>
         <Portal>
@@ -38,10 +49,23 @@ const SheetContent = React.forwardRef<HTMLDivElement, SheetContentProps>(
         <Portal>
           <DialogPrimitive.Content
             ref={ref}
-            className={classNames(styles.content, styles[side], "rf-popover-motion", className)}
+            className={classNames(
+              styles.content,
+              styles[side],
+              !scrollable && styles.contentNoScroll,
+              "rf-popover-motion",
+              className,
+            )}
             style={overlayStyle(maxWidth, maxHeight)}
           >
-            <div className={styles.inner}>{children}</div>
+            <div
+              className={classNames(
+                styles.inner,
+                !scrollable && styles.innerNoScroll,
+              )}
+            >
+              {children}
+            </div>
           </DialogPrimitive.Content>
         </Portal>
       </DialogPrimitive.Portal>

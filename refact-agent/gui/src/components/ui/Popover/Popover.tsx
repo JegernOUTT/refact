@@ -29,7 +29,9 @@ export interface PopoverProps extends OverlayRootProps {
   forceSheet?: boolean;
 }
 export type PopoverTriggerProps = PopoverPrimitive.PopoverTriggerProps;
-export type PopoverContentProps = AnchoredOverlayContentProps;
+export interface PopoverContentProps extends AnchoredOverlayContentProps {
+  scrollable?: boolean;
+}
 export type PopoverCloseProps = PopoverPrimitive.PopoverCloseProps;
 
 const useOpenState = ({
@@ -101,6 +103,7 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
       align = "center",
       sideOffset = 8,
       collisionPadding = 12,
+      scrollable = true,
       children,
     },
     ref,
@@ -114,7 +117,11 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
     if (renderSheet && context) {
       return (
         <Sheet open={context.open} onOpenChange={context.onOpenChange}>
-          <Sheet.Content maxWidth={maxWidth} maxHeight={maxHeight}>
+          <Sheet.Content
+            maxWidth={maxWidth}
+            maxHeight={maxHeight}
+            scrollable={scrollable}
+          >
             {children}
           </Sheet.Content>
         </Sheet>
@@ -130,10 +137,22 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
             align={align}
             sideOffset={sideOffset}
             collisionPadding={collisionPadding}
-            className={classNames(styles.content, "rf-popover-motion", className)}
+            className={classNames(
+              styles.content,
+              !scrollable && styles.contentNoScroll,
+              "rf-popover-motion",
+              className,
+            )}
             style={overlayStyle(maxWidth, maxHeight)}
           >
-            <div className={styles.inner}>{children}</div>
+            <div
+              className={classNames(
+                styles.inner,
+                !scrollable && styles.innerNoScroll,
+              )}
+            >
+              {children}
+            </div>
           </PopoverPrimitive.Content>
         </Portal>
       </PopoverPrimitive.Portal>

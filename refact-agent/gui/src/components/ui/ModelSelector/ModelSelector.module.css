@@ -11,10 +11,13 @@
 }
 
 .listRoot {
-  display: grid;
+  display: flex;
   gap: var(--rf-space-3);
+  min-height: 0;
   min-width: 0;
   width: min(100%, 420px);
+  max-height: min(520px, calc(100dvh - var(--rf-space-6)));
+  flex-direction: column;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
 }
@@ -55,8 +58,9 @@
 .scrollArea {
   display: grid;
   gap: var(--rf-space-3);
+  min-height: 0;
   min-width: 0;
-  max-height: min(420px, calc(100dvh - var(--rf-space-6)));
+  flex: 1 1 auto;
   overflow-y: auto;
   padding-right: var(--rf-space-1);
 }
@@ -88,13 +92,17 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-3);
-  padding: var(--rf-space-3);
+  padding: var(--rf-space-2) var(--rf-space-2);
   color: var(--rf-color-fg);
   text-align: left;
   background: transparent;
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
+  border: 0;
+  border-radius: 0;
   cursor: pointer;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .row:focus-visible {
@@ -110,38 +118,52 @@
 
 .row:hover:not(:disabled) {
   background: var(--rf-surface-1);
-  border-color: var(--rf-border-strong);
 }
 
 .row[data-selected="true"] {
   background: var(--rf-color-accent-soft);
-  border-color: var(--rf-color-accent);
+  color: var(--rf-color-accent);
 }
 
 .rowContent {
   display: grid;
-  gap: var(--rf-space-2);
+  flex: 1 1 auto;
+  gap: var(--rf-space-1);
   min-width: 0;
 }
 
 .rowHeader {
   display: flex;
-  flex-wrap: wrap;
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
 }
 
 .modelName {
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   overflow-wrap: anywhere;
   font-size: var(--rf-text-3);
   font-weight: 700;
   line-height: var(--rf-line);
 }
 
+.badgeGroup {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
 .badge {
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 .metaRow {
@@ -204,7 +226,4 @@
   padding: var(--rf-space-4);
   color: var(--rf-color-muted);
   text-align: center;
-  background: var(--rf-surface-1);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
 }

@@ -389,212 +389,212 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
         className={styles.content}
         maxHeight="min(640px, calc(100dvh - 2 * var(--rf-space-5)))"
         maxWidth="440px"
+        scrollable={false}
         side="top"
         sideOffset={8}
       >
-        <div className={`${styles.section} ${styles.modelSection}`}>
-          <KitModelSelector
-            disabled={isInteractionDisabled}
-            groups={modelSelectorGroups}
-            models={modelSelectorOptions}
-            value={caps.currentModel}
-            variant="inline"
-            onAddNewModel={handleAddNewModel}
-            onSelect={handleModelSelect}
-          />
-        </div>
+        <div className={styles.settingsLayout}>
+          <div className={`${styles.section} ${styles.modelSection}`}>
+            <KitModelSelector
+              disabled={isInteractionDisabled}
+              groups={modelSelectorGroups}
+              models={modelSelectorOptions}
+              value={caps.currentModel}
+              variant="inline"
+              onAddNewModel={handleAddNewModel}
+              onSelect={handleModelSelect}
+            />
+          </div>
 
-        {/* Model Details */}
-        {selectedModelDetail &&
-          (selectedModelDetail.nCtx || selectedModelDetail.pricing) && (
-            <>
-              <Separator size="4" />
-              <Flex gap="2" align="center" px="2" py="1">
-                {selectedModelDetail.nCtx && (
-                  <Text size="1" color="gray">
-                    {formatContextWindow(selectedModelDetail.nCtx)} context
-                  </Text>
-                )}
-                {selectedModelDetail.pricing && (
-                  <>
-                    <Text size="1" color="gray">
-                      ·
-                    </Text>
-                    <Text size="1" color="gray">
-                      {selectedModelDetail.pricing.prompt}/
-                      {selectedModelDetail.pricing.output} per 1M tokens
-                    </Text>
-                  </>
-                )}
-              </Flex>
-            </>
-          )}
-
-        <Separator size="4" />
-
-        {/* Max Tokens Section with Slider */}
-        {selectedModelDetail && (
-          <>
-            <div className={styles.section}>
-              <Flex justify="between" align="center" mb="2">
-                <Text
-                  size="1"
-                  color="gray"
-                  weight="medium"
-                  className={styles.sectionHeader}
-                >
-                  Max tokens
-                </Text>
-                <Text size="1" weight="medium">
-                  {displayMaxTokens ?? `${defaultMaxTokens} (default)`}
-                </Text>
-              </Flex>
-              <Flex align="center" gap="2" className={styles.sliderContainer}>
-                <Text size="1" color="gray">
-                  1K
-                </Text>
-                <Slider
-                  size="1"
-                  min={MIN_OUTPUT_TOKENS}
-                  max={maxOutputTokens}
-                  step={MIN_OUTPUT_TOKENS}
-                  value={[clampedMaxTokens]}
-                  onValueChange={(values) => setLocalMaxTokens(values[0])}
-                  onValueCommit={(values) => {
-                    dispatch(setMaxTokens({ chatId, value: values[0] }));
-                    setLocalMaxTokens(null);
-                  }}
-                  disabled={isInteractionDisabled}
-                  className={styles.slider}
-                />
-                <Text size="1" color="gray">
-                  {formatTokens(maxOutputTokens)}
-                </Text>
-                {threadMaxTokens != null && (
-                  <button
-                    type="button"
-                    className={styles.resetButton}
-                    onClick={handleMaxTokensReset}
-                    disabled={isInteractionDisabled}
-                    aria-label="Reset max tokens"
-                  >
-                    <Cross1Icon />
-                  </button>
-                )}
-              </Flex>
-            </div>
-            {supportsBoostReasoning && <Separator size="4" />}
-          </>
-        )}
-
-        {/* Thinking Section */}
-        {supportsBoostReasoning && (
-          <div className={styles.section}>
-            <Flex align="center" justify="between" gap="3">
-              <Flex align="center" gap="1">
-                <Text size="1">
-                  <ReasoningIcon />
-                </Text>
-                <Text size="1" weight="medium">
-                  Reasoning
-                </Text>
-              </Flex>
-              <Switch
-                size="1"
-                checked={isBoostReasoningEnabled}
-                onCheckedChange={handleThinkingToggle}
-                disabled={thinkingDisabled}
-              />
-            </Flex>
-
-            {isStartedChat && (
-              <Callout.Root color="amber" size="1" mt="2">
-                <Callout.Text>
-                  Changing reasoning mid-chat may break prompt caching (if
-                  enabled) and make the next turn much more expensive.
-                </Callout.Text>
-              </Callout.Root>
-            )}
-
-            {isBoostReasoningEnabled && selectedModelDetail && (
-              <>
-                {/* Reasoning effort options (transparent) */}
-                {selectedModelDetail.reasoningEffortOptions &&
-                  selectedModelDetail.reasoningEffortOptions.length > 0 && (
-                    <Flex align="center" justify="between" gap="2" mt="2">
+          <div className={styles.settingsFooter}>
+            {selectedModelDetail &&
+              (selectedModelDetail.nCtx || selectedModelDetail.pricing) && (
+                <>
+                  <Separator size="4" />
+                  <Flex gap="2" align="center" px="2" py="1">
+                    {selectedModelDetail.nCtx && (
                       <Text size="1" color="gray">
-                        Effort
+                        {formatContextWindow(selectedModelDetail.nCtx)} context
                       </Text>
-                      <Flex gap="1">
-                        {selectedModelDetail.reasoningEffortOptions.map(
-                          (level) => (
-                            <button
-                              key={level}
-                              type="button"
-                              className={`${styles.effortButton} ${
-                                (threadReasoningEffort ?? "medium") === level
-                                  ? styles.effortButtonActive
-                                  : ""
-                              }`}
-                              onClick={() =>
-                                dispatch(
-                                  setReasoningEffort({
-                                    chatId,
-                                    value: level as ReasoningEffort,
-                                  }),
-                                )
-                              }
-                              disabled={isInteractionDisabled}
-                            >
-                              <Text size="1">{level}</Text>
-                            </button>
-                          ),
-                        )}
-                      </Flex>
-                    </Flex>
-                  )}
-                {/* Thinking budget slider */}
-                {selectedModelDetail.supportsThinkingBudget && (
-                  <Flex direction="column" gap="1" mt="2">
-                    <Flex align="center" justify="between">
-                      <Text size="1" color="gray">
-                        Thinking tokens
-                      </Text>
-                      <Text size="1" weight="medium">
-                        {displayThinkingBudget ?? 16384}
-                      </Text>
-                    </Flex>
-                    <Flex align="center" gap="2">
-                      <Text size="1" color="gray">
-                        1K
-                      </Text>
-                      <Slider
-                        size="1"
-                        min={1024}
-                        max={32768}
-                        step={1024}
-                        value={[displayThinkingBudget ?? 16384]}
-                        onValueChange={(values) =>
-                          setLocalThinkingBudget(values[0])
-                        }
-                        onValueCommit={(values) => {
-                          dispatch(
-                            setThinkingBudget({ chatId, value: values[0] }),
-                          );
-                          setLocalThinkingBudget(null);
-                        }}
-                        disabled={isInteractionDisabled}
-                      />
-                      <Text size="1" color="gray">
-                        32K
-                      </Text>
-                    </Flex>
+                    )}
+                    {selectedModelDetail.pricing && (
+                      <>
+                        <Text size="1" color="gray">
+                          ·
+                        </Text>
+                        <Text size="1" color="gray">
+                          {selectedModelDetail.pricing.prompt}/
+                          {selectedModelDetail.pricing.output} per 1M tokens
+                        </Text>
+                      </>
+                    )}
                   </Flex>
-                )}
+                </>
+              )}
+
+            <Separator size="4" />
+
+            {selectedModelDetail && (
+              <>
+                <div className={styles.section}>
+                  <Flex justify="between" align="center" mb="2">
+                    <Text
+                      size="1"
+                      color="gray"
+                      weight="medium"
+                      className={styles.sectionHeader}
+                    >
+                      Max tokens
+                    </Text>
+                    <Text size="1" weight="medium">
+                      {displayMaxTokens ?? `${defaultMaxTokens} (default)`}
+                    </Text>
+                  </Flex>
+                  <Flex align="center" gap="2" className={styles.sliderContainer}>
+                    <Text size="1" color="gray">
+                      1K
+                    </Text>
+                    <Slider
+                      size="1"
+                      min={MIN_OUTPUT_TOKENS}
+                      max={maxOutputTokens}
+                      step={MIN_OUTPUT_TOKENS}
+                      value={[clampedMaxTokens]}
+                      onValueChange={(values) => setLocalMaxTokens(values[0])}
+                      onValueCommit={(values) => {
+                        dispatch(setMaxTokens({ chatId, value: values[0] }));
+                        setLocalMaxTokens(null);
+                      }}
+                      disabled={isInteractionDisabled}
+                      className={styles.slider}
+                    />
+                    <Text size="1" color="gray">
+                      {formatTokens(maxOutputTokens)}
+                    </Text>
+                    {threadMaxTokens != null && (
+                      <button
+                        type="button"
+                        className={styles.resetButton}
+                        onClick={handleMaxTokensReset}
+                        disabled={isInteractionDisabled}
+                        aria-label="Reset max tokens"
+                      >
+                        <Cross1Icon />
+                      </button>
+                    )}
+                  </Flex>
+                </div>
+                {supportsBoostReasoning && <Separator size="4" />}
               </>
             )}
+
+            {supportsBoostReasoning && (
+              <div className={styles.section}>
+                <Flex align="center" justify="between" gap="3">
+                  <Flex align="center" gap="1">
+                    <Text size="1">
+                      <ReasoningIcon />
+                    </Text>
+                    <Text size="1" weight="medium">
+                      Reasoning
+                    </Text>
+                  </Flex>
+                  <Switch
+                    size="1"
+                    checked={isBoostReasoningEnabled}
+                    onCheckedChange={handleThinkingToggle}
+                    disabled={thinkingDisabled}
+                  />
+                </Flex>
+
+                {isStartedChat && (
+                  <Callout.Root color="amber" size="1" mt="2">
+                    <Callout.Text>
+                      Changing reasoning mid-chat may break prompt caching (if
+                      enabled) and make the next turn much more expensive.
+                    </Callout.Text>
+                  </Callout.Root>
+                )}
+
+                {isBoostReasoningEnabled && selectedModelDetail && (
+                  <>
+                    {selectedModelDetail.reasoningEffortOptions &&
+                      selectedModelDetail.reasoningEffortOptions.length > 0 && (
+                        <Flex align="center" justify="between" gap="2" mt="2">
+                          <Text size="1" color="gray">
+                            Effort
+                          </Text>
+                          <Flex gap="1">
+                            {selectedModelDetail.reasoningEffortOptions.map(
+                              (level) => (
+                                <button
+                                  key={level}
+                                  type="button"
+                                  className={`${styles.effortButton} ${
+                                    (threadReasoningEffort ?? "medium") === level
+                                      ? styles.effortButtonActive
+                                      : ""
+                                  }`}
+                                  onClick={() =>
+                                    dispatch(
+                                      setReasoningEffort({
+                                        chatId,
+                                        value: level as ReasoningEffort,
+                                      }),
+                                    )
+                                  }
+                                  disabled={isInteractionDisabled}
+                                >
+                                  <Text size="1">{level}</Text>
+                                </button>
+                              ),
+                            )}
+                          </Flex>
+                        </Flex>
+                      )}
+                    {selectedModelDetail.supportsThinkingBudget && (
+                      <Flex direction="column" gap="1" mt="2">
+                        <Flex align="center" justify="between">
+                          <Text size="1" color="gray">
+                            Thinking tokens
+                          </Text>
+                          <Text size="1" weight="medium">
+                            {displayThinkingBudget ?? 16384}
+                          </Text>
+                        </Flex>
+                        <Flex align="center" gap="2">
+                          <Text size="1" color="gray">
+                            1K
+                          </Text>
+                          <Slider
+                            size="1"
+                            min={1024}
+                            max={32768}
+                            step={1024}
+                            value={[displayThinkingBudget ?? 16384]}
+                            onValueChange={(values) =>
+                              setLocalThinkingBudget(values[0])
+                            }
+                            onValueCommit={(values) => {
+                              dispatch(
+                                setThinkingBudget({ chatId, value: values[0] }),
+                              );
+                              setLocalThinkingBudget(null);
+                            }}
+                            disabled={isInteractionDisabled}
+                          />
+                          <Text size="1" color="gray">
+                            32K
+                          </Text>
+                        </Flex>
+                      </Flex>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </KitPopover.Content>
     </KitPopover>
   );

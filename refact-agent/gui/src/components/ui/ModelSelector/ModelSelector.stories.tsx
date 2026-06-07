@@ -22,10 +22,23 @@ const capabilities = (...items: string[]) => (
   </span>
 );
 
+const longModelName =
+  "OpenAI GPT 5.5 Ultra Long Model Name For Truncation With Task Agent Badge";
+
+const manyModels: ModelOption[] = Array.from({ length: 18 }, (_, index) => ({
+  value: `openai/bulk-${index}`,
+  displayName: `Bulk model ${index + 1} with a deliberately descriptive name`,
+  group: index % 2 === 0 ? "openai" : "anthropic",
+  pricing: { prompt: "$1.00", output: "$4.00" },
+  contextWindow: "128K ctx",
+  badges: index % 3 === 0 ? ["task-agent", "reasoning"] : ["light"],
+  capabilities: capabilities("tools", "vision"),
+}));
+
 const models: ModelOption[] = [
   {
     value: "openai/gpt-5.5",
-    displayName: "GPT 5.5",
+    displayName: longModelName,
     group: "openai",
     pricing: { prompt: "$1.25", output: "$10.00" },
     contextWindow: "400K ctx",
@@ -132,6 +145,27 @@ export const DisabledRowsAndAllBadges: Story = {
       <section className={styles.panel}>
         <h2 className={styles.title}>All badge combinations</h2>
         <StatefulSelector groups={groups} models={models} variant="inline" />
+      </section>
+    </div>
+  ),
+};
+
+export const PanelLessSingleScroll: Story = {
+  args: baseArgs,
+  render: () => (
+    <div className={styles.storyShell}>
+      <section className={styles.panel}>
+        <h2 className={styles.title}>Panel-less single-scroll list</h2>
+        <p className={styles.description}>
+          Long names truncate, badges stay grouped, selected state is tint plus
+          check, and only the model list scrolls.
+        </p>
+        <StatefulSelector
+          groups={groups}
+          models={[...models, ...manyModels]}
+          onAddNewModel={() => undefined}
+          variant="inline"
+        />
       </section>
     </div>
   ),

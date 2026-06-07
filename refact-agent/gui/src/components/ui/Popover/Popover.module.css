@@ -24,6 +24,11 @@
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
+.contentNoScroll {
+  display: flex;
+  overflow: hidden;
+}
+
 .content:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-space-1);
@@ -32,4 +37,12 @@
 .inner {
   min-width: 0;
   padding: var(--rf-space-3);
+}
+
+.innerNoScroll {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
 }

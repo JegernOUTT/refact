@@ -320,6 +320,10 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 - `ModelOption` carries render-ready fields only: `value`, `displayName`, optional `group`, `disabled`, `pricing: { prompt, output }`, `contextWindow`, `badges: Array<"default" | "reasoning" | "light" | "buddy" | "task-agent" | "chat2">`, and `capabilities: ReactNode`.
 - The kit selector must stay pure: no caps hooks, Redux, RTK Query, services, provider utilities, or feature imports. Connected feature code owns enrichment, grouping, pricing formatting, capability icons, and persistence.
 - Use `variant="popover"` for compact pickers backed by the kit `Popover` responsive Sheet behavior, and `variant="inline"` for settings surfaces that render the searchable list directly.
+- Model rows are panel-less and glass-friendly: no per-row bordered/card boxes, transparent idle rows, subtle `--rf-surface-1` hover tint, and selected state as `--rf-color-accent-soft` background + accent name + check icon only.
+- Model names must truncate with ellipsis before badges wrap; badge chips stay in a compact grouped flex container so labels such as `Task Agent` fit on the name line in normal widths and wrap as a group only when unavoidable.
+- `ModelSelector` popovers and settings compositions must have exactly one vertical scroll owner. Use `Popover.Content scrollable={false}` when an inner selector/list owns scrolling; keep search and footer actions pinned outside the `.scrollArea`.
+- `Popover.Content` supports `scrollable={false}` for flex-column, overflow-hidden overlay content. Use it for composed popovers/sheets that need sticky top/bottom regions with a single inner scroller.
 
 ### Sizing contract
 
