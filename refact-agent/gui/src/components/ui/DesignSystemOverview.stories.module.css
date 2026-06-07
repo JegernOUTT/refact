@@ -281,12 +281,6 @@
 .shimmerBox {
   min-height: 38px;
   border-radius: var(--rf-radius-ctl);
-  background-image: linear-gradient(
-    90deg,
-    var(--rf-surface-2),
-    var(--rf-surface-3),
-    var(--rf-surface-2)
-  );
 }
 
 .note {

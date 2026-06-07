@@ -37,11 +37,41 @@
 }
 
 .rf-status-pulse {
+  position: relative;
+  isolation: isolate;
   opacity: 1;
 }
 
+.rf-status-pulse::after {
+  position: absolute;
+  inset: 0;
+  border: var(--rf-hairline) solid var(--rf-color-accent-soft);
+  border-radius: inherit;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(1);
+}
+
 .rf-shimmer {
-  background-position: 100% 0;
+  position: relative;
+  overflow: hidden;
+  background: var(--rf-surface-2);
+}
+
+.rf-shimmer::after {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    var(--rf-surface-3),
+    transparent
+  );
+  content: "";
+  opacity: 0.72;
+  pointer-events: none;
+  transform: translateX(-100%);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -122,13 +152,12 @@
     transform: translateY(0) scale(0.98);
   }
 
-  .rf-status-pulse {
+  .rf-status-pulse::after {
     animation: rf-pulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
   }
 
-  .rf-shimmer {
+  .rf-shimmer::after {
     animation: rf-shimmer var(--rf-dur-slow) var(--rf-ease-standard) infinite;
-    background-size: 200% 100%;
   }
 }
 
@@ -136,8 +165,8 @@
   .rf-enter,
   .rf-enter-rise,
   .rf-popover-motion,
-  .rf-status-pulse,
-  .rf-shimmer,
+  .rf-status-pulse::after,
+  .rf-shimmer::after,
   .rf-stagger > * {
     animation: none;
     transition: none;
@@ -155,8 +184,8 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .rf-shimmer {
-    background-image: none;
+  .rf-shimmer::after {
+    opacity: 0;
   }
 }
 
@@ -195,24 +224,30 @@
 }
 
 @keyframes rf-pulse {
-  0%,
-  100% {
-    opacity: 0.72;
-    box-shadow: 0 0 0 0 var(--rf-color-accent-soft);
+  from {
+    opacity: 0.6;
+    transform: scale(1);
   }
 
-  50% {
-    opacity: 1;
-    box-shadow: 0 0 0 4px transparent;
+  to {
+    opacity: 0;
+    transform: scale(2.2);
   }
 }
 
 @keyframes rf-shimmer {
-  from {
-    background-position: 100% 0;
+  0% {
+    opacity: 0;
+    transform: translateX(-100%);
   }
 
-  to {
-    background-position: -100% 0;
+  20%,
+  80% {
+    opacity: 0.72;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(100%);
   }
 }
