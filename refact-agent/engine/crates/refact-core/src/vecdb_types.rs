@@ -52,6 +52,43 @@ pub struct EmbeddingModelConfig {
     pub n_ctx: usize,
 }
 
+impl EmbeddingModelConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.endpoint.trim().is_empty() {
+            return Err("VecDB embedding config error: endpoint is empty".to_string());
+        }
+        if self.model_name.trim().is_empty() {
+            return Err("VecDB embedding config error: model_name is empty".to_string());
+        }
+        if self.embedding_size <= 0 {
+            return Err(format!(
+                "VecDB embedding config error: embedding_size must be positive, got {}",
+                self.embedding_size
+            ));
+        }
+        if self.embedding_batch == 0 {
+            return Err(
+                "VecDB embedding config error: embedding_batch must be positive".to_string(),
+            );
+        }
+        if self.rejection_threshold <= 0.0 {
+            return Err(format!(
+                "VecDB embedding config error: rejection_threshold must be positive, got {}",
+                self.rejection_threshold
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn prefixed_query(&self, text: &str) -> String {
+        format!("{}{}", self.query_prefix, text)
+    }
+
+    pub fn prefixed_document(&self, text: &str) -> String {
+        format!("{}{}", self.document_prefix, text)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct VecDbStatus {
     pub files_unprocessed: usize,

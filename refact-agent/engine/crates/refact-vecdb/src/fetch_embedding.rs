@@ -20,11 +20,30 @@ struct OllamaPayload {
     model: String,
 }
 
+#[cfg(test)]
+static LAST_EMBEDDING_INPUTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub fn take_last_embedding_inputs() -> Vec<String> {
+    std::mem::take(&mut LAST_EMBEDDING_INPUTS.lock().unwrap())
+}
+
 pub async fn get_embedding(
     client: Arc<AMutex<reqwest::Client>>,
     embedding_model: &EmbeddingModelConfig,
     text: Vec<String>,
 ) -> Result<Vec<Vec<f32>>, String> {
+    #[cfg(test)]
+    {
+        *LAST_EMBEDDING_INPUTS.lock().unwrap() = text.clone();
+    }
+    #[cfg(test)]
+    if embedding_model.endpoint == "test://record-only" {
+        return Ok(text
+            .iter()
+            .map(|_| vec![1.0; embedding_model.embedding_size as usize])
+            .collect());
+    }
     if embedding_model.embedding_endpoint_style.is_empty()
         && embedding_model.endpoint_style.eq_ignore_ascii_case("hf")
     {

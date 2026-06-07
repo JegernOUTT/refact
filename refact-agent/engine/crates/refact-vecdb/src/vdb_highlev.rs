@@ -24,11 +24,15 @@ pub struct VecDb {
 }
 
 impl VecDb {
+    pub fn validate_constants(constants: &VecdbConstants) -> Result<(), String> {
+        constants.embedding_model.validate()
+    }
+
     pub async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
         let embedding_mb = fetch_embedding::get_embedding_with_retries(
             self.vecdb_emb_client.clone(),
             &self.constants.embedding_model,
-            vec![query.to_string()],
+            vec![self.constants.embedding_model.prefixed_query(query)],
             5,
         )
         .await
@@ -81,6 +85,7 @@ impl VecDb {
         insecure: bool,
         constants: VecdbConstants,
     ) -> Result<VecDb, String> {
+        Self::validate_constants(&constants)?;
         let emb_table_name = vdb_emb_aux::create_emb_table_name(&vec![workspace_folder]);
         let handler = VecDBSqlite::init(
             vecdb_dir,
@@ -206,5 +211,80 @@ impl VecdbSearch for VecDb {
         filter_mb: Option<String>,
     ) -> Result<Vec<VecdbRecord>, String> {
         VecDb::vecdb_search_with_embedding(self, embedding, top_n, filter_mb).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fetch_embedding::take_last_embedding_inputs;
+
+    fn test_config() -> EmbeddingModelConfig {
+        EmbeddingModelConfig {
+            endpoint: "test://record-only".to_string(),
+            endpoint_style: "openai".to_string(),
+            embedding_endpoint_style: "openai".to_string(),
+            api_key: String::new(),
+            auth_token: String::new(),
+            extra_headers: Default::default(),
+            model_name: "test-embedding".to_string(),
+            embedding_size: 2,
+            dimensions: None,
+            query_prefix: "query: ".to_string(),
+            document_prefix: "doc: ".to_string(),
+            rejection_threshold: 0.63,
+            embedding_batch: 2,
+            n_ctx: 128,
+        }
+    }
+
+    fn test_constants(config: EmbeddingModelConfig) -> VecdbConstants {
+        VecdbConstants {
+            embedding_model: config,
+            tokenizer: None,
+            splitter_window_size: 128,
+            vecdb_max_files: 100,
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_embedding_config() {
+        let mut config = test_config();
+        config.embedding_batch = 0;
+        let err = VecDb::validate_constants(&test_constants(config)).unwrap_err();
+        assert!(err.contains("embedding_batch"));
+    }
+
+    #[test]
+    fn rejects_zero_rejection_threshold() {
+        let mut config = test_config();
+        config.rejection_threshold = 0.0;
+        let err = VecDb::validate_constants(&test_constants(config)).unwrap_err();
+        assert!(err.contains("rejection_threshold"));
+    }
+
+    #[tokio::test]
+    async fn embed_query_applies_query_prefix_at_embedding_boundary() {
+        let tmp =
+            std::env::temp_dir().join(format!("refact-vecdb-highlev-{}", uuid::Uuid::new_v4()));
+        let legacy = tmp.join("legacy");
+        let vecdb = VecDb::init(
+            &tmp,
+            &legacy,
+            "workspace".to_string(),
+            false,
+            test_constants(test_config()),
+        )
+        .await
+        .unwrap();
+
+        let embedding = vecdb.embed_query("hello").await.unwrap();
+
+        assert_eq!(embedding, vec![1.0, 1.0]);
+        assert_eq!(
+            take_last_embedding_inputs(),
+            vec!["query: hello".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }
