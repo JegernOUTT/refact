@@ -411,6 +411,14 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         ))
     }
 
+    fn response_message_n_choices(
+        &mut self,
+        choices: Vec<String>,
+        finish_reasons: Vec<FinishReason>,
+    ) -> Result<Value, String> {
+        self.response_n_choices(choices, finish_reasons)
+    }
+
     fn response_streaming(
         &mut self,
         delta: String,

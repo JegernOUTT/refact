@@ -257,8 +257,10 @@ pub async fn handle_v1_code_completion_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::{CodeAssistantCaps, CompletionModelRecord};
     use refact_core::llm_types::{BaseModelRecord, WireFormat};
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn post(model: &str) -> CodeCompletionPost {
         CodeCompletionPost {
@@ -387,5 +389,114 @@ mod tests {
         );
 
         assert_ne!(first, second);
+    }
+
+    fn custom_completion_post(model: &str) -> CodeCompletionPost {
+        CodeCompletionPost {
+            inputs: crate::call_validation::CodeCompletionInputs {
+                sources: HashMap::from([(
+                    "src/main.rs".to_string(),
+                    "fn main() {\n    pri\n}\n".to_string(),
+                )]),
+                cursor: refact_core::chat_types::CursorPosition {
+                    file: "src/main.rs".to_string(),
+                    line: 1,
+                    character: 7,
+                },
+                multiline: false,
+            },
+            parameters: crate::call_validation::SamplingParameters::default(),
+            model: model.to_string(),
+            stream: false,
+            no_cache: false,
+            use_ast: false,
+            use_vecdb: false,
+            rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
+        }
+    }
+
+    fn custom_completion_caps() -> Arc<CodeAssistantCaps> {
+        let mut caps = CodeAssistantCaps::default();
+        caps.defaults.completion_default_model = "custom/native-model".to_string();
+        caps.completion_models.insert(
+            "custom/native-model".to_string(),
+            Arc::new(CompletionModelRecord {
+                base: BaseModelRecord {
+                    id: "custom/native-model".to_string(),
+                    name: "native-model".to_string(),
+                    endpoint: "http://127.0.0.1:1/v1/completions".to_string(),
+                    api_key: "sk-test".to_string(),
+                    extra_headers: HashMap::from([("X-Tenant".to_string(), "team-a".to_string())]),
+                    ..Default::default()
+                },
+                scratchpad: "FIM-PSM".to_string(),
+                scratchpad_patch: serde_json::json!({
+                    "fim_prefix": "<fim_prefix>",
+                    "fim_suffix": "<fim_suffix>",
+                    "fim_middle": "<fim_middle>",
+                    "eot": "<eot>",
+                    "context_format": "plain"
+                }),
+                ..Default::default()
+            }),
+        );
+        caps.completion_models.insert(
+            "custom/other-model".to_string(),
+            Arc::new(CompletionModelRecord {
+                base: BaseModelRecord {
+                    id: "custom/other-model".to_string(),
+                    name: "other-model".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        Arc::new(caps)
+    }
+
+    fn resolve_and_normalize_for_test(
+        caps: Arc<CodeAssistantCaps>,
+        post: &mut CodeCompletionPost,
+    ) -> Arc<CompletionModelRecord> {
+        let model = resolve_completion_model(caps, &post.model).unwrap();
+        normalize_code_completion_post(post, &model).unwrap();
+        model
+    }
+
+    #[test]
+    fn custom_completion_empty_model_resolves_default_before_cache_keying() {
+        let caps = custom_completion_caps();
+        let mut post = custom_completion_post("");
+
+        let resolved = resolve_and_normalize_for_test(caps, &mut post);
+        let key = completion_cache::cache_key_from_post(&post);
+        let key_part: serde_json::Value = serde_json::from_str(&key.1).unwrap();
+
+        assert_eq!(resolved.base.id, "custom/native-model");
+        assert_eq!(resolved.base.name, "native-model");
+        assert_eq!(post.model, "custom/native-model");
+        assert_eq!(key_part["model"], "custom/native-model");
+        assert_eq!(key_part["line_mode"], "singleline");
+    }
+
+    #[test]
+    fn custom_completion_cache_key_separates_resolved_models() {
+        let caps = custom_completion_caps();
+        let mut post_a = custom_completion_post("");
+        let mut post_b = custom_completion_post("custom/other-model");
+
+        resolve_and_normalize_for_test(caps.clone(), &mut post_a);
+        resolve_and_normalize_for_test(caps, &mut post_b);
+
+        let key_a = completion_cache::cache_key_from_post(&post_a);
+        let key_b = completion_cache::cache_key_from_post(&post_b);
+        let part_a: serde_json::Value = serde_json::from_str(&key_a.1).unwrap();
+        let part_b: serde_json::Value = serde_json::from_str(&key_b.1).unwrap();
+
+        assert_ne!(key_a, key_b);
+        assert_eq!(part_a["model"], "custom/native-model");
+        assert_eq!(part_b["model"], "custom/other-model");
     }
 }
