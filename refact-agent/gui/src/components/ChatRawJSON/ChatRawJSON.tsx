@@ -1,4 +1,4 @@
-import { Box, Button, Flex, Heading } from "@radix-ui/themes";
+import { Box, Button, Flex, Heading } from "../LongTailPrimitives";
 import { ScrollArea } from "../ScrollArea";
 import { ShikiCodeBlock } from "../Markdown/ShikiCodeBlock";
 

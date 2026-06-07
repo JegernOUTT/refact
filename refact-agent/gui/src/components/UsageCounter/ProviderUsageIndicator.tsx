@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { HoverCard, Flex, Text, Badge } from "@radix-ui/themes";
+import { HoverCard, Flex, Text, Badge } from "../LongTailPrimitives";
 import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,

@@ -1,5 +1,5 @@
 import React from "react";
-import { Flex, Text, Badge } from "@radix-ui/themes";
+import { Badge } from "../ui";
 import type { CompletionDetail } from "../../services/refact/commands";
 import styles from "./SlashCommandSuggestion.module.css";
 
@@ -12,17 +12,13 @@ export const SlashCommandSuggestion: React.FC<SlashCommandSuggestionProps> = ({
   name,
   detail,
 }) => (
-  <Flex direction="row" align="center" gap="2" className={styles.suggestion}>
-    <Text weight="bold" size="2" className={styles.name}>
-      {name}
-    </Text>
+  <div className={styles.suggestion}>
+    <span className={styles.name}>{name}</span>
     {detail?.description && (
-      <Text size="1" color="gray" className={styles.description}>
-        {detail.description}
-      </Text>
+      <span className={styles.description}>{detail.description}</span>
     )}
-    <Badge size="1" variant="soft" className={styles.badge}>
+    <Badge tone={detail?.kind === "skill" ? "accent" : "muted"} className={styles.badge}>
       {detail?.kind === "skill" ? "skill" : "cmd"}
     </Badge>
-  </Flex>
+  </div>
 );

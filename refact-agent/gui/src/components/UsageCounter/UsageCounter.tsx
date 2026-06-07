@@ -6,7 +6,7 @@ import {
   Box,
   Tabs,
   Popover,
-} from "@radix-ui/themes";
+} from "../LongTailPrimitives";
 import classNames from "classnames";
 import React, { useMemo, useState } from "react";
 

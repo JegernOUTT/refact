@@ -1,8 +1,8 @@
 import { useCallback } from "react";
 import type { FC } from "react";
+import { WandSparkles } from "lucide-react";
 import type { SmartLink as SmartLinkType } from "../../services/refact";
-import { Button } from "@radix-ui/themes";
-import { MagicWandIcon } from "@radix-ui/react-icons";
+import { Button } from "../ui";
 import { useSmartLinks } from "../../hooks";
 import styles from "./SmartLink.module.css";
 
@@ -55,20 +55,17 @@ export const SmartLink: FC<{
   }, []);
 
   return (
-    <>
-      <Button
-        size={isSmall ? "1" : "2"}
-        onClick={handleClick}
-        title={title ? title.join("\n") : ""}
-        color="gray"
-        type="button"
-        variant="outline"
-        className={styles.magicButton}
-        disabled={shouldBeDisabled}
-      >
-        {smartlink.sl_chat ? <MagicWandIcon /> : null}
-        {smartlink.sl_label}
-      </Button>
-    </>
+    <Button
+      size={isSmall ? "sm" : "md"}
+      onClick={handleClick}
+      title={title ? title.join("\n") : ""}
+      type="button"
+      variant="soft"
+      leftIcon={smartlink.sl_chat ? WandSparkles : undefined}
+      className={styles.magicButton}
+      disabled={shouldBeDisabled}
+    >
+      {smartlink.sl_label}
+    </Button>
   );
 };

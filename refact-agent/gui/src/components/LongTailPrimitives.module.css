@@ -1,0 +1,78 @@
+.flex {
+  display: flex;
+  min-width: 0;
+}
+
+.text {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  line-height: var(--rf-line);
+}
+
+.text1 {
+  font-size: var(--rf-text-1);
+}
+
+.text2 {
+  font-size: var(--rf-text-2);
+}
+
+.bold {
+  font-weight: 700;
+}
+
+.medium {
+  font-weight: 650;
+}
+
+.muted {
+  color: var(--rf-color-muted);
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.heading {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-4);
+  line-height: var(--rf-line);
+}
+
+.code {
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+}
+
+.link {
+  color: var(--rf-color-accent);
+  cursor: pointer;
+  font-size: var(--rf-text-1);
+}
+
+.separator {
+  width: 100%;
+  height: var(--rf-hairline);
+  background: var(--rf-border);
+}
+
+.spinner {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  animation: spin var(--rf-dur-slow) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

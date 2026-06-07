@@ -1,5 +1,5 @@
 import React, { useMemo, useEffect, useRef, useState } from "react";
-import { Flex, Text } from "@radix-ui/themes";
+import { Flex, Text } from "../LongTailPrimitives";
 import { ArrowDownIcon } from "@radix-ui/react-icons";
 import classNames from "classnames";
 

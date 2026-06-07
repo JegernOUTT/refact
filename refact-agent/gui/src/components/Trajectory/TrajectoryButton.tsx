@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { HoverCard, Popover, Text } from "@radix-ui/themes";
+import { HoverCard, Popover, Text } from "../LongTailPrimitives";
 import { ArchiveIcon } from "@radix-ui/react-icons";
 import { TrajectoryPopoverContent } from "./TrajectoryPopover";
 import styles from "./TrajectoryButton.module.css";

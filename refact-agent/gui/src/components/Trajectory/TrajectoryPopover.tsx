@@ -8,7 +8,7 @@ import {
   Spinner,
   Tabs,
   Text,
-} from "@radix-ui/themes";
+} from "../LongTailPrimitives";
 import { useTrajectoryOps } from "../../hooks/useTrajectoryOps";
 import styles from "./TrajectoryPopover.module.css";
 
@@ -82,7 +82,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={transformOptions.drop_all_context}
                   onCheckedChange={(checked) => {
-                    const enabled = checked === true;
+                    const enabled = checked;
                     updateTransformOption("drop_all_context", enabled);
                     if (enabled) {
                       updateTransformOption(
@@ -108,7 +108,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateTransformOption(
                       "dedup_and_compress_context",
-                      checked === true,
+                      checked,
                     )
                   }
                 />
@@ -122,7 +122,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateTransformOption(
                       "compress_non_agentic_tools",
-                      checked === true,
+                      checked,
                     )
                   }
                 />
@@ -134,7 +134,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={transformOptions.drop_all_memories}
                   onCheckedChange={(checked) =>
-                    updateTransformOption("drop_all_memories", checked === true)
+                    updateTransformOption("drop_all_memories", checked)
                   }
                 />
                 Drop all memories
@@ -147,7 +147,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateTransformOption(
                       "drop_project_information",
-                      checked === true,
+                      checked,
                     )
                   }
                 />
@@ -212,7 +212,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateHandoffOption(
                       "include_last_user_plus",
-                      checked === true,
+                      checked,
                     )
                   }
                 />
@@ -226,7 +226,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateHandoffOption(
                       "include_all_opened_context",
-                      checked === true,
+                      checked,
                     )
                   }
                 />
@@ -240,7 +240,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateHandoffOption(
                       "include_agentic_tools",
-                      checked === true,
+                      checked,
                     )
                   }
                 />
@@ -254,7 +254,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateHandoffOption(
                       "llm_summary_for_excluded",
-                      checked === true,
+                      checked,
                     )
                   }
                 />
@@ -268,7 +268,7 @@ export const TrajectoryPopoverContent: React.FC<
                   onCheckedChange={(checked) =>
                     updateHandoffOption(
                       "include_all_user_assistant_only",
-                      checked === true,
+                      checked,
                     )
                   }
                 />

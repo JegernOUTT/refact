@@ -1,7 +1,7 @@
 import React from "react";
 import { useAppSelector, useGetLinksFromLsp } from "../../hooks";
 import { Markdown } from "../Markdown";
-import { Flex, Separator } from "@radix-ui/themes";
+import { Flex, Separator } from "../LongTailPrimitives";
 import {
   selectIsStreaming,
   selectIsWaiting,

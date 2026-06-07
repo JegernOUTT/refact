@@ -26,7 +26,7 @@ import {
   isUndoTextDocToolCall,
   parseRawTextDocToolCall,
 } from "./types";
-import { Box, Card, Flex, Button } from "@radix-ui/themes";
+import { Box, Card, Flex, Button } from "../LongTailPrimitives";
 import { TruncateLeft } from "../Text";
 import { Link } from "../Link";
 import { filename } from "../../utils/filename";

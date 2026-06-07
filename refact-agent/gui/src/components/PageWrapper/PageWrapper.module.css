@@ -1,13 +1,32 @@
 .PageWrapper {
-  width: 100%;
-  /* justify-content: center; */
-  /* Fallback height for JB */
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: space-between;
 }
-@media print {
-  .PageWrapper {
-    max-height: unset;
+
+.web {
+  padding: var(--rf-space-5) var(--rf-space-4);
+}
+
+.ide {
+  padding: var(--rf-space-2);
+}
+
+.noPadding {
+  padding: 0 var(--rf-space-2);
+}
+
+@media (min-width: 768px) {
+  .ide {
+    padding-inline: var(--rf-space-4);
+  }
+}
+
+@media (min-width: 1280px) {
+  .web,
+  .ide {
+    padding-inline: var(--rf-space-6);
   }
 }

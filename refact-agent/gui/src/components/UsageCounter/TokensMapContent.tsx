@@ -1,4 +1,4 @@
-import { Box, Flex, Text, ScrollArea, HoverCard } from "@radix-ui/themes";
+import { Box, Flex, Text, ScrollArea, HoverCard } from "../LongTailPrimitives";
 import { InfoCircledIcon } from "@radix-ui/react-icons";
 import React, { useMemo } from "react";
 import type { TokenMap, TokenMapSegment } from "../../services/refact/chat";

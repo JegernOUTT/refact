@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { Flex, Text, Box, Separator } from "@radix-ui/themes";
+import { Flex, Text, Box, Separator } from "../LongTailPrimitives";
 import classNames from "classnames";
 
 import { useAppSelector, useAppDispatch } from "../../hooks";

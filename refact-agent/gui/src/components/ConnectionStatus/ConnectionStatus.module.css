@@ -1,91 +1,91 @@
 .indicator {
+  display: inline-flex;
   padding: 0;
 }
 
 .iconConnected {
-  color: var(--green-9);
-  width: 14px;
-  height: 14px;
+  color: var(--rf-color-success);
 }
 
 .iconDisconnected {
-  color: var(--red-9);
-  width: 14px;
-  height: 14px;
+  color: var(--rf-color-danger);
 }
 
-.iconReconnecting {
-  color: var(--orange-9);
-  width: 14px;
-  height: 14px;
-  animation: spin 1s linear infinite;
+.iconReconnecting,
+.iconRefreshing {
+  color: var(--rf-color-warning);
+  animation: spin var(--rf-dur-slow) linear infinite;
 }
 
 .reconnectingPulse {
-  animation: reconnectingPulse 1.5s ease-in-out infinite;
+  animation: reconnectingPulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
 }
 
 @keyframes reconnectingPulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(255, 140, 0, 0.4);
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--rf-color-warning) 35%, transparent);
   }
   50% {
-    box-shadow: 0 0 0 4px rgba(255, 140, 0, 0);
+    box-shadow: 0 0 0 var(--rf-space-1) transparent;
   }
 }
 
 @keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
   to {
     transform: rotate(360deg);
   }
 }
 
-/* Unified toolbar button style */
 .statusButton {
   display: flex;
-  align-items: center;
-  justify-content: center;
   width: 34px;
   height: 34px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-ctl);
   cursor: pointer;
-  transition: background-color 0.15s ease;
-  flex-shrink: 0;
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .statusButton.statusConnected:hover {
-  background: rgba(48, 164, 108, 0.15);
+  background: color-mix(in oklab, var(--rf-color-success) 16%, transparent);
 }
 
 .statusButton.statusDisconnected:hover {
-  background: rgba(229, 72, 77, 0.15);
+  background: color-mix(in oklab, var(--rf-color-danger) 16%, transparent);
 }
 
 .statusButton.statusReconnecting:hover {
-  background: rgba(255, 140, 0, 0.15);
+  background: color-mix(in oklab, var(--rf-color-warning) 16%, transparent);
 }
 
 .statusButton.statusRefreshing:hover {
-  background: var(--gray-a3);
+  background: var(--rf-surface-1);
 }
 
 .statusButton:focus-visible {
-  outline: 2px solid var(--accent-8);
-  outline-offset: -2px;
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(var(--rf-hairline) * -2);
 }
 
 .statusButton:disabled {
   cursor: default;
-  opacity: 0.5;
+  opacity: var(--rf-disabled-opacity);
 }
 
 .statusButton:disabled:hover {
   background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .iconReconnecting,
+  .iconRefreshing,
+  .reconnectingPulse {
+    animation: none;
+  }
 }

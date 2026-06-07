@@ -1,4 +1,21 @@
 .chat_link_button {
   max-width: 100%;
-  backdrop-filter: blur(10px);
+}
+
+.spinner {
+  display: inline-flex;
+  flex-shrink: 0;
+  animation: spin var(--rf-dur-slow) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

@@ -4,7 +4,6 @@ import { ChatLinks } from "./ChatLinks";
 import { setUpStore } from "../../app/store";
 import { Provider } from "react-redux";
 import { Theme } from "../Theme";
-import { Container } from "@radix-ui/themes";
 import { http, HttpResponse, type HttpHandler } from "msw";
 import { CHAT_LINKS_URL } from "../../services/refact/consts";
 import {
@@ -19,9 +18,9 @@ const Template = () => {
   return (
     <Provider store={store}>
       <Theme>
-        <Container p="4">
+        <div style={{ padding: "var(--rf-space-4)" }}>
           <ChatLinks />
-        </Container>
+        </div>
       </Theme>
     </Provider>
   );
