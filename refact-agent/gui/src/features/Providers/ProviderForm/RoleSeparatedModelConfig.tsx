@@ -23,7 +23,6 @@ import {
 const COMPLETION_ENDPOINT_STYLES = [
   "openai_completions",
   "openai_chat_completions",
-  "openai_responses",
 ];
 const EMBEDDING_ENDPOINT_STYLES = ["openai", "ollama_native", "voyage"];
 const DEFAULT_COMPLETION_CONTEXT = "4096";

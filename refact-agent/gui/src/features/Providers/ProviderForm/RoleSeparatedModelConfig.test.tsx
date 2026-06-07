@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 
 import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
@@ -41,6 +41,15 @@ const preloadedState = {
   },
 };
 
+function stubPointerCapture() {
+  if (!("hasPointerCapture" in HTMLElement.prototype)) {
+    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+  }
+}
+
 function mockUpdateProvider(onPost: (body: unknown) => void) {
   server.use(
     http.post("*/v1/providers/custom_work", async ({ request }) => {
@@ -51,6 +60,30 @@ function mockUpdateProvider(onPost: (body: unknown) => void) {
 }
 
 describe("RoleSeparatedModelConfig", () => {
+  it("does not offer unsupported openai_responses completion style", async () => {
+    stubPointerCapture();
+    const { user, store } = render(
+      <RoleSeparatedModelConfig provider={baseDetail} />,
+      {
+        preloadedState,
+      },
+    );
+
+    await screen.findByText("Role-separated model configuration");
+    await user.click(screen.getByLabelText("Completion endpoint style"));
+
+    expect(
+      screen.getByRole("option", { name: "openai_completions" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "openai_chat_completions" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "openai_responses" }),
+    ).not.toBeInTheDocument();
+    store.dispatch(providersApi.util.resetApiState());
+  });
+
   it("posts exact completion endpoint, style, and model record", async () => {
     let requestBody: unknown;
     mockUpdateProvider((body) => {

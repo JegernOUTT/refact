@@ -213,10 +213,11 @@ const DEFAULT_MODEL_FIELDS: {
   },
 ];
 
-function normalizeProviderDefaults(
+export function normalizeProviderDefaults(
   defaults: ProviderDefaults | undefined,
 ): ProviderDefaults {
   return {
+    ...defaults,
     chat: defaults?.chat ?? {},
     chat_model_2: defaults?.chat_model_2 ?? {},
     task_planner_agent_model: defaults?.task_planner_agent_model ?? {},
