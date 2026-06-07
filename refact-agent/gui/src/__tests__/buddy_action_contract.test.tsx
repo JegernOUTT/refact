@@ -170,7 +170,7 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
     plan_doc_slug: "task-recovery",
     plan_markdown: "# Recover task",
     done_when: { summary: "Done", checklist: [] },
-    status: "running",
+    status: "active",
     autonomy: "full_auto",
     budget: {
       wall_clock_secs: 7200,

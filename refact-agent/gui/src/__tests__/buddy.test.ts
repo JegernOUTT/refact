@@ -73,27 +73,28 @@ import { createInitialAnimState } from "../features/Buddy/state";
 import { setUpStore } from "../app/store";
 import { trajectoriesApi } from "../services/refact";
 import { buddyApi, type BuddyErrorReport } from "../services/refact/buddy";
-import type {
-  BuddySnapshot,
-  BuddyState,
-  BuddySettings,
-  ObserverToggles,
-  BuddyActivityEntry,
-  BuddySuggestion,
-  BuddyConversationEntry,
-  DiagnosticContext,
-  BuddySpeechItem,
-  BuddyRuntimeEvent,
-  BuddyOpportunity,
-  BuddyControl,
-  BuddyDraft,
-  BuddyPulse,
-  BuddyAction,
-  BuddyPage,
-  DraftKind,
-  ConductorGoal,
-  GoalStatus,
-  BuddyGhostMessage,
+import {
+  normalizeGoalStatus,
+  type BuddySnapshot,
+  type BuddyState,
+  type BuddySettings,
+  type ObserverToggles,
+  type BuddyActivityEntry,
+  type BuddySuggestion,
+  type BuddyConversationEntry,
+  type DiagnosticContext,
+  type BuddySpeechItem,
+  type BuddyRuntimeEvent,
+  type BuddyOpportunity,
+  type BuddyControl,
+  type BuddyDraft,
+  type BuddyPulse,
+  type BuddyAction,
+  type BuddyPage,
+  type DraftKind,
+  type ConductorGoal,
+  type GoalStatusWire,
+  type BuddyGhostMessage,
 } from "../features/Buddy/types";
 import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
 import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
@@ -411,9 +412,21 @@ function makeGhostMessage(
     ...overrides,
   };
 }
-
-function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
-  const status: GoalStatus = overrides?.status ?? "running";
+type ConductorGoalOverrides = Omit<Partial<ConductorGoal>, "status" | "ledger"> & {
+  status?: GoalStatusWire;
+  ledger?: Omit<NonNullable<ConductorGoal["ledger"]>, "status"> & {
+    status?: GoalStatusWire | null;
+  };
+};
+function makeConductorGoal(overrides?: ConductorGoalOverrides): ConductorGoal {
+  const { status: overrideStatus, ledger: overrideLedger, ...rest } =
+    overrides ?? {};
+  const { status: overrideLedgerStatus, ...ledgerRest } = overrideLedger ?? {};
+  const status = normalizeGoalStatus(overrideStatus ?? "active");
+  const ledgerStatus =
+    overrideLedgerStatus == null
+      ? overrideLedgerStatus
+      : normalizeGoalStatus(overrideLedgerStatus);
   return {
     id: "goal-1",
     title: "Ship conductor",
@@ -451,7 +464,6 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       has_conductor_chat: true,
     },
     ledger: {
-      status,
       autonomy: "full_auto",
       planner_task_id: "planner-task-1",
       task_ids: ["task-1"],
@@ -462,11 +474,13 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       ghost_messages: [],
       no_progress_wakes: 1,
       turn_failures: 0,
+      ...ledgerRest,
+      status: ledgerStatus ?? status,
     },
     created_at: "2024-01-01T00:00:00Z",
     updated_at: "2024-01-01T00:00:10Z",
     completed_at: null,
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -2173,7 +2187,7 @@ describe("buddy conductor goal state", () => {
     expect(selectGoalById(rootState, "missing-goal")).toBeUndefined();
   });
 
-  test("conductor goal event inserts and updates by goal id", () => {
+  test("conductor goal event inserts, updates by goal id, and normalizes legacy status", () => {
     const initialGoal = makeConductorGoal({ id: "goal-event" });
     const updatedGoal = makeConductorGoal({
       id: "goal-event",
@@ -2189,20 +2203,23 @@ describe("buddy conductor goal state", () => {
     expect(selectGoalById(rootState, "goal-event")?.title).toBe(
       "Updated conductor",
     );
-    expect(selectGoalById(rootState, "goal-event")?.status).toBe(
-      "waiting_for_human",
+    expect(selectGoalById(rootState, "goal-event")?.status).toBe("paused");
+    expect(selectGoalById(rootState, "goal-event")?.ledger?.status).toBe(
+      "paused",
     );
   });
-
   test("active conductor goals exclude terminal statuses", () => {
-    const active = makeConductorGoal({ id: "goal-active", status: "running" });
+    const active = makeConductorGoal({ id: "goal-active", status: "active" });
     const paused = makeConductorGoal({ id: "goal-paused", status: "paused" });
     const done = makeConductorGoal({ id: "goal-done", status: "done" });
-    const failed = makeConductorGoal({ id: "goal-failed", status: "failed" });
+    const escalated = makeConductorGoal({
+      id: "goal-escalated",
+      status: "escalated",
+    });
     const state = reducer(
       undefined,
       setBuddySnapshot(
-        makeSnapshot({ conductor_goals: [active, paused, done, failed] }),
+        makeSnapshot({ conductor_goals: [active, paused, done, escalated] }),
       ),
     );
 
@@ -2254,13 +2271,22 @@ describe("buddy conductor goal state", () => {
     ).toBeUndefined();
   });
 
-  test("status-to-mood mapping covers conducting, waiting, blocker, and done", () => {
+  test("status-to-mood mapping covers canonical conducting, waiting, blocker, and done", () => {
     expect(
-      conductorMoodForGoals([makeConductorGoal({ status: "running" })]),
+      conductorMoodForGoals([makeConductorGoal({ status: "active" })]),
+    ).toMatchObject({ state: "conducting", mood: "focused" });
+    expect(
+      conductorMoodForGoals([makeConductorGoal({ status: "proposed" })]),
     ).toMatchObject({ state: "conducting", mood: "focused" });
     expect(
       conductorMoodForGoals([
-        makeConductorGoal({ status: "waiting_for_human" }),
+        makeConductorGoal({
+          status: "paused",
+          summary: {
+            ...makeConductorGoal().summary,
+            open_question_count: 1,
+          },
+        }),
       ]),
     ).toMatchObject({ state: "waiting_human", animationType: "perk" });
     expect(
@@ -2275,6 +2301,14 @@ describe("buddy conductor goal state", () => {
     expect(
       conductorMoodForGoals([makeConductorGoal({ status: "abandoned" })]),
     ).toMatchObject({ state: "abandoned", tone: "warning" });
+  });
+
+  test("legacy conductor statuses normalize to canonical aliases", () => {
+    expect(normalizeGoalStatus("planned")).toBe("proposed");
+    expect(normalizeGoalStatus("running")).toBe("active");
+    expect(normalizeGoalStatus("waiting_for_human")).toBe("paused");
+    expect(normalizeGoalStatus("failed")).toBe("escalated");
+    expect(normalizeGoalStatus("cancelled")).toBe("abandoned");
   });
 
   test("escalated state outranks blocker and renders distinct panel mood", () => {
@@ -2321,7 +2355,7 @@ describe("buddy conductor goal state", () => {
       tone: "danger",
     });
 
-    render(React.createElement(BuddyConductorGoalsPanel, { compact: true }), {
+    render(React.createElement(BuddyConductorGoalsPanel), {
       store,
     });
 

@@ -279,7 +279,7 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
     plan_doc_slug: "plan-doc",
     plan_markdown: "# Plan",
     done_when: { summary: "Done", checklist: ["Green checks"] },
-    status: "running",
+    status: "active",
     autonomy: "full_auto",
     budget: { wall_clock_secs: 3600, total_tokens: 10000, usd: 2 },
     spent: {
@@ -305,7 +305,7 @@ function makeConductorGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       has_conductor_chat: true,
     },
     ledger: {
-      status: "running",
+      status: "active",
       autonomy: "full_auto",
       planner_task_id: "planner-task-1",
       task_ids: ["task-1"],
@@ -1275,7 +1275,7 @@ describe("BuddyConductorGoalsPanel", () => {
     const { user } = render(<BuddyConductorGoalsPanel />, { store });
 
     expect(screen.getByText("Ship conductor goals")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(screen.getByText("active")).toBeInTheDocument();
     expect(screen.getByText("150 / 10.0K")).toBeInTheDocument();
     expect(screen.getByText("25 read")).toBeInTheDocument();
     expect(screen.getByText("$0.12 / $2.00")).toBeInTheDocument();

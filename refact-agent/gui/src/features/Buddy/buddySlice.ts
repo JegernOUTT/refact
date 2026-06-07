@@ -1,4 +1,5 @@
 import { createSelector, createSlice, PayloadAction } from "@reduxjs/toolkit";
+import { normalizeGoalStatus } from "./types";
 import type {
   BuddySnapshot,
   BuddyState,
@@ -509,7 +510,9 @@ function normalizeBuddySnapshot(snapshot: BuddySnapshot): BuddySnapshot {
     pulse: snapshot.pulse ?? defaultBuddyPulse(),
     opportunities,
     active_drafts: snapshot.active_drafts ?? [],
-    conductor_goals: snapshot.conductor_goals ?? [],
+    conductor_goals: (snapshot.conductor_goals ?? []).map(
+      normalizeConductorGoal,
+    ),
   };
 }
 
@@ -539,11 +542,25 @@ const EMPTY_BUDDY_SUGGESTIONS: BuddySuggestion[] = [];
 const ACTIVE_CONDUCTOR_GOAL_STATUSES = new Set<GoalStatus>([
   "proposed",
   "active",
-  "planned",
-  "running",
-  "waiting_for_human",
   "paused",
 ]);
+
+function normalizeConductorGoal(goal: ConductorGoal): ConductorGoal {
+  const status = normalizeGoalStatus(goal.status);
+  return {
+    ...goal,
+    status,
+    ledger: goal.ledger
+      ? {
+          ...goal.ledger,
+          status:
+            goal.ledger.status == null
+              ? goal.ledger.status
+              : normalizeGoalStatus(goal.ledger.status),
+        }
+      : goal.ledger,
+  };
+}
 
 function isConductorGoalActive(goal: ConductorGoal): boolean {
   return ACTIVE_CONDUCTOR_GOAL_STATUSES.has(goal.status);
@@ -553,10 +570,11 @@ function upsertConductorGoalEntry(
   goals: ConductorGoal[],
   goal: ConductorGoal,
 ): ConductorGoal[] {
-  const index = goals.findIndex((entry) => entry.id === goal.id);
-  if (index < 0) return [goal, ...goals];
+  const normalizedGoal = normalizeConductorGoal(goal);
+  const index = goals.findIndex((entry) => entry.id === normalizedGoal.id);
+  if (index < 0) return [normalizedGoal, ...goals];
   const next = [...goals];
-  next[index] = goal;
+  next[index] = normalizedGoal;
   return next;
 }
 

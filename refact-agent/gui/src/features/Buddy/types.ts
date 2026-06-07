@@ -953,15 +953,29 @@ export interface BuddyStorageMetadata {
 export type GoalStatus =
   | "proposed"
   | "active"
+  | "paused"
+  | "escalated"
+  | "done"
+  | "abandoned";
+
+export type GoalStatusWire =
+  | GoalStatus
   | "planned"
   | "running"
   | "waiting_for_human"
-  | "paused"
-  | "done"
-  | "escalated"
-  | "abandoned"
   | "failed"
   | "cancelled";
+
+export function normalizeGoalStatus(raw: unknown): GoalStatus {
+  if (raw === "proposed" || raw === "active" || raw === "paused") return raw;
+  if (raw === "escalated" || raw === "done" || raw === "abandoned") return raw;
+  if (raw === "planned") return "proposed";
+  if (raw === "running") return "active";
+  if (raw === "waiting_for_human") return "paused";
+  if (raw === "failed") return "escalated";
+  if (raw === "cancelled") return "abandoned";
+  return "proposed";
+}
 
 export type GoalAutonomy = "read_only" | "governed" | "full_auto";
 

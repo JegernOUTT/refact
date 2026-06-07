@@ -1,9 +1,4 @@
-import type {
-  AnimType,
-  ConductorGoal,
-  GoalStatus,
-  MoodType,
-} from "./types";
+import type { AnimType, ConductorGoal, GoalStatus, MoodType } from "./types";
 
 export type ConductorDashboardState =
   | "conducting"
@@ -112,24 +107,31 @@ const MOOD_VIEWS: Record<ConductorDashboardState, ConductorMoodView> = {
   },
 };
 
-function statusToState(status: GoalStatus): ConductorDashboardState {
-  if (status === "active" || status === "proposed") return "conducting";
-  if (status === "escalated") return "escalated";
-  if (status === "abandoned") return "abandoned";
-  if (status === "waiting_for_human") return "waiting_human";
-  if (status === "done") return "done";
-  if (status === "failed" || status === "cancelled") return "blocker";
-  if (status === "paused") return "blocker";
-  return "conducting";
+function statusToState(
+  status: GoalStatus,
+  openQuestionCount: number,
+): ConductorDashboardState {
+  switch (status) {
+    case "active":
+    case "proposed":
+      return "conducting";
+    case "paused":
+      return openQuestionCount > 0 ? "waiting_human" : "blocker";
+    case "escalated":
+      return "escalated";
+    case "abandoned":
+      return "abandoned";
+    case "done":
+      return "done";
+  }
 }
 
 export function goalToConductorState(
   goal: ConductorGoal,
 ): ConductorDashboardState {
-  const state = statusToState(goal.status);
+  const state = statusToState(goal.status, goal.summary.open_question_count);
   if (state === "escalated" || state === "abandoned") return state;
   if ((goal.summary.surgery_memo_count ?? 0) > 0) return "surgery";
-  if (goal.summary.open_question_count > 0) return "waiting_human";
   return state;
 }
 

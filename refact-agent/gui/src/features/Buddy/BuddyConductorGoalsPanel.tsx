@@ -14,24 +14,15 @@ type Props = {
   compact?: boolean;
 };
 
-const ACTIVE_STATUSES = new Set<GoalStatus>([
-  "proposed",
-  "active",
-  "planned",
-  "running",
-  "waiting_for_human",
-  "escalated",
-  "paused",
-]);
+const ACTIVE_STATUSES = new Set<GoalStatus>(["proposed", "active", "paused"]);
 
 const FILTERS: { id: GoalFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
-  { id: "waiting_for_human", label: "Needs human" },
+  { id: "paused", label: "Paused" },
   { id: "escalated", label: "Escalated" },
   { id: "abandoned", label: "Abandoned" },
   { id: "done", label: "Done" },
-  { id: "failed", label: "Failed" },
 ];
 
 function formatStatus(status: GoalStatus): string {

@@ -91,7 +91,7 @@ function makeGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
     plan_doc_slug: "master-plan",
     plan_markdown: "# Tiny captain goal",
     done_when: { summary: "Done", checklist: [] },
-    status: "running",
+    status: "active",
     autonomy: "governed",
     budget: { total_tokens: 10000, usd: null },
     spent: {
@@ -117,7 +117,7 @@ function makeGoal(overrides?: Partial<ConductorGoal>): ConductorGoal {
       has_conductor_chat: true,
     },
     ledger: {
-      status: "running",
+      status: "active",
       autonomy: "governed",
       planner_task_id: "planner-1",
       task_ids: ["card-1", "card-2"],
@@ -203,7 +203,7 @@ describe("BuddyChatCompanion conductor cockpit", () => {
         makeSnapshot({
           conductor_goals: [
             makeGoal({
-              status: "waiting_for_human",
+              status: "paused",
               summary: {
       task_count: 2,
       chat_count: 2,
@@ -219,7 +219,7 @@ describe("BuddyChatCompanion conductor cockpit", () => {
     },
     ledger: {
                 ...makeGoal().ledger,
-                status: "waiting_for_human",
+                status: "paused",
                 pending_questions: [
                   {
                     id: "q-1",
@@ -252,7 +252,7 @@ describe("BuddyChatCompanion conductor cockpit", () => {
       http.post("*/v1/buddy/conductor/goals/:goalId/resume", ({ params }) => {
         calls.push(`resume:${String(params.goalId)}`);
         return HttpResponse.json(
-          makeGoal({ id: String(params.goalId), status: "running" }),
+          makeGoal({ id: String(params.goalId), status: "active" }),
         );
       }),
       http.post(
@@ -284,7 +284,7 @@ describe("BuddyChatCompanion conductor cockpit", () => {
       setBuddySnapshot(
         makeSnapshot({
           conductor_goals: [
-            makeGoal({ id: "goal-controls", status: "waiting_for_human" }),
+            makeGoal({ id: "goal-controls", status: "proposed" }),
           ],
         }),
       ),

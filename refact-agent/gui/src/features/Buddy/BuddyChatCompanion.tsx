@@ -1504,8 +1504,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           <div className={styles.phaseRow}>
             <span>Phase: {formatStatusToken(conductorGoal.status)}</span>
             <span>Autonomy: {formatStatusToken(conductorGoal.autonomy)}</span>
-            {humanYieldCount > 0 ||
-            conductorGoal.status === "waiting_for_human" ? (
+            {humanYieldCount > 0 ? (
               <span className={styles.humanYield}>
                 Human yield · {humanYieldCount}
               </span>
@@ -1559,11 +1558,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
               type="button"
               className={styles.controlButton}
               onClick={() => void handleGoalAction("resume")}
-              disabled={
-                pending ||
-                conductorGoal.status === "running" ||
-                conductorGoal.status === "active"
-              }
+              disabled={pending || conductorGoal.status === "active"}
             >
               Resume
             </button>
