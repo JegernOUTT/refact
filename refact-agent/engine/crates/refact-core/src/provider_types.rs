@@ -31,6 +31,25 @@ pub struct ProviderModel {
     pub removable: bool,
 }
 
+impl ProviderModel {
+    pub fn custom_role(model_id: &str, enabled: bool, n_ctx: usize) -> Self {
+        Self {
+            id: model_id.to_string(),
+            base_name: model_id.to_string(),
+            enabled,
+            n_ctx,
+            supports_tools: false,
+            supports_multimodality: false,
+            supports_reasoning: None,
+            supports_agent: false,
+            wire_format_override: None,
+            endpoint_override: None,
+            user_configured: true,
+            removable: true,
+        }
+    }
+}
+
 fn default_true_runtime() -> bool {
     true
 }
@@ -45,6 +64,10 @@ pub struct ProviderRuntime {
     pub chat_endpoint: String,
     pub completion_endpoint: String,
     pub embedding_endpoint: String,
+    #[serde(default)]
+    pub completion_endpoint_style: String,
+    #[serde(default)]
+    pub embedding_endpoint_style: String,
     #[serde(skip_serializing)]
     pub api_key: String,
     #[serde(skip_serializing)]
