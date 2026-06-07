@@ -378,7 +378,11 @@ impl ScratchpadAbstract for FillInTheMiddleScratchpad {
         delta: String,
         finish_reason: FinishReason,
     ) -> Result<(Value, FinishReason), String> {
-        let json_choices = if !delta.is_empty() || finish_reason == FinishReason::Stop {
+        let json_choices = if !delta.is_empty()
+            || matches!(
+                finish_reason,
+                FinishReason::Stop | FinishReason::ContentFilter | FinishReason::Unknown
+            ) {
             let mut s: String = _cut_result(
                 &delta,
                 self.t.eot.as_str(),

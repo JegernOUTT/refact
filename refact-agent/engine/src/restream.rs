@@ -38,8 +38,6 @@ pub async fn scratchpad_interaction_not_stream_json(
     let mut model_says = if only_deterministic_messages {
         save_url = "only-det-messages".to_string();
         Ok(Value::Object(serde_json::Map::new()))
-    } else if model_rec.endpoint_style == "hf" {
-        Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style.".to_string())
     } else {
         crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint(
             &model_rec,
@@ -49,10 +47,12 @@ pub async fn scratchpad_interaction_not_stream_json(
         )
         .await
     }
-    .map_err(|e| ScratchError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("forward_to_endpoint: {}", e),
-    ))?;
+    .map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("forward_to_endpoint: {}", e),
+        )
+    })?;
     generate_id_and_index_for_tool_calls_if_missing(&mut model_says);
     info!(
         "forward to endpoint {:.2}ms, url was {}",
@@ -342,16 +342,12 @@ pub async fn scratchpad_interaction_stream(
                 break;
             }
             // info!("prompt: {:?}", prompt);
-            let event_source_maybe = if model_rec.endpoint_style == "hf" {
-                Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style.".to_string())
-            } else {
-                crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_streaming(
-                    &model_rec,
-                    &prompt,
-                    &client,
-                    &my_parameters
-                ).await
-            };
+            let event_source_maybe = crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_streaming(
+                &model_rec,
+                &prompt,
+                &client,
+                &my_parameters
+            ).await;
             let response = match event_source_maybe {
                 Ok(resp) => resp,
                 Err(e) => {
