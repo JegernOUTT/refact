@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use async_trait::async_trait;
 use tracing::info;
 
+use refact_core::llm_types::EmbeddingEndpointStyle;
 use refact_core::vecdb_types::{
     EmbeddingModelConfig, FileReader, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
 };
@@ -23,9 +24,41 @@ pub struct VecDb {
     constants: VecdbConstants,
 }
 
+fn validate_embedding_config(model: &EmbeddingModelConfig) -> Result<(), String> {
+    if model.model_name.trim().is_empty() {
+        return Err("No embedding model configured".to_string());
+    }
+    if model.embedding_size <= 0 {
+        return Err("No embedding size configured".to_string());
+    }
+    if model.embedding_batch == 0 {
+        return Err("No embedding batch configured".to_string());
+    }
+    if model.rejection_threshold <= 0.0 {
+        return Err(format!(
+            "VecDB embedding config error: rejection_threshold must be positive, got {}",
+            model.rejection_threshold
+        ));
+    }
+
+    let style = if model.embedding_endpoint_style.is_empty() {
+        EmbeddingEndpointStyle::from_config(&model.endpoint_style, "embedding_endpoint_style")?
+    } else {
+        EmbeddingEndpointStyle::from_config(
+            &model.embedding_endpoint_style,
+            "embedding_endpoint_style",
+        )?
+    };
+
+    if model.endpoint.trim().is_empty() && style != EmbeddingEndpointStyle::OllamaNative {
+        return Err("No embedding endpoint configured".to_string());
+    }
+    Ok(())
+}
+
 impl VecDb {
     pub fn validate_constants(constants: &VecdbConstants) -> Result<(), String> {
-        constants.embedding_model.validate()
+        validate_embedding_config(&constants.embedding_model)
     }
 
     pub async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
@@ -220,10 +253,14 @@ mod tests {
     use crate::fetch_embedding::take_last_embedding_inputs;
 
     fn test_config() -> EmbeddingModelConfig {
+        embedding_config("openai", "test://record-only")
+    }
+
+    fn embedding_config(endpoint_style: &str, endpoint: &str) -> EmbeddingModelConfig {
         EmbeddingModelConfig {
-            endpoint: "test://record-only".to_string(),
+            endpoint: endpoint.to_string(),
             endpoint_style: "openai".to_string(),
-            embedding_endpoint_style: "openai".to_string(),
+            embedding_endpoint_style: endpoint_style.to_string(),
             api_key: String::new(),
             auth_token: String::new(),
             extra_headers: Default::default(),
@@ -252,7 +289,7 @@ mod tests {
         let mut config = test_config();
         config.embedding_batch = 0;
         let err = VecDb::validate_constants(&test_constants(config)).unwrap_err();
-        assert!(err.contains("embedding_batch"));
+        assert!(err.contains("embedding batch"));
     }
 
     #[test]
@@ -261,6 +298,18 @@ mod tests {
         config.rejection_threshold = 0.0;
         let err = VecDb::validate_constants(&test_constants(config)).unwrap_err();
         assert!(err.contains("rejection_threshold"));
+    }
+
+    #[test]
+    fn vdb_highlev_rejects_openai_empty_endpoint() {
+        let err = validate_embedding_config(&embedding_config("openai", "")).unwrap_err();
+
+        assert_eq!(err, "No embedding endpoint configured");
+    }
+
+    #[test]
+    fn vdb_highlev_accepts_ollama_native_empty_endpoint() {
+        validate_embedding_config(&embedding_config("ollama_native", "")).unwrap();
     }
 
     #[tokio::test]

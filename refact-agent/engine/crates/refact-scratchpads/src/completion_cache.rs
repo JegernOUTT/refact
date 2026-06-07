@@ -109,7 +109,7 @@ pub fn cache_key_from_post(post: &CodeCompletionPost) -> (String, String) {
                 "dummy1-{}:{}",
                 post.inputs.cursor.line, post.inputs.cursor.character
             ),
-            "".to_string(),
+            cache_part2_from_post(post),
         );
     }
     let rope = Rope::from_str(text_maybe.unwrap());
@@ -120,7 +120,7 @@ pub fn cache_key_from_post(post: &CodeCompletionPost) -> (String, String) {
                 "dummy2-{}:{}",
                 post.inputs.cursor.line, post.inputs.cursor.character
             ),
-            "".to_string(),
+            cache_part2_from_post(post),
         );
     }
     let mut cursor_line = cursor_line_maybe.unwrap();
@@ -148,10 +148,9 @@ pub fn cache_key_from_post(post: &CodeCompletionPost) -> (String, String) {
     let mut key = "".to_string();
     key.push_str(&linesvec.join(""));
     key.push_str(&cursor_line.to_string());
-    let chars = key.chars();
-
-    if chars.clone().count() > CACHE_KEY_CHARS {
-        key = chars.skip(key.len() - CACHE_KEY_CHARS).collect();
+    let char_count = key.chars().count();
+    if char_count > CACHE_KEY_CHARS {
+        key = key.chars().skip(char_count - CACHE_KEY_CHARS).collect();
     }
     return (key, cache_part2_from_post(post));
 }
@@ -222,19 +221,16 @@ mod tests {
     use super::*;
     use refact_core::chat_types::{CodeCompletionInputs, CursorPosition, SamplingParameters};
 
-    fn test_post() -> CodeCompletionPost {
+    fn post(file: &str, source: &str) -> CodeCompletionPost {
         let mut sources = HashMap::new();
-        sources.insert(
-            "/tmp/main.rs".to_string(),
-            "fn main() {\n    pri\n}".to_string(),
-        );
+        sources.insert(file.to_string(), source.to_string());
         CodeCompletionPost {
             inputs: CodeCompletionInputs {
                 sources,
                 cursor: CursorPosition {
-                    file: "/tmp/main.rs".to_string(),
-                    line: 1,
-                    character: 7,
+                    file: file.to_string(),
+                    line: 0,
+                    character: source.chars().count() as i32,
                 },
                 multiline: false,
             },
@@ -251,6 +247,10 @@ mod tests {
             cache_salt: "salt-a".to_string(),
             cache_generation: 1,
         }
+    }
+
+    fn test_post() -> CodeCompletionPost {
+        post("/tmp/main.rs", "fn main() {\n    pri\n}")
     }
 
     #[test]
@@ -288,5 +288,40 @@ mod tests {
         assert_eq!(cache_bump_generation(cache.clone()), 1);
         assert!(cache.read().unwrap().map.is_empty());
         assert!(cache.read().unwrap().in_added_order.is_empty());
+    }
+
+    #[test]
+    fn fallback_cache_key_includes_post_salt() {
+        let mut first = post("missing.rs", "let a = 1;");
+        first.inputs.cursor.file = "other.rs".to_string();
+        let mut second = first.clone();
+        second.model = "model-b".to_string();
+
+        let first_key = cache_key_from_post(&first);
+        let second_key = cache_key_from_post(&second);
+
+        assert_eq!(first_key.0, second_key.0);
+        assert_ne!(first_key.1, second_key.1);
+    }
+
+    #[test]
+    fn cache_key_changes_with_generation_salt() {
+        let first = post("test.rs", "let a = 1;");
+        let mut second = first.clone();
+        second.rag_tokens_n = 256;
+
+        assert_ne!(
+            cache_key_from_post(&first).1,
+            cache_key_from_post(&second).1
+        );
+    }
+
+    #[test]
+    fn cache_key_truncates_unicode_by_chars() {
+        let source = "é".repeat(CACHE_KEY_CHARS + 3);
+        let key = cache_key_from_post(&post("test.rs", &source)).0;
+
+        assert_eq!(key.chars().count(), CACHE_KEY_CHARS);
+        assert!(key.chars().all(|c| c == 'é'));
     }
 }

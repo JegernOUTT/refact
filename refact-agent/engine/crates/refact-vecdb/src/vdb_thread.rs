@@ -157,6 +157,36 @@ async fn vectorize_batch_from_q(
     Ok(())
 }
 
+fn apply_cached_vectors_result(
+    batch: Vec<SplitResult>,
+    vectors_maybe: Result<Vec<Option<Vec<f32>>>, String>,
+    ready_to_vecdb: &mut Vec<VecdbRecord>,
+    run_actual_model_on_these: &mut Vec<SplitResult>,
+) {
+    match vectors_maybe {
+        Ok(vectors) => {
+            for (split, maybe_vector) in batch.iter().zip(vectors.iter()) {
+                if maybe_vector.is_none() {
+                    run_actual_model_on_these.push(split.clone());
+                    continue;
+                }
+                ready_to_vecdb.push(VecdbRecord {
+                    vector: maybe_vector.clone(),
+                    file_path: split.file_path.clone(),
+                    start_line: split.start_line,
+                    end_line: split.end_line,
+                    distance: -1.0,
+                    usefulness: 0.0,
+                });
+            }
+        }
+        Err(err) => {
+            tracing::error!("{}", err);
+            run_actual_model_on_these.extend(batch);
+        }
+    }
+}
+
 async fn from_splits_to_vecdb_records_applying_cache(
     splits: &mut Vec<SplitResult>,
     ready_to_vecdb: &mut Vec<VecdbRecord>,
@@ -182,24 +212,12 @@ async fn from_splits_to_vecdb_records_applying_cache(
             .await
             .fetch_vectors_from_cache(&cache_lookup)
             .await;
-        if let Ok(vectors) = vectors_maybe {
-            for (split, maybe_vector) in batch.iter().zip(vectors.iter()) {
-                if maybe_vector.is_none() {
-                    run_actual_model_on_these.push(split.clone());
-                    continue;
-                }
-                ready_to_vecdb.push(VecdbRecord {
-                    vector: maybe_vector.clone(),
-                    file_path: split.file_path.clone(),
-                    start_line: split.start_line,
-                    end_line: split.end_line,
-                    distance: -1.0,
-                    usefulness: 0.0,
-                });
-            }
-        } else if let Err(err) = vectors_maybe {
-            tracing::error!("{}", err);
-        }
+        apply_cached_vectors_result(
+            batch,
+            vectors_maybe,
+            ready_to_vecdb,
+            run_actual_model_on_these,
+        );
     }
 }
 
@@ -742,5 +760,38 @@ mod tests {
         assert!(service_locked.vstatus.lock().await.vecdb_max_files_hit);
         assert_eq!(service_locked.vecdb_todo.lock().await.len(), 2);
         let _ = std::fs::remove_dir_all(tmp);
+    }
+}
+
+#[cfg(test)]
+mod cache_error_tests {
+    use super::*;
+
+    fn split(text: &str) -> SplitResult {
+        SplitResult {
+            file_path: PathBuf::from("/tmp/test.rs"),
+            window_text: text.to_string(),
+            window_text_hash: refact_ast::ast::chunk_utils::official_text_hashing_function(text),
+            start_line: 1,
+            end_line: 1,
+            symbol_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn vdb_thread_cache_lookup_error_keeps_batch_for_embedding() {
+        let batch = vec![split("one"), split("two")];
+        let mut ready = vec![];
+        let mut run_actual = vec![];
+
+        apply_cached_vectors_result(
+            batch,
+            Err("cache failed".to_string()),
+            &mut ready,
+            &mut run_actual,
+        );
+
+        assert!(ready.is_empty());
+        assert_eq!(run_actual.len(), 2);
     }
 }
