@@ -276,6 +276,7 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 ### Surface model
 
 - Panel-less by default: inline content, especially tool cards and transcript content, should not gain boxes, fills, or heavy borders.
+- Kit Menu, Select, and Combobox item rows follow the ModelSelector row language: transparent idle rows, no per-row border/box/radius, `--rf-surface-1` hover, and `--rf-color-accent-soft` selected tint with accent-colored marker. Preserve the glass overlay container and keep overlay content as the single scroll owner.
 - Surfaces are reserved for overlays, fields, selected/active state, and true containment. When used, keep them barely visible with tokenized borders/backgrounds.
 - JCEF/JetBrains (`[data-host="jetbrains"]`) forces solid overlay surfaces and disables blur for performance.
 

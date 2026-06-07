@@ -95,6 +95,7 @@ export function Combobox({
               <ComboboxItem
                 key={item.value}
                 className={styles.item}
+                data-selected={item.value === value ? "true" : undefined}
                 disabled={item.disabled}
                 focusOnHover
                 value={item.value}

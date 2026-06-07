@@ -14,8 +14,8 @@
 }
 
 .medium {
-  width: 10px;
-  height: 10px;
+  width: calc((var(--rf-space-2) + var(--rf-space-3)) / 2);
+  height: calc((var(--rf-space-2) + var(--rf-space-3)) / 2);
 }
 
 .large {

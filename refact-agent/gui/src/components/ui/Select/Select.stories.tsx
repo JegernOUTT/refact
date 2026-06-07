@@ -22,10 +22,10 @@ function SelectDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
         <section className={storyStyles.panel}>
           <h3 className={storyStyles.title}>Select</h3>
           <p className={storyStyles.description}>
-            Token styled Radix Select with grouped items, separators, disabled states, and clamped overlay surface.
+            Panel-less Radix Select rows with grouped items, selected tint, hover state, and clamped overlay surface.
           </p>
           <div className={storyStyles.row}>
-            <Select value={value} onValueChange={setValue}>
+            <Select defaultOpen value={value} onValueChange={setValue}>
               <Select.Trigger placeholder="Choose mode" />
               <Select.Content maxHeight="260px" maxWidth="320px">
                 <Select.Group>

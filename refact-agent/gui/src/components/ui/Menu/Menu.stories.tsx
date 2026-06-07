@@ -10,9 +10,9 @@ function MenuStory({ reducedMotion = false }: { reducedMotion?: boolean }) {
         <section className={styles.panel} data-appearance={appearance} key={appearance}>
           <div className={styles.header}>
             <h2 className={styles.title}>{appearance} menu</h2>
-            <p className={styles.description}>Keyboard-navigable DropdownMenu with label, item, and separator slots.</p>
+            <p className={styles.description}>Panel-less DropdownMenu rows with subtle hover, label, item, and separator slots.</p>
           </div>
-          <Menu>
+          <Menu defaultOpen>
             <Menu.Trigger asChild>
               <button className={styles.button} type="button">Open menu</button>
             </Menu.Trigger>

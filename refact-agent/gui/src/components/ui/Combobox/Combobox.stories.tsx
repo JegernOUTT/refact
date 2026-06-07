@@ -22,7 +22,7 @@ const items = [
 ];
 
 function ComboboxDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
-  const [value, setValue] = useState("ag");
+  const [value, setValue] = useState("agent");
 
   return (
     <div className={reducedMotion ? storyStyles.reducedMotion : undefined}>
@@ -30,7 +30,7 @@ function ComboboxDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
         <section className={storyStyles.panel}>
           <h3 className={storyStyles.title}>Combobox</h3>
           <p className={storyStyles.description}>
-            Generic Ariakit combobox with token styling and clamped popover surface.
+            Panel-less Ariakit combobox rows with selected tint, hover state, and clamped popover surface.
           </p>
           <Combobox
             items={items}

@@ -33,15 +33,20 @@
   min-height: var(--rf-control-h);
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-fg);
-  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   outline: none;
   user-select: none;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .item[data-highlighted] {
   color: var(--rf-color-fg);
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-1);
 }
 
 .item[data-disabled] {
