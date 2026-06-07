@@ -172,19 +172,19 @@ One Rust binary becomes the whole control room: `refact-lsp` speaks LSP to edito
 
 ## Comparison
 
-| Capability | Refact (this fork) | Upstream archive | Typical AI assistant |
-| --- | --- | --- | --- |
-| Local-first / no-cloud | Local engine, local project state, zero bundled cloud requirement | Earlier local-first foundation, no longer active | Often service-hosted by default |
-| BYOK providers | Broad hosted, local, OpenAI-compatible, and custom provider support | Older provider coverage | Usually one vendor or a small provider set |
-| Autonomous agents | Tool-using agent modes with shell, file, browser, MCP, and delegation support | Earlier agent workflows | Often chat-first with limited autonomy |
-| Task planner + cards | Planner chats, task boards, per-card agents, and worktree isolation | Not the active focus | Usually external project tracking |
-| Persistent memory + autoinjection | `.refact/` knowledge, trajectories, tasks, integrations, VecDB, and context injection | Earlier project state concepts | Often ephemeral or account-cloud memory |
-| Hidden static plans | `set_plan`, `update_plan`, and `get_plan` preserve base plans plus append-only deltas | Not a primary public surface | Rarely supported |
-| MCP / skills / subagents | MCP lazy discovery, skills, slash commands, hooks, subagents, and marketplaces | More limited extension story | Varies by vendor |
-| Worktree isolation | Per-card isolated git worktrees for task-agent execution | Not a central workflow | Rarely built in |
-| Scheduler / cron | Basic `cron_create`, `cron_list`, `cron_delete`, and `sleep` tick events | Not a central workflow | Usually absent or external |
-| Cross-device UI | Browser UI works anywhere that can reach the local engine | Earlier web UI foundation | Usually app-specific |
-| Telemetry-free | Local/BYOK usage does not require a Refact cloud account | Cloud-era integrations existed historically | Often account and service telemetry based |
+| Capability | Refact (this fork) | Typical AI assistant |
+| --- | --- | --- |
+| Local-first / no-cloud | Local engine, local project state, zero bundled cloud requirement | Often service-hosted by default |
+| BYOK providers | Broad hosted, local, OpenAI-compatible, and custom provider support | Usually one vendor or a small provider set |
+| Autonomous agents | Tool-using agent modes with shell, file, browser, MCP, and delegation support | Often chat-first with limited autonomy |
+| Task planner + cards | Planner chats, task boards, per-card agents, and worktree isolation | Usually external project tracking |
+| Persistent memory + autoinjection | `.refact/` knowledge, trajectories, tasks, integrations, VecDB, and context injection | Often ephemeral or account-cloud memory |
+| Hidden static plans | `set_plan`, `update_plan`, and `get_plan` preserve base plans plus append-only deltas | Rarely supported |
+| MCP / skills / subagents | MCP lazy discovery, skills, slash commands, hooks, subagents, and marketplaces | Varies by vendor |
+| Worktree isolation | Per-card isolated git worktrees for task-agent execution | Rarely built in |
+| Scheduler / cron | Basic `cron_create`, `cron_list`, `cron_delete`, and `sleep` tick events | Usually absent or external |
+| Cross-device UI | Browser UI works anywhere that can reach the local engine | Usually app-specific |
+| Telemetry-free | Local/BYOK usage does not require a Refact cloud account | Often account and service telemetry based |
 
 ## Supported providers & models
 
