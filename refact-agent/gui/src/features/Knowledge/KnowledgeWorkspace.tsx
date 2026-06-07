@@ -1,9 +1,11 @@
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
+
+import { Surface } from "../../components/ui";
 import { useGetKnowledgeGraphQuery } from "../../services/refact/knowledgeGraphApi";
-import { MemoryListView } from "./MemoryListView";
+import type { KnowledgeMemoRecord } from "../../services/refact/types";
 import { KnowledgeGraphView } from "./KnowledgeGraphView";
 import { MemoryDetailsEditor } from "./MemoryDetailsEditor";
-import type { KnowledgeMemoRecord } from "../../services/refact/types";
+import { MemoryListView } from "./MemoryListView";
 import styles from "./KnowledgeWorkspace.module.css";
 
 export function KnowledgeWorkspace() {
@@ -17,23 +19,18 @@ export function KnowledgeWorkspace() {
   const allDocNodes = useMemo(() => {
     if (!graph) return [];
     return graph.nodes.filter((node) => {
-      const isDocNode =
-        node.node_type === "doc" || node.node_type.startsWith("doc_");
+      const isDocNode = node.node_type === "doc" || node.node_type.startsWith("doc_");
       if (!isDocNode) return false;
 
       const kind = node.node_type.replace("doc_", "").toLowerCase();
-      return (
-        kind !== "deprecated" && kind !== "archived" && kind !== "trajectory"
-      );
+      return kind !== "deprecated" && kind !== "archived" && kind !== "trajectory";
     });
   }, [graph]);
 
   const docDocEdges = useMemo(() => {
     if (!graph) return [];
     const docIds = new Set(allDocNodes.map((n) => n.id));
-    return graph.edges.filter(
-      (edge) => docIds.has(edge.source) && docIds.has(edge.target),
-    );
+    return graph.edges.filter((edge) => docIds.has(edge.source) && docIds.has(edge.target));
   }, [graph, allDocNodes]);
 
   const linkedIds = useMemo(() => {
@@ -87,33 +84,30 @@ export function KnowledgeWorkspace() {
 
   if (error) {
     return (
-      <div className={styles.workspace}>
-        <div className={styles.error}>
+      <Surface className={styles.workspace} radius="none">
+        <Surface className={styles.error} variant="plain">
           <p>Failed to load knowledge graph</p>
-        </div>
-      </div>
+        </Surface>
+      </Surface>
     );
   }
 
   return (
-    <div className={styles.workspace}>
-      <div className={styles.editorSection}>
-        <MemoryDetailsEditor
-          memory={selectedMemory}
-          onMemoryDeleted={handleMemoryDeleted}
-        />
-      </div>
+    <Surface className={styles.workspace} radius="none">
+      <Surface className={styles.editorSection} variant="surface-1">
+        <MemoryDetailsEditor memory={selectedMemory} onMemoryDeleted={handleMemoryDeleted} />
+      </Surface>
 
-      <div className={styles.listSection}>
+      <Surface className={styles.listSection} variant="surface-1">
         <MemoryListView
           memories={memoryRecords}
           selectedId={selectedId}
           onSelectId={handleSelectMemory}
           linkedIds={linkedIds}
         />
-      </div>
+      </Surface>
 
-      <div className={styles.graphSection}>
+      <Surface className={styles.graphSection} variant="surface-1">
         <KnowledgeGraphView
           nodes={linkedDocNodes}
           edges={docDocEdges}
@@ -121,7 +115,7 @@ export function KnowledgeWorkspace() {
           onSelectId={handleSelectMemory}
           isLoading={isLoading}
         />
-      </div>
-    </div>
+      </Surface>
+    </Surface>
   );
 }

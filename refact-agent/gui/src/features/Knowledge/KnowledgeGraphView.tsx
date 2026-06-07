@@ -1,15 +1,14 @@
-import { useEffect, useRef, useState, useMemo, useCallback } from "react";
-import CytoscapeComponent from "react-cytoscapejs";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import cytoscape from "cytoscape";
 import type Cytoscape from "cytoscape";
 import fcose from "cytoscape-fcose";
-import { Flex, Text } from "@radix-ui/themes";
-import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
-import type {
-  KnowledgeGraphNode,
-  KnowledgeGraphEdge,
-} from "../../services/refact/types";
+import CytoscapeComponent from "react-cytoscapejs";
+import { Search } from "lucide-react";
+
+import { Icon, LoadingState, Surface } from "../../components/ui";
+import type { KnowledgeGraphEdge, KnowledgeGraphNode } from "../../services/refact/types";
 import styles from "./KnowledgeGraphView.module.css";
+import { useKnowledgeGraphTheme } from "./useKnowledgeGraphTheme";
 
 cytoscape.use(fcose);
 
@@ -40,14 +39,6 @@ const isDocNode = (node: KnowledgeGraphNode): boolean => {
   }
   return nodeType === "doc" || nodeType.startsWith("doc_");
 };
-const NODE_COLORS: Record<string, string> = {
-  code: "#3B82F6",
-  decision: "#8B5CF6",
-  preference: "#10B981",
-  pattern: "#F59E0B",
-  lesson: "#06B6D4",
-  default: "#8B5CF6",
-};
 
 export function KnowledgeGraphView({
   nodes,
@@ -61,6 +52,7 @@ export function KnowledgeGraphView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [cyReady, setCyReady] = useState(false);
   const cyReadyRef = useRef(false);
+  const { colors } = useKnowledgeGraphTheme();
 
   const filteredNodes = useMemo(() => {
     return nodes.filter((node) => isDocNode(node));
@@ -68,9 +60,7 @@ export function KnowledgeGraphView({
 
   const filteredEdges = useMemo(() => {
     const nodeIds = new Set(filteredNodes.map((n) => n.id));
-    return edges.filter(
-      (edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target),
-    );
+    return edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
   }, [filteredNodes, edges]);
 
   const degreeMap = useMemo(() => {
@@ -108,15 +98,23 @@ export function KnowledgeGraphView({
     ];
   }, [filteredNodes, filteredEdges, degreeMap]);
 
-  const stylesheet: unknown[] = useMemo(() => {
+  const stylesheet = useMemo<Cytoscape.StylesheetStyle[]>(() => {
+    const nodeColors: Record<string, string> = {
+      code: colors.kind.code,
+      decision: colors.kind.decision,
+      preference: colors.kind.preference,
+      pattern: colors.kind.pattern,
+      lesson: colors.kind.lesson,
+    };
+
     return [
       {
         selector: "node",
         style: {
-          "background-color": "#8B5CF6",
+          "background-color": colors.kind.other,
           label: "",
           "font-size": "12px",
-          color: "#ffffff",
+          color: colors.foreground,
           "text-valign": "center",
           "text-halign": "center",
           width: "mapData(degree, 1, 20, 30, 60)",
@@ -125,40 +123,38 @@ export function KnowledgeGraphView({
           "text-max-width": "80px",
         },
       },
-      ...Object.entries(NODE_COLORS)
-        .filter(([type]) => type !== "default")
-        .map(([type, color]) => ({
-          selector: `node[type="${type}"]`,
-          style: {
-            "background-color": color,
-          },
-        })),
+      ...Object.entries(nodeColors).map(([type, color]) => ({
+        selector: `node[type="${type}"]`,
+        style: {
+          "background-color": color,
+        },
+      })),
       {
         selector: "edge",
         style: {
           width: 1,
-          "line-color": "#9CA3AF",
-          "target-arrow-color": "#9CA3AF",
+          "line-color": colors.muted,
+          "target-arrow-color": colors.muted,
           "target-arrow-shape": "triangle",
           "curve-style": "bezier",
-          opacity: 0.4,
+          opacity: 0.5,
         },
       },
       {
         selector: "node:selected",
         style: {
           "border-width": 5,
-          "border-color": "#FFFFFF",
+          "border-color": colors.border,
           "border-opacity": 1,
           width: "mapData(degree, 1, 20, 40, 80)",
           height: "mapData(degree, 1, 20, 40, 80)",
-          "background-color": "#A78BFA",
-          "box-shadow": "0 0 20px #8B5CF6",
+          "background-color": colors.accent,
+          "box-shadow": `0 0 20px ${colors.accentSoft}`,
           "z-index": 999,
         },
       },
     ];
-  }, []);
+  }, [colors]);
 
   const handleNodeClick = useCallback(
     (nodeId: string) => {
@@ -220,106 +216,75 @@ export function KnowledgeGraphView({
   }, [cyReady, handleNodeClick, handleBackgroundClick]);
 
   useEffect(() => {
-    if (!cyReady || !containerRef.current || !cyRef.current) return;
-    if (typeof ResizeObserver === "undefined") return;
-
-    const ro = new ResizeObserver(() => {
-      cyRef.current?.resize();
-    });
-    ro.observe(containerRef.current);
-    return () => ro.disconnect();
-  }, [cyReady]);
-
-  useEffect(() => {
-    if (!cyRef.current || !cyReady) return;
+    if (!cyRef.current || !cyReady || elements.length === 0) return;
 
     if (layoutRef.current) {
       layoutRef.current.stop();
     }
 
-    const layoutOpts: Cytoscape.LayoutOptions & Record<string, unknown> = {
+    const layout = cyRef.current.layout({
       name: "fcose",
+      quality: "default",
+      randomize: false,
+      animate: true,
       animationDuration: 500,
-      randomize: true,
-      randomSeed: 42,
-      idealEdgeLength: 220,
-      nodeRepulsion: 18000,
-      nodeSeparation: 90,
-      edgeElasticity: 0.35,
-      gravity: 0.15,
-      packComponents: true,
-      componentSpacing: 140,
-      padding: 30,
+      fit: true,
+      padding: 50,
+      nodeRepulsion: 4500,
+      idealEdgeLength: 100,
+      edgeElasticity: 0.45,
+      nestingFactor: 0.1,
+      gravity: 0.25,
+      numIter: 2500,
+      tile: true,
+      tilingPaddingVertical: 10,
+      tilingPaddingHorizontal: 10,
+    } as Cytoscape.LayoutOptions);
+
+    layoutRef.current = layout;
+    layout.run();
+
+    return () => {
+      layout.stop();
     };
-
-    layoutRef.current = cyRef.current.layout(layoutOpts);
-
-    requestAnimationFrame(() => {
-      cyRef.current?.resize();
-      if (layoutRef.current) {
-        layoutRef.current.run();
-      }
-    });
-  }, [cyReady, elements]);
+  }, [elements, cyReady]);
 
   useEffect(() => {
     if (!cyRef.current || !cyReady) return;
 
-    cyRef.current.$("node:selected").unselect();
-
+    cyRef.current.elements().unselect();
     if (selectedId) {
       const node = cyRef.current.$id(selectedId);
       if (node.length > 0) {
         node.select();
-
-        const currentZoom = cyRef.current.zoom();
-        const targetZoom = Math.max(currentZoom, 1.5);
-
         cyRef.current.animate({
           center: { eles: node },
-          zoom: targetZoom,
-          duration: 400,
-          easing: "ease-out",
+          zoom: 1.5,
+          duration: 500,
         });
       }
     }
   }, [cyReady, selectedId]);
 
   if (isLoading) {
-    return (
-      <Flex align="center" justify="center" height="100%">
-        <Text>Loading graph...</Text>
-      </Flex>
-    );
+    return <LoadingState className={styles.loadingState} label="Loading graph..." />;
   }
 
   if (filteredNodes.length === 0) {
     return (
-      <div className={styles.emptyState}>
-        <div className={styles.emptyStateIcon}>
-          <MagnifyingGlassIcon />
-        </div>
-        <div className={styles.emptyStateText}>
-          <p>No linked memories</p>
-        </div>
-      </div>
+      <Surface className={styles.emptyState} radius="none">
+        <Icon icon={Search} size="lg" tone="faint" />
+        <p className={styles.emptyStateText}>No linked memories</p>
+      </Surface>
     );
   }
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        width: "100%",
-        height: "100%",
-        display: "flex",
-        overflow: "hidden",
-      }}
-    >
+    <div ref={containerRef} className={styles.graphContainer}>
       <CytoscapeComponent
+        className={styles.graphCanvas}
         elements={elements}
-        style={{ width: "100%", height: "100%" }}
-        stylesheet={stylesheet as Cytoscape.StylesheetStyle[]}
+        stylesheet={stylesheet}
         cy={(cy) => {
           cyRef.current = cy;
           if (!cyReadyRef.current) {

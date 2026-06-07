@@ -1,11 +1,20 @@
-import { useState, useEffect } from "react";
-import { Button, Dialog, Flex, TextField } from "@radix-ui/themes";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
-import type { KnowledgeMemoRecord } from "../../services/refact/types";
+import { useEffect, useState } from "react";
+import { AlertTriangle, X } from "lucide-react";
+
 import {
-  useUpdateMemoryMutation,
-  useDeleteMemoryMutation,
-} from "../../services/refact/knowledgeGraphApi";
+  Badge,
+  Button,
+  ButtonGroup,
+  Dialog,
+  FieldStack,
+  FieldText,
+  FieldTextarea,
+  Icon,
+  IconButton,
+  Surface,
+} from "../../components/ui";
+import type { KnowledgeMemoRecord } from "../../services/refact/types";
+import { useDeleteMemoryMutation, useUpdateMemoryMutation } from "../../services/refact/knowledgeGraphApi";
 import styles from "./MemoryDetailsEditor.module.css";
 
 interface MemoryDetailsEditorProps {
@@ -57,10 +66,7 @@ export function MemoryDetailsEditor({
     }
   }, [memory]);
 
-  const handleFieldChange = (
-    field: keyof DraftMemory,
-    value: string | string[],
-  ) => {
+  const handleFieldChange = (field: keyof DraftMemory, value: string | string[]) => {
     setDraft((prev) => ({ ...prev, [field]: value }));
     setIsDirty(true);
   };
@@ -100,9 +106,7 @@ export function MemoryDetailsEditor({
         setIsDirty(false);
         onMemoryUpdated?.();
       })
-      .catch((_error: unknown) => {
-        // Error is handled by RTK Query
-      });
+      .catch((_error: unknown) => undefined);
   };
 
   const handleDelete = (archive: boolean) => {
@@ -117,9 +121,7 @@ export function MemoryDetailsEditor({
         setIsDeleteOpen(false);
         onMemoryDeleted?.();
       })
-      .catch((_error: unknown) => {
-        // Error is handled by RTK Query
-      });
+      .catch((_error: unknown) => undefined);
   };
 
   const handleDiscardChanges = () => {
@@ -129,158 +131,136 @@ export function MemoryDetailsEditor({
 
   if (!memory) {
     return (
-      <div className={styles.container}>
+      <Surface className={styles.container} radius="none">
         <p className={styles.emptyState}>No memory selected</p>
-      </div>
+      </Surface>
     );
   }
 
-  const canSave = memory.file_path && isDirty && draft.title && draft.content;
-  const canDelete = memory.file_path;
+  const canSave = Boolean(memory.file_path && isDirty && draft.title && draft.content);
+  const canDelete = Boolean(memory.file_path);
 
   return (
-    <div className={styles.container}>
+    <Surface className={styles.container} radius="none">
       <div className={styles.scrollArea}>
-        <div className={styles.field}>
-          <label className={styles.label}>
-            TITLE {isDirty && <span className={styles.dirtyIndicator}>●</span>}
-          </label>
-          <TextField.Root
+        <FieldStack label={<>TITLE {isDirty ? <span className={styles.dirtyIndicator}>●</span> : null}</>}>
+          <FieldText
             value={draft.title}
-            onChange={(e) => handleFieldChange("title", e.target.value)}
+            onChange={(value) => handleFieldChange("title", value)}
             placeholder="Untitled"
             className={styles.input}
           />
-        </div>
+        </FieldStack>
 
-        <div className={styles.field}>
-          <label className={styles.label}>KIND</label>
-          <div className={styles.readOnlyValue}>{draft.kind}</div>
-        </div>
+        <FieldStack label="KIND">
+          <Surface className={styles.readOnlyValue} radius="control" variant="surface-1">
+            {draft.kind}
+          </Surface>
+        </FieldStack>
 
-        <div className={styles.field}>
-          <label className={styles.label}>CREATED</label>
-          <div className={styles.readOnlyValue}>{memory.created ?? "—"}</div>
-        </div>
+        <FieldStack label="CREATED">
+          <Surface className={styles.readOnlyValue} radius="control" variant="surface-1">
+            {memory.created ?? "—"}
+          </Surface>
+        </FieldStack>
 
-        <div className={styles.field}>
-          <label className={styles.label}>TAGS</label>
-          {draft.tags.length > 0 && (
+        <FieldStack label="TAGS">
+          {draft.tags.length > 0 ? (
             <div className={styles.tagsContainer}>
               {draft.tags.map((tag) => (
-                <span key={tag} className={styles.tag}>
+                <Badge key={tag} tone="accent" className={styles.tag}>
                   {tag}
-                  <button
+                  <IconButton
                     className={styles.tagRemove}
+                    icon={X}
+                    size="sm"
+                    variant="plain"
                     onClick={() => handleRemoveTag(tag)}
                     aria-label={`Remove ${tag}`}
-                  >
-                    ×
-                  </button>
-                </span>
+                  />
+                </Badge>
               ))}
             </div>
-          )}
-          <TextField.Root
+          ) : null}
+          <FieldText
             value={tagsInput}
-            onChange={(e) => setTagsInput(e.target.value)}
+            onChange={setTagsInput}
             onBlur={handleTagsBlur}
             placeholder="comma, separated, tags"
             className={styles.input}
           />
-        </div>
+        </FieldStack>
 
-        <div className={styles.field}>
-          <label className={styles.label}>FILE PATH</label>
-          <div className={styles.readOnlyValue}>
+        <FieldStack label="FILE PATH">
+          <Surface className={styles.readOnlyValue} radius="control" variant="surface-1">
             {memory.file_path ?? (
               <span className={styles.warning}>
-                <ExclamationTriangleIcon /> This memory has no file path and
+                <Icon icon={AlertTriangle} size="sm" tone="warning" /> This memory has no file path and
                 cannot be edited
               </span>
             )}
-          </div>
-        </div>
+          </Surface>
+        </FieldStack>
 
-        <div className={styles.field}>
-          <label className={styles.label}>CONTENT</label>
-          <textarea
+        <FieldStack label="CONTENT">
+          <FieldTextarea
             value={draft.content}
-            onChange={(e) => handleFieldChange("content", e.target.value)}
+            onChange={(value) => handleFieldChange("content", value)}
             className={styles.textarea}
             placeholder="Memory content..."
           />
-        </div>
+        </FieldStack>
       </div>
 
       <div className={styles.actions}>
-        <Button
-          onClick={handleSave}
-          disabled={!canSave || isSaving}
-          style={{ flex: 1 }}
-        >
-          {isSaving ? "Saving..." : "Save"}
+        <Button className={styles.actionButton} onClick={handleSave} disabled={!canSave || isSaving} loading={isSaving} variant="primary">
+          Save
         </Button>
-        <Button
-          color="red"
-          variant="outline"
-          onClick={() => setIsDeleteOpen(true)}
-          disabled={!canDelete}
-          style={{ flex: 1 }}
-        >
+        <Button className={styles.actionButton} variant="danger" onClick={() => setIsDeleteOpen(true)} disabled={!canDelete}>
           Delete
         </Button>
       </div>
 
-      {isDeleteOpen && (
-        <Dialog.Root open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
-          <Dialog.Content>
+      {isDeleteOpen ? (
+        <Dialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
+          <Dialog.Content maxWidth="420px">
             <Dialog.Title>Delete Memory</Dialog.Title>
-            <Flex direction="column" gap="3">
+            <div className={styles.dialogBody}>
               <p>What would you like to do?</p>
-              <Flex gap="2" justify="end">
-                <Button
-                  variant="outline"
-                  onClick={() => setIsDeleteOpen(false)}
-                >
+              <ButtonGroup className={styles.dialogActions}>
+                <Button variant="ghost" onClick={() => setIsDeleteOpen(false)}>
                   Cancel
                 </Button>
-                <Button color="yellow" onClick={() => handleDelete(true)}>
+                <Button variant="soft" onClick={() => handleDelete(true)}>
                   Archive
                 </Button>
-                <Button color="red" onClick={() => handleDelete(false)}>
+                <Button variant="danger" onClick={() => handleDelete(false)}>
                   Permanently Delete
                 </Button>
-              </Flex>
-            </Flex>
+              </ButtonGroup>
+            </div>
           </Dialog.Content>
-        </Dialog.Root>
-      )}
+        </Dialog>
+      ) : null}
 
-      {showDiscardDialog && (
-        <Dialog.Root
-          open={showDiscardDialog}
-          onOpenChange={setShowDiscardDialog}
-        >
-          <Dialog.Content>
+      {showDiscardDialog ? (
+        <Dialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog}>
+          <Dialog.Content maxWidth="420px">
             <Dialog.Title>Unsaved Changes</Dialog.Title>
-            <Flex direction="column" gap="3">
+            <div className={styles.dialogBody}>
               <p>You have unsaved changes. Discard them?</p>
-              <Flex gap="2" justify="end">
-                <Button
-                  variant="outline"
-                  onClick={() => setShowDiscardDialog(false)}
-                >
+              <ButtonGroup className={styles.dialogActions}>
+                <Button variant="ghost" onClick={() => setShowDiscardDialog(false)}>
                   Cancel
                 </Button>
-                <Button color="red" onClick={handleDiscardChanges}>
+                <Button variant="danger" onClick={handleDiscardChanges}>
                   Discard
                 </Button>
-              </Flex>
-            </Flex>
+              </ButtonGroup>
+            </div>
           </Dialog.Content>
-        </Dialog.Root>
-      )}
-    </div>
+        </Dialog>
+      ) : null}
+    </Surface>
   );
 }

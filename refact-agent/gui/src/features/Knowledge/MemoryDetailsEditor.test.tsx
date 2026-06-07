@@ -20,7 +20,7 @@ const createMockStore = () => {
   return configureStore({
     reducer: {
       [knowledgeGraphApi.reducerPath]: knowledgeGraphApi.reducer,
-      config: (state = { lspPort: 8001, apiKey: "" }) => state,
+      config: (state = { lspPort: 8001, apiKey: "", themeProps: {} }) => state,
     },
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware().concat(knowledgeGraphApi.middleware),
