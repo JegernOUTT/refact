@@ -12,7 +12,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: var(--rf-space-3);
 }
 
 .IntegrationForm {
@@ -21,15 +21,29 @@
 }
 
 .IntegrationWarning {
-  margin-top: 1rem;
-  padding: 0.5rem 1rem;
+  margin-top: var(--rf-space-4);
+  padding: var(--rf-space-2) var(--rf-space-4);
   cursor: pointer;
   user-select: none;
 }
 
 .WarningHoverCardContent {
-  background-color: var(--accent-a3);
-  color: var(--accent-a11);
+  background-color: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
+}
+
+.root {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+
+.content {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  flex-direction: column;
 }
 
 .popup {
@@ -38,11 +52,10 @@
   width: 80%;
   left: 50%;
   transform: translateX(-50%);
-  background-color: var(--accent-3);
+  background-color: var(--rf-surface-2);
   bottom: 65px;
 }
 
-/* styles for IDEs (padding for pages varies on config.host (vscode, jetbrains, web) */
 .popup_ide {
-  width: calc(100vw - var(--space-2) * 2);
+  width: calc(100vw - var(--rf-space-2) * 2);
 }

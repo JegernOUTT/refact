@@ -1,4 +1,55 @@
-.integrationIcon {
-  max-width: 30px;
-  object-fit: cover;
+.root {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-4);
+}
+
+.text {
+  margin: 0;
+  color: var(--rf-text-secondary);
+  font-size: var(--rf-font-size-sm);
+  line-height: var(--rf-line-height-relaxed);
+}
+
+.formStack {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-5);
+}
+
+.pathGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
+}
+
+.fieldStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.error {
+  margin: 0;
+  color: var(--rf-color-danger);
+  font-size: var(--rf-font-size-xs);
+}
+
+.pathOption {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  color: var(--rf-text-primary);
+  font-size: var(--rf-font-size-sm);
+}
+
+.pathHelp {
+  display: inline-flex;
+  color: var(--rf-text-secondary);
 }

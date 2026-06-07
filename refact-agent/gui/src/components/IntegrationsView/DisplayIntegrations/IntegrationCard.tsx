@@ -1,7 +1,7 @@
 import type { FC, MouseEventHandler } from "react";
 import classNames from "classnames";
 
-import { Card, Flex, Text } from "@radix-ui/themes";
+import { Surface } from "../../ui";
 import { useAppSelector } from "../../../hooks";
 import { useUpdateIntegration } from "./useUpdateIntegration";
 
@@ -59,7 +59,13 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
   };
 
   return (
-    <Card
+    <Surface
+      animated="rise"
+      as="button"
+      type="button"
+      radius="card"
+      variant="plain"
+      interactive
       className={classNames(styles.integrationCard, {
         [styles.integrationCardInline]: isNotConfigured,
         [styles.disabledCard]: isUpdatingAvailability,
@@ -69,37 +75,36 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
         handleIntegrationShowUp(integration);
       }}
     >
-      <Flex
-        gap="4"
-        direction={isNotConfigured ? "column" : "row"}
-        align={"center"}
+      <span
+        className={classNames(styles.content, {
+          [styles.contentInline]: isNotConfigured,
+        })}
       >
         <img
           src={integrationLogo}
           className={styles.integrationIcon}
           alt={integration.integr_name}
         />
-        <Flex
-          align="center"
-          justify="between"
-          gap={isNotConfigured ? "0" : "2"}
-          width={isNotConfigured ? "auto" : "100%"}
+        <span
+          className={classNames(styles.body, {
+            [styles.bodyInline]: isNotConfigured,
+          })}
         >
-          <Text
-            size="3"
-            weight="medium"
-            align={isNotConfigured ? "center" : "left"}
+          <span
+            className={classNames(styles.title, {
+              [styles.titleInline]: isNotConfigured,
+            })}
           >
             {displayName}
-          </Text>
+          </span>
           {!isNotConfigured && (
             <OnOffSwitch
               isEnabled={integrationAvailability.on_your_laptop}
               handleClick={handleAvailabilityClick}
             />
           )}
-        </Flex>
-      </Flex>
-    </Card>
+        </span>
+      </span>
+    </Surface>
   );
 };

@@ -1,5 +1,3 @@
-import { Button, Flex, Text } from "@radix-ui/themes";
-
 import { FC } from "react";
 import {
   IntegrationWithIconRecord,
@@ -10,6 +8,8 @@ import { NewIntegrations } from "./NewIntegrations";
 import { ProjectIntegrations } from "./ProjectIntegrations";
 import { useAppDispatch } from "../../../hooks";
 import { push } from "../../../features/Pages/pagesSlice";
+import { Button } from "../../ui";
+import styles from "./DisplayIntegrations.module.css";
 
 type IntegrationsListProps = {
   globalIntegrations?: IntegrationWithIconRecord[];
@@ -31,20 +31,20 @@ export const IntegrationsList: FC<IntegrationsListProps> = ({
   const dispatch = useAppDispatch();
 
   return (
-    <Flex direction="column" width="100%" gap="4">
-      <Flex align="center" justify="between">
-        <Text my="2">
+    <div className={styles.list}>
+      <div className={styles.introRow}>
+        <p className={styles.description}>
           Integrations allow Refact.ai Agent to interact with other services and
           tools
-        </Text>
+        </p>
         <Button
-          variant="outline"
-          size="2"
+          variant="soft"
+          size="sm"
           onClick={() => dispatch(push({ name: "mcp marketplace" }))}
         >
           Browse MCP Marketplace
         </Button>
-      </Flex>
+      </div>
       <GlobalIntegrations
         globalIntegrations={globalIntegrations}
         handleIntegrationShowUp={handleIntegrationShowUp}
@@ -57,6 +57,6 @@ export const IntegrationsList: FC<IntegrationsListProps> = ({
         availableIntegrationsToConfigure={availableIntegrationsToConfigure}
         handleIntegrationShowUp={handleIntegrationShowUp}
       />
-    </Flex>
+    </div>
   );
 };

@@ -1,21 +1,30 @@
 .integrationCard {
-  padding: 1rem;
+  display: block;
   width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-3) var(--rf-space-2);
   cursor: pointer;
   user-select: none;
-  transition: opacity 0.15s ease-in-out;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    opacity var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.integrationCard:hover {
+  background: var(--rf-surface-1);
 }
 
 .integrationCardInline {
-  width: 100%;
-  min-height: 140px;
+  min-height: 120px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0.75rem;
-  .integrationIcon {
-    max-width: 45px;
-  }
+  padding: var(--rf-space-3);
+}
+
+.integrationCardInline .integrationIcon {
+  max-width: 45px;
 }
 
 .disabledCard {
@@ -23,7 +32,46 @@
   cursor: not-allowed;
 }
 
+.content {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-4);
+  min-width: 0;
+}
+
+.contentInline {
+  flex-direction: column;
+  justify-content: center;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+}
+
+.bodyInline {
+  flex: initial;
+  justify-content: center;
+}
+
 .integrationIcon {
   max-width: 30px;
   object-fit: cover;
+  flex: 0 0 auto;
+}
+
+.title {
+  min-width: 0;
+  color: var(--rf-text-primary);
+  font-size: var(--rf-font-size-sm);
+  font-weight: var(--rf-font-weight-medium);
+  line-height: var(--rf-line-height-tight);
+}
+
+.titleInline {
+  text-align: center;
 }

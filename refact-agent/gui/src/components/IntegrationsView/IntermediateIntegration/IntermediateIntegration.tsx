@@ -1,6 +1,7 @@
+import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
 import { type FormEvent, type FC, useState, useMemo } from "react";
 import { NotConfiguredIntegrationWithIconRecord } from "../../../services/refact";
-import { Button, Card, Flex, RadioGroup, Text } from "@radix-ui/themes";
+import { Button } from "../../ui";
 import { CustomInputField } from "../CustomFieldsAndWidgets";
 import { Link } from "../../Link";
 import { useGetIntegrationDataByPathQuery } from "../../../hooks/useGetIntegrationDataByPathQuery";
@@ -8,6 +9,7 @@ import { validateSnakeCase } from "../../../utils/validateSnakeCase";
 import { createProjectLabelsWithConflictMarkers } from "../../../utils/createProjectLabelsWithConflictMarkers";
 import { IntegrationPathField } from "./IntegrationPathField";
 import { MCPSetupWizard } from "../MCPSetupWizard";
+import styles from "./IntermediateIntegration.module.css";
 
 type IntegrationCmdlineProps = {
   integration: NotConfiguredIntegrationWithIconRecord;
@@ -64,44 +66,43 @@ export const IntermediateIntegration: FC<IntegrationCmdlineProps> = ({
   }
 
   return (
-    <Flex direction="column" gap="4" width="100%">
+    <div className={styles.root}>
       {relatedIntegration.data?.integr_schema.description && (
-        <Text size="2" color="gray" mb="2">
+        <p className={styles.text}>
           {relatedIntegration.data.integr_schema.description}
-        </Text>
+        </p>
       )}
-      <Text size="2" color="gray">
+      <p className={styles.text}>
         Where do you want to configure this integration? Any project that has
         version control can have its own integrations configured.
-      </Text>
+      </p>
       <form onSubmit={handleSubmit} id={`form-${integration.integr_name}`}>
-        <Flex gap="5" direction="column" width="100%">
-          <Card>
-            <RadioGroup.Root
-              name="integr_config_path"
-              defaultValue={integration.integr_config_path[0]}
-            >
-              {integration.integr_config_path.map((configPath, index) => {
-                const shouldPathBeFormatted =
-                  integration.project_path[index] !== "";
+        <div className={styles.formStack}>
+          <RadioGroupPrimitive.Root
+            className={styles.pathGroup}
+            name="integr_config_path"
+            defaultValue={integration.integr_config_path[0]}
+          >
+            {integration.integr_config_path.map((configPath, index) => {
+              const shouldPathBeFormatted =
+                integration.project_path[index] !== "";
 
-                return (
-                  <Text as="label" size="2" key={configPath}>
-                    <IntegrationPathField
-                      configPath={configPath}
-                      projectPath={integration.project_path[index]}
-                      projectLabels={projectLabels}
-                      shouldBeFormatted={shouldPathBeFormatted}
-                    />
-                  </Text>
-                );
-              })}
-            </RadioGroup.Root>
-          </Card>
-          <Flex direction="column" gap="3">
+              return (
+                <label className={styles.pathOption} key={configPath}>
+                  <IntegrationPathField
+                    configPath={configPath}
+                    projectPath={integration.project_path[index]}
+                    projectLabels={projectLabels}
+                    shouldBeFormatted={shouldPathBeFormatted}
+                  />
+                </label>
+              );
+            })}
+          </RadioGroupPrimitive.Root>
+          <div className={styles.fieldStack}>
             {integrationTemplate && (
-              <Flex direction="column" gap="2">
-                <Text size="2" color="gray">
+              <div className={styles.fieldStack}>
+                <p className={styles.text}>
                   Name for your new command, make sure that it&apos;s written in{" "}
                   <Link
                     href="https://en.wikipedia.org/wiki/Snake_case"
@@ -109,8 +110,8 @@ export const IntermediateIntegration: FC<IntegrationCmdlineProps> = ({
                   >
                     snake case
                   </Link>
-                </Text>
-                <Flex direction="column" gap="1">
+                </p>
+                <div className={styles.fieldStack}>
                   <CustomInputField
                     name="command_name"
                     placeholder="runserver_py"
@@ -119,18 +120,13 @@ export const IntermediateIntegration: FC<IntegrationCmdlineProps> = ({
                     color={errorMessage ? "red" : undefined}
                     wasInteracted
                   />
-                  {errorMessage && (
-                    <Text color="red" size="1">
-                      {errorMessage}
-                    </Text>
-                  )}
-                </Flex>
-              </Flex>
+                  {errorMessage && <p className={styles.error}>{errorMessage}</p>}
+                </div>
+              </div>
             )}
             <Button
               type="submit"
-              variant="surface"
-              color="green"
+              variant="primary"
               disabled={
                 integrationTemplate ? !!errorMessage || !commandName : false
               }
@@ -142,9 +138,9 @@ export const IntermediateIntegration: FC<IntegrationCmdlineProps> = ({
             >
               Continue with setup
             </Button>
-          </Flex>
-        </Flex>
+          </div>
+        </div>
       </form>
-    </Flex>
+    </div>
   );
 };

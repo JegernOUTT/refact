@@ -1,11 +1,12 @@
-import { Flex, Heading, Text } from "@radix-ui/themes";
+import { Settings } from "lucide-react";
 import { FC } from "react";
-import { GearIcon } from "@radix-ui/react-icons";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
+import { Icon } from "../../ui";
 import { IntegrationCard } from "./IntegrationCard";
+import styles from "./DisplayIntegrations.module.css";
 
 type GlobalIntegrationsProps = {
   globalIntegrations?: IntegrationWithIconRecord[];
@@ -21,25 +22,20 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
   handleIntegrationShowUp,
 }) => {
   return (
-    <Flex
-      align="start"
-      direction="column"
-      justify="between"
-      gap="4"
-      width="100%"
-    >
-      <Heading as="h4" size="3" style={{ width: "100%" }}>
-        <GearIcon /> Globally configured {globalIntegrations?.length ?? 0}{" "}
+    <section className={styles.section}>
+      <h4 className={styles.sectionTitle}>
+        <Icon icon={Settings} size="md" tone="muted" />
+        Globally configured {globalIntegrations?.length ?? 0}{" "}
         {(globalIntegrations?.length ?? 0) !== 1
           ? "integrations"
           : "integration"}
-      </Heading>
-      <Text size="2" color="gray">
+      </h4>
+      <p className={styles.muted}>
         Global configurations are shared in your IDE and available for all your
         projects.
-      </Text>
+      </p>
       {globalIntegrations && (
-        <Flex direction="column" align="start" gap="3" width="100%">
+        <div className={styles.cards}>
           {globalIntegrations.map((integration, index) => (
             <IntegrationCard
               key={`${index}-${integration.integr_config_path}`}
@@ -47,8 +43,8 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
               handleIntegrationShowUp={handleIntegrationShowUp}
             />
           ))}
-        </Flex>
+        </div>
       )}
-    </Flex>
+    </section>
   );
 };

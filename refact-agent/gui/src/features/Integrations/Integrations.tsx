@@ -1,11 +1,13 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Button } from "@radix-ui/themes";
-import { ArrowLeftIcon } from "@radix-ui/react-icons";
+import { ArrowLeft } from "lucide-react";
+import classNames from "classnames";
 import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
 import type { Config } from "../Config/configSlice";
 import { useGetIntegrationsQuery } from "../../hooks/useGetIntegrationsDataQuery";
 import { IntegrationsView } from "../../components/IntegrationsView";
+import { Button } from "../../components/ui";
+import styles from "./Integrations.module.css";
 
 export type IntegrationsProps = {
   onCloseIntegrations?: () => void;
@@ -67,26 +69,24 @@ export const Integrations: React.FC<IntegrationsProps> = ({
   return (
     <PageWrapper
       host={host}
-      style={{
-        padding: 0,
-        marginTop: isInnerIntegrationSelected ? 50 : 0,
-      }}
+      className={classNames(styles.page, {
+        [styles.pageInnerSelected]: isInnerIntegrationSelected,
+      })}
+      noPadding
     >
       {!isInnerIntegrationSelected && (
         <>
           {host === "vscode" && !tabbed ? (
-            <Flex gap="2" pb="3">
-              <Button variant="surface" onClick={backFromIntegrations}>
-                <ArrowLeftIcon width="16" height="16" />
+            <div className={styles.backRow}>
+              <Button variant="soft" onClick={backFromIntegrations} leftIcon={ArrowLeft}>
                 Back
               </Button>
-            </Flex>
+            </div>
           ) : (
             <Button
-              mr="auto"
-              variant="outline"
+              className={styles.webBackButton}
+              variant="ghost"
               onClick={onCloseIntegrations}
-              mb="4"
             >
               Back
             </Button>
@@ -94,26 +94,15 @@ export const Integrations: React.FC<IntegrationsProps> = ({
         </>
       )}
       <ScrollArea scrollbars="vertical" fullHeight>
-        <Flex
-          direction="column"
-          justify="between"
-          flexGrow="1"
-          mr={LeftRightPadding}
-          pr={LeftRightPadding}
-          style={{
-            width: "inherit",
-            height: "100%",
-          }}
-        >
+        <div className={styles.scrollContent}>
           <IntegrationsView
             leftRightPadding={LeftRightPadding}
             handleIfInnerIntegrationWasSet={handleIfInnerIntegrationWasSet}
             integrationsMap={integrations.data}
-            // integrationsIcons={icons.data}
             isLoading={integrations.isLoading}
             goBack={backFromIntegrations}
           />
-        </Flex>
+        </div>
       </ScrollArea>
     </PageWrapper>
   );

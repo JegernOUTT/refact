@@ -1,17 +1,10 @@
+import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
 import { FC, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Box,
-  Button,
-  Card,
-  Flex,
-  RadioGroup,
-  Text,
-  TextField,
-} from "@radix-ui/themes";
 import { useGetAutoNameMutation } from "../../../services/refact/mcpMarketplace";
 import { NotConfiguredIntegrationWithIconRecord } from "../../../services/refact";
 import { validateSnakeCase } from "../../../utils/validateSnakeCase";
 import { createProjectLabelsWithConflictMarkers } from "../../../utils/createProjectLabelsWithConflictMarkers";
+import { FieldText, Switch, Button } from "../../ui";
 import { IntegrationPathField } from "../IntermediateIntegration/IntegrationPathField";
 import styles from "./MCPSetupWizard.module.css";
 
@@ -152,109 +145,89 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   const canSubmit = !!input.trim() && !!suggestedName && !nameError;
 
   return (
-    <Flex direction="column" gap="4" width="100%">
-      <Text size="2" color="gray">
-        Enter the command or URL for your MCP server:
-      </Text>
+    <div className={styles.root}>
+      <p className={styles.text}>Enter the command or URL for your MCP server:</p>
 
-      <TextField.Root
-        size="2"
+      <FieldText
         placeholder="npx -y @modelcontextprotocol/server-github"
         value={input}
-        onChange={(e) => handleInputChange(e.target.value)}
-        className={styles.inputField}
+        onChange={handleInputChange}
         data-testid="mcp-wizard-input"
       />
 
       {input.trim() && (
-        <Flex direction="column" gap="2">
-          <Text size="2" color="gray">
-            Detected: {transportLabel}
-          </Text>
+        <div className={styles.detectedStack}>
+          <p className={styles.text}>Detected: {transportLabel}</p>
 
-          <Flex align="center" gap="2">
-            <Text size="2" color="gray">
-              Name:
-            </Text>
-            <Box style={{ flex: 1 }}>
-              <TextField.Root
-                size="2"
+          <div className={styles.nameRow}>
+            <p className={styles.text}>Name:</p>
+            <div className={styles.nameField}>
+              <FieldText
                 value={suggestedName}
-                onChange={(e) => handleNameChange(e.target.value)}
-                color={nameError ? "red" : undefined}
+                onChange={handleNameChange}
                 data-testid="mcp-wizard-name"
               />
-            </Box>
-          </Flex>
-          {nameError && (
-            <Text color="red" size="1">
-              {nameError}
-            </Text>
-          )}
-        </Flex>
+            </div>
+          </div>
+          {nameError && <p className={styles.error}>{nameError}</p>}
+        </div>
       )}
 
-      <Card>
-        <RadioGroup.Root
-          name="integr_config_path"
-          value={selectedConfigPath}
-          onValueChange={setSelectedConfigPath}
-        >
-          {integration.integr_config_path.map((configPath, index) => {
-            const shouldPathBeFormatted =
-              integration.project_path[index] !== "";
-            return (
-              <Text as="label" size="2" key={configPath}>
-                <IntegrationPathField
-                  configPath={configPath}
-                  projectPath={integration.project_path[index] ?? ""}
-                  projectLabels={projectLabels}
-                  shouldBeFormatted={shouldPathBeFormatted}
-                />
-              </Text>
-            );
-          })}
-        </RadioGroup.Root>
-      </Card>
+      <RadioGroupPrimitive.Root
+        className={styles.pathGroup}
+        name="integr_config_path"
+        value={selectedConfigPath}
+        onValueChange={setSelectedConfigPath}
+      >
+        {integration.integr_config_path.map((configPath, index) => {
+          const shouldPathBeFormatted = integration.project_path[index] !== "";
+          return (
+            <label key={configPath}>
+              <IntegrationPathField
+                configPath={configPath}
+                projectPath={integration.project_path[index] ?? ""}
+                projectLabels={projectLabels}
+                shouldBeFormatted={shouldPathBeFormatted}
+              />
+            </label>
+          );
+        })}
+      </RadioGroupPrimitive.Root>
 
       {transport === "stdio" && (
-        <Box>
+        <div>
           <button
             type="button"
             className={styles.advancedToggle}
             onClick={() => setAdvancedOpen((v) => !v)}
           >
-            <Text size="2" color="gray">
-              {advancedOpen ? "▼" : "▶"} Advanced: Use SSE transport instead
-            </Text>
+            {advancedOpen ? "▼" : "▶"} Advanced: Use SSE transport instead
           </button>
           {advancedOpen && (
-            <Flex align="center" gap="2" mt="2">
-              <input
-                type="checkbox"
+            <div className={styles.advancedPanel}>
+              <Switch
                 id="use-sse"
                 checked={useSSE}
-                onChange={(e) => setUseSSE(e.target.checked)}
+                onCheckedChange={setUseSSE}
                 data-testid="mcp-wizard-sse-checkbox"
               />
-              <Text as="label" htmlFor="use-sse" size="2">
+              <label className={styles.text} htmlFor="use-sse">
                 Use SSE transport
-              </Text>
-            </Flex>
+              </label>
+            </div>
           )}
-        </Box>
+        </div>
       )}
 
       <Button
         type="button"
-        variant="surface"
-        color="green"
+        variant="primary"
         disabled={!canSubmit}
         onClick={handleSubmit}
         data-testid="mcp-wizard-submit"
       >
         Continue with setup
       </Button>
-    </Flex>
+    </div>
   );
 };

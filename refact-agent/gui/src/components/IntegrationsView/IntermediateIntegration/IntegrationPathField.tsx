@@ -1,8 +1,11 @@
 import React from "react";
-import { Flex, RadioGroup, Text, HoverCard } from "@radix-ui/themes";
-import { QuestionMarkCircledIcon } from "@radix-ui/react-icons";
+import * as HoverCardPrimitive from "@radix-ui/react-hover-card";
+import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
+import { CircleHelp } from "lucide-react";
 
 import { type ProjectLabelInfo } from "../../../utils/createProjectLabelsWithConflictMarkers";
+import { Icon, Surface } from "../../ui";
+import styles from "./IntermediateIntegration.module.css";
 
 export type IntegrationPathFieldProps = {
   configPath: string;
@@ -21,47 +24,49 @@ export const IntegrationPathField: React.FC<IntegrationPathFieldProps> = ({
 }) => {
   if (!shouldBeFormatted) {
     return (
-      <Flex gap="2">
-        <RadioGroup.Item value={configPath} /> {globalLabel}
-      </Flex>
+      <span className={styles.pathOption}>
+        <RadioGroupPrimitive.Item value={configPath} /> {globalLabel}
+      </span>
     );
   }
 
   const projectInfo = projectLabels.find((info) => info.path === projectPath);
 
   if (!projectInfo) {
-    // Fallback to showing the full path if no project info found
     return (
-      <Flex gap="2">
-        <RadioGroup.Item value={configPath} /> {projectPath}
-      </Flex>
+      <span className={styles.pathOption}>
+        <RadioGroupPrimitive.Item value={configPath} /> {projectPath}
+      </span>
     );
   }
 
   const content = (
-    <Flex gap="2">
-      <RadioGroup.Item value={configPath} /> {projectInfo.label}
-    </Flex>
+    <span className={styles.pathOption}>
+      <RadioGroupPrimitive.Item value={configPath} /> {projectInfo.label}
+    </span>
   );
 
   if (projectInfo.hasConflict) {
     return (
-      <Flex align="center" gap="2">
+      <span className={styles.pathOption}>
         {content}
-        <HoverCard.Root>
-          <HoverCard.Trigger>
-            <QuestionMarkCircledIcon />
-          </HoverCard.Trigger>
-          <HoverCard.Content side="right" align="center" size="1">
-            <Text size="1" as="p">
-              Full project path:{" "}
-            </Text>
-            <Text size="1" as="span" color="gray">
-              {projectInfo.fullPath}
-            </Text>
-          </HoverCard.Content>
-        </HoverCard.Root>
-      </Flex>
+        <HoverCardPrimitive.Root>
+          <HoverCardPrimitive.Trigger asChild>
+            <span className={styles.pathHelp}>
+              <Icon icon={CircleHelp} size="sm" tone="muted" />
+            </span>
+          </HoverCardPrimitive.Trigger>
+          <HoverCardPrimitive.Portal>
+          <HoverCardPrimitive.Portal>
+            <HoverCardPrimitive.Content className="rf-popover-motion" side="right" align="center">
+              <Surface variant="overlay" radius="card">
+                <p className={styles.text}>Full project path:</p>
+                <p className={styles.text}>{projectInfo.fullPath}</p>
+              </Surface>
+            </HoverCardPrimitive.Content>
+          </HoverCardPrimitive.Portal>          </HoverCardPrimitive.Portal>
+        </HoverCardPrimitive.Root>
+      </span>
     );
   }
 

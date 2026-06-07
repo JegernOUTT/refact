@@ -1,13 +1,15 @@
-import { Flex, Heading, Text } from "@radix-ui/themes";
+import classNames from "classnames";
+import { Settings } from "lucide-react";
 import { FC } from "react";
-import { GearIcon } from "@radix-ui/react-icons";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
 import { formatPathName } from "../../../utils/formatPathName";
 import { Markdown } from "../../Markdown";
+import { Icon } from "../../ui";
 import { IntegrationCard } from "./IntegrationCard";
+import styles from "./DisplayIntegrations.module.css";
 
 type ProjectIntegrationsProps = {
   groupedProjectIntegrations?: Record<string, IntegrationWithIconRecord[]>;
@@ -33,25 +35,19 @@ export const ProjectIntegrations: FC<ProjectIntegrationsProps> = ({
       );
 
       return (
-        <Flex
-          key={`project-group-${index}`}
-          direction="column"
-          gap="4"
-          align="start"
-        >
-          <Heading as="h4" size="3">
-            <Flex align="start" gapX="3" gapY="1" justify="start" wrap="wrap">
-              <GearIcon /> In
-              <Markdown>{formattedProjectName}</Markdown>
-              configured {integrations.length}{" "}
-              {integrations.length !== 1 ? "integrations" : "integration"}
-            </Flex>
-          </Heading>
-          <Text size="2" color="gray">
+        <section className={styles.section} key={`project-group-${index}`}>
+          <h4 className={classNames(styles.sectionTitle, styles.sectionTitleWrap)}>
+            <Icon icon={Settings} size="md" tone="muted" />
+            In
+            <Markdown>{formattedProjectName}</Markdown>
+            configured {integrations.length}{" "}
+            {integrations.length !== 1 ? "integrations" : "integration"}
+          </h4>
+          <p className={styles.muted}>
             Folder-specific integrations are local integrations, which are
             shared only in folder-specific scope.
-          </Text>
-          <Flex direction="column" align="start" gap="2" width="100%">
+          </p>
+          <div className={styles.cards}>
             {integrations.map((integration, subIndex) => (
               <IntegrationCard
                 key={`project-${index}-${subIndex}-${integration.integr_config_path}`}
@@ -59,8 +55,8 @@ export const ProjectIntegrations: FC<ProjectIntegrationsProps> = ({
                 handleIntegrationShowUp={handleIntegrationShowUp}
               />
             ))}
-          </Flex>
-        </Flex>
+          </div>
+        </section>
       );
     },
   );

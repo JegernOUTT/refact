@@ -1,7 +1,7 @@
-import { Box, Text } from "@radix-ui/themes";
 import { Markdown } from "../Markdown";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FieldSwitch, FieldText, FieldTextarea } from "../ui";
+import styles from "./CustomFieldsAndWidgets.module.css";
 
 export const CustomInputField = ({
   value,
@@ -12,7 +12,6 @@ export const CustomInputField = ({
   size = "long",
   onChange,
   wasInteracted = false,
-
 }: {
   id?: string;
   wasInteracted?: boolean;
@@ -48,7 +47,7 @@ export const CustomInputField = ({
   }, [onChange, value]);
 
   return (
-    <Box width="100%">
+    <div className={styles.fieldWrap}>
       {size !== "multiline" ? (
         <FieldText
           id={id}
@@ -68,53 +67,35 @@ export const CustomInputField = ({
           onChange={(nextValue) => onChange?.(nextValue)}
         />
       )}
-    </Box>
+    </div>
   );
 };
 
 export const CustomLabel = ({
   label,
   htmlFor,
-  mt,
 }: {
   label: string;
   htmlFor?: string;
   mt?: string;
 }) => {
   return (
-    <Text
-      as="label"
-      htmlFor={htmlFor}
-      size="2"
-      weight="medium"
-      mt={mt ? mt : "0"}
-      style={{
-        display: "block",
-      }}
-    >
-      {label}
-    </Text>
+    <span className={styles.label}>
+      <label htmlFor={htmlFor}>{label}</label>
+    </span>
   );
 };
 
 export const CustomDescriptionField = ({
   children = "",
-  mb = "2",
 }: {
   children?: string;
   mb?: string;
 }) => {
   return (
-    <Text
-      size="1"
-      mb={{
-        initial: "0",
-        xs: mb,
-      }}
-      style={{ display: "block", opacity: 0.85 }}
-    >
+    <span className={styles.description}>
       <Markdown>{children}</Markdown>
-    </Text>
+    </span>
   );
 };
 
@@ -140,9 +121,9 @@ export const CustomBoolField = ({
   );
 
   return (
-    <Box>
+    <div>
       <FieldSwitch name={name} id={id} checked={checked} onChange={onCheckedChange} />
       <input type="hidden" name={name} value={checked ? "on" : "off"} />
-    </Box>
+    </div>
   );
 };

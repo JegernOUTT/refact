@@ -1,10 +1,10 @@
-import { Flex, Grid, Heading } from "@radix-ui/themes";
 import { FC } from "react";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
 import { IntegrationCard } from "./IntegrationCard";
+import styles from "./DisplayIntegrations.module.css";
 
 type NewIntegrationsProps = {
   availableIntegrationsToConfigure?: NotConfiguredIntegrationWithIconRecord[];
@@ -19,18 +19,9 @@ export const NewIntegrations: FC<NewIntegrationsProps> = ({
   availableIntegrationsToConfigure,
   handleIntegrationShowUp,
 }) => (
-  <Flex direction="column" gap="4" align="start">
-    <Heading as="h4" size="3">
-      <Flex align="start" gap="3" justify="center">
-        Add new integration
-      </Flex>
-    </Heading>
-    <Grid
-      align="stretch"
-      gap="3"
-      columns={{ initial: "2", xs: "3", sm: "4", md: "5" }}
-      width="100%"
-    >
+  <section className={styles.section}>
+    <h4 className={styles.sectionTitle}>Add new integration</h4>
+    <div className={styles.grid}>
       {availableIntegrationsToConfigure &&
         Object.entries(availableIntegrationsToConfigure).map(
           ([_projectPath, integration], index) => (
@@ -44,6 +35,6 @@ export const NewIntegrations: FC<NewIntegrationsProps> = ({
             />
           ),
         )}
-    </Grid>
-  </Flex>
+    </div>
+  </section>
 );

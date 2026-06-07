@@ -1,0 +1,28 @@
+.page {
+  padding: 0;
+}
+
+.pageInnerSelected {
+  margin-top: 50px;
+}
+
+.backRow {
+  display: flex;
+  gap: var(--rf-space-2);
+  padding-bottom: var(--rf-space-3);
+}
+
+.webBackButton {
+  margin-right: auto;
+  margin-bottom: var(--rf-space-4);
+}
+
+.scrollContent {
+  display: flex;
+  width: inherit;
+  min-width: 0;
+  height: 100%;
+  flex-direction: column;
+  justify-content: space-between;
+  flex-grow: 1;
+}

@@ -1,6 +1,6 @@
 .toolRow {
   padding: var(--space-2) var(--space-1);
-  border-bottom: 1px solid var(--gray-4);
+  border-bottom: 1px solid var(--rf-border);
 }
 
 .toolRow:last-child {
@@ -20,7 +20,7 @@
 }
 
 .schemaBox {
-  background: var(--gray-2);
+  background: var(--rf-surface-1);
   border-radius: var(--radius-2);
   padding: var(--space-2);
   overflow: auto;
