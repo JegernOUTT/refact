@@ -1,3 +1,9 @@
+.chevron {
+  flex: 0 0 auto;
+  color: currentColor;
+  transition: transform var(--rf-dur-med) var(--rf-ease-standard);
+}
+
 .up {
   transform: rotate(180deg);
 }

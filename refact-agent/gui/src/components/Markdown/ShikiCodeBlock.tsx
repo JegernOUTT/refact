@@ -1,5 +1,4 @@
 import React, { CSSProperties, useEffect, useState, useMemo } from "react";
-import { Code, CodeProps, Box } from "@radix-ui/themes";
 import classNames from "classnames";
 import { PreTag, PreTagProps } from "./Pre";
 import styles from "./Markdown.module.css";
@@ -26,7 +25,7 @@ export type ShikiCodeBlockProps = React.JSX.IntrinsicElements["code"] & {
     noMargin?: boolean;
     widthMaxContent?: boolean;
   };
-  color?: CodeProps["color"];
+  color?: string;
   showLineNumbers?: boolean;
   isStreaming?: boolean;
 } & Partial<MarkdownControls>;
@@ -132,18 +131,17 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
 
   if (!isBlock) {
     return (
-      <Code
-        variant="ghost"
+      <code
         className={classNames(styles.code, styles.code_inline, className)}
-        color={color}
+        data-color={color}
       >
         {children}
-      </Code>
+      </code>
     );
   }
 
   return (
-    <Box className={classNames("scrollX", styles.shiki_wrapper)}>
+    <div className={classNames("scrollX", "rf-enter", styles.shiki_wrapper)}>
       <PreTag
         className={classNames({
           [styles.pre_width_max_content]: preOptions.widthMaxContent,
@@ -189,7 +187,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
           )}
         </div>
       </PreTag>
-    </Box>
+    </div>
   );
 };
 

@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Box, Button, Flex } from "@radix-ui/themes";
 import { useCollapsibleStore } from "../ChatContent/useStoredOpen";
 import styles from "./reveal.module.css";
 import classNames from "classnames";
@@ -17,25 +16,24 @@ const RevealButton: React.FC<{
   isInline: boolean;
   children: React.ReactNode;
 }> = ({ onClick, isInline, children }) => (
-  <Button
-    variant="ghost"
-    onClick={onClick}
-    asChild
+  <button
     className={classNames(styles.reveal_button, {
       [styles.reveal_button_inline]: isInline,
     })}
+    onClick={onClick}
+    type="button"
   >
     {children}
-  </Button>
+  </button>
 );
 
 const RevealText: React.FC<{
   isRevealingCode: boolean;
   text: string;
 }> = ({ isRevealingCode, text }) => (
-  <Flex position="absolute" bottom="2" width="100%" justify="center">
-    {isRevealingCode ? text : <Box className={styles.reveal_text}>{text}</Box>}
-  </Flex>
+  <div className={styles.reveal_text_wrap}>
+    {isRevealingCode ? text : <div className={styles.reveal_text}>{text}</div>}
+  </div>
 );
 
 export const Reveal: React.FC<RevealProps> = ({
@@ -71,11 +69,11 @@ export const Reveal: React.FC<RevealProps> = ({
 
   if (open) {
     return (
-      <Box width="100%" position="relative" pb="5">
+      <div className={styles.reveal_open}>
         {children}
         <RevealButton onClick={handleClose} isInline={!isRevealingCode}>
           {!defaultOpen && (
-            <Box
+            <div
               className={classNames(
                 styles.reveal_hidden,
                 styles.reveal_hidden_exposed,
@@ -85,26 +83,25 @@ export const Reveal: React.FC<RevealProps> = ({
                 isRevealingCode={isRevealingCode}
                 text="Hide details"
               />
-            </Box>
+            </div>
           )}
         </RevealButton>
-      </Box>
+      </div>
     );
   }
 
   return (
     <RevealButton onClick={handleClick} isInline={!isRevealingCode}>
-      <Flex direction="column" position="relative" align="start">
-        <Box
+      <div className={styles.reveal_closed}>
+        <div
           className={classNames({
             [styles.reveal_hidden]: !open,
           })}
-          width="100%"
         >
           {children}
-        </Box>
+        </div>
         {!defaultOpen && (
-          <Box
+          <div
             className={classNames({
               [styles.reveal_button_box]: open,
             })}
@@ -113,9 +110,9 @@ export const Reveal: React.FC<RevealProps> = ({
               isRevealingCode={isRevealingCode}
               text="Click for more"
             />
-          </Box>
+          </div>
         )}
-      </Flex>
+      </div>
     </RevealButton>
   );
 };

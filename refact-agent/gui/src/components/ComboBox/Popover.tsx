@@ -1,6 +1,5 @@
 import React from "react";
 import { ComboboxPopover, type ComboboxStore } from "@ariakit/react";
-import { Box } from "@radix-ui/themes";
 import classNames from "classnames";
 import { type AnchorRect } from "./utils";
 import { ScrollArea } from "../ScrollArea";
@@ -19,21 +18,16 @@ export const Popover: React.FC<
     : undefined;
 
   return (
-    <Box
-      asChild
-      className={classNames(
-        "rt-PopperContent",
-        "rt-HoverCardContent",
-        "rf-popover-motion",
-        styles.popover,
-      )}
+    <ComboboxPopover
+      unmountOnHide
+      fitViewport
+      {...props}
+      className={classNames("rf-popover-motion", styles.popover)}
       style={style}
     >
-      <ComboboxPopover unmountOnHide fitViewport {...props}>
-        <ScrollArea scrollbars="vertical" className={styles.popover__scroll}>
-          <Box className={styles.popover__box}>{children}</Box>
-        </ScrollArea>
-      </ComboboxPopover>
-    </Box>
+      <ScrollArea scrollbars="vertical" className={styles.popover__scroll}>
+        <div className={styles.popover__box}>{children}</div>
+      </ScrollArea>
+    </ComboboxPopover>
   );
 };

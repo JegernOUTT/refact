@@ -1,28 +1,50 @@
-import { ScrollArea as RadixScrollArea } from "@radix-ui/themes";
 import classNames from "classnames";
 import React from "react";
 import styles from "./ScrollArea.module.css";
 
-export type ScrollAreaProps = React.ComponentProps<typeof RadixScrollArea> & {
+export type ScrollAreaProps = React.ComponentPropsWithoutRef<"div"> & {
+  asChild?: boolean;
   className?: string;
   scrollbars?: "vertical" | "horizontal" | "both" | undefined;
   fullHeight?: boolean;
+  type?: "auto" | "always" | "scroll" | "hover";
 };
 export const ScrollArea = React.forwardRef<HTMLDivElement, ScrollAreaProps>(
-  ({ scrollbars, className, fullHeight, ...props }, ref) => {
-    const isVertical = scrollbars !== undefined && scrollbars === "vertical";
+  (
+    {
+      asChild,
+      children,
+      className,
+      fullHeight,
+      scrollbars,
+      type: _type,
+      ...props
+    },
+    ref,
+  ) => {
+    const rootClassName = classNames(
+      styles.root,
+      scrollbars === "vertical" && styles.vertical,
+      scrollbars === "horizontal" && styles.horizontal,
+      fullHeight && styles.full_height,
+      className,
+    );
+
+    if (asChild && React.isValidElement(children)) {
+      const child = children as React.ReactElement<React.HTMLAttributes<HTMLDivElement>>;
+      const childProps = child.props;
+      return React.cloneElement(child, {
+        ...props,
+        className: classNames(rootClassName, styles.viewport, childProps.className),
+      });
+    }
 
     return (
-      <RadixScrollArea
-        ref={ref}
-        type="hover"
-        {...props}
-        className={classNames(
-          isVertical && styles.vertical,
-          fullHeight && styles.full_height,
-          className,
-        )}
-      />
+      <div className={rootClassName}>
+        <div {...props} ref={ref} className={styles.viewport}>
+          {children}
+        </div>
+      </div>
     );
   },
 );

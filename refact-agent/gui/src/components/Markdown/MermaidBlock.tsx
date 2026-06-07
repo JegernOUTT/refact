@@ -1,13 +1,6 @@
 import React, { useEffect, useState, useId, useCallback, useRef } from "react";
-import { Box, IconButton, Tooltip } from "@radix-ui/themes";
-import {
-  CopyIcon,
-  CodeIcon,
-  EyeOpenIcon,
-  ZoomInIcon,
-  ZoomOutIcon,
-  ResetIcon,
-} from "@radix-ui/react-icons";
+import { Code, Copy, Eye, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import { IconButton, Tooltip } from "../ui";
 import { PreTag } from "./Pre";
 import styles from "./Markdown.module.css";
 import diagramStyles from "./DiagramBlock.module.css";
@@ -42,41 +35,24 @@ async function getMermaid(theme: "dark" | "light") {
       securityLevel: "strict",
       fontFamily:
         'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      themeVariables:
-        theme === "dark"
-          ? {
-              primaryColor: "#2a3a4a",
-              primaryTextColor: "#e1e7ef",
-              primaryBorderColor: "#4a6a8a",
-              lineColor: "#5a7a9a",
-              secondaryColor: "#1e2e3e",
-              tertiaryColor: "#1a2a3a",
-              nodeTextColor: "#e1e7ef",
-              mainBkg: "#1e2e3e",
-              nodeBorder: "#4a6a8a",
-              clusterBkg: "#15202e",
-              clusterBorder: "#3a5a7a",
-              titleColor: "#c0d0e0",
-              edgeLabelBackground: "#1a2a3a",
-              noteBkgColor: "#2a3a4a",
-              noteTextColor: "#c0d0e0",
-              noteBorderColor: "#4a6a8a",
-            }
-          : {
-              primaryColor: "#e8f0fe",
-              primaryTextColor: "#1a2a3a",
-              primaryBorderColor: "#a0b8d0",
-              lineColor: "#6a8aaa",
-              secondaryColor: "#f0f4fa",
-              tertiaryColor: "#f8fafe",
-              nodeTextColor: "#1a2a3a",
-              mainBkg: "#e8f0fe",
-              nodeBorder: "#a0b8d0",
-              clusterBkg: "#f4f8fe",
-              clusterBorder: "#c0d0e8",
-              titleColor: "#2a3a5a",
-              edgeLabelBackground: "#f8fafe",
-            },
+      themeVariables: {
+        primaryColor: "var(--rf-surface-2)",
+        primaryTextColor: "var(--rf-color-fg)",
+        primaryBorderColor: "var(--rf-border-strong)",
+        lineColor: "var(--rf-color-muted)",
+        secondaryColor: "var(--rf-surface-1)",
+        tertiaryColor: "var(--rf-surface-base)",
+        nodeTextColor: "var(--rf-color-fg)",
+        mainBkg: "var(--rf-surface-1)",
+        nodeBorder: "var(--rf-border-strong)",
+        clusterBkg: "var(--rf-surface-2)",
+        clusterBorder: "var(--rf-border)",
+        titleColor: "var(--rf-color-fg)",
+        edgeLabelBackground: "var(--rf-surface-base)",
+        noteBkgColor: "var(--rf-surface-2)",
+        noteTextColor: "var(--rf-color-fg)",
+        noteBorderColor: "var(--rf-border-strong)",
+      },
       flowchart: { curve: "basis", padding: 16, htmlLabels: false },
     });
     mermaidInitialized = theme;
@@ -326,13 +302,13 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
 
   if (error) {
     return (
-      <Box className={styles.shiki_wrapper}>
+      <div className={styles.shiki_wrapper}>
         <PreTag className={styles.shiki_pre}>
           <code className={classNames(styles.code, styles.code_block)}>
             {code}
           </code>
         </PreTag>
-      </Box>
+      </div>
     );
   }
 
@@ -342,73 +318,79 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
   const displayH = svgMeta ? svgMeta.height * scale : 0;
 
   return (
-    <Box className={styles.shiki_wrapper}>
-      <Box className={diagramStyles.diagram_container}>
-        <Box className={diagramStyles.diagram_toolbar}>
+    <div className={styles.shiki_wrapper}>
+      <div className={diagramStyles.diagram_container}>
+        <div className={diagramStyles.diagram_toolbar}>
           {!showSource && crispSvg && (
             <>
-              <Tooltip content="Zoom in">
-                <IconButton
-                  size="1"
-                  variant="ghost"
-                  onClick={handleZoomIn}
-                  aria-label="Zoom in"
-                >
-                  <ZoomInIcon width={12} height={12} />
-                </IconButton>
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <IconButton
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleZoomIn}
+                    aria-label="Zoom in"
+                    icon={ZoomIn}
+                  />
+                </Tooltip.Trigger>
+                <Tooltip.Content>Zoom in</Tooltip.Content>
               </Tooltip>
               <span className={diagramStyles.diagram_zoom_info}>
                 {zoomPercent}%
               </span>
-              <Tooltip content="Zoom out">
-                <IconButton
-                  size="1"
-                  variant="ghost"
-                  onClick={handleZoomOut}
-                  aria-label="Zoom out"
-                >
-                  <ZoomOutIcon width={12} height={12} />
-                </IconButton>
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <IconButton
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleZoomOut}
+                    aria-label="Zoom out"
+                    icon={ZoomOut}
+                  />
+                </Tooltip.Trigger>
+                <Tooltip.Content>Zoom out</Tooltip.Content>
               </Tooltip>
-              <Tooltip content="Fit to view">
-                <IconButton
-                  size="1"
-                  variant="ghost"
-                  onClick={fitToContainer}
-                  aria-label="Fit diagram to view"
-                >
-                  <ResetIcon width={12} height={12} />
-                </IconButton>
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <IconButton
+                    size="sm"
+                    variant="ghost"
+                    onClick={fitToContainer}
+                    aria-label="Fit to view"
+                    icon={RotateCcw}
+                  />
+                </Tooltip.Trigger>
+                <Tooltip.Content>Fit to view</Tooltip.Content>
               </Tooltip>
             </>
           )}
-          <Tooltip content={showSource ? "Show diagram" : "Show source"}>
-            <IconButton
-              size="1"
-              variant="ghost"
-              onClick={handleToggleSource}
-              aria-label={showSource ? "Show diagram" : "Show source"}
-            >
-              {showSource ? (
-                <EyeOpenIcon width={12} height={12} />
-              ) : (
-                <CodeIcon width={12} height={12} />
-              )}
-            </IconButton>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
+              <IconButton
+                size="sm"
+                variant="ghost"
+                onClick={handleToggleSource}
+                aria-label={showSource ? "Show diagram" : "Show source"}
+                icon={showSource ? Eye : Code}
+              />
+            </Tooltip.Trigger>
+            <Tooltip.Content>{showSource ? "Show diagram" : "Show source"}</Tooltip.Content>
           </Tooltip>
           {onCopyClick && (
-            <Tooltip content="Copy source">
-              <IconButton
-                size="1"
-                variant="ghost"
-                onClick={handleCopy}
-                aria-label="Copy mermaid source"
-              >
-                <CopyIcon width={12} height={12} />
-              </IconButton>
+            <Tooltip>
+              <Tooltip.Trigger asChild>
+                <IconButton
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleCopy}
+                  aria-label="Copy mermaid source"
+                  icon={Copy}
+                />
+              </Tooltip.Trigger>
+              <Tooltip.Content>Copy source</Tooltip.Content>
             </Tooltip>
           )}
-        </Box>
+        </div>
         {showSource ? (
           <PreTag className={styles.shiki_pre}>
             <code className={classNames(styles.code, styles.code_block)}>
@@ -416,7 +398,7 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
             </code>
           </PreTag>
         ) : crispSvg ? (
-          <Box
+          <div
             ref={canvasCallbackRef}
             className={classNames(
               diagramStyles.diagram_canvas,
@@ -435,14 +417,12 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
               }}
               dangerouslySetInnerHTML={{ __html: crispSvg }}
             />
-          </Box>
-        ) : rawSvg ? (
-          <Box className={diagramStyles.diagram_loading}>Rendering…</Box>
+          </div>
         ) : (
-          <Box className={diagramStyles.diagram_loading}>Rendering…</Box>
+          <div className={diagramStyles.diagram_loading}>Rendering…</div>
         )}
-      </Box>
-    </Box>
+      </div>
+    </div>
   );
 };
 

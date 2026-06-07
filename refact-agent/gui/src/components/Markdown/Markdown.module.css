@@ -14,6 +14,77 @@
   overflow-wrap: anywhere;
 }
 
+.markdown :where(p) {
+  margin: var(--rf-space-2) 0;
+}
+
+.markdown :where(h1, h2, h3, h4, h5, h6) {
+  margin: var(--rf-space-3) 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.markdown h1 {
+  font-size: var(--rf-text-5);
+}
+
+.markdown h2 {
+  font-size: var(--rf-text-4);
+}
+
+.markdown :where(h3, h4, h5, h6) {
+  font-size: var(--rf-text-3);
+}
+
+.markdown blockquote {
+  margin: var(--rf-space-3) 0;
+  padding-left: var(--rf-space-3);
+  color: var(--rf-color-muted);
+  border-left: var(--rf-hairline) solid var(--rf-border-strong);
+}
+
+.markdown kbd {
+  padding: calc(var(--rf-space-1) / 2) var(--rf-space-1);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+}
+
+.markdown :where(strong, .bold) {
+  font-weight: 700;
+}
+
+.puzzle_link {
+  display: flex;
+  margin-top: var(--rf-space-2);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+}
+
+.table {
+  width: max-content;
+  max-width: 100%;
+  margin: var(--rf-space-2) 0;
+  border-collapse: collapse;
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.table :where(th, td) {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+}
+
+.table th {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  font-weight: 650;
+}
+
 .variant_chat {
   font-size: var(--rf-text-3);
   line-height: 1.6;
@@ -75,10 +146,7 @@
 
 .code_block::selection,
 .code_block ::selection {
-  background-color: var(
-    --refact-chat-code-selection-color,
-    rgba(173, 214, 255, 0.5)
-  );
+  background-color: var(--refact-chat-code-selection-color, var(--rf-color-accent-soft));
 }
 
 .shiki_wrapper {

@@ -1,27 +1,55 @@
 .reveal_button {
-  text-align: left;
-  justify-content: start;
   width: 100%;
-  --button-ghost-padding-y: 0;
-  --button-ghost-padding-x: 0;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
 }
 
-.reveal_button_inline {
-  color: unset !important;
-  &:hover {
-    background: none;
-    cursor: pointer;
-    .reveal_text {
-      text-decoration: underline;
-    }
-  }
+.reveal_button:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-space-1);
+}
+
+.reveal_button_inline:hover .reveal_text {
+  text-decoration: underline;
+}
+
+.reveal_open {
+  position: relative;
+  width: 100%;
+  padding-bottom: var(--rf-space-5);
+}
+
+.reveal_closed {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.reveal_text_wrap {
+  position: absolute;
+  bottom: var(--rf-space-2);
+  left: 0;
+  display: flex;
+  width: 100%;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .reveal_text {
-  color: var(--accent-a11);
-  &:hover {
-    text-decoration: underline;
-  }
+  color: var(--rf-color-accent);
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.reveal_text:hover {
+  text-decoration: underline;
 }
 
 .reveal_hidden {
@@ -30,25 +58,31 @@
   max-height: 9em;
   mask-image: linear-gradient(
     to bottom,
-    var(--color-background) 50%,
+    var(--rf-surface-base) 50%,
     transparent 100%
   );
 }
 
 .reveal_hidden_exposed {
-  color: var(--accent-11);
-  background-color: var(--color-background);
   position: absolute;
-  max-height: 6em;
   left: 0;
   bottom: 0;
   height: 100%;
+  max-height: 6em;
+  color: var(--rf-color-accent);
+  background: var(--rf-surface-base);
   mask-image: linear-gradient(
     to top,
-    var(--color-background) 0%,
+    var(--rf-surface-base) 0%,
     transparent 100%
   );
-  &:hover {
-    background-color: var(--accent-a3);
-  }
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.reveal_hidden_exposed:hover {
+  background: var(--rf-color-accent-soft);
+}
+
+.reveal_button_box {
+  min-width: 0;
 }

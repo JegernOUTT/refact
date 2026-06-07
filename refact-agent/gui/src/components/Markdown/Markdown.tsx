@@ -8,17 +8,6 @@ import {
   type ShikiCodeBlockProps,
   type MarkdownControls,
 } from "./ShikiCodeBlock";
-import {
-  Text,
-  Heading,
-  Blockquote,
-  Em,
-  Kbd,
-  Quote,
-  Strong,
-  Flex,
-  Table,
-} from "@radix-ui/themes";
 import { Link } from "../Link";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
@@ -108,9 +97,9 @@ const PuzzleLink: React.FC<{
   if (!link) return children;
 
   return (
-    <Flex direction="column" align="start" gap="2" mt="2">
+    <div className={styles.puzzle_link}>
       <ChatLinkButton link={link} onClick={handleLinkAction} />
-    </Flex>
+    </div>
   );
 };
 
@@ -127,9 +116,7 @@ const MaybeInteractiveElement: React.FC<{
   });
 
   return (
-    <Text as="div" className={styles.maybe_pin} my="2">
-      {processed}
-    </Text>
+    <div className={styles.maybe_pin}>{processed}</div>
   );
 };
 
@@ -183,34 +170,34 @@ const _Markdown: React.FC<MarkdownProps> = ({
         if (canHaveInteractiveElements) {
           return <MaybeInteractiveElement {...props} />;
         }
-        return <Text as="p" {...props} />;
+        return <p {...props} />;
       },
       h1({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="4" size="4" as="h1" {...props} />;
+        return <h1 {...props} />;
       },
       h2({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h2" {...props} />;
+        return <h2 {...props} />;
       },
       h3({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h3" {...props} />;
+        return <h3 {...props} />;
       },
       h4({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h4" {...props} />;
+        return <h4 {...props} />;
       },
       h5({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h5" {...props} />;
+        return <h5 {...props} />;
       },
       h6({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Heading my="3" size="3" as="h6" {...props} />;
+        return <h6 {...props} />;
       },
       blockquote({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Blockquote {...props} />;
+        return <blockquote {...props} />;
       },
       em({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Em {...props} />;
+        return <em {...props} />;
       },
       kbd({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Kbd {...props} />;
+        return <kbd {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
         const href = props.href ?? "";
@@ -248,34 +235,34 @@ const _Markdown: React.FC<MarkdownProps> = ({
         );
       },
       q({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Quote {...props} />;
+        return <q {...props} />;
       },
       strong({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Strong {...props} />;
+        return <strong {...props} />;
       },
       b({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Text {...props} weight="bold" />;
+        return <span {...props} className={classNames(styles.bold, props.className)} />;
       },
       i({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Em {...props} />;
+        return <em {...props} />;
       },
       table({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Root my="2" variant="surface" {...props} />;
+        return <table {...props} className={classNames(styles.table, props.className)} />;
       },
       tbody({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Body {...props} />;
+        return <tbody {...props} />;
       },
       thead({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Header {...props} />;
+        return <thead {...props} />;
       },
       tr({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.Row {...props} />;
+        return <tr {...props} />;
       },
       th({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <Table.ColumnHeaderCell {...props} />;
+        return <th {...props} />;
       },
       td({ color: _color, ref: _ref, node: _node, width: _width, ...props }) {
-        return <Table.Cell {...props} />;
+        return <td {...props} />;
       },
     };
   }, [

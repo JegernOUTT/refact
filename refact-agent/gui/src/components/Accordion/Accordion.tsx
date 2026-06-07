@@ -1,9 +1,9 @@
 import React from "react";
 import * as RadixAccordion from "@radix-ui/react-accordion";
 import classNames from "classnames";
+import { ChevronDown } from "lucide-react";
 import styles from "./Accordion.module.css";
-import { ChevronDownIcon } from "@radix-ui/react-icons";
-import { Box, IconProps } from "@radix-ui/themes";
+import { Icon, type IconProps } from "../ui";
 
 type AccordionRoot = typeof RadixAccordion.Root;
 type AccordionRootProps =
@@ -60,7 +60,6 @@ export const Trigger: AccordionTrigger = React.forwardRef<
   HTMLButtonElement,
   RadixAccordion.AccordionTriggerProps
 >(({ className, children, ...props }, ref) => {
-  // TODO: maybe make the chevron optional?
   return (
     <Header>
       <RadixAccordion.Trigger
@@ -68,8 +67,8 @@ export const Trigger: AccordionTrigger = React.forwardRef<
         className={classNames(styles.reset, styles.AccordionTrigger, className)}
         ref={ref}
       >
-        {" "}
-        {children} <Chevron />
+        {children}
+        <Chevron />
       </RadixAccordion.Trigger>
     </Header>
   );
@@ -87,18 +86,21 @@ export const Content: AccordionContent = React.forwardRef<
       className={classNames(styles.AccordionContent, className)}
       ref={ref}
     >
-      <Box py="2" px="3">
-        {children}
-      </Box>
+      <div className={styles.AccordionContentInner}>{children}</div>
     </RadixAccordion.Content>
   );
 });
 Content.displayName = RadixAccordion.Content.displayName;
 
-export const Chevron: React.FC<IconProps> = ({ className, ...props }) => {
+export const Chevron: React.FC<Omit<IconProps, "icon">> = ({
+  className,
+  ...props
+}) => {
   return (
-    <ChevronDownIcon
+    <Icon
       {...props}
+      icon={ChevronDown}
+      size="sm"
       className={classNames(styles.AccordionChevron, className)}
       aria-hidden
     />

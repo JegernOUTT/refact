@@ -1,7 +1,15 @@
 import React, { ReactNode, useMemo } from "react";
-import { HoverCard, Select as RadixSelect } from "@radix-ui/themes";
-import styles from "./select.module.css";
 import classnames from "classnames";
+import {
+  Select as KitSelect,
+  Tooltip,
+  type SelectContentProps,
+  type SelectItemProps,
+  type SelectProps as KitSelectProps,
+  type SelectSeparatorProps,
+  type SelectTriggerProps,
+} from "../ui";
+import styles from "./select.module.css";
 
 type SeparatorOption = { type: "separator"; key?: string };
 function isSeparator(option: unknown): option is SeparatorOption {
@@ -10,46 +18,44 @@ function isSeparator(option: unknown): option is SeparatorOption {
   if (!("type" in option)) return false;
   return option.type === "separator";
 }
-export type SelectProps = React.ComponentProps<typeof RadixSelect.Root> & {
+export type SelectProps = Omit<KitSelectProps, "onValueChange"> & {
   onChange: (value: string) => void;
   options: (string | ItemProps | SeparatorOption)[];
   title?: string;
   contentPosition?: "item-aligned" | "popper";
   value?: string;
   disabled?: boolean;
-  open?: SelectRootProps["open"];
-  defaultOpen?: SelectRootProps["defaultOpen"];
 };
 
-export type SelectRootProps = React.ComponentProps<typeof RadixSelect.Root>;
-export const Root: React.FC<SelectRootProps> = RadixSelect.Root;
+export type SelectRootProps = KitSelectProps;
+export const Root: React.FC<SelectRootProps> = KitSelect;
 
-export type TriggerProps = React.ComponentProps<typeof RadixSelect.Trigger>;
-export const Trigger: React.FC<TriggerProps> = RadixSelect.Trigger;
+export type TriggerProps = SelectTriggerProps;
+export const Trigger: React.FC<TriggerProps> = KitSelect.Trigger;
 
-export type ContentProps = React.ComponentProps<typeof RadixSelect.Content>;
+export type ContentProps = SelectContentProps;
 export const Content: React.FC<ContentProps & { className?: string }> = (
   props,
 ) => (
-  <RadixSelect.Content
+  <KitSelect.Content
     {...props}
     className={classnames(styles.content, props.className)}
   />
 );
 
-export type ItemProps = React.ComponentProps<typeof RadixSelect.Item> & {
+export type ItemProps = SelectItemProps & {
   tooltip?: ReactNode;
 };
 
 export const Item: React.FC<ItemProps & { className?: string }> = (props) => (
-  <RadixSelect.Item
+  <KitSelect.Item
     {...props}
     className={classnames(styles.item, props.className)}
   />
 );
 
-export type SeparatorProps = React.ComponentProps<typeof RadixSelect.Separator>;
-export const Separator: React.FC<SeparatorProps> = RadixSelect.Separator;
+export type SeparatorProps = SelectSeparatorProps;
+export const Separator: React.FC<SeparatorProps> = KitSelect.Separator;
 
 export const Select: React.FC<SelectProps> = ({
   title,
@@ -66,30 +72,26 @@ export const Select: React.FC<SelectProps> = ({
     const selectOption = options.find(
       (option) =>
         typeof option !== "string" &&
-        "value" in option &&
+        !isSeparator(option) &&
         option.value === props.value,
     );
     if (!selectOption) return null;
     if (typeof selectOption === "string") return null;
+    if (isSeparator(selectOption)) return null;
     return selectOption;
   }, [props.value, options]);
 
   return (
-    <Root {...props} onValueChange={onChange} onOpenChange={setIsOpen} size="1">
-      {maybeSelectedOption &&
-      "tooltip" in maybeSelectedOption &&
-      maybeSelectedOption.tooltip &&
-      !isOpen ? (
-        <HoverCard.Root openDelay={1000}>
-          <HoverCard.Trigger>
+    <Root {...props} onValueChange={onChange} onOpenChange={setIsOpen}>
+      {maybeSelectedOption && maybeSelectedOption.tooltip && !isOpen ? (
+        <Tooltip delayDuration={1000}>
+          <Tooltip.Trigger asChild>
             <span>
-              <Trigger />
+              <Trigger title={title} />
             </span>
-          </HoverCard.Trigger>
-          <HoverCard.Content size="1" side="top">
-            {maybeSelectedOption.tooltip}
-          </HoverCard.Content>
-        </HoverCard.Root>
+          </Tooltip.Trigger>
+          <Tooltip.Content>{maybeSelectedOption.tooltip}</Tooltip.Content>
+        </Tooltip>
       ) : (
         <Trigger title={title} />
       )}
@@ -108,8 +110,8 @@ export const Select: React.FC<SelectProps> = ({
           if (option.tooltip) {
             return (
               <Item key={`select-item-${index}-${option.value}`} {...option}>
-                <HoverCard.Root openDelay={1000}>
-                  <HoverCard.Trigger>
+                <Tooltip delayDuration={1000}>
+                  <Tooltip.Trigger asChild>
                     <div>
                       <span className={styles.trigger_only}>
                         {option.textValue ?? option.value}
@@ -118,11 +120,9 @@ export const Select: React.FC<SelectProps> = ({
                         {option.children}
                       </span>
                     </div>
-                  </HoverCard.Trigger>
-                  <HoverCard.Content size="1">
-                    {option.tooltip}
-                  </HoverCard.Content>
-                </HoverCard.Root>
+                  </Tooltip.Trigger>
+                  <Tooltip.Content>{option.tooltip}</Tooltip.Content>
+                </Tooltip>
               </Item>
             );
           }

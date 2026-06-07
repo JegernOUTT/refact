@@ -1,5 +1,5 @@
 import React from "react";
-import { Flex, Text, Badge } from "@radix-ui/themes";
+import { Badge } from "../ui";
 import { CapabilityIcons } from "../../features/Providers/ProviderForm/ProviderModelsList/components";
 import type { ModelCapabilities } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import {
@@ -7,6 +7,7 @@ import {
   formatPricing,
 } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import type { CapCost } from "../../services/refact";
+import styles from "./RichModelSelectItem.module.css";
 
 export type RichModelData = {
   displayName: string;
@@ -36,66 +37,33 @@ export const RichModelSelectItem: React.FC<RichModelSelectItemProps> = ({
   isBuddy,
 }) => {
   return (
-    <Flex direction="column" gap="0" style={{ lineHeight: 1.3 }}>
-      <Flex align="center" gap="2">
-        <Text size="2" weight="medium" style={{ lineHeight: 1.4 }}>
-          {displayName}
-        </Text>
-        {isDefault && (
-          <Badge size="1" color="blue" variant="soft">
-            Default
-          </Badge>
-        )}
-        {isTaskPlannerAgent && (
-          <Badge size="1" color="indigo" variant="soft">
-            Task Agent
-          </Badge>
-        )}
-        {isChat2 && (
-          <Badge size="1" color="cyan" variant="soft">
-            Chat 2
-          </Badge>
-        )}
-        {isThinking && (
-          <Badge size="1" color="purple" variant="soft">
-            Reasoning
-          </Badge>
-        )}
-        {isLight && (
-          <Badge size="1" color="green" variant="soft">
-            Light
-          </Badge>
-        )}
-        {isBuddy && (
-          <Badge size="1" color="orange" variant="soft">
-            Companion
-          </Badge>
-        )}
-      </Flex>
+    <div className={styles.root}>
+      <div className={styles.header}>
+        <span className={styles.name}>{displayName}</span>
+        {isDefault && <Badge tone="accent">Default</Badge>}
+        {isTaskPlannerAgent && <Badge tone="accent">Task Agent</Badge>}
+        {isChat2 && <Badge tone="accent">Chat 2</Badge>}
+        {isThinking && <Badge tone="accent">Reasoning</Badge>}
+        {isLight && <Badge tone="success">Light</Badge>}
+        {isBuddy && <Badge tone="warning">Companion</Badge>}
+      </div>
 
-      <Flex align="center" gap="2" style={{ opacity: 0.6, marginTop: 2 }}>
+      <div className={styles.meta}>
         {pricing && (
-          <Text
-            size="1"
-            color="gray"
-            title={formatPricing(pricing, false)}
-            style={{ cursor: "help", fontSize: "11px" }}
-          >
+          <span className={styles.metaText} title={formatPricing(pricing, false)}>
             {formatPricing(pricing, true)}
-          </Text>
+          </span>
         )}
         {nCtx && (
-          <Text
-            size="1"
-            color="gray"
+          <span
+            className={styles.metaText}
             title={`Context window: ${nCtx.toLocaleString()} tokens`}
-            style={{ cursor: "help", fontSize: "11px" }}
           >
             {formatContextWindow(nCtx)}
-          </Text>
+          </span>
         )}
         {capabilities && <CapabilityIcons capabilities={capabilities} />}
-      </Flex>
-    </Flex>
+      </div>
+    </div>
   );
 };

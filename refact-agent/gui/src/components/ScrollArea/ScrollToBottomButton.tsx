@@ -1,5 +1,6 @@
-import { ArrowDownIcon } from "@radix-ui/react-icons";
-import { Container, Flex, IconButton } from "@radix-ui/themes";
+import { ArrowDown } from "lucide-react";
+import { IconButton } from "../ui";
+import styles from "./ScrollToBottomButton.module.css";
 
 type ScrollToBottomButtonProps = {
   onClick: () => void;
@@ -9,29 +10,15 @@ export const ScrollToBottomButton = ({
   onClick,
 }: ScrollToBottomButtonProps) => {
   return (
-    <Container
-      style={{
-        position: "absolute",
-        bottom: 15,
-        left: 0,
-        right: 0,
-        pointerEvents: "none",
-      }}
-    >
-      <Flex justify="end" pr="4">
-        <IconButton
-          title="Follow stream"
-          style={{
-            width: 35,
-            height: 35,
-            zIndex: 1,
-            pointerEvents: "auto",
-          }}
-          onClick={onClick}
-        >
-          <ArrowDownIcon width={21} height={21} />
-        </IconButton>
-      </Flex>
-    </Container>
+    <div className={styles.root}>
+      <IconButton
+        title="Follow stream"
+        className={styles.button}
+        onClick={onClick}
+        aria-label="Follow stream"
+        icon={ArrowDown}
+        variant="soft"
+      />
+    </div>
   );
 };

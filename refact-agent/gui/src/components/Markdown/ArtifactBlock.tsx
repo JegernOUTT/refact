@@ -5,15 +5,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Box, Flex, IconButton, Tooltip } from "@radix-ui/themes";
-import {
-  CodeIcon,
-  CopyIcon,
-  DownloadIcon,
-  ExternalLinkIcon,
-  EyeOpenIcon,
-  PlayIcon,
-} from "@radix-ui/react-icons";
+import { Code, Copy, Download, ExternalLink, Eye, Play } from "lucide-react";
+import { Icon, IconButton, Tooltip } from "../ui";
 import { ToolCard, type ToolStatus } from "../ChatContent/ToolCard";
 import { PreTag } from "./Pre";
 import { useAppearance } from "../../hooks/useAppearance";
@@ -35,16 +28,13 @@ const MIN_MESSAGE_INTERVAL_MS = 50;
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
 function wrapArtifactHtml(userCode: string, isDark: boolean): string {
-  const theme = isDark ? "dark" : "light";
-  const bg = isDark ? "#1a1a2e" : "#ffffff";
-  const fg = isDark ? "#e0e0e0" : "#1a1a1a";
   const colorScheme = isDark ? "dark" : "light";
+  const theme = isDark ? "dark" : "light";
 
   const injectedStyles = `<style data-refact-artifact>
 html:not([data-artifact-styled]) { color-scheme: ${colorScheme}; }
-html:not([data-artifact-styled]) body { margin: 8px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: ${bg}; color: ${fg}; }
+html:not([data-artifact-styled]) body { margin: 8px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: Canvas; color: CanvasText; }
 </style>`;
-
   const injectedScripts = `<script data-refact-artifact>
 (function() {
   var lastH = 0;
@@ -233,69 +223,73 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
 
   return (
     <ToolCard
-      icon={<PlayIcon />}
+      icon={<Icon icon={Play} size="sm" />}
       summary="HTML Preview"
       meta={`${lineCount} lines`}
       status={status}
       isOpen={isOpen}
       onToggle={handleToggle}
     >
-      <Box className={styles.artifact_container}>
-        <Flex className={styles.tab_bar}>
-          <Tooltip content={showSource ? "Show preview" : "Show source"}>
-            <IconButton
-              size="1"
-              variant="ghost"
-              onClick={handleToggleSource}
-              disabled={isStreaming}
-              aria-label={showSource ? "Show preview" : "Show source"}
-            >
-              {showSource ? (
-                <EyeOpenIcon width={12} height={12} />
-              ) : (
-                <CodeIcon width={12} height={12} />
-              )}
-            </IconButton>
+      <div className={styles.artifact_container}>
+        <div className={styles.tab_bar}>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
+              <IconButton
+                size="sm"
+                variant="ghost"
+                onClick={handleToggleSource}
+                disabled={isStreaming}
+                aria-label={showSource ? "Show preview" : "Show source"}
+                icon={showSource ? Eye : Code}
+              />
+            </Tooltip.Trigger>
+            <Tooltip.Content>{showSource ? "Show preview" : "Show source"}</Tooltip.Content>
           </Tooltip>
-          <Box className={styles.tab_bar_spacer} />
-          <Tooltip content="Open in new tab">
-            <IconButton
-              size="1"
-              variant="ghost"
-              onClick={handleOpenInTab}
-              disabled={isStreaming}
-              aria-label="Open in new tab"
-            >
-              <ExternalLinkIcon width={12} height={12} />
-            </IconButton>
+          <div className={styles.tab_bar_spacer} />
+          <Tooltip>
+            <Tooltip.Trigger asChild>
+              <IconButton
+                size="sm"
+                variant="ghost"
+                onClick={handleOpenInTab}
+                disabled={isStreaming}
+                aria-label="Open in new tab"
+                icon={ExternalLink}
+              />
+            </Tooltip.Trigger>
+            <Tooltip.Content>Open in new tab</Tooltip.Content>
           </Tooltip>
-          <Tooltip content="Download as .html">
-            <IconButton
-              size="1"
-              variant="ghost"
-              onClick={handleDownload}
-              disabled={isStreaming}
-              aria-label="Download HTML file"
-            >
-              <DownloadIcon width={12} height={12} />
-            </IconButton>
+          <Tooltip>
+            <Tooltip.Trigger asChild>
+              <IconButton
+                size="sm"
+                variant="ghost"
+                onClick={handleDownload}
+                disabled={isStreaming}
+                aria-label="Download HTML file"
+                icon={Download}
+              />
+            </Tooltip.Trigger>
+            <Tooltip.Content>Download as .html</Tooltip.Content>
           </Tooltip>
           {onCopyClick && (
-            <Tooltip content="Copy source">
-              <IconButton
-                size="1"
-                variant="ghost"
-                onClick={handleCopy}
-                aria-label="Copy HTML source"
-              >
-                <CopyIcon width={12} height={12} />
-              </IconButton>
+            <Tooltip>
+              <Tooltip.Trigger asChild>
+                <IconButton
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleCopy}
+                  aria-label="Copy HTML source"
+                  icon={Copy}
+                />
+              </Tooltip.Trigger>
+              <Tooltip.Content>Copy source</Tooltip.Content>
             </Tooltip>
           )}
-        </Flex>
+        </div>
 
         {effectiveShowSource && (
-          <Box className={styles.source_view}>
+          <div className={styles.source_view}>
             <PreTag className={markdownStyles.shiki_pre}>
               <code
                 className={classNames(
@@ -306,7 +300,7 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
                 {code}
               </code>
             </PreTag>
-          </Box>
+          </div>
         )}
 
         {showIframe && (
@@ -321,8 +315,8 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
           />
         )}
 
-        {error && <Box className={styles.error_bar}>JS Error: {error}</Box>}
-      </Box>
+        {error && <div className={styles.error_bar}>JS Error: {error}</div>}
+      </div>
     </ToolCard>
   );
 };

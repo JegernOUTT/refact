@@ -1,7 +1,9 @@
 import React from "react";
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
-import { Cross2Icon, RowSpacingIcon } from "@radix-ui/react-icons";
-import { Flex, Button, Text } from "@radix-ui/themes";
+import { Rows3, X } from "lucide-react";
+import classNames from "classnames";
+import { Button } from "../ui";
+import styles from "./collapsible.module.css";
 
 export type CollapsibleProps = Pick<
   RadixCollapsible.CollapsibleProps,
@@ -16,28 +18,36 @@ export type CollapsibleProps = Pick<
 export const Collapsible: React.FC<CollapsibleProps> = ({
   children,
   title,
+  className,
   ...props
 }) => {
   const [open, setOpen] = React.useState(props.defaultOpen ?? false);
+  const TriggerIcon = open ? X : Rows3;
+
   return (
     <RadixCollapsible.Root
       {...props}
-      className={props.className}
+      className={classNames(styles.root, className)}
       open={open}
       onOpenChange={setOpen}
     >
-      <Flex align="center" justify="between">
+      <div className={styles.header}>
         <RadixCollapsible.Trigger asChild>
-          <Text size="3">
-            <Button size="2" variant="ghost">
-              {title}
-              {open ? <Cross2Icon /> : <RowSpacingIcon />}
-            </Button>
-          </Text>
+          <Button
+            className={styles.trigger}
+            disabled={props.disabled}
+            rightIcon={TriggerIcon}
+            size="sm"
+            variant="ghost"
+          >
+            {title}
+          </Button>
         </RadixCollapsible.Trigger>
-      </Flex>
+      </div>
 
-      <RadixCollapsible.Content>{children}</RadixCollapsible.Content>
+      <RadixCollapsible.Content className={styles.content}>
+        <div className={styles.contentInner}>{children}</div>
+      </RadixCollapsible.Content>
     </RadixCollapsible.Root>
   );
 };
