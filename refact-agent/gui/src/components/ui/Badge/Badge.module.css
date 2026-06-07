@@ -15,6 +15,18 @@
   vertical-align: middle;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .badge {
+    transition:
+      color var(--rf-dur-fast) var(--rf-ease-standard),
+      transform var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
+  .badge:hover {
+    transform: translateY(-1px);
+  }
+}
+
 .default {
   color: var(--rf-color-fg);
 }

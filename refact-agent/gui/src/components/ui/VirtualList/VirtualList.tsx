@@ -5,8 +5,10 @@ import type { Components } from "react-virtuoso";
 
 import styles from "./VirtualList.module.css";
 
-export interface VirtualListProps<T>
-  extends Omit<React.ComponentProps<"div">, "children" | "itemData"> {
+export interface VirtualListProps<T> extends Omit<
+  React.ComponentProps<"div">,
+  "children" | "itemData"
+> {
   items: T[];
   renderItem: (item: T, index: number) => React.ReactNode;
   getItemKey?: (item: T, index: number) => React.Key;
@@ -28,19 +30,33 @@ export function VirtualList<T>({
   ...props
 }: VirtualListProps<T>) {
   const components: Components<T> = {
-    Footer: footer ? () => <div className={styles.footer}>{footer}</div> : undefined,
-    Header: header ? () => <div className={styles.header}>{header}</div> : undefined,
+    Footer: footer
+      ? () => <div className={styles.footer}>{footer}</div>
+      : undefined,
+    Header: header
+      ? () => <div className={styles.header}>{header}</div>
+      : undefined,
   };
 
   return (
-    <div {...props} className={classNames(styles.root, className)} style={{ height }}>
+    <div
+      {...props}
+      className={classNames(styles.root, className)}
+      style={{ height }}
+    >
       {items.length ? (
         <Virtuoso
-          className={styles.virtuoso}
+          className={classNames(styles.virtuoso, "rf-stagger")}
           components={components}
           data={items}
-          itemContent={(index, item) => <div className={styles.item}>{renderItem(item, index)}</div>}
-          computeItemKey={getItemKey ? (index, item) => getItemKey(item, index) : undefined}
+          itemContent={(index, item) => (
+            <div className={classNames(styles.item, index < 12 && "rf-enter")}>
+              {renderItem(item, index)}
+            </div>
+          )}
+          computeItemKey={
+            getItemKey ? (index, item) => getItemKey(item, index) : undefined
+          }
         />
       ) : (
         <div className={styles.empty}>{emptyMessage}</div>

@@ -15,12 +15,19 @@
   transition:
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
     background var(--rf-dur-fast) var(--rf-ease-standard),
-    color var(--rf-dur-fast) var(--rf-ease-standard);
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .chip:hover:not(.disabled) {
   border-color: var(--rf-border-strong);
   background: var(--rf-surface-2);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chip:hover:not(.disabled) {
+    transform: translateY(-1px);
+  }
 }
 
 .selected {

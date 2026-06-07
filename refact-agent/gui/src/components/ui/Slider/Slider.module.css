@@ -40,6 +40,14 @@
   border-radius: var(--rf-radius-pill);
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .track {
+    transition:
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      opacity var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
 .range {
   position: absolute;
   height: 100%;
@@ -73,7 +81,8 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .thumb {
-    transition: transform var(--rf-dur-fast) var(--rf-ease-standard),
+    transition:
+      transform var(--rf-dur-fast) var(--rf-ease-standard),
       border-color var(--rf-dur-fast) var(--rf-ease-standard);
   }
 

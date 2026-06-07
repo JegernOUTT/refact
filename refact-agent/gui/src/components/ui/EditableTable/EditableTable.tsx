@@ -14,7 +14,10 @@ export interface EditableTableColumn<T extends EditableTableRow> {
   placeholder?: string;
   inputType?: React.ComponentProps<"input">["type"];
   width?: string;
-  getInputProps?: (params: { row: T; rowIndex: number }) => Record<string, unknown>;
+  getInputProps?: (params: {
+    row: T;
+    rowIndex: number;
+  }) => Record<string, unknown>;
 }
 
 export type EditableTableValidate<T extends EditableTableRow> = (params: {
@@ -24,8 +27,10 @@ export type EditableTableValidate<T extends EditableTableRow> = (params: {
   value: string;
 }) => React.ReactNode;
 
-export interface EditableTableProps<T extends EditableTableRow>
-  extends Omit<React.ComponentProps<"div">, "children" | "onChange"> {
+export interface EditableTableProps<T extends EditableTableRow> extends Omit<
+  React.ComponentProps<"div">,
+  "children" | "onChange"
+> {
   columns: EditableTableColumn<T>[];
   value: T[];
   onChange: (value: T[]) => void;
@@ -60,12 +65,17 @@ export function EditableTable<T extends EditableTableRow>({
   const [rows, setRows] = useState<InternalRow<T>[]>(() =>
     value.map((row) => ({ id: nextId(), value: row })),
   );
-  const pendingFocusRef = useRef<{ rowIndex: number; columnId: string } | null>(null);
+  const pendingFocusRef = useRef<{ rowIndex: number; columnId: string } | null>(
+    null,
+  );
   const inputRefs = useRef(new Map<string, HTMLInputElement>());
 
   useEffect(() => {
     setRows((currentRows) =>
-      value.map((row, index) => ({ id: currentRows[index]?.id ?? nextId(), value: row })),
+      value.map((row, index) => ({
+        id: currentRows[index]?.id ?? nextId(),
+        value: row,
+      })),
     );
   }, [value]);
 
@@ -77,23 +87,26 @@ export function EditableTable<T extends EditableTableRow>({
     }
 
     pendingFocusRef.current = null;
-    inputRefs.current.get(inputKey(pendingFocus.rowIndex, pendingFocus.columnId))?.focus();
+    inputRefs.current
+      .get(inputKey(pendingFocus.rowIndex, pendingFocus.columnId))
+      ?.focus();
   }, [rows]);
 
   const errors = useMemo(
     () =>
-      rows.map((row, rowIndex) =>
-        Object.fromEntries(
-          columns.map((column) => [
-            column.id,
-            validate?.({
-              columnId: column.id,
-              row: row.value,
-              rowIndex,
-              value: String(row.value[column.id]),
-            }) ?? null,
-          ]),
-        ) as Partial<Record<Extract<keyof T, string>, React.ReactNode>>,
+      rows.map(
+        (row, rowIndex) =>
+          Object.fromEntries(
+            columns.map((column) => [
+              column.id,
+              validate?.({
+                columnId: column.id,
+                row: row.value,
+                rowIndex,
+                value: String(row.value[column.id]),
+              }) ?? null,
+            ]),
+          ) as Partial<Record<Extract<keyof T, string>, React.ReactNode>>,
       ),
     [columns, rows, validate],
   );
@@ -103,10 +116,16 @@ export function EditableTable<T extends EditableTableRow>({
     onChange(nextRows.map((row) => row.value));
   };
 
-  const updateCell = (rowIndex: number, columnId: Extract<keyof T, string>, nextValue: string) => {
+  const updateCell = (
+    rowIndex: number,
+    columnId: Extract<keyof T, string>,
+    nextValue: string,
+  ) => {
     emitChange(
       rows.map((row, index) =>
-        index === rowIndex ? { ...row, value: { ...row.value, [columnId]: nextValue } } : row,
+        index === rowIndex
+          ? { ...row, value: { ...row.value, [columnId]: nextValue } }
+          : row,
       ),
     );
   };
@@ -149,21 +168,24 @@ export function EditableTable<T extends EditableTableRow>({
               </th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="rf-stagger">
             {rows.length ? (
               rows.map((row, rowIndex) => (
-                <tr className={styles.row} key={row.id}>
+                <tr className={classNames(styles.row, "rf-enter")} key={row.id}>
                   {columns.map((column) => {
                     const error = errors[rowIndex]?.[column.id];
 
-                    const inputProps =
-                      (column.getInputProps?.({ row: row.value, rowIndex }) ?? {}) as Partial<
-                        React.ComponentProps<"input">
-                      >;
+                    const inputProps = (column.getInputProps?.({
+                      row: row.value,
+                      rowIndex,
+                    }) ?? {}) as Partial<React.ComponentProps<"input">>;
 
                     return (
                       <td className={styles.cell} key={column.id}>
-                        <label className={styles.stackedLabel} htmlFor={inputKey(rowIndex, column.id)}>
+                        <label
+                          className={styles.stackedLabel}
+                          htmlFor={inputKey(rowIndex, column.id)}
+                        >
                           {column.header}
                         </label>
                         <FieldText
@@ -182,7 +204,9 @@ export function EditableTable<T extends EditableTableRow>({
                           placeholder={column.placeholder}
                           type={column.inputType}
                           value={String(row.value[column.id])}
-                          onChange={(nextValue) => updateCell(rowIndex, column.id, nextValue)}
+                          onChange={(nextValue) =>
+                            updateCell(rowIndex, column.id, nextValue)
+                          }
                           onKeyDown={(event) => {
                             if (event.key === "Enter") {
                               event.preventDefault();
@@ -190,7 +214,11 @@ export function EditableTable<T extends EditableTableRow>({
                             }
                           }}
                         />
-                        {error ? <FieldError className={styles.error}>{error}</FieldError> : null}
+                        {error ? (
+                          <FieldError className={styles.error}>
+                            {error}
+                          </FieldError>
+                        ) : null}
                       </td>
                     );
                   })}
@@ -216,7 +244,13 @@ export function EditableTable<T extends EditableTableRow>({
           </tbody>
         </table>
       </div>
-      <Button leftIcon={Plus} size="sm" type="button" variant="soft" onClick={addRow}>
+      <Button
+        leftIcon={Plus}
+        size="sm"
+        type="button"
+        variant="soft"
+        onClick={addRow}
+      >
         {addLabel}
       </Button>
     </div>

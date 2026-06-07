@@ -11,15 +11,19 @@ export type SurfaceVariant =
   | "selected";
 
 export type SurfaceRadius = "none" | "chip" | "control" | "card" | "pill";
+export type SurfaceAnimation = boolean | "rise";
 
 type SurfaceOwnProps<T extends React.ElementType> = {
   as?: T;
   variant?: SurfaceVariant;
   radius?: SurfaceRadius;
+  animated?: SurfaceAnimation;
+  interactive?: boolean;
 };
 
-export type SurfaceProps<T extends React.ElementType = "div"> = SurfaceOwnProps<T> &
-  Omit<React.ComponentPropsWithoutRef<T>, keyof SurfaceOwnProps<T>>;
+export type SurfaceProps<T extends React.ElementType = "div"> =
+  SurfaceOwnProps<T> &
+    Omit<React.ComponentPropsWithoutRef<T>, keyof SurfaceOwnProps<T>>;
 
 const variantClass: Record<SurfaceVariant, string> = {
   plain: styles.plain,
@@ -42,10 +46,15 @@ export function Surface<T extends React.ElementType = "div">({
   as,
   variant = "plain",
   radius = "card",
+  animated = false,
+  interactive,
   className,
   ...props
 }: SurfaceProps<T>) {
   const Component = as ?? "div";
+  const isInteractive =
+    interactive ??
+    typeof (props as { onClick?: unknown }).onClick === "function";
 
   return (
     <Component
@@ -53,6 +62,9 @@ export function Surface<T extends React.ElementType = "div">({
         styles.surface,
         variantClass[variant],
         radiusClass[radius],
+        animated === true && "rf-enter",
+        animated === "rise" && "rf-enter-rise",
+        isInteractive && "rf-pressable",
         className,
       )}
       {...props}

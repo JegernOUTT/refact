@@ -12,7 +12,7 @@
 }
 
 .rf-popover-motion {
-  transform: scale(1);
+  transform: var(--rf-motion-transform-base, translate(0, 0)) scale(1);
   transform-origin: var(--radix-popover-content-transform-origin, center);
 }
 
@@ -214,12 +214,12 @@
 @keyframes rf-scale-fade {
   from {
     opacity: 0;
-    transform: scale(0.96);
+    transform: var(--rf-motion-transform-base, translate(0, 0)) scale(0.96);
   }
 
   to {
     opacity: 1;
-    transform: scale(1);
+    transform: var(--rf-motion-transform-base, translate(0, 0)) scale(1);
   }
 }
 

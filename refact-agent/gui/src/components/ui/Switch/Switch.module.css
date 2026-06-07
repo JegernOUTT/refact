@@ -18,6 +18,15 @@
   cursor: pointer;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .root {
+    transition:
+      background var(--rf-dur-med) var(--rf-ease-standard),
+      border-color var(--rf-dur-med) var(--rf-ease-standard),
+      opacity var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
 .root:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-hairline);

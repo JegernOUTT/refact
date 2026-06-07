@@ -6,7 +6,10 @@
 }
 
 .content {
-  --rf-overlay-ideal-width: var(--rf-overlay-max-width, var(--rf-overlay-dialog-w));
+  --rf-overlay-ideal-width: var(
+    --rf-overlay-max-width,
+    var(--rf-overlay-dialog-w)
+  );
   --rf-overlay-ideal-height: var(--rf-overlay-max-height, auto);
 
   position: fixed;
@@ -30,7 +33,10 @@
   border: var(--rf-hairline) solid var(--rf-border-strong);
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-overlay);
-  transform: translate(-50%, -50%);
+
+  --rf-motion-transform-base: translate(-50%, -50%);
+
+  transform: var(--rf-motion-transform-base) scale(1);
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 

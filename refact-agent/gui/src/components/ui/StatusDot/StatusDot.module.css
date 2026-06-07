@@ -8,6 +8,15 @@
   vertical-align: middle;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .dot {
+    transition:
+      color var(--rf-dur-fast) var(--rf-ease-standard),
+      opacity var(--rf-dur-fast) var(--rf-ease-standard),
+      transform var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
 .small {
   width: var(--rf-space-2);
   height: var(--rf-space-2);

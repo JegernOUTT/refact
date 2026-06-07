@@ -21,7 +21,10 @@ export interface DataTableColumn<T> {
   hideLabelOnCard?: boolean;
 }
 
-export interface DataTableProps<T> extends Omit<React.ComponentProps<"div">, "children"> {
+export interface DataTableProps<T> extends Omit<
+  React.ComponentProps<"div">,
+  "children"
+> {
   columns: DataTableColumn<T>[];
   rows: T[];
   getRowId: (row: T, index: number) => string;
@@ -76,7 +79,9 @@ export function DataTable<T>({
     >
       <div className={styles.tableWrap}>
         <table className={styles.table}>
-          {caption ? <caption className={styles.caption}>{caption}</caption> : null}
+          {caption ? (
+            <caption className={styles.caption}>{caption}</caption>
+          ) : null}
           <thead>
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
@@ -87,7 +92,10 @@ export function DataTable<T>({
                   return (
                     <th
                       className={styles.headerCell}
-                      data-align={columns.find((column) => column.id === header.column.id)?.align}
+                      data-align={
+                        columns.find((column) => column.id === header.column.id)
+                          ?.align
+                      }
                       key={header.id}
                       scope="col"
                     >
@@ -98,16 +106,28 @@ export function DataTable<T>({
                           onClick={header.column.getToggleSortingHandler()}
                         >
                           <span className={styles.headerContent}>
-                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            {flexRender(
+                              header.column.columnDef.header,
+                              header.getContext(),
+                            )}
                           </span>
                           <Icon
-                            icon={sorted === "asc" ? ArrowUp : sorted === "desc" ? ArrowDown : ArrowUpDown}
+                            icon={
+                              sorted === "asc"
+                                ? ArrowUp
+                                : sorted === "desc"
+                                  ? ArrowDown
+                                  : ArrowUpDown
+                            }
                             size="sm"
                             tone={sorted ? "accent" : "muted"}
                           />
                         </button>
                       ) : (
-                        flexRender(header.column.columnDef.header, header.getContext())
+                        flexRender(
+                          header.column.columnDef.header,
+                          header.getContext(),
+                        )
                       )}
                     </th>
                   );
@@ -115,17 +135,23 @@ export function DataTable<T>({
               </tr>
             ))}
           </thead>
-          <tbody>
+          <tbody className="rf-stagger">
             {sortedRows.length ? (
               sortedRows.map((row) => (
-                <tr key={row.id}>
+                <tr className="rf-enter" key={row.id}>
                   {row.getVisibleCells().map((cell) => (
                     <td
                       className={styles.cell}
-                      data-align={columns.find((column) => column.id === cell.column.id)?.align}
+                      data-align={
+                        columns.find((column) => column.id === cell.column.id)
+                          ?.align
+                      }
                       key={cell.id}
                     >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      {flexRender(
+                        cell.column.columnDef.cell,
+                        cell.getContext(),
+                      )}
                     </td>
                   ))}
                 </tr>
@@ -140,16 +166,25 @@ export function DataTable<T>({
           </tbody>
         </table>
       </div>
-      <div className={styles.cards} aria-label={typeof caption === "string" ? caption : undefined}>
+      <div
+        className={classNames(styles.cards, "rf-stagger")}
+        aria-label={typeof caption === "string" ? caption : undefined}
+      >
         {sortedRows.length ? (
           sortedRows.map((row) => (
-            <div className={styles.card} key={row.id}>
+            <div className={classNames(styles.card, "rf-enter")} key={row.id}>
               {columns.map((column) => (
-                <div className={styles.cardField} key={column.id} data-align={column.align}>
+                <div
+                  className={styles.cardField}
+                  key={column.id}
+                  data-align={column.align}
+                >
                   {column.hideLabelOnCard ? null : (
                     <div className={styles.cardLabel}>{column.header}</div>
                   )}
-                  <div className={styles.cardValue}>{column.cell(row.original)}</div>
+                  <div className={styles.cardValue}>
+                    {column.cell(row.original)}
+                  </div>
                 </div>
               ))}
             </div>
