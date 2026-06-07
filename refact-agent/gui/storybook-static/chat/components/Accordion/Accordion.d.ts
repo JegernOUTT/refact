@@ -1,0 +1,15 @@
+import React from "react";
+import * as RadixAccordion from "@radix-ui/react-accordion";
+import { IconProps } from "@radix-ui/themes";
+type AccordionRoot = typeof RadixAccordion.Root;
+export declare const Root: AccordionRoot;
+type AccordionItem = typeof RadixAccordion.Item;
+export declare const Item: AccordionItem;
+type AccordionHeader = typeof RadixAccordion.Header;
+export declare const Header: AccordionHeader;
+type AccordionTrigger = typeof RadixAccordion.Trigger;
+export declare const Trigger: AccordionTrigger;
+type AccordionContent = typeof RadixAccordion.Content;
+export declare const Content: AccordionContent;
+export declare const Chevron: React.FC<IconProps>;
+export {};

@@ -1,0 +1,21 @@
+import React from "react";
+import type { Config } from "../Config/configSlice";
+import type { ExtensionMarketplaceItem, ExtensionMarketplaceSource } from "../../services/refact/extensionsMarketplace";
+import { type Page } from "../Pages/pagesSlice";
+type ExtensionsMarketplaceProps = {
+    host: Config["host"];
+    title: string;
+    kind: "skill" | "command" | "subagent";
+    tabbed: Config["tabbed"];
+    back: () => void;
+    items: ExtensionMarketplaceItem[];
+    sources: ExtensionMarketplaceSource[];
+    isLoading: boolean;
+    error: unknown;
+    isInstalling: boolean;
+    onInstall: (item: ExtensionMarketplaceItem, scope: "local" | "global", params?: Record<string, string>, overwrite?: boolean) => Promise<void>;
+    onInstalled?: (item: ExtensionMarketplaceItem) => Page;
+    hasProjectRoot: boolean;
+};
+export declare const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps>;
+export {};

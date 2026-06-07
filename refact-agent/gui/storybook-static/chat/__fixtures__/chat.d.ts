@@ -1,0 +1,12 @@
+import type { ChatThread } from "../features/Chat/Thread/types";
+import { ChatHistoryItem } from "../features/History/historySlice";
+export * from "./some_chrome_screenshots";
+type ChatMessages = ChatThread["messages"];
+export declare const MARS_ROVER_CHAT: ChatHistoryItem;
+export declare const CHAT_FUNCTIONS_MESSAGES: ChatMessages;
+export declare const FROG_CHAT: ChatThread;
+export declare const CHAT_WITH_DIFFS: ChatMessages;
+export declare const CHAT_WITH_DIFF_ACTIONS: ChatThread;
+export declare const LARGE_DIFF: ChatThread;
+export declare const TOOL_IMAGE_STUB: ChatMessages;
+export declare const CHAT_WITH_KNOWLEDGE_TOOL: ChatThread;

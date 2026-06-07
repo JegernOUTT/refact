@@ -1,0 +1,15 @@
+import type { Palette, Stage, SignalDef, SkillDef, ToyDef } from "./types";
+export declare const CANVAS_SIZE = 128;
+export declare const CANVAS_CENTER_X: number;
+export declare const CANVAS_CENTER_Y: number;
+export declare const PALETTES: Palette[];
+export declare const NAMES: string[];
+export declare const STAGES: Stage[];
+export declare const SIGNALS: Record<string, SignalDef>;
+export declare const UNKNOWN_SIGNAL: SignalDef;
+export declare function getSignalDef(signalType: string): SignalDef;
+export declare const SKILLS: SkillDef[];
+export declare const TOY_DEFS: Record<string, ToyDef>;
+export declare const TOY_EMOJI: Record<string, string>;
+export declare const STAGE_SIZES: [number, number][];
+export declare const PERSISTENT_TOY_ACTIONS: Set<string>;

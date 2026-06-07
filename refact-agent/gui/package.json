@@ -45,7 +45,7 @@
     "format:check": "prettier . --check",
     "format": "prettier . --write",
     "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build",
+    "build-storybook": "NODE_OPTIONS=--max-old-space-size=8192 storybook build",
     "types": "tsc --noEmit",
     "prepublishOnly": "npm run build",
     "alpha:version": "npm --preid alpha version prerelease",

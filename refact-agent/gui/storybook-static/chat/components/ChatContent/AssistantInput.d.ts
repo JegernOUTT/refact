@@ -1,0 +1,20 @@
+import React from "react";
+import { ChatContextFile, DiffChunk, ThinkingBlock, ToolCall, Usage, WebSearchCitation } from "../../services/refact";
+type ChatInputProps = {
+    message: string | null;
+    reasoningContent?: string | null;
+    thinkingBlocks?: ThinkingBlock[] | null;
+    toolCalls?: ToolCall[] | null;
+    serverExecutedTools?: ToolCall[] | null;
+    serverContentBlocks?: unknown[] | null;
+    citations?: WebSearchCitation[] | null;
+    messageId?: string;
+    onBranch?: (messageId: string) => void;
+    onDelete?: (messageId: string) => void;
+    contextFilesByToolId?: Record<string, ChatContextFile[]>;
+    diffsByToolId?: Record<string, DiffChunk[]>;
+    usage?: Usage | null;
+    isStreaming?: boolean;
+};
+export declare const AssistantInput: React.NamedExoticComponent<ChatInputProps>;
+export {};
