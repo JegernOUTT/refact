@@ -16,6 +16,7 @@ module.exports = {
   plugins: ["react-refresh"],
   rules: {
     "no-console": "warn",
+    "no-restricted-imports": "off",
     "react-refresh/only-export-components": [
       "warn",
       { allowConstantExport: true },
@@ -34,6 +35,42 @@ module.exports = {
       { ignoreArrowShorthand: true },
     ],
   },
+  overrides: [
+    {
+      files: ["src/components/ui/**/*.{ts,tsx}", "src/styles/**/*.{ts,tsx}"],
+      rules: {
+        "no-restricted-imports": [
+          "error",
+          {
+            patterns: [
+              {
+                group: [
+                  "**/features/*",
+                  "**/features/**",
+                  "@/features/*",
+                  "@/features/**",
+                ],
+                message: "ui/styles must not import from features",
+              },
+              {
+                group: [
+                  "**/services/*",
+                  "**/services/**",
+                  "@/services/*",
+                  "@/services/**",
+                ],
+                message: "ui/styles must not import from services",
+              },
+              {
+                group: ["**/app/*", "**/app/**", "@/app/*", "@/app/**"],
+                message: "ui/styles must not import from app",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ],
   parserOptions: {
     ecmaVersion: "latest",
     sourceType: "module",
