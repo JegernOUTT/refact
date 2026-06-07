@@ -56,7 +56,7 @@ export const ExtItemList: React.FC<ExtItemListProps> = ({
                 variant="danger"
                 size="sm"
                 icon={Trash2}
-                aria-label={`Delete `}
+                aria-label={`Delete ${item.name}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   onDelete(item.name, item.scope);
