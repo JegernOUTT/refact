@@ -429,10 +429,19 @@ pub async fn enqueue_budget_threshold_wakes_for_project(
             Ok(spent) => spent,
             Err(error) => {
                 tracing::warn!(
-                    "conductor budget wake aggregation failed for {}: {}",
-                    goal.id,
-                    error
+                    goal_id = %goal.id,
+                    error = %error,
+                    "conductor budget wake aggregation failed; enqueuing fail-closed budget wake"
                 );
+                if enqueue_goal_wake_after_target_refresh(
+                    gcx.clone(),
+                    &goal.id,
+                    ConductorWakeReason::Budget,
+                )
+                .await
+                {
+                    enqueued = true;
+                }
                 continue;
             }
         };
@@ -1154,14 +1163,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
+        assert!(enqueue_budget_threshold_wakes_for_project(gcx.clone(), dir.path()).await);
 
-        assert!(gcx
-            .conductor_wake_bus
-            .lock()
-            .await
-            .mailbox("goal-bad-budget")
-            .is_none());
+        let bus = gcx.conductor_wake_bus.lock().await;
+        let mailbox = bus.mailbox("goal-bad-budget").unwrap();
+        assert_eq!(mailbox.reasons, vec![ConductorWakeReason::Budget]);
+        drop(bus);
         let ledger =
             refact_buddy_core::conductor_store::load_goal_ledger(dir.path(), "goal-bad-budget")
                 .await
