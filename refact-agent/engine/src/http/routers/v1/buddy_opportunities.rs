@@ -110,10 +110,13 @@ pub async fn handle_v1_buddy_opportunities_list(
     let gcx = app.gcx.clone();
     let buddy_arc = gcx.buddy.clone();
     let lock = buddy_arc.lock().await;
-    let mut opps = match lock.as_ref() {
-        Some(svc) => svc.opportunity_queue.snapshot(),
-        None => vec![],
-    };
+    let svc = lock.as_ref().ok_or_else(|| {
+        ScratchError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "buddy not initialized".into(),
+        )
+    })?;
+    let mut opps = svc.opportunity_queue.snapshot();
     if let Some(status_filter) = &query.status {
         let allowed: Vec<&str> = status_filter.split(',').map(|s| s.trim()).collect();
         opps.retain(|o| {

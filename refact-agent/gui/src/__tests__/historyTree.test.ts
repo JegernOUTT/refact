@@ -256,16 +256,33 @@ describe("buildHistoryTree", () => {
   });
 
   describe("task filtering", () => {
-    it("should exclude items with task_id", () => {
+    it("should include task-scoped chats that are not planner/agent mode", () => {
       const chats = {
         a: createItem("a"),
-        b: createItem("b", { task_id: "task-1" }),
+        b: createItem("b", {
+          task_id: "task-1",
+          task_meta: { task_id: "task-1", role: "planner" },
+          mode: "review",
+          parent_id: "planner-1",
+          link_type: "mode_transition",
+        }),
         c: createItem("c"),
       };
       const result = buildHistoryTree(chats);
 
-      expect(result).toHaveLength(2);
-      expect(result.map((r) => r.id).sort()).toEqual(["a", "c"]);
+      expect(result).toHaveLength(3);
+      expect(result.map((r) => r.id).sort()).toEqual(["a", "b", "c"]);
+    });
+
+    it("should exclude task planner/agent chats regardless of case", () => {
+      const chats = {
+        a: createItem("a"),
+        b: createItem("b", { mode: "TASK_PLANNER", task_id: "task-1" }),
+        c: createItem("c", { mode: "TASK_AGENT", task_id: "task-1" }),
+      };
+      const result = buildHistoryTree(chats);
+
+      expect(result.map((r) => r.id).sort()).toEqual(["a"]);
     });
 
     it("should exclude items with mode task_agent", () => {

@@ -111,10 +111,12 @@ const startListening = listenerMiddleware.startListening.withTypes<
 
 function syncProjectStorageNamespace(state: RootState): boolean {
   const previous = getProjectStorageNamespace();
+  const workspaceRoots = state.current_project.workspaceRoots;
   setProjectStorageNamespaceFromProjectInfo({
-    workspaceRoots: state.current_project.workspaceRoots,
-    projectName: state.current_project.name,
-    workspaceName: state.config.currentWorkspaceName,
+    workspaceRoots,
+    projectName: workspaceRoots?.length
+      ? state.current_project.name
+      : undefined,
   });
   return getProjectStorageNamespace() !== previous;
 }
@@ -803,12 +805,19 @@ startListening({
     const toolCallId = msg.tool_call_id;
     const key = `${event.chat_id}:${toolCallId}`;
     if (processedHandoffIds.has(key) || inFlightHandoffs.has(key)) return;
+    inFlightHandoffs.add(key);
 
     const parsed = safeParseJson(msg.content);
-    if (!parsed || typeof parsed !== "object") return;
+    if (!parsed || typeof parsed !== "object") {
+      inFlightHandoffs.delete(key);
+      return;
+    }
 
     const content = parsed as ToolMessageContent;
-    if (!isHandoffToModeContent(content)) return;
+    if (!isHandoffToModeContent(content)) {
+      inFlightHandoffs.delete(key);
+      return;
+    }
 
     const { new_chat_id } = content;
     const state = listenerApi.getState();
@@ -828,7 +837,7 @@ startListening({
         isTaskChat,
         taskMeta,
         parentId: event.chat_id,
-        linkType: "mode_transition",
+        linkType: "handoff",
         worktree,
         mode:
           isTaskChat && taskMeta?.role === "planner"
@@ -885,7 +894,6 @@ startListening({
 
     if (hasConfiguredEngineEndpoint(state)) {
       const { regenerate } = await import("../services/refact/chatCommands");
-      inFlightHandoffs.add(key);
       try {
         await regenerate(new_chat_id, state.config, apiKey ?? undefined);
         if (processedHandoffIds.size >= MAX_PROCESSED_HANDOFFS) {
@@ -910,6 +918,7 @@ startListening({
           .forEach((k) => processedHandoffIds.delete(k));
       }
       processedHandoffIds.add(key);
+      inFlightHandoffs.delete(key);
     }
   },
 });

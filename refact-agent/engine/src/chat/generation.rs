@@ -27,7 +27,7 @@ use crate::knowledge::enrichment::enrich_messages_with_knowledge;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
-    frozen_prefix_is_complete, maybe_save_trajectory,
+    frozen_prefix_is_complete, maybe_save_trajectory, maybe_save_trajectory_background,
 };
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{build_canonical_openai_tools, prepare_chat_passthrough, ChatPrepareOptions};
@@ -36,7 +36,6 @@ use super::stream_core::{
     run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal,
     LlmStreamError, LlmStreamOutcome, ABORT_ERROR_MESSAGE,
 };
-use super::queue::inject_priority_messages_if_any;
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
@@ -60,6 +59,46 @@ enum ContextLimitCompactionDecision {
     Skip,
     Attempt { attempt: usize },
     MaxAttemptsReached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NormalizedStopReason {
+    ProviderLengthStop,
+    ContextLengthStop,
+}
+
+pub(crate) fn normalize_stop_reason(reason: &str) -> Option<NormalizedStopReason> {
+    let lower = reason.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if lower.contains("context_length_exceeded")
+        || lower.contains("maximum context")
+        || lower.contains("context window")
+        || lower.contains("context length")
+        || lower.contains("input too long")
+        || lower.contains("input is too long")
+        || lower.contains("model_length")
+        || lower.contains("prompt is too long")
+    {
+        return Some(NormalizedStopReason::ContextLengthStop);
+    }
+    match lower.as_str() {
+        "length"
+        | "max_tokens"
+        | "max_output_tokens"
+        | "token_limit"
+        | "max_tokens_stop"
+        | "max_tokens_exceeded" => Some(NormalizedStopReason::ProviderLengthStop),
+        _ => None,
+    }
+}
+
+fn compression_reason_for_stop_reason(reason: NormalizedStopReason) -> CompressionReason {
+    match reason {
+        NormalizedStopReason::ProviderLengthStop => CompressionReason::ProviderLengthStop,
+        NormalizedStopReason::ContextLengthStop => CompressionReason::ContextLengthStop,
+    }
 }
 
 fn context_limit_compaction_decision(
@@ -609,6 +648,53 @@ fn tail_needs_assistant(messages: &[ChatMessage]) -> bool {
     false
 }
 
+fn latest_assistant_tool_call_window_closed(messages: &[ChatMessage]) -> bool {
+    let Some((assistant_index, assistant)) = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.role == "assistant")
+    else {
+        return true;
+    };
+
+    let Some(tool_calls) = assistant.tool_calls.as_ref() else {
+        return true;
+    };
+    if tool_calls.is_empty() {
+        return true;
+    }
+
+    let mut answered_ids = std::collections::HashSet::new();
+    for message in messages.iter().skip(assistant_index + 1) {
+        match message.role.as_str() {
+            "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                answered_ids.insert(message.tool_call_id.as_str());
+            }
+            role if is_prompt_turn_role(role) || role == "assistant" => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    tool_calls
+        .iter()
+        .all(|tc| answered_ids.contains(tc.id.as_str()))
+}
+
+async fn inject_priority_messages_before_llm_if_safe(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> bool {
+    let can_inject = {
+        let session = session_arc.lock().await;
+        latest_assistant_tool_call_window_closed(&session.messages)
+    };
+
+    can_inject && crate::chat::queue::inject_priority_messages_if_any(app, session_arc).await
+}
+
 fn is_claude_code_model(model: &BaseModelRecord) -> bool {
     model.wire_format == crate::llm::WireFormat::AnthropicMessages && !model.auth_token.is_empty()
 }
@@ -678,11 +764,7 @@ fn is_reasoning_token_limit_stop(message: &ChatMessage) -> bool {
     }
 
     let finish_reason = message.finish_reason.as_deref().unwrap_or_default();
-    let stopped_for_tokens = matches!(
-        finish_reason,
-        "length" | "max_tokens" | "max_output_tokens" | "token_limit"
-    );
-    if !stopped_for_tokens {
+    if normalize_stop_reason(finish_reason) != Some(NormalizedStopReason::ProviderLengthStop) {
         return false;
     }
 
@@ -697,22 +779,8 @@ fn is_reasoning_token_limit_stop(message: &ChatMessage) -> bool {
                 .is_some_and(|blocks| !blocks.is_empty()))
 }
 
-fn is_length_like_finish_reason(finish_reason: Option<&str>) -> bool {
-    matches!(
-        finish_reason,
-        Some("length" | "max_tokens" | "max_output_tokens" | "token_limit")
-    )
-}
-
-fn has_reasoning_or_thinking_output(message: &ChatMessage) -> bool {
-    message
-        .reasoning_content
-        .as_deref()
-        .is_some_and(|reasoning| !reasoning.trim().is_empty())
-        || message
-            .thinking_blocks
-            .as_ref()
-            .is_some_and(|blocks| !blocks.is_empty())
+fn length_like_finish_reason(finish_reason: Option<&str>) -> Option<NormalizedStopReason> {
+    finish_reason.and_then(normalize_stop_reason)
 }
 
 fn has_empty_or_near_empty_visible_output(message: &ChatMessage) -> bool {
@@ -730,9 +798,8 @@ pub(crate) fn is_high_pressure_length_stop(
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
-        || !is_length_like_finish_reason(message.finish_reason.as_deref())
+        || length_like_finish_reason(message.finish_reason.as_deref()).is_none()
         || !has_empty_or_near_empty_visible_output(message)
-        || !has_reasoning_or_thinking_output(message)
     {
         return false;
     }
@@ -749,7 +816,7 @@ fn is_length_stop_compression_candidate(message: &ChatMessage) -> bool {
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
-        && is_length_like_finish_reason(message.finish_reason.as_deref())
+        && length_like_finish_reason(message.finish_reason.as_deref()).is_some()
         && has_empty_or_near_empty_visible_output(message)
 }
 
@@ -776,7 +843,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
         }
         return false;
     };
-    let reactive_attempt = {
+    let (reactive_attempt, reason) = {
         let mut session = session_arc.lock().await;
         if !matches!(
             session.runtime.state,
@@ -790,6 +857,8 @@ async fn maybe_compact_after_high_pressure_length_stop(
         if !is_high_pressure_length_stop(message, &session.messages, effective_n_ctx) {
             return false;
         }
+        let reason = length_like_finish_reason(message.finish_reason.as_deref())
+            .map(compression_reason_for_stop_reason);
         let reactive_attempt = session
             .thread
             .reactive_compact_attempts
@@ -805,7 +874,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
         session.thread.reactive_compact_attempts = Some(reactive_attempt);
         session.increment_version();
         session.touch();
-        reactive_attempt
+        (reactive_attempt, reason)
     };
 
     warn!(
@@ -813,9 +882,14 @@ async fn maybe_compact_after_high_pressure_length_stop(
         reactive_attempt,
         crate::chat::summarization::MAX_SEGMENT_SUMMARY_ATTEMPTS,
     );
-    let compacted =
-        crate::chat::summarization::apply_segment_summarization(gcx, session_arc, thread, true)
-            .await;
+    let compacted = crate::chat::summarization::apply_segment_summarization_with_reason(
+        gcx,
+        session_arc,
+        thread,
+        true,
+        reason,
+    )
+    .await;
     if compacted {
         let mut session = session_arc.lock().await;
         session.thread.previous_response_id = None;
@@ -924,6 +998,10 @@ pub fn start_generation(
         let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
         loop {
+            if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
+                continue;
+            }
+
             let (mut thread, chat_id) = {
                 let session = session_arc.lock().await;
                 (session.thread.clone(), session.chat_id.clone())
@@ -1156,13 +1234,15 @@ pub fn start_generation(
                             session.add_message(make_ui_only_error_message(&original_error));
                             session.thread.reactive_compact_attempts = Some(reactive_attempt);
                         }
-                        let compacted = crate::chat::summarization::apply_segment_summarization(
-                            gcx.clone(),
-                            &session_arc,
-                            &thread,
-                            true,
-                        )
-                        .await;
+                        let compacted =
+                            crate::chat::summarization::apply_segment_summarization_with_reason(
+                                gcx.clone(),
+                                &session_arc,
+                                &thread,
+                                true,
+                                Some(CompressionReason::ContextLengthStop),
+                            )
+                            .await;
                         if compacted {
                             let mut session = session_arc.lock().await;
                             session.clear_stream_for_retry();
@@ -1302,7 +1382,7 @@ pub fn start_generation(
                 );
             }
 
-            maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+            maybe_save_trajectory_background(app.clone(), session_arc.clone());
 
             match process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt)
                 .await
@@ -1324,7 +1404,9 @@ pub fn start_generation(
                         maybe_save_trajectory(app.clone(), session_arc.clone()).await;
                         continue;
                     }
-                    if inject_priority_messages_if_any(app.clone(), session_arc.clone()).await {
+                    if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone())
+                        .await
+                    {
                         continue;
                     }
                     let should_continue = {
@@ -1401,7 +1483,11 @@ pub fn start_generation(
                     break;
                 }
                 ToolStepOutcome::Continue => {
-                    inject_priority_messages_if_any(app.clone(), session_arc.clone()).await;
+                    if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone())
+                        .await
+                    {
+                        continue;
+                    }
                 }
             }
         }
@@ -2312,7 +2398,17 @@ async fn run_streaming_generation(
             usage.metering_usd = metering_usd;
         }
 
-        session.finish_stream(result.finish_reason);
+        let next_state = if session
+            .draft_message
+            .as_ref()
+            .and_then(|m| m.tool_calls.as_ref())
+            .is_some_and(|tool_calls| !tool_calls.is_empty())
+        {
+            SessionState::ExecutingTools
+        } else {
+            SessionState::Idle
+        };
+        session.finish_stream_with_next_state(result.finish_reason, next_state);
     }
 
     Ok(GenerationResult::Completed)
@@ -2406,6 +2502,23 @@ mod tests {
             finish_reason: Some("length".to_string()),
             reasoning_content: Some("still thinking".to_string()),
             usage: Some(high_pressure_usage()),
+            ..Default::default()
+        }
+    }
+
+    fn make_low_pressure_length_stop() -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            finish_reason: Some("length".to_string()),
+            usage: Some(ChatUsage {
+                prompt_tokens: 100,
+                completion_tokens: 0,
+                total_tokens: 100,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                metering_usd: None,
+            }),
             ..Default::default()
         }
     }
@@ -2663,6 +2776,42 @@ mod tests {
     }
 
     #[test]
+    fn normalize_stop_reason_openai_length() {
+        assert_eq!(
+            normalize_stop_reason("length"),
+            Some(NormalizedStopReason::ProviderLengthStop)
+        );
+        assert_eq!(
+            normalize_stop_reason("max_output_tokens"),
+            Some(NormalizedStopReason::ProviderLengthStop)
+        );
+    }
+
+    #[test]
+    fn normalize_stop_reason_anthropic_max_tokens() {
+        assert_eq!(
+            normalize_stop_reason("max_tokens"),
+            Some(NormalizedStopReason::ProviderLengthStop)
+        );
+    }
+
+    #[test]
+    fn normalize_stop_reason_gemini_max_tokens() {
+        assert_eq!(
+            normalize_stop_reason("MAX_TOKENS"),
+            Some(NormalizedStopReason::ProviderLengthStop)
+        );
+    }
+
+    #[test]
+    fn normalize_stop_reason_generic_context_length() {
+        assert_eq!(
+            normalize_stop_reason("context_length_exceeded: input too long for model_length"),
+            Some(NormalizedStopReason::ContextLengthStop)
+        );
+    }
+
+    #[test]
     fn test_claude_code_identity_generated_once_per_session() {
         let model = claude_code_model();
         let mut session = ChatSession::new("cc-identity".to_string());
@@ -2799,6 +2948,14 @@ mod tests {
     }
 
     #[test]
+    fn test_reasoning_token_limit_stop_ignores_context_length_stop() {
+        let mut message = make_reasoning_token_limit_msg();
+        message.finish_reason = Some("context_length_exceeded".to_string());
+
+        assert!(!is_reasoning_token_limit_stop(&message));
+    }
+
+    #[test]
     fn test_reasoning_token_limit_stop_ignores_visible_answer() {
         let mut message = make_reasoning_token_limit_msg();
         message.content = ChatContent::SimpleText("visible answer".to_string());
@@ -2811,6 +2968,57 @@ mod tests {
         let messages = vec![make_user_msg("continue"), message.clone()];
 
         assert!(is_high_pressure_length_stop(&message, &messages, 100_000));
+    }
+
+    #[test]
+    fn low_pressure_length_stop_does_not_trigger_compression() {
+        let message = make_low_pressure_length_stop();
+        let messages = vec![make_user_msg("continue"), message.clone()];
+
+        assert!(!is_high_pressure_length_stop(&message, &messages, 100_000));
+    }
+
+    #[tokio::test]
+    async fn high_pressure_length_stop_triggers_compression_attempt() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut session = ChatSession::new("length-stop-attempt".to_string());
+        session.messages = vec![make_user_msg("continue"), make_high_pressure_length_stop()];
+        let thread = session.thread.clone();
+        let mut rx = session.subscribe();
+        let session_arc = Arc::new(AMutex::new(session));
+
+        assert!(
+            !maybe_compact_after_high_pressure_length_stop(
+                gcx,
+                &session_arc,
+                &thread,
+                Some(100_000),
+            )
+            .await
+        );
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.reactive_compact_attempts, Some(1));
+        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
+        assert_eq!(
+            session.compression_reason,
+            Some(CompressionReason::NoEligibleSegment)
+        );
+        drop(session);
+
+        let mut saw_provider_length_status = false;
+        while let Ok(json) = rx.try_recv() {
+            let env: EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let ChatEvent::RuntimeUpdated {
+                compression_phase: Some(CompressionPhase::Checking),
+                compression_reason: Some(CompressionReason::ProviderLengthStop),
+                ..
+            } = env.event
+            {
+                saw_provider_length_status = true;
+            }
+        }
+        assert!(saw_provider_length_status);
     }
 
     #[test]
@@ -2972,6 +3180,43 @@ mod tests {
     }
 
     #[test]
+    fn test_priority_injection_guard_waits_for_tool_results() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("call_123", "cat"),
+        ];
+        assert!(!latest_assistant_tool_call_window_closed(&messages));
+
+        messages.push(make_tool_msg("call_123", "file content"));
+        assert!(latest_assistant_tool_call_window_closed(&messages));
+    }
+
+    #[test]
+    fn test_priority_injection_guard_ignores_stale_tool_results() {
+        let messages = vec![
+            make_user_msg("first"),
+            make_assistant_with_tool_call("call_reused", "cat"),
+            make_tool_msg("call_reused", "old result"),
+            make_user_msg("second"),
+            make_assistant_with_tool_call("call_reused", "cat"),
+        ];
+
+        assert!(!latest_assistant_tool_call_window_closed(&messages));
+    }
+
+    #[test]
+    fn test_priority_injection_guard_waits_for_server_tool_placeholders() {
+        let mut messages = vec![
+            make_user_msg("hello"),
+            make_assistant_with_tool_call("srvtoolu_123", "web_search"),
+        ];
+        assert!(!latest_assistant_tool_call_window_closed(&messages));
+
+        messages.push(make_tool_msg("srvtoolu_123", "server result placeholder"));
+        assert!(latest_assistant_tool_call_window_closed(&messages));
+    }
+
+    #[test]
     fn test_tail_needs_assistant_empty_messages() {
         let messages: Vec<ChatMessage> = vec![];
         assert!(!tail_needs_assistant(&messages));
@@ -3090,6 +3335,18 @@ mod tests {
         let mut thread = ThreadParams::default();
         thread.mode = "agent".to_string();
         let error = context_limit_error("context_length_exceeded", false);
+
+        assert_eq!(
+            context_limit_compaction_decision(&error, &thread, &abort),
+            ContextLimitCompactionDecision::Attempt { attempt: 1 }
+        );
+    }
+
+    #[test]
+    fn context_length_error_triggers_reactive_compression() {
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let thread = ThreadParams::default();
+        let error = context_limit_error("input too long for model_length", false);
 
         assert_eq!(
             context_limit_compaction_decision(&error, &thread, &abort),

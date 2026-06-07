@@ -6,6 +6,8 @@ import com.intellij.notification.Notification
 import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.event.EditorFactoryEvent
@@ -13,7 +15,6 @@ import com.intellij.openapi.editor.event.EditorFactoryListener
 import com.intellij.openapi.keymap.KeymapUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindowManager
-import com.intellij.util.concurrency.AppExecutorUtil
 import com.smallcloud.refactai.PluginState
 import com.smallcloud.refactai.RefactAIBundle
 import com.smallcloud.refactai.Resources
@@ -27,6 +28,15 @@ import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as I
 
 private var lastNotification: Notification? = null
 private var lastRegularNotification: Notification? = null
+
+private fun showSettingsDialog(project: Project, settingsId: String) {
+    ApplicationManager.getApplication().invokeLater({
+        if (!project.isDisposed) {
+            ShowSettingsUtilImpl.showSettingsDialog(project, settingsId, null)
+        }
+    }, ModalityState.defaultModalityState())
+}
+
 private fun removeLastNotification() {
     lastNotification?.apply {
         expire()
@@ -71,9 +81,7 @@ fun emitRegular(project: Project, editor: Editor) {
 
     notification.addAction(NotificationAction.createSimple(RefactAIBundle.message("notifications.settingsAndPrivacy")) {
         notification.expire()
-        AppExecutorUtil.getAppExecutorService().execute {
-            ShowSettingsUtilImpl.showSettingsDialog(project, refactAIRootSettingsID, null)
-        }
+        showSettingsDialog(project, refactAIRootSettingsID)
     })
 
     notification.addAction(NotificationAction.createSimple(
@@ -112,9 +120,7 @@ fun emitWarning(project: Project, msg: String) {
 
     notification.addAction(NotificationAction.createSimple(RefactAIBundle.message("notifications.settingsAndPrivacy")) {
         notification.expire()
-        AppExecutorUtil.getAppExecutorService().execute {
-            ShowSettingsUtilImpl.showSettingsDialog(project, refactAIAdvancedSettingsID, null)
-        }
+        showSettingsDialog(project, refactAIAdvancedSettingsID)
     })
 
     notification.notify(project)
@@ -130,9 +136,7 @@ fun emitInfo(msg: String, needToDeleteLast: Boolean = true) {
 
     notification.addAction(NotificationAction.createSimple(RefactAIBundle.message("notifications.settingsAndPrivacy")) {
         notification.expire()
-        AppExecutorUtil.getAppExecutorService().execute {
-            ShowSettingsUtilImpl.showSettingsDialog(project, refactAIRootSettingsID, null)
-        }
+        showSettingsDialog(project, refactAIRootSettingsID)
     })
     notification.notify(project)
 }
@@ -151,9 +155,7 @@ fun emitInfoWithDocLink(msg: String, docUrl: String, needToDeleteLast: Boolean =
     })
     notification.addAction(NotificationAction.createSimple(RefactAIBundle.message("notifications.settingsAndPrivacy")) {
         notification.expire()
-        AppExecutorUtil.getAppExecutorService().execute {
-            ShowSettingsUtilImpl.showSettingsDialog(project, refactAIRootSettingsID, null)
-        }
+        showSettingsDialog(project, refactAIRootSettingsID)
     })
     notification.notify(project)
 }
@@ -189,9 +191,7 @@ fun emitError(msg: String) {
 
     notification.addAction(NotificationAction.createSimple(RefactAIBundle.message("notifications.settingsAndPrivacy")) {
         notification.expire()
-        AppExecutorUtil.getAppExecutorService().execute {
-            ShowSettingsUtilImpl.showSettingsDialog(project, refactAIRootSettingsID, null)
-        }
+        showSettingsDialog(project, refactAIRootSettingsID)
     })
     notification.notify(project)
     lastNotification = notification

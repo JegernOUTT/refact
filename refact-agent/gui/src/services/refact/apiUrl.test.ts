@@ -114,6 +114,13 @@ describe("hasUsableEngineEndpoint", () => {
     );
   });
 
+  test("does not treat standalone web without a valid lspUrl as same-origin usable", () => {
+    expect(hasUsableEngineEndpoint({ host: "web" })).toBe(false);
+    expect(
+      hasUsableEngineEndpoint({ host: "web", lspUrl: "http2://remote:8001" }),
+    ).toBe(false);
+  });
+
   test("allows sanitized remote lspUrl without a usable port", () => {
     expect(
       hasUsableEngineEndpoint({

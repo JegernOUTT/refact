@@ -47,6 +47,7 @@ export const currentProjectInfoReducer = createReducer(
         delete state.workspaceRoots;
       }
     });
+    builder.addCase(resetSidebarReadiness, () => undefined);
   },
 );
 

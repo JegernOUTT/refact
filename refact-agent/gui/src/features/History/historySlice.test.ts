@@ -188,11 +188,20 @@ describe("getHistoryTree", () => {
     expect(result[0].children[2].id).toBe("child_old");
   });
 
-  it("filters out task chats from tree", () => {
+  it("filters out task planner/agent chats but keeps other task-scoped chats", () => {
     const state: HistoryState = {
       chats: {
-        task_chat: createHistoryItem("task_chat", "Task Chat", {
+        planner_chat: createHistoryItem("planner_chat", "Planner Chat", {
           task_id: "task-123",
+          mode: "task_planner",
+        }),
+        agent_chat: createHistoryItem("agent_chat", "Agent Chat", {
+          task_id: "task-123",
+          mode: "task_agent",
+        }),
+        review_chat: createHistoryItem("review_chat", "Review Chat", {
+          task_id: "task-123",
+          mode: "review",
         }),
         regular: createHistoryItem("regular", "Regular Chat"),
       },
@@ -203,8 +212,10 @@ describe("getHistoryTree", () => {
 
     const result = getHistoryTree({ history: state });
 
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe("regular");
+    expect(result.map((n: { id: string }) => n.id).sort()).toEqual([
+      "regular",
+      "review_chat",
+    ]);
   });
 
   it("inverts handoff relationship - handoff becomes root with parent as child", () => {

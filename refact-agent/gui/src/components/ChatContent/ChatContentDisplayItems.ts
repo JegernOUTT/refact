@@ -207,6 +207,9 @@ function buildCompressionDisplayItem(
   return null;
 }
 
+// Adjacent matching report+summary pairs render as one report card: source-preserving
+// hides only the internal model summary, and legacy replacement-style reports keep
+// their historical collapse behavior.
 function isCompressedAssistantPairedWithReport(
   messages: ChatMessages,
   index: number,
@@ -775,6 +778,29 @@ function findReportAndSummaryReplacementIndex(
   return changedIndex;
 }
 
+function findReportAndSummaryInsertionIndex(
+  previousMessages: ChatMessages,
+  nextMessages: ChatMessages,
+): number | null {
+  if (nextMessages.length !== previousMessages.length + 2) return null;
+
+  const changedIndex = previousMessages.findIndex(
+    (message, index) => message !== nextMessages[index],
+  );
+  if (changedIndex === -1) return null;
+
+  if (!isCompressionReportMessage(nextMessages[changedIndex])) return null;
+  if (!isCompressedAssistantMessage(nextMessages[changedIndex + 1])) {
+    return null;
+  }
+
+  for (let i = changedIndex; i < previousMessages.length; i++) {
+    if (previousMessages[i] !== nextMessages[i + 2]) return null;
+  }
+
+  return changedIndex;
+}
+
 function tryParseSkillActivated(
   content: string,
 ): Omit<DisplayItemSkillActivated, "type" | "key" | "messageIndex"> | null {
@@ -833,6 +859,19 @@ export function tryIncrementalDisplayItemsUpdate(
         nextMessages,
         isStreaming,
         replacementIndex,
+      );
+    }
+
+    const insertionIndex = findReportAndSummaryInsertionIndex(
+      previousMessages,
+      nextMessages,
+    );
+    if (insertionIndex !== null) {
+      return rebuildDisplayItemsFromStart(
+        previousItems,
+        nextMessages,
+        isStreaming,
+        insertionIndex,
       );
     }
 

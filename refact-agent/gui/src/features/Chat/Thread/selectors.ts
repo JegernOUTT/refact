@@ -41,7 +41,7 @@ const EMPTY_PLAN_MESSAGES: PlanMessage[] = [];
 export type PlanHistoryItem = PlanMessage | EventMessage;
 
 const EMPTY_PLAN_HISTORY: PlanHistoryItem[] = [];
-const PLAN_SYNTHESIS_SEPARATOR = "\n\n---\n\n## Plan updates\n\n";
+export const PLAN_SYNTHESIS_SEPARATOR = "\n\n---\n\n## Plan updates\n\n";
 const EMPTY_QUEUED: QueuedItem[] = [];
 const EMPTY_PAUSE_REASONS: ThreadConfirmation["pause_reasons"] = [];
 const EMPTY_IMAGES: ImageFile[] = [];

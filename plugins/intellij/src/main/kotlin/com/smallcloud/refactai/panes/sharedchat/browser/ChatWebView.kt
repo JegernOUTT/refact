@@ -82,6 +82,7 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
     private val disposing = AtomicBoolean(false)
     private var healthCheckTimer: Timer? = null
     private var setupDelayTimer: Timer? = null
+    private var setupTimeoutTimer: Timer? = null
     // lastPingSentAt: updated when a health ping is queued for the renderer
     // lastPongAt:     updated when the JS→Kotlin pong callback fires
     private val lastPingSentAt = AtomicLong(System.currentTimeMillis())
@@ -696,12 +697,9 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
 
         readyQuery = jsQueryManager.createStringQuery { message ->
             if (message == "ready") {
-                val previousState = initializationState.getAndSet(3)
-                if (previousState < 3) {
-                    logger.info("React application signaled ready")
-                }
-                markRendererResponsive()
-                refreshAfterVisibilityChange()
+                notifyReactReadyFromApp()
+            } else if (message == "failed") {
+                resetReactSetup("React application setup reported failure")
             }
         }
     }
@@ -870,9 +868,9 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
                             if (typeof RefactChat !== 'undefined' && config) {
                                 RefactChat.render(element, config);
                                 console.log('RefactChat initialized successfully');
-                                try { ${readyQuery.inject("'ready'")} } catch(e) { console.error('Ready signal failed', e); }
                             } else {
                                 console.error('RefactChat not available or config missing', typeof RefactChat, config);
+                                try { ${readyQuery.inject("'failed'")} } catch(e) { console.error('Ready failure signal failed', e); }
                             }
                         }
 
@@ -880,6 +878,7 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
                         script.onload = loadChatJs;
                         script.onerror = function(e) {
                             console.error('Failed to load chat script:', e);
+                            try { ${readyQuery.inject("'failed'")} } catch(err) { console.error('Ready failure signal failed', err); }
                         };
                         script.src = "http://refactai/dist/chat/index.umd.cjs";
                         document.head.appendChild(script);
@@ -891,8 +890,20 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
 
                     jsExecutor.executeBatch(scripts, "react-setup").exceptionally { throwable ->
                         logger.error("Failed to setup React application", throwable)
+                        setupTimeoutTimer?.stop()
+                        setupTimeoutTimer = null
                         initializationState.set(1)
                         null
+                    }
+                    setupTimeoutTimer?.stop()
+                    setupTimeoutTimer = Timer(15_000, null).apply {
+                        isRepeats = false
+                        addActionListener {
+                            if (!disposing.get() && initializationState.get() == 2) {
+                                resetReactSetup("React setup timed out before ready signal; scheduling retry")
+                            }
+                        }
+                        start()
                     }
                 }
             }
@@ -938,21 +949,52 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
     val webView: JBCefBrowser
         get() = jbcefBrowser
 
-    fun postMessage(message: Events.ToChat<*>?) {
-        if (message == null) return
+    fun postMessage(message: Events.ToChat<*>?): Boolean {
+        if (message == null) return true
 
         if (initializationState.get() < 3) {
             logger.warn("Attempted to post message before browser initialization complete")
-            return
+            return false
         }
 
         if (jbcefBrowser.isDisposed) {
             logger.warn("Attempted to post message to disposed browser")
-            return
+            return false
         }
 
         val json = Events.stringify(message)
         postMessageString(json)
+        return true
+    }
+
+    fun notifyReactReadyFromApp() {
+        val previousState = initializationState.getAndSet(3)
+        if (previousState < 3) {
+            logger.info("React application signaled ready")
+        }
+        setupTimeoutTimer?.stop()
+        setupTimeoutTimer = null
+        browserHealthy.set(true)
+        markRendererResponsive()
+        refreshAfterVisibilityChange()
+    }
+
+    private fun resetReactSetup(reason: String) {
+        logger.warn(reason)
+        setupTimeoutTimer?.stop()
+        setupTimeoutTimer = null
+        browserHealthy.set(false)
+        initializationState.set(1)
+        setupDelayTimer?.stop()
+        setupDelayTimer = Timer(1_000, null).apply {
+            isRepeats = false
+            addActionListener {
+                if (!disposing.get() && initializationState.get() == 1) {
+                    setupReactApplication()
+                }
+            }
+            start()
+        }
     }
 
     private fun postMessageString(message: String) {
@@ -968,6 +1010,8 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
             healthCheckTimer = null
             setupDelayTimer?.stop()
             setupDelayTimer = null
+            setupTimeoutTimer?.stop()
+            setupTimeoutTimer = null
 
             osrRenderer?.cleanup()
             osrRenderer = null

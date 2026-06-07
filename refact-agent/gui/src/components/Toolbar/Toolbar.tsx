@@ -4,7 +4,6 @@ import {
   Cross1Icon,
   PlusIcon,
   CheckboxIcon,
-  ExternalLinkIcon,
   MoonIcon,
   SunIcon,
 } from "@radix-ui/react-icons";
@@ -224,8 +223,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         openSettings();
       } else if (to === "hot keys") {
         openHotKeys();
-      } else if (to === "fim") {
-        dispatch(push({ name: "fill in the middle debug page" }));
       } else if (to === "stats") {
         dispatch(push({ name: "stats dashboard" }));
       } else if (to === "integrations") {
@@ -604,13 +601,18 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       <div className={styles.toolbarSection}>
         <ConnectionStatusIndicator />
-        <span
+        <a
           className={styles.engineUrl}
+          href={engineUrl}
           title={engineUrl}
           aria-label={`Engine URL ${engineUrl}`}
+          onClick={(event) => {
+            event.preventDefault();
+            onOpenChatInBrowser();
+          }}
         >
           {engineUrl}
-        </span>
+        </a>
       </div>
 
       <div className={styles.toolbarDivider} />
@@ -628,13 +630,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div className={styles.toolbarDivider} />
 
       <div className={styles.toolbarSection}>
-        <ToolbarIconButton
-          label="Open Chat in Browser"
-          onClick={onOpenChatInBrowser}
-        >
-          <ExternalLinkIcon />
-        </ToolbarIconButton>
-
         {host === "web" && (
           <ToolbarIconButton label="Toggle Dark Mode" onClick={toggleDarkMode}>
             {isDarkMode ? <MoonIcon /> : <SunIcon />}

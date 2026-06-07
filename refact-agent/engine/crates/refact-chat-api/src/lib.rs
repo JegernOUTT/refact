@@ -110,11 +110,14 @@ pub enum CompressionReason {
     PendingToolCalls,
     NoEligibleSegment,
     EffectiveContextUnknown,
+    ProviderLengthStop,
+    ContextLengthStop,
     PressureLow,
     NoSummaryModel,
     InputTooLarge,
     TransientFailure,
     SourceChanged,
+    InsufficientSavings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

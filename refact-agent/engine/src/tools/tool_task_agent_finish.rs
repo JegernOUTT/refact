@@ -606,12 +606,16 @@ impl Tool for ToolTaskAgentFinish {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let task_id = get_task_id(&ccx).await?;
         let card_id = get_card_id(&ccx).await?;
-        let planner_chat_id = ccx
-            .lock()
-            .await
-            .task_meta
-            .as_ref()
-            .and_then(|meta| meta.planner_chat_id.clone());
+        let (planner_chat_id, finish_chat_id) = {
+            let ccx_lock = ccx.lock().await;
+            (
+                ccx_lock
+                    .task_meta
+                    .as_ref()
+                    .and_then(|meta| meta.planner_chat_id.clone()),
+                ccx_lock.chat_id.clone(),
+            )
+        };
 
         let success = parse_success_arg(args)?;
 
@@ -684,6 +688,15 @@ impl Tool for ToolTaskAgentFinish {
                         "Card {} is already in '{}' column. Cannot finish twice.",
                         card_id_owned, card.column
                     ));
+                }
+
+                if let Some(agent_chat_id) = card.agent_chat_id.as_deref() {
+                    if !agent_chat_id.is_empty() && agent_chat_id != finish_chat_id {
+                        return Err(format!(
+                            "Card {} is now owned by agent_chat_id={}, not {}",
+                            card_id_owned, agent_chat_id, finish_chat_id
+                        ));
+                    }
                 }
 
                 let card_title = card.title.clone();

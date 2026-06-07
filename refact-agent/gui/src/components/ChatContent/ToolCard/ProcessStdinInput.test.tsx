@@ -94,7 +94,7 @@ describe("ProcessStdinInput", () => {
       }),
     );
 
-    await renderExpandedStdinCard(true);
+    await renderExpandedStdinCard(true, { host: "vscode", lspPort: 8001 });
 
     const input = screen.getByLabelText<HTMLInputElement>("Process stdin");
     fireEvent.change(input, { target: { value: "hello" } });

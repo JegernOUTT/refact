@@ -30,6 +30,7 @@ class EventNames {
         DIFF_PREVIEW("ide/diffPreview"),
         WRITE_RESULTS_TO_FILE("ide/writeResultsToFile"),
         IS_CHAT_STREAMING("ide/isChatStreaming"),
+        IS_CHAT_READY("ide/isChatReady"),
         CHAT_PAGE_CHANGE("ide/chatPageChange"),
         IDE_TOOL_EDIT("ide/toolEdit"),
         FORCE_RELOAD_FILE_BY_PATH("ide/forceReloadFileByPath"),
@@ -99,6 +100,9 @@ class Events {
                 EventNames.FromChat.OPEN_CHAT_IN_BROWSER.value -> OpenChatInBrowser()
                 EventNames.FromChat.IS_CHAT_STREAMING.value -> {
                     IsChatStreaming(payload?.asBoolean ?: false)
+                }
+                EventNames.FromChat.IS_CHAT_READY.value -> {
+                    IsChatReady(payload?.asBoolean ?: false)
                 }
                 EventNames.FromChat.CHAT_PAGE_CHANGE.value -> {
                     ChatPageChange(payload?.asString ?: "")
@@ -327,6 +331,7 @@ class Events {
 
 
     class IsChatStreaming(val isStreaming: Boolean) : FromChat(EventNames.FromChat.IS_CHAT_STREAMING, isStreaming)
+    class IsChatReady(val isReady: Boolean) : FromChat(EventNames.FromChat.IS_CHAT_READY, isReady)
     class ChatPageChange(val currentPage: String) : FromChat(EventNames.FromChat.CHAT_PAGE_CHANGE, currentPage)
     class OpenSettings : FromChat(EventNames.FromChat.OPEN_SETTINGS, null)
 

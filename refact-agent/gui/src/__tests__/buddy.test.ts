@@ -895,7 +895,9 @@ describe("Buddy chat notification freshness", () => {
         });
       }),
     );
-    const store = setUpStore();
+    const store = setUpStore({
+      config: { apiKey: "test", lspPort: 8001, themeProps: {}, host: "vscode" },
+    });
     const runtime = makeChatRuntimeEvent({
       id: "runtime-investigate-dismiss-fails",
       title: "Runtime failure",
@@ -3616,7 +3618,9 @@ describe("Buddy frontend error reporting helpers", () => {
   test("reportBuddyFrontendError drops well-known browser noise", async () => {
     const post = makePostMock().mockResolvedValue(undefined);
     const deps = {
-      getState: () => ({ config: { apiKey: "key", lspPort: 8001 } }),
+      getState: () => ({
+        config: { apiKey: "key", host: "vscode" as const, lspPort: 8001 },
+      }),
       post,
       now: () => 100,
     };
@@ -3661,7 +3665,9 @@ describe("Buddy frontend error reporting helpers", () => {
           chatId: "chat-a",
         },
         {
-          getState: () => ({ config: { apiKey: "key", lspPort: 8001 } }),
+          getState: () => ({
+            config: { apiKey: "key", host: "vscode" as const, lspPort: 8001 },
+          }),
           post,
           now: () => 100,
         },
@@ -3711,7 +3717,9 @@ describe("Buddy frontend error reporting helpers", () => {
   test("reportBuddyFrontendError dedupes only matching chat scope", async () => {
     const post = makePostMock().mockResolvedValue(undefined);
     const deps = {
-      getState: () => ({ config: { apiKey: "key", lspPort: 8001 } }),
+      getState: () => ({
+        config: { apiKey: "key", host: "vscode" as const, lspPort: 8001 },
+      }),
       post,
       now: () => 100,
     };
@@ -3922,7 +3930,9 @@ describe("Buddy frontend error reporting helpers", () => {
         chatId: "chat-a",
       },
       {
-        getState: () => ({ config: { apiKey: "key", lspPort: 8001 } }),
+        getState: () => ({
+          config: { apiKey: "key", host: "vscode" as const, lspPort: 8001 },
+        }),
         post,
         now: () => 100,
       },

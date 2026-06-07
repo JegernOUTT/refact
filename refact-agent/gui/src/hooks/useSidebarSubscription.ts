@@ -156,11 +156,19 @@ function clearLegacyHistory() {
 }
 
 function isMigrationDone(): boolean {
-  return localStorage.getItem(MIGRATION_KEY) === "true";
+  try {
+    return localStorage.getItem(MIGRATION_KEY) === "true";
+  } catch {
+    return false;
+  }
 }
 
 function markMigrationDone() {
-  localStorage.setItem(MIGRATION_KEY, "true");
+  try {
+    localStorage.setItem(MIGRATION_KEY, "true");
+  } catch {
+    // Migration marker is best-effort only.
+  }
 }
 
 function trajectoryItemsFromMeta(
@@ -245,8 +253,11 @@ export function useSidebarSubscription() {
   );
   const postMessage = usePostMessage();
   const historyChats = useAppSelector((state) => state.history.chats);
+  const sidebarSections = useAppSelector((state) => state.sidebar.sections);
   const historyRef = useRef(historyChats);
   historyRef.current = historyChats;
+  const sidebarSectionsRef = useRef(sidebarSections);
+  sidebarSectionsRef.current = sidebarSections;
   const serverWorkspaceRootsRef = useRef<string[] | undefined>(undefined);
   const disconnectRef = useRef<(() => void) | null>(null);
   const activeEndpointRef = useRef<string | null>(null);
@@ -794,9 +805,11 @@ export function useSidebarSubscription() {
       return;
     }
 
+    let eligibleCount = 0;
     let successCount = 0;
     for (const chat of legacyChats) {
       if (chat.messages.length === 0) continue;
+      eligibleCount++;
 
       try {
         const trajectoryData = chatThreadToTrajectoryData(
@@ -814,15 +827,21 @@ export function useSidebarSubscription() {
           trajectoriesApi.endpoints.saveTrajectory.initiate(trajectoryData),
         ).unwrap();
         successCount++;
-      } catch {
-        // Ignore individual chat migration failures
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to migrate local history";
+        throw new Error(message);
       }
     }
 
-    if (successCount > 0) {
-      clearLegacyHistory();
+    if (eligibleCount === 0 || successCount === eligibleCount) {
+      if (successCount > 0) {
+        clearLegacyHistory();
+      }
+      markMigrationDone();
     }
-    markMigrationDone();
   }, [dispatch]);
 
   const prepareInitialHistory = useCallback(
@@ -904,13 +923,17 @@ export function useSidebarSubscription() {
 
     const onError = (error: Error) => {
       if (generation !== generationRef.current) return;
-      dispatch(
-        sidebarSectionSnapshotReceived({
-          section: "chats",
-          status: "error",
-          error: error.message,
-        }),
-      );
+      for (const section of ["workspace", "chats", "tasks", "buddy"] as const) {
+        if (sidebarSectionsRef.current[section].status !== "ready") {
+          dispatch(
+            sidebarSectionSnapshotReceived({
+              section,
+              status: "error",
+              error: error.message,
+            }),
+          );
+        }
+      }
       dispatch(setHistoryLoadError(error.message));
       dispatch(setHistoryLoading(false));
       scheduleReconnect();

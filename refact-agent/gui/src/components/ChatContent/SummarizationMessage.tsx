@@ -24,6 +24,8 @@ type TierMeta = {
 
 const LLM_SEGMENT_SUMMARY_DESCRIPTION =
   "Older context was summarized so this chat can continue within the model limit.";
+const SOURCE_PRESERVING_SUMMARY_DESCRIPTION =
+  "Original messages remain visible. A compact summary was added for future model context.";
 
 function metaForTier(
   tier: SummarizationTier | undefined,
@@ -91,12 +93,6 @@ function tokenLabelFor(
 
 type StatCell = { label: string; value: string };
 
-function parseStringStat(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 function parseNumberStat(value: unknown, suffix = ""): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return `${value.toLocaleString()}${suffix}`;
@@ -111,10 +107,19 @@ function sourceMessageCountFromReport(
   ) {
     return report.source_message_count;
   }
+  if (Array.isArray(report.summarized_source_message_ids)) {
+    return report.summarized_source_message_ids.length;
+  }
   if (Array.isArray(report.source_message_ids)) {
     return report.source_message_ids.length;
   }
   return null;
+}
+
+function isSourcePreservingReport(
+  report: ChatCompressionReportMetadata | null,
+): boolean {
+  return report?.insert_mode === "source_preserving";
 }
 
 function statCell(label: string, value: string | null): StatCell[] {
@@ -128,27 +133,35 @@ function statsFromCompressionReportMetadata(
   if (!report) return null;
 
   const sourceMessageCount = sourceMessageCountFromReport(report);
+  const sourcePreserving = isSourcePreservingReport(report);
   const stats: StatCell[] = [
     ...statCell(
-      "Messages compressed",
+      sourcePreserving ? "Messages summarized" : "Messages compressed",
       sourceMessageCount !== null ? sourceMessageCount.toLocaleString() : null,
     ),
     ...statCell("Tokens saved", parseNumberStat(report.estimated_tokens_saved)),
     ...statCell("Reduction", parseNumberStat(report.reduction_percent, "%")),
-    ...statCell("Summary model", parseStringStat(report.summary_model)),
+    ...statCell(
+      sourcePreserving ? "Context files preserved" : "Context files removed",
+      parseNumberStat(
+        sourcePreserving
+          ? report.preserved_context_file_count
+          : report.context_files_removed,
+      ),
+    ),
+    ...statCell(
+      sourcePreserving ? "Tool outputs compressed" : "Tool outputs truncated",
+      parseNumberStat(
+        sourcePreserving
+          ? report.compressed_tool_output_count
+          : report.tool_results_truncated,
+      ),
+    ),
     ...statCell("Tokens before", parseNumberStat(report.tokens_before)),
     ...statCell("Tokens after", parseNumberStat(report.tokens_after)),
     ...statCell(
       "Context messages dropped",
       parseNumberStat(report.context_messages_dropped),
-    ),
-    ...statCell(
-      "Context files removed",
-      parseNumberStat(report.context_files_removed),
-    ),
-    ...statCell(
-      "Tool outputs truncated",
-      parseNumberStat(report.tool_results_truncated),
     ),
   ];
   return stats.length > 0 ? stats : null;
@@ -156,10 +169,12 @@ function statsFromCompressionReportMetadata(
 
 function isPrimaryReportStat(stat: StatCell): boolean {
   return (
+    stat.label === "Messages summarized" ||
     stat.label === "Messages compressed" ||
     stat.label === "Tokens saved" ||
     stat.label === "Reduction" ||
-    stat.label === "Summary model"
+    stat.label === "Context files preserved" ||
+    stat.label === "Tool outputs compressed"
   );
 }
 
@@ -242,6 +257,7 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
     : null;
 
   const compressionMeta = getAssistantCompressionMetadata(message);
+  const sourcePreservingReport = isSourcePreservingReport(compressionReport);
   const reportSourceCount = compressionReport
     ? sourceMessageCountFromReport(compressionReport)
     : null;
@@ -270,8 +286,8 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
   const reportSummaryStats = isSegmentCompressionReport
     ? primaryReportStats(reportStats)
     : reportStats;
-  const hasReportSummary =
-    isSegmentCompressionReport || reportSummaryStats !== null;
+  const hasMetadataReport = compressionReport !== null;
+  const hasReportSummary = hasMetadataReport && reportSummaryStats !== null;
   const cardClassName = compressionReport
     ? `${styles.card} ${styles.reportCard}`
     : styles.card;
@@ -326,10 +342,12 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
         >
           {isSegmentCompressionReport && (
             <p className={styles.description}>
-              {LLM_SEGMENT_SUMMARY_DESCRIPTION}
+              {sourcePreservingReport
+                ? SOURCE_PRESERVING_SUMMARY_DESCRIPTION
+                : LLM_SEGMENT_SUMMARY_DESCRIPTION}
             </p>
           )}
-          {reportSummaryStats && <StatsGrid stats={reportSummaryStats} />}
+          <StatsGrid stats={reportSummaryStats} />
         </Box>
       )}
       {open && (
@@ -338,7 +356,9 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
           className={styles.body}
           data-testid="summarization-card-body"
         >
-          {contentText.length > 0 ? (
+          {hasMetadataReport ? (
+            <span>Details are shown in the compact report above.</span>
+          ) : contentText.length > 0 ? (
             <ToolMarkdown>{contentText}</ToolMarkdown>
           ) : (
             <span>No details available.</span>

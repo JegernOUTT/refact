@@ -218,7 +218,9 @@ export function activate(context: vscode.ExtensionContext)
     }
 
     const comp = new completionProvider.MyInlineCompletionProvider();
-    vscode.languages.registerInlineCompletionItemProvider({pattern: "**"}, comp);
+    context.subscriptions.push(
+        vscode.languages.registerInlineCompletionItemProvider({pattern: "**"}, comp)
+    );
 
     // const quickProvider = new QuickActionProvider();
     // vscode.languages.registerCodeActionsProvider({pattern: "**"},quickProvider,
@@ -317,7 +319,7 @@ export function activate(context: vscode.ExtensionContext)
 
 
     let config_debounce: NodeJS.Timeout|undefined;
-    vscode.workspace.onDidChangeConfiguration(e => {
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (
             e.affectsConfiguration("refactai.xDebug") ||
             e.affectsConfiguration("refactai.insecureSSL") ||
@@ -353,7 +355,7 @@ export function activate(context: vscode.ExtensionContext)
                 fetchAPI.maybe_show_rag_status();
             }
         }
-    });
+    }));
 
     const quickProvider = new QuickActionProvider();
     context.subscriptions.push(

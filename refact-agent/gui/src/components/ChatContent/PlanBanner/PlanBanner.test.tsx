@@ -189,6 +189,25 @@ describe("PlanBanner", () => {
     expect(header.textContent).not.toContain("NaN");
   });
 
+  it("renders task_done plan payloads as markdown report text", () => {
+    renderPlanBanner([
+      makePlan(1, {
+        content: JSON.stringify({
+          type: "task_done",
+          summary: "Completed the task",
+          report: "## What changed\n\nEverything is done.",
+          files_changed: ["src/foo.ts"],
+        }),
+      }),
+    ]);
+
+    expect(screen.getByText("Completed the task")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "What changed" })).toBeTruthy();
+    expect(screen.getByText("Everything is done.")).toBeTruthy();
+    expect(screen.getByText("src/foo.ts")).toBeTruthy();
+    expect(screen.queryByText(/task_done/)).toBeNull();
+  });
+
   it("toggle collapse hides body, persists in localStorage, and restores on remount", () => {
     const { unmount } = renderPlanBanner([makePlan(1)]);
 

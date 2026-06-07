@@ -545,13 +545,14 @@ pub async fn check_or_pause_cache_guard(
 
     let sanitized = body_for_cache_guard(request_body);
 
+    let has_explicit_markers = has_anthropic_explicit_cache_markers(request_body);
+
     let maybe_violation_prev = {
-        let mut session = session_arc.lock().await;
+        let session = session_arc.lock().await;
         if session.cache_guard_force_next {
-            session.cache_guard_force_next = false;
             None
         } else if let Some(prev) = session.cache_guard_snapshot.as_ref() {
-            if is_append_only_prefix(prev, &sanitized) {
+            if cache_prefix_compatible(prev, &sanitized, has_explicit_markers) {
                 None
             } else {
                 Some(prev.clone())
@@ -565,9 +566,7 @@ pub async fn check_or_pause_cache_guard(
         return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
     };
 
-    if has_anthropic_explicit_cache_markers(request_body)
-        && is_anthropic_cache_prefix_compatible(&previous, &sanitized)
-    {
+    if cache_prefix_compatible(&previous, &sanitized, has_explicit_markers) {
         return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
     }
 
@@ -581,10 +580,14 @@ pub async fn check_or_pause_cache_guard(
 
     let reason = {
         let mut session = session_arc.lock().await;
+        if session.cache_guard_force_next {
+            return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
+        }
         if let Some(outcome) = cache_guard_outcome_if_snapshot_changed(
             session.cache_guard_snapshot.as_ref(),
             &previous,
             &sanitized,
+            has_explicit_markers,
         ) {
             return Ok(outcome);
         }
@@ -625,6 +628,7 @@ fn cache_guard_outcome_if_snapshot_changed(
     current: Option<&Value>,
     captured_previous: &Value,
     sanitized: &Value,
+    has_explicit_markers: bool,
 ) -> Option<CacheGuardOutcome> {
     if current == Some(captured_previous) {
         return None;
@@ -632,11 +636,16 @@ fn cache_guard_outcome_if_snapshot_changed(
     let Some(current) = current else {
         return Some(CacheGuardOutcome::Pass(Some(sanitized.clone())));
     };
-    if is_append_only_prefix(current, sanitized) {
+    if cache_prefix_compatible(current, sanitized, has_explicit_markers) {
         Some(CacheGuardOutcome::Pass(Some(sanitized.clone())))
     } else {
-        Some(CacheGuardOutcome::Pass(None))
+        None
     }
+}
+
+fn cache_prefix_compatible(prev: &Value, next: &Value, has_explicit_markers: bool) -> bool {
+    is_append_only_prefix(prev, next)
+        || has_explicit_markers && is_anthropic_cache_prefix_compatible(prev, next)
 }
 
 // `cache_guard_snapshot` is an in-memory-only canonical provider request body for
@@ -647,6 +656,7 @@ pub async fn commit_cache_guard_snapshot(
 ) {
     let mut session = session_arc.lock().await;
     session.cache_guard_snapshot = Some(sanitized_body);
+    session.cache_guard_force_next = false;
 }
 
 fn is_ignored_key(key: &str, top_level: bool) -> bool {
@@ -1462,14 +1472,18 @@ mod tests {
             "model": "test"
         }));
 
-        let outcome =
-            cache_guard_outcome_if_snapshot_changed(Some(&current), &captured_previous, &sanitized);
+        let outcome = cache_guard_outcome_if_snapshot_changed(
+            Some(&current),
+            &captured_previous,
+            &sanitized,
+            false,
+        );
 
         assert!(matches!(outcome, Some(CacheGuardOutcome::Pass(Some(_)))));
     }
 
     #[test]
-    fn cache_guard_stale_snapshot_recheck_does_not_commit_over_new_violation() {
+    fn cache_guard_stale_snapshot_recheck_still_pauses_on_new_violation() {
         let captured_previous = sanitize_body_for_cache_guard(&json!({
             "messages": [{"role": "user", "content": "old"}],
             "model": "test"
@@ -1483,10 +1497,14 @@ mod tests {
             "model": "test"
         }));
 
-        let outcome =
-            cache_guard_outcome_if_snapshot_changed(Some(&current), &captured_previous, &sanitized);
+        let outcome = cache_guard_outcome_if_snapshot_changed(
+            Some(&current),
+            &captured_previous,
+            &sanitized,
+            false,
+        );
 
-        assert!(matches!(outcome, Some(CacheGuardOutcome::Pass(None))));
+        assert!(outcome.is_none());
     }
 
     #[test]
@@ -1504,6 +1522,7 @@ mod tests {
             Some(&captured_previous),
             &captured_previous,
             &sanitized,
+            false,
         );
 
         assert!(outcome.is_none());
@@ -1782,9 +1801,75 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(matches!(outcome, CacheGuardOutcome::Pass(Some(_))));
+        let CacheGuardOutcome::Pass(Some(sanitized)) = outcome else {
+            panic!("cache guard should force a snapshot commit")
+        };
+        {
+            let session = session_arc.lock().await;
+            assert!(
+                session.cache_guard_force_next,
+                "force-next must stay armed until the snapshot commit succeeds"
+            );
+            assert!(session.runtime.pause_reasons.is_empty());
+        }
+
+        commit_cache_guard_snapshot(session_arc.clone(), sanitized.clone()).await;
         let session = session_arc.lock().await;
         assert!(!session.cache_guard_force_next);
+        assert_eq!(session.cache_guard_snapshot.as_ref(), Some(&sanitized));
+    }
+
+    #[tokio::test]
+    async fn cache_guard_force_next_survives_pass_without_commit() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session = session_with_task_role(None);
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        let prev_body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "pre-compaction", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
+        let next_body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "post-compaction", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
+        {
+            let mut session = session_arc.lock().await;
+            session.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
+            session.cache_guard_force_next = true;
+        }
+
+        let first = check_or_pause_cache_guard(
+            app.clone(),
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(first, CacheGuardOutcome::Pass(Some(_))));
+        {
+            let session = session_arc.lock().await;
+            assert!(session.cache_guard_force_next);
+            assert!(session.runtime.pause_reasons.is_empty());
+        }
+
+        let retry = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(retry, CacheGuardOutcome::Pass(Some(_))));
+        let session = session_arc.lock().await;
+        assert!(session.cache_guard_force_next);
         assert!(session.runtime.pause_reasons.is_empty());
     }
 

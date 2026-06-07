@@ -286,9 +286,6 @@ fn trajectory_list_main_link_type(link_type: Option<&str>) -> bool {
 }
 
 pub fn trajectory_event_is_displayable_chat(event: &TrajectoryEvent) -> bool {
-    if event.task_id.is_some() {
-        return false;
-    }
     if matches!(
         event.mode.as_deref(),
         Some("task_agent" | "task_planner" | "buddy")
@@ -304,9 +301,6 @@ pub fn trajectory_event_is_displayable_chat(event: &TrajectoryEvent) -> bool {
 
 fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData) -> bool {
     if data.extra.get("buddy_meta").is_some_and(|v| !v.is_null()) {
-        return false;
-    }
-    if data.extra.get("task_meta").is_some_and(|v| !v.is_null()) {
         return false;
     }
     if matches!(data.mode.as_deref(), Some("task_agent" | "task_planner")) {
@@ -2325,6 +2319,16 @@ pub async fn try_save_trajectory(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<bool, String> {
+    let save_mutex = {
+        let session = session_arc.lock().await;
+        if !session.trajectory_dirty {
+            return Ok(true);
+        }
+        session.trajectory_save_mutex.clone()
+    };
+
+    let _save_guard = save_mutex.lock().await;
+
     let snapshot = {
         let session = session_arc.lock().await;
         if !session.trajectory_dirty {
@@ -2347,9 +2351,88 @@ pub async fn try_save_trajectory(
     Ok(!session.trajectory_dirty)
 }
 
+pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
+    let gcx = app.gcx.clone();
+    tokio::spawn(async move {
+        loop {
+            let save_mutex = {
+                let mut session = session_arc.lock().await;
+                if !session.trajectory_dirty {
+                    session.trajectory_save_in_flight = false;
+                    session.trajectory_save_queued = false;
+                    return;
+                }
+                if session.trajectory_save_in_flight {
+                    session.trajectory_save_queued = true;
+                    return;
+                }
+                session.trajectory_save_in_flight = true;
+                session.trajectory_save_queued = false;
+                session.trajectory_save_mutex.clone()
+            };
+
+            let _save_guard = save_mutex.lock().await;
+
+            let snapshot = {
+                let mut session = session_arc.lock().await;
+                if !session.trajectory_dirty {
+                    if session.trajectory_save_queued {
+                        session.trajectory_save_queued = false;
+                        session.trajectory_save_in_flight = false;
+                        drop(session);
+                        continue;
+                    } else {
+                        session.trajectory_save_in_flight = false;
+                        return;
+                    }
+                }
+                trajectory_snapshot_from_session(&session)
+            };
+
+            let saved_version = snapshot.version;
+            let chat_id = snapshot.chat_id.clone();
+            let result = save_trajectory_snapshot(gcx.clone(), snapshot)
+                .await
+                .map_err(|e| format!("Failed to save trajectory for {}: {}", chat_id, e));
+
+            let mut session = session_arc.lock().await;
+            match result {
+                Ok(()) => {
+                    if session.trajectory_version == saved_version {
+                        session.trajectory_dirty = false;
+                    }
+                }
+                Err(e) => {
+                    warn!("{}", e);
+                    session.trajectory_dirty = true;
+                    session.trajectory_save_in_flight = false;
+                    session.trajectory_save_queued = false;
+                    return;
+                }
+            }
+
+            if session.trajectory_dirty || session.trajectory_save_queued {
+                session.trajectory_save_queued = false;
+                session.trajectory_save_in_flight = false;
+                drop(session);
+                continue;
+            }
+
+            session.trajectory_save_in_flight = false;
+            return;
+        }
+    });
+}
+
 pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
-    if let Err(e) = try_save_trajectory(app, session_arc).await {
+    if let Err(e) = try_save_trajectory(app, session_arc.clone()).await {
         warn!("{}", e);
+    } else {
+        let mut session = session_arc.lock().await;
+        if !session.trajectory_dirty {
+            session.trajectory_save_in_flight = false;
+            session.trajectory_save_queued = false;
+        }
     }
 }
 
@@ -4459,7 +4542,6 @@ async fn collect_trajectory_list_candidates(
     gcx: &Arc<GlobalContext>,
     cursor_filter: Option<&(String, String)>,
     displayable_only: bool,
-    task_roots: &[PathBuf],
 ) -> Vec<TrajectoryListCandidate> {
     let mut candidates = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -4478,9 +4560,6 @@ async fn collect_trajectory_list_candidates(
                 continue;
             }
             if !is_real_file(&path).await {
-                continue;
-            }
-            if displayable_only && is_under_task_root(&path, task_roots) {
                 continue;
             }
             let Ok(content) = fs::read_to_string(&path).await else {
@@ -4703,17 +4782,12 @@ pub async fn list_trajectories_page(
     };
 
     let task_roots = get_all_task_roots(gcx.clone()).await;
-    let mut candidates = collect_trajectory_list_candidates(
-        &gcx,
-        cursor_filter.as_ref(),
-        displayable_only,
-        &task_roots,
-    )
-    .await;
+    let mut candidates =
+        collect_trajectory_list_candidates(&gcx, cursor_filter.as_ref(), displayable_only).await;
     let total_count = if cursor_filter.is_none() {
         candidates.len()
     } else {
-        collect_trajectory_list_candidates(&gcx, None, displayable_only, &task_roots)
+        collect_trajectory_list_candidates(&gcx, None, displayable_only)
             .await
             .len()
     };
@@ -5711,18 +5785,38 @@ mod tests {
             .await
             .unwrap();
 
-        write_trajectory_file(
-            &root
-                .join("tasks")
-                .join("task-list")
-                .join("trajectories")
-                .join("planner")
-                .join("planner-chat.json"),
-            "planner-chat",
-            "Planner Chat",
-            "2024-01-01T00:00:03Z",
-        )
-        .await;
+        let planner_path = root
+            .join("tasks")
+            .join("task-list")
+            .join("trajectories")
+            .join("planner")
+            .join("planner-chat.json");
+        let mut planner =
+            sample_trajectory("planner-chat", "Planner Chat", "2024-01-01T00:00:035Z");
+        planner["mode"] = json!("task_planner");
+        planner["task_meta"] = json!({ "task_id": "task-list", "role": "planner" });
+        tokio::fs::create_dir_all(planner_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&planner_path, serde_json::to_string(&planner).unwrap())
+            .await
+            .unwrap();
+
+        let review_path = root
+            .join("tasks")
+            .join("task-list")
+            .join("trajectories")
+            .join("planner")
+            .join("review-chat.json");
+        let mut review = sample_trajectory("review-chat", "Review Chat", "2024-01-01T00:00:045Z");
+        review["mode"] = json!("review");
+        review["parent_id"] = json!("planner-chat");
+        review["link_type"] = json!("mode_transition");
+        review["task_meta"] = json!({ "task_id": "task-list", "role": "planner" });
+        tokio::fs::write(&review_path, serde_json::to_string(&review).unwrap())
+            .await
+            .unwrap();
+
         let task_path = root
             .join("trajectories")
             .join("legacy-task-agent-chat.json");
@@ -5733,6 +5827,13 @@ mod tests {
         );
         legacy_task["mode"] = json!("task_agent");
         tokio::fs::write(&task_path, serde_json::to_string(&legacy_task).unwrap())
+            .await
+            .unwrap();
+
+        let buddy_path = root.join("trajectories").join("buddy-chat.json");
+        let mut buddy = sample_trajectory("buddy-chat", "Buddy Chat", "2024-01-01T00:00:015Z");
+        buddy["buddy_meta"] = json!({ "is_buddy_chat": true });
+        tokio::fs::write(&buddy_path, serde_json::to_string(&buddy).unwrap())
             .await
             .unwrap();
 
@@ -5751,11 +5852,83 @@ mod tests {
         .unwrap();
 
         let page = list_trajectories_page(app, 10, None, true).await.unwrap();
-        let ids: Vec<_> = page.items.iter().map(|item| item.id.as_str()).collect();
+        let ids: std::collections::HashSet<_> =
+            page.items.iter().map(|item| item.id.as_str()).collect();
 
-        assert_eq!(ids, vec!["project-chat"]);
-        assert_eq!(page.total_count, 1);
+        assert_eq!(
+            ids,
+            std::collections::HashSet::from(["project-chat", "review-chat"])
+        );
+        assert_eq!(page.total_count, 2);
         assert!(!page.has_more);
+    }
+
+    #[test]
+    fn displayable_chat_predicates_follow_mode_not_task_scope() {
+        let review = TrajectoryListData {
+            id: "review-chat".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            mode: Some("review".to_string()),
+            extra: serde_json::from_value(json!({
+                "parent_id": "planner-chat",
+                "link_type": "mode_transition",
+                "task_meta": { "task_id": "task-list", "role": "planner" }
+            }))
+            .unwrap(),
+        };
+        assert!(trajectory_list_data_is_displayable_chat(&review));
+
+        let planner = TrajectoryListData {
+            id: "planner-chat".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            mode: Some("task_planner".to_string()),
+            extra: serde_json::from_value(json!({
+                "task_meta": { "task_id": "task-list", "role": "planner" }
+            }))
+            .unwrap(),
+        };
+        assert!(!trajectory_list_data_is_displayable_chat(&planner));
+
+        let buddy = TrajectoryListData {
+            id: "buddy-chat".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            mode: Some("review".to_string()),
+            extra: serde_json::from_value(json!({ "buddy_meta": { "is_buddy_chat": true } }))
+                .unwrap(),
+        };
+        assert!(!trajectory_list_data_is_displayable_chat(&buddy));
+
+        let subagent = TrajectoryListData {
+            id: "subagent-chat".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            mode: Some("agent".to_string()),
+            extra: serde_json::from_value(json!({
+                "parent_id": "project-chat",
+                "link_type": "subagent"
+            }))
+            .unwrap(),
+        };
+        assert!(!trajectory_list_data_is_displayable_chat(&subagent));
+
+        let review_event: TrajectoryEvent = serde_json::from_value(json!({
+            "type": "updated",
+            "id": "review-chat",
+            "mode": "review",
+            "task_id": "task-list",
+            "parent_id": "planner-chat",
+            "link_type": "mode_transition"
+        }))
+        .unwrap();
+        assert!(trajectory_event_is_displayable_chat(&review_event));
+
+        let planner_event: TrajectoryEvent = serde_json::from_value(json!({
+            "type": "updated",
+            "id": "planner-chat",
+            "mode": "task_planner",
+            "task_id": "task-list"
+        }))
+        .unwrap();
+        assert!(!trajectory_event_is_displayable_chat(&planner_event));
     }
 
     #[tokio::test]
@@ -11948,7 +12121,7 @@ mod tests {
     fn test_trajectory_snapshot_from_session_captures_fields() {
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
-        use tokio::sync::{broadcast, Notify};
+        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
         use std::collections::VecDeque;
 
         let (tx, _rx) = broadcast::channel(16);
@@ -12014,6 +12187,9 @@ mod tests {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 5,
+            trajectory_save_in_flight: false,
+            trajectory_save_queued: false,
+            trajectory_save_mutex: Arc::new(AMutex::new(())),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
@@ -12059,7 +12235,7 @@ mod tests {
         use super::super::types::ActiveCommandContext;
         use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
-        use tokio::sync::{broadcast, Notify};
+        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
         use std::collections::VecDeque;
         use std::time::Instant;
 
@@ -12096,6 +12272,9 @@ mod tests {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 1,
+            trajectory_save_in_flight: false,
+            trajectory_save_queued: false,
+            trajectory_save_mutex: Arc::new(AMutex::new(())),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
@@ -12277,6 +12456,7 @@ mod tests {
 
         let wake_up_at = chrono::Utc::now() + chrono::Duration::minutes(5);
         let mut session = ChatSession::new("wake-roundtrip".to_string());
+        session.thread.title = "Wake Roundtrip".to_string();
         session.created_at = "2024-01-01T00:00:00Z".to_string();
         session.wake_up_at = Some(wake_up_at);
         session.add_message(ChatMessage::new("user".to_string(), "wait".to_string()));
@@ -12346,6 +12526,7 @@ mod tests {
 
         let card_ids = vec!["T-1".to_string(), "T-10".to_string(), "T-2".to_string()];
         let mut session = ChatSession::new("wait-card-roundtrip".to_string());
+        session.thread.title = "Wait Card Roundtrip".to_string();
         session.created_at = "2024-01-01T00:00:00Z".to_string();
         session.waiting_for_card_ids = card_ids.clone();
         session.add_message(ChatMessage::new("user".to_string(), "waiting".to_string()));

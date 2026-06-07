@@ -8,10 +8,6 @@ export interface ChatPage {
   name: "chat";
 }
 
-export interface FIMDebugPage {
-  name: "fill in the middle debug page";
-}
-
 export interface DocumentationSettingsPage {
   name: "documentation settings";
 }
@@ -119,7 +115,6 @@ export interface IntegrationsSetupPage {
 export type Page =
   | ChatPage
   | HistoryList
-  | FIMDebugPage
   | DocumentationSettingsPage
   | ChatThreadHistoryPage
   | IntegrationsSetupPage

@@ -348,6 +348,14 @@ mod tests {
         }
     }
 
+    fn stderr_exit_command(message: &str, code: i32) -> String {
+        if cfg!(windows) {
+            format!("echo {message} 1>&2 && exit /b {code}")
+        } else {
+            format!("sh -c 'echo {message} >&2; exit {code}'")
+        }
+    }
+
     #[test]
     fn test_payload_serialization_minimal() {
         let payload = make_payload("PreToolUse", None);
@@ -488,7 +496,7 @@ mod tests {
         let config = make_hook_config(
             HookEvent::PreToolUse,
             None,
-            "sh -c 'echo block_reason >&2; exit 2'",
+            &stderr_exit_command("block_reason", 2),
         );
         let payload = make_payload("PreToolUse", Some("shell"));
         let result = run_single_hook(&config, &payload).await;
@@ -503,7 +511,7 @@ mod tests {
         let config = make_hook_config(
             HookEvent::PostToolUse,
             None,
-            "sh -c 'echo warn_output >&2; exit 1'",
+            &stderr_exit_command("warn_output", 1),
         );
         let payload = make_payload("PostToolUse", Some("cat"));
         let result = run_single_hook(&config, &payload).await;
@@ -716,7 +724,7 @@ mod tests {
             make_hook_config(
                 HookEvent::PreToolUse,
                 None,
-                "sh -c 'echo blocked >&2; exit 2'",
+                &stderr_exit_command("blocked", 2),
             ),
             make_hook_config(HookEvent::PreToolUse, None, "echo success2"),
         ];

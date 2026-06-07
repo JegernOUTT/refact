@@ -38,7 +38,6 @@ import { projectInformationApi } from "../services/refact/projectInformation";
 import { setupStatusApi } from "../services/refact/setupStatus";
 import { extensionsApi } from "../services/refact/extensions";
 import { pluginsApi } from "../services/refact/plugins";
-import { reducer as fimReducer } from "../features/FIM/reducer";
 import { tipOfTheDaySlice } from "../features/TipOfTheDay";
 import { reducer as configReducer } from "../features/Config/configSlice";
 import { activeFileReducer } from "../features/Chat/activeFile";
@@ -90,7 +89,6 @@ const persistedTipOfTheDayReducer = persistReducer<
 // their `reducerPath`s, therefore we no longer need to call `combineReducers`.
 const rootReducer = combineSlices(
   {
-    fim: fimReducer,
     // tipOfTheDay: persistedTipOfTheDayReducer,
     [tipOfTheDaySlice.reducerPath]: persistedTipOfTheDayReducer,
     config: configReducer,

@@ -143,6 +143,9 @@ export function useAllChatsSubscription() {
   const pendingSubchatUpdateRef = useRef<
     Map<string, Extract<ChatEventEnvelope, { type: "subchat_update" }>>
   >(new Map());
+  const sseRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const streamedBytesRef = useRef<Map<string, number>>(new Map());
   const pendingBytesRef = useRef<Map<string, number>>(new Map());
   const configRef = useRef<EngineApiConfig>(subscriptionConfig);
@@ -547,9 +550,9 @@ export function useAllChatsSubscription() {
       if (unsub) {
         unsub();
         subscriptionsRef.current.delete(chatId);
-        retryCountRef.current.delete(chatId);
-        dispatch(removeSseConnection({ chatId }));
       }
+      retryCountRef.current.delete(chatId);
+      dispatch(removeSseConnection({ chatId }));
     },
     [
       dispatch,
@@ -644,17 +647,35 @@ export function useAllChatsSubscription() {
 
   useEffect(() => {
     if (!sseRefreshRequested) return;
-    if (!hasEndpointRef.current) return;
+    if (!hasEndpoint) return;
+    if (sseRefreshTimeoutRef.current) {
+      clearTimeout(sseRefreshTimeoutRef.current);
+      sseRefreshTimeoutRef.current = null;
+    }
 
     unsubscribe(sseRefreshRequested);
-    setTimeout(() => {
-      subscribe(sseRefreshRequested);
+    sseRefreshTimeoutRef.current = setTimeout(() => {
+      sseRefreshTimeoutRef.current = null;
+      if (desiredIdsRef.current.has(sseRefreshRequested)) {
+        subscribe(sseRefreshRequested);
+      }
       dispatch(clearSseRefreshRequest());
     }, 50);
-  }, [sseRefreshRequested, dispatch, subscribe, unsubscribe]);
+  }, [
+    dispatch,
+    endpointIdentity,
+    hasEndpoint,
+    sseRefreshRequested,
+    subscribe,
+    unsubscribe,
+  ]);
 
   useEffect(() => {
     return () => {
+      if (sseRefreshTimeoutRef.current) {
+        clearTimeout(sseRefreshTimeoutRef.current);
+        sseRefreshTimeoutRef.current = null;
+      }
       unsubscribeAll();
     };
   }, [unsubscribeAll]);

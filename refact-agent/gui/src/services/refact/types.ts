@@ -479,11 +479,16 @@ export type SummarizationTier =
   | "tier1_merged"
   | "tier2_reactive";
 
+export type CompressionInsertMode = string;
+
 export type LlmSegmentSummaryCompressionMetadata = Record<string, unknown> & {
   kind: "llm_segment_summary";
   schema_version?: number;
+  insert_mode?: CompressionInsertMode;
   source_hash?: string;
   source_message_ids?: string[];
+  summarized_source_message_ids?: string[];
+  preserved_source_message_ids?: string[];
   created_at?: string;
   summary_model?: string;
 };
@@ -519,13 +524,18 @@ export interface SummarizationMessage extends BaseMessage {
 export type ChatCompressionReportMetadata = {
   kind: "chat_compression_report";
   compression_kind?: string;
+  insert_mode?: CompressionInsertMode;
   source_message_count?: number;
   source_message_ids?: string[];
+  summarized_source_message_ids?: string[];
+  preserved_source_message_ids?: string[];
   source_hash?: string;
   summary_model?: string;
   context_files_removed?: number;
   context_messages_dropped?: number;
   tool_results_truncated?: number;
+  preserved_context_file_count?: number;
+  compressed_tool_output_count?: number;
   tokens_before?: number;
   tokens_after?: number;
   estimated_tokens_saved?: number;
@@ -537,6 +547,8 @@ const CHAT_COMPRESSION_REPORT_NUMBER_FIELDS = [
   "context_files_removed",
   "context_messages_dropped",
   "tool_results_truncated",
+  "preserved_context_file_count",
+  "compressed_tool_output_count",
   "tokens_before",
   "tokens_after",
   "estimated_tokens_saved",
@@ -545,6 +557,7 @@ const CHAT_COMPRESSION_REPORT_NUMBER_FIELDS = [
 
 const CHAT_COMPRESSION_REPORT_STRING_FIELDS = [
   "compression_kind",
+  "insert_mode",
   "source_hash",
   "summary_model",
 ] as const satisfies readonly (keyof ChatCompressionReportMetadata)[];
@@ -569,7 +582,10 @@ function hasOptionalStringField(
 
 function hasOptionalStringArrayField(
   record: Record<string, unknown>,
-  key: "source_message_ids",
+  key:
+    | "source_message_ids"
+    | "summarized_source_message_ids"
+    | "preserved_source_message_ids",
 ): boolean {
   const value = record[key];
   return (
@@ -590,7 +606,9 @@ function isChatCompressionReportMetadata(
     CHAT_COMPRESSION_REPORT_STRING_FIELDS.every((key) =>
       hasOptionalStringField(value, key),
     ) &&
-    hasOptionalStringArrayField(value, "source_message_ids")
+    hasOptionalStringArrayField(value, "source_message_ids") &&
+    hasOptionalStringArrayField(value, "summarized_source_message_ids") &&
+    hasOptionalStringArrayField(value, "preserved_source_message_ids")
   );
 }
 

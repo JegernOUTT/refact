@@ -22,6 +22,7 @@ use crate::buddy::actor::BuddyService;
 use crate::buddy::conductor::wake::{ConductorWakeBus, ConductorWakeTargets};
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::user_activity::UserActivityRing;
+use crate::chat::types::EnqueueCommandOutcome;
 use crate::caps::CodeAssistantCaps;
 use crate::chat::trajectories::{self, TrajectoryEvent};
 use crate::chat::{self, process_command_queue, SessionsMap};
@@ -160,12 +161,9 @@ impl EngineChatSessionFacade {
             priority,
             command,
         };
-        if priority {
-            session.enqueue_priority_command(request);
-        } else {
-            session.command_queue.push_back(request);
-            session.touch();
-            session.emit_queue_update();
+        let enqueue_outcome = session.enqueue_command(request);
+        if enqueue_outcome == EnqueueCommandOutcome::Full {
+            return Err("chat command queue is full".to_string());
         }
         let processor_running = session.queue_processor_running.clone();
         let queue_notify = session.queue_notify.clone();

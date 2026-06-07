@@ -1581,7 +1581,7 @@ mod tests {
 
     fn long_running_command() -> String {
         if cfg!(target_os = "windows") {
-            "[Console]::Out.Write('ready'); Start-Sleep -Seconds 30".to_string()
+            "[Console]::Out.WriteLine('ready'); Start-Sleep -Seconds 30".to_string()
         } else {
             "printf ready; sleep 30".to_string()
         }

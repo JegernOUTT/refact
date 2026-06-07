@@ -209,6 +209,9 @@ impl ChatSession {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 0,
+            trajectory_save_in_flight: false,
+            trajectory_save_queued: false,
+            trajectory_save_mutex: Arc::new(AMutex::new(())),
             created_at: chrono::Utc::now().to_rfc3339(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
@@ -278,6 +281,9 @@ impl ChatSession {
             external_reload_pending: None,
             trajectory_dirty: false,
             trajectory_version: 0,
+            trajectory_save_in_flight: false,
+            trajectory_save_queued: false,
+            trajectory_save_mutex: Arc::new(AMutex::new(())),
             created_at,
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
@@ -306,6 +312,9 @@ impl ChatSession {
     pub fn increment_version(&mut self) {
         self.trajectory_version += 1;
         self.trajectory_dirty = true;
+        if self.trajectory_save_in_flight {
+            self.trajectory_save_queued = true;
+        }
     }
 
     pub fn reset_compaction_runtime_state(&mut self) {
@@ -511,6 +520,21 @@ impl ChatSession {
         if self.recent_request_ids_set.contains(request_id) {
             return true;
         }
+        self.remember_request_id(request_id);
+        false
+    }
+
+    pub fn has_seen_request(&self, request_id: &str) -> bool {
+        self.recent_request_ids_set.contains(request_id)
+    }
+
+    pub fn remember_accepted_request(&mut self, request_id: &str) {
+        if !self.has_seen_request(request_id) {
+            self.remember_request_id(request_id);
+        }
+    }
+
+    fn remember_request_id(&mut self, request_id: &str) {
         if self.recent_request_ids.len() >= limits().recent_request_ids_capacity {
             if let Some(evicted) = self.recent_request_ids.pop_front() {
                 self.recent_request_ids_set.remove(&evicted);
@@ -518,7 +542,68 @@ impl ChatSession {
         }
         self.recent_request_ids.push_back(request_id.to_string());
         self.recent_request_ids_set.insert(request_id.to_string());
-        false
+    }
+
+    fn command_is_critical_for_queue(&self, command: &ChatCommand) -> bool {
+        matches!(command, ChatCommand::Abort {})
+            || (self.runtime.state == SessionState::Paused
+                && matches!(
+                    command,
+                    ChatCommand::ToolDecision { .. } | ChatCommand::ToolDecisions { .. }
+                ))
+            || (self.runtime.state == SessionState::WaitingIde
+                && matches!(command, ChatCommand::IdeToolResult { .. }))
+    }
+
+    fn command_interrupts_active_loop(command: &ChatCommand) -> bool {
+        matches!(
+            command,
+            ChatCommand::UserMessage { .. }
+                | ChatCommand::RetryFromIndex { .. }
+                | ChatCommand::Regenerate {}
+                | ChatCommand::UpdateMessage {
+                    regenerate: true,
+                    ..
+                }
+                | ChatCommand::RemoveMessage {
+                    regenerate: true,
+                    ..
+                }
+                | ChatCommand::Abort {}
+        )
+    }
+
+    pub fn enqueue_command(&mut self, request: CommandRequest) -> EnqueueCommandOutcome {
+        if self
+            .recent_request_ids_set
+            .contains(&request.client_request_id)
+        {
+            return EnqueueCommandOutcome::Duplicate;
+        }
+        let request_id = request.client_request_id.clone();
+        let outcome = self.enqueue_accepted_command(request);
+        if outcome == EnqueueCommandOutcome::Accepted {
+            self.remember_request_id(&request_id);
+        }
+        outcome
+    }
+
+    pub fn enqueue_accepted_command(&mut self, request: CommandRequest) -> EnqueueCommandOutcome {
+        if self.command_queue.len() >= max_queue_size()
+            && !self.command_is_critical_for_queue(&request.command)
+        {
+            return EnqueueCommandOutcome::Full;
+        }
+
+        if request.priority {
+            self.enqueue_accepted_priority_command(request)
+        } else {
+            self.command_queue.push_back(request);
+            self.touch();
+            self.emit_queue_update();
+            self.queue_notify.notify_one();
+            EnqueueCommandOutcome::Accepted
+        }
     }
 
     pub fn add_message(&mut self, mut message: ChatMessage) {
@@ -539,56 +624,71 @@ impl ChatSession {
         self.touch();
     }
 
-    fn tool_result_ids(&self) -> HashSet<String> {
+    fn latest_assistant_tool_call_window(
+        &self,
+        tool_call_id: Option<&str>,
+    ) -> Option<(usize, Vec<String>)> {
         self.messages
             .iter()
-            .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
-            .map(|m| m.tool_call_id.clone())
-            .collect()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, message)| {
+                if message.role != "assistant" {
+                    return None;
+                }
+                let tool_calls = message.tool_calls.as_ref()?;
+                if tool_calls.is_empty() {
+                    None
+                } else if tool_call_id.map_or(true, |id| tool_calls.iter().any(|tc| tc.id == id)) {
+                    Some((idx, tool_calls.iter().map(|tc| tc.id.clone()).collect()))
+                } else {
+                    None
+                }
+            })
     }
 
-    fn assistant_tool_call_ids_matching(&self, tool_call_id: &str) -> Option<Vec<String>> {
-        self.messages.iter().rev().find_map(|message| {
-            if message.role != "assistant" {
-                return None;
+    fn result_ids_after_assistant(&self, assistant_index: usize) -> HashSet<String> {
+        let mut result_ids = HashSet::new();
+        for message in self.messages.iter().skip(assistant_index + 1) {
+            match message.role.as_str() {
+                "tool" | "diff" if !message.tool_call_id.is_empty() => {
+                    result_ids.insert(message.tool_call_id.clone());
+                }
+                role if role == "assistant"
+                    || role == "user"
+                    || role == crate::chat::internal_roles::EVENT_ROLE
+                    || role == crate::chat::internal_roles::PLAN_ROLE =>
+                {
+                    break;
+                }
+                _ => {}
             }
-            let tool_calls = message.tool_calls.as_ref()?;
-            if tool_calls.iter().any(|tc| tc.id == tool_call_id) {
-                Some(tool_calls.iter().map(|tc| tc.id.clone()).collect())
-            } else {
-                None
-            }
-        })
+        }
+        result_ids
     }
 
-    fn latest_assistant_tool_call_ids(&self) -> Option<Vec<String>> {
-        self.messages.iter().rev().find_map(|message| {
-            if message.role != "assistant" {
-                return None;
-            }
-            let tool_calls = message.tool_calls.as_ref()?;
-            if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls.iter().map(|tc| tc.id.clone()).collect())
-            }
-        })
-    }
-
-    fn all_tool_call_ids_have_results(&self, tool_call_ids: &[String]) -> bool {
-        let result_ids = self.tool_result_ids();
+    fn all_tool_call_ids_have_results_after(
+        &self,
+        assistant_index: usize,
+        tool_call_ids: &[String],
+    ) -> bool {
+        let result_ids = self.result_ids_after_assistant(assistant_index);
         tool_call_ids.iter().all(|id| result_ids.contains(id))
     }
 
     fn has_pending_tool_result_window(&self) -> bool {
-        self.latest_assistant_tool_call_ids()
-            .map(|tool_call_ids| !self.all_tool_call_ids_have_results(&tool_call_ids))
+        self.latest_assistant_tool_call_window(None)
+            .map(|(assistant_index, tool_call_ids)| {
+                !self.all_tool_call_ids_have_results_after(assistant_index, &tool_call_ids)
+            })
             .unwrap_or(false)
     }
 
     fn tool_result_window_closed_for_tool_call(&self, tool_call_id: &str) -> bool {
-        if let Some(tool_call_ids) = self.assistant_tool_call_ids_matching(tool_call_id) {
-            self.all_tool_call_ids_have_results(&tool_call_ids)
+        if let Some((assistant_index, tool_call_ids)) =
+            self.latest_assistant_tool_call_window(Some(tool_call_id))
+        {
+            self.all_tool_call_ids_have_results_after(assistant_index, &tool_call_ids)
         } else {
             !self.has_pending_tool_result_window()
         }
@@ -633,7 +733,6 @@ impl ChatSession {
         let completed = self.tool_result_window_closed_for_tool_call(&tool_call_id);
         if completed {
             self.drain_post_tool_side_effects();
-            self.set_runtime_state(SessionState::Idle, None);
         }
         completed
     }
@@ -948,25 +1047,31 @@ impl ChatSession {
         });
     }
 
-    /// Insert a priority command at the head of the queue and interrupt the
-    /// currently advancing loop so the new command is picked up ASAP.
+    /// Try to insert a priority command before non-priority queued work.
     ///
-    /// Mirrors what HTTP priority user messages do: if generation or tool
-    /// execution is active, abort the current stream and drop any pending
-    /// tool_calls so the queue processor immediately moves to the next item.
-    /// Used by event-message injections (planner↔agent communication,
-    /// background-agent completion, task agent monitor stall/wake notices,
-    /// task broadcast, agent steer) so they perturb the advancing loop the
-    /// same way as priority user messages.
-    pub fn enqueue_priority_command(&mut self, mut request: CommandRequest) {
+    /// Accepted interrupting commands abort any active generation/tool loop before
+    /// insertion. Duplicate or full-queue rejections leave the active loop and
+    /// side effects untouched, so callers that add messages should do so only
+    /// after receiving `Accepted`.
+    pub fn enqueue_priority_command(
+        &mut self,
+        mut request: CommandRequest,
+    ) -> EnqueueCommandOutcome {
         request.priority = true;
-        let interrupts_active_loop = matches!(
-            &request.command,
-            ChatCommand::UserMessage { .. }
-                | ChatCommand::RetryFromIndex { .. }
-                | ChatCommand::Regenerate {}
-                | ChatCommand::Abort {}
-        );
+        self.enqueue_command(request)
+    }
+
+    pub fn enqueue_accepted_priority_command(
+        &mut self,
+        mut request: CommandRequest,
+    ) -> EnqueueCommandOutcome {
+        request.priority = true;
+        if self.command_queue.len() >= max_queue_size()
+            && !self.command_is_critical_for_queue(&request.command)
+        {
+            return EnqueueCommandOutcome::Full;
+        }
+        let interrupts_active_loop = Self::command_interrupts_active_loop(&request.command);
         let active = matches!(
             self.runtime.state,
             SessionState::Generating | SessionState::ExecutingTools
@@ -984,6 +1089,7 @@ impl ChatSession {
         self.touch();
         self.emit_queue_update();
         self.queue_notify.notify_one();
+        EnqueueCommandOutcome::Accepted
     }
 
     pub fn set_paused_with_reasons_and_auto_approved(
@@ -1108,6 +1214,14 @@ impl ChatSession {
     }
 
     pub fn finish_stream(&mut self, finish_reason: Option<String>) {
+        self.finish_stream_with_next_state(finish_reason, SessionState::Idle);
+    }
+
+    pub fn finish_stream_with_next_state(
+        &mut self,
+        finish_reason: Option<String>,
+        next_state: SessionState,
+    ) {
         if let Some(mut draft) = self.draft_message.take() {
             let should_keep_draft = has_displayable_assistant_content(&draft);
 
@@ -1129,7 +1243,7 @@ impl ChatSession {
                 });
             }
         }
-        self.set_runtime_state(SessionState::Idle, None);
+        self.set_runtime_state(next_state, None);
         self.touch();
     }
 
@@ -1190,21 +1304,15 @@ impl ChatSession {
     }
 
     pub fn clear_pending_tool_calls_for_interruption(&mut self) {
-        let answered_ids: HashSet<String> = self
-            .messages
-            .iter()
-            .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
-            .map(|m| m.tool_call_id.clone())
-            .collect();
-
+        let latest_window = self.latest_assistant_tool_call_window(None);
         let mut updated_message = None;
-        for message in self.messages.iter_mut().rev() {
-            if message.role != "assistant" {
-                continue;
-            }
-
+        if let Some((assistant_index, _)) = latest_window {
+            let answered_ids = self.result_ids_after_assistant(assistant_index);
+            let Some(message) = self.messages.get_mut(assistant_index) else {
+                return;
+            };
             let Some(tool_calls) = message.tool_calls.as_ref() else {
-                break;
+                return;
             };
             let retained_tool_calls: Vec<_> = tool_calls
                 .iter()
@@ -1220,7 +1328,6 @@ impl ChatSession {
                 };
                 updated_message = Some(message.clone());
             }
-            break;
         }
 
         if let Some(message) = updated_message {
@@ -1377,7 +1484,9 @@ impl ChatSession {
         if before_len != after_len {
             self.touch();
             if self.runtime.pause_reasons.is_empty() {
-                self.set_runtime_state(SessionState::Idle, None);
+                // The caller knows whether a cleared pause will continue into tool execution,
+                // follow-up generation, or true idle. Keep the paused runtime state intact here
+                // so the caller can publish exactly one non-idle/idle transition.
             } else {
                 self.emit(ChatEvent::PauseRequired {
                     reasons: self.runtime.pause_reasons.clone(),
@@ -2296,6 +2405,30 @@ mod tests {
     }
 
     #[test]
+    fn test_finish_stream_can_continue_to_tools_without_idle() {
+        let mut session = make_session();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
+            tool_calls: vec![json!({
+                "id": "call_123",
+                "type": "function",
+                "function": {"name": "cat", "arguments": "{}"}
+            })],
+        }]);
+
+        session
+            .finish_stream_with_next_state(Some("tool_calls".into()), SessionState::ExecutingTools);
+
+        assert!(session.draft_message.is_none());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.runtime.state, SessionState::ExecutingTools);
+        assert!(session.messages[0]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty()));
+    }
+
+    #[test]
     fn test_finish_stream_with_error_keeps_content() {
         let mut session = make_session();
         session.start_stream();
@@ -2411,6 +2544,93 @@ mod tests {
             session.command_queue[0].command,
             ChatCommand::Regenerate {}
         ));
+    }
+
+    #[test]
+    fn duplicate_priority_command_does_not_interrupt_active_generation() {
+        let mut session = make_session();
+        session.is_duplicate_request("priority-regenerate");
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+
+        let outcome = session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-regenerate".into(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+
+        assert_eq!(outcome, EnqueueCommandOutcome::Duplicate);
+        assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Generating);
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[test]
+    fn full_priority_command_does_not_interrupt_active_generation() {
+        let mut session = make_session();
+        for i in 0..max_queue_size() {
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: format!("queued-{i}"),
+                priority: true,
+                command: ChatCommand::SetParams {
+                    patch: json!({"temperature": i}),
+                },
+            });
+        }
+        session.emit_queue_update();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+
+        let outcome = session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-regenerate-full".into(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+
+        assert_eq!(outcome, EnqueueCommandOutcome::Full);
+        assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Generating);
+        assert_eq!(session.command_queue.len(), max_queue_size());
+        assert!(!session
+            .recent_request_ids_set
+            .contains("priority-regenerate-full"));
+    }
+
+    #[test]
+    fn full_queue_abort_still_interrupts_active_generation() {
+        let mut session = make_session();
+        for i in 0..max_queue_size() {
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: format!("queued-{i}"),
+                priority: true,
+                command: ChatCommand::SetParams {
+                    patch: json!({"temperature": i}),
+                },
+            });
+        }
+        session.emit_queue_update();
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "partial".into(),
+        }]);
+
+        let outcome = session.enqueue_priority_command(CommandRequest {
+            client_request_id: "priority-abort-full".into(),
+            priority: false,
+            command: ChatCommand::Abort {},
+        });
+
+        assert_eq!(outcome, EnqueueCommandOutcome::Accepted);
+        assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.command_queue.len(), max_queue_size() + 1);
+        assert!(session
+            .recent_request_ids_set
+            .contains("priority-abort-full"));
     }
 
     #[test]
@@ -3276,7 +3496,7 @@ mod tests {
             session.messages[1].content.content_text_only(),
             "The user accepted the changes."
         );
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.runtime.state, SessionState::WaitingIde);
 
         let mut event_roles = Vec::new();
         while let Ok(json) = rx.try_recv() {
@@ -3390,7 +3610,7 @@ mod tests {
         assert!(outcome.accepted_ids.is_empty());
         assert_eq!(outcome.denied_ids, vec!["tc1"]);
         assert!(session.runtime.pause_reasons.is_empty());
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.runtime.state, SessionState::Paused);
     }
 
     #[test]
@@ -3414,7 +3634,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_tool_decisions_transitions_to_idle_when_empty() {
+    fn test_process_tool_decisions_leaves_final_state_to_caller() {
         let mut session = make_session();
         session.runtime.pause_reasons.push(PauseReason {
             reason_type: "test".into(),
@@ -3430,7 +3650,7 @@ mod tests {
             accepted: true,
         }]);
         assert!(session.runtime.pause_reasons.is_empty());
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.runtime.state, SessionState::Paused);
     }
 
     #[test]
@@ -4405,7 +4625,7 @@ mod tests {
     }
 
     #[test]
-    fn all_denied_transitions_to_idle_after_synthesis() {
+    fn all_denied_synthesizes_tool_result_and_leaves_state_to_caller() {
         let mut session = make_session();
         session.add_message(make_assistant_with_tool_calls(&["tc1"]));
         session.runtime.pause_reasons.push(make_pause_reason("tc1"));
@@ -4418,7 +4638,7 @@ mod tests {
 
         assert_eq!(outcome.denied_ids, vec!["tc1"]);
         assert!(session.runtime.pause_reasons.is_empty());
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.runtime.state, SessionState::Paused);
         assert_eq!(
             session.messages.iter().filter(|m| m.role == "tool").count(),
             1
@@ -4439,7 +4659,7 @@ mod tests {
         assert_eq!(outcome.denied_ids, vec!["tc1"]);
         assert!(session.messages.iter().all(|m| m.role != "tool"));
         assert!(session.runtime.pause_reasons.is_empty());
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.runtime.state, SessionState::Paused);
     }
 
     #[test]
@@ -4550,7 +4770,7 @@ mod tests {
             role_sequence(&session),
             vec!["assistant", "tool", "tool", "event", "event"]
         );
-        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.runtime.state, SessionState::WaitingIde);
         assert!(session.post_tool_side_effects.is_empty());
         assert_eq!(
             session.messages[3].extra["event"]["subkind"],
@@ -4560,6 +4780,49 @@ mod tests {
             session.messages[4].extra["event"]["subkind"],
             json!("ide_callback")
         );
+    }
+
+    #[test]
+    fn ide_tool_completion_ignores_stale_reused_tool_result_ids() {
+        let mut session = make_session();
+        session.add_message(make_assistant_with_tool_calls(&["tc1"]));
+        session.add_message(make_tool_result("tc1", "old result"));
+        session.add_message(ChatMessage::new("user".to_string(), "again".to_string()));
+        session.add_message(make_assistant_with_tool_calls(&["tc1", "tc2"]));
+        session.runtime.state = SessionState::WaitingIde;
+
+        let completed =
+            session.record_ide_tool_result("tc2".to_string(), "second".to_string(), false);
+
+        assert!(!completed);
+        assert_eq!(session.post_tool_side_effects.len(), 1);
+    }
+
+    #[test]
+    fn interruption_cleanup_ignores_stale_reused_tool_result_ids() {
+        let mut session = make_session();
+        session.add_message(make_assistant_with_tool_calls(&["tc1"]));
+        session.add_message(make_tool_result("tc1", "old result"));
+        session.add_message(ChatMessage::new("user".to_string(), "again".to_string()));
+        session.add_message(make_assistant_with_tool_calls(&["tc1", "tc2"]));
+        session.add_message(make_tool_result("tc2", "current second result"));
+
+        session.clear_pending_tool_calls_for_interruption();
+
+        let latest_assistant = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        let ids: Vec<_> = latest_assistant
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tool_call| tool_call.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["tc2"]);
     }
 
     #[test]

@@ -5,6 +5,47 @@ use refact_core::chat_types::{ChatContent, ChatMessage, MultimodalElement};
 use refact_ast::ast::chunk_utils::count_text_tokens_with_fallback;
 use crate::pp_command_output::output_mini_postprocessing;
 
+const MIN_PLAIN_TEXT_MESSAGE_TOKENS: usize = 50;
+const TRUNCATION_MARKER: &str = "Truncated: too many tokens";
+
+fn truncate_text_to_token_budget(
+    tokenizer: Option<Arc<Tokenizer>>,
+    text: &str,
+    limit_tokens: usize,
+) -> String {
+    if count_text_tokens_with_fallback(tokenizer.clone(), text) <= limit_tokens {
+        return text.to_string();
+    }
+
+    let marker = format!("\n{TRUNCATION_MARKER}");
+    if count_text_tokens_with_fallback(tokenizer.clone(), &marker) >= limit_tokens {
+        return TRUNCATION_MARKER.to_string();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    let mut best = 0usize;
+
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let prefix: String = chars[..mid].iter().collect();
+        let candidate = format!("{prefix}{marker}");
+        let tokens = count_text_tokens_with_fallback(tokenizer.clone(), &candidate);
+        if tokens <= limit_tokens {
+            best = mid;
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    let prefix: String = chars[..best].iter().collect();
+    format!("{prefix}{marker}")
+}
+
 fn limit_text_by_tokens(
     tokenizer: Option<Arc<Tokenizer>>,
     text: &str,
@@ -16,15 +57,38 @@ fn limit_text_by_tokens(
         let line_tokens = count_text_tokens_with_fallback(tokenizer.clone(), line);
         if tok_used + line_tokens > limit_tokens {
             if new_text_lines.is_empty() {
-                new_text_lines.push("No content: tokens limit reached");
+                let truncated =
+                    truncate_text_to_token_budget(tokenizer.clone(), line, limit_tokens);
+                let used = count_text_tokens_with_fallback(tokenizer.clone(), &truncated);
+                return (truncated, used.min(limit_tokens));
             }
-            new_text_lines.push("Truncated: too many tokens\n");
+            new_text_lines.push(TRUNCATION_MARKER);
             break;
         }
         tok_used += line_tokens;
         new_text_lines.push(line);
     }
-    (new_text_lines.join("\n"), tok_used)
+    let result = new_text_lines.join("\n");
+    let used = count_text_tokens_with_fallback(tokenizer, &result);
+    (result, used.min(limit_tokens))
+}
+
+fn fair_message_token_limit(
+    remaining_budget: usize,
+    messages_left: usize,
+    per_message_limit: Option<usize>,
+) -> usize {
+    if messages_left <= 1 {
+        return per_message_limit
+            .unwrap_or(remaining_budget)
+            .min(remaining_budget);
+    }
+
+    let fair_share = remaining_budget / messages_left;
+    per_message_limit
+        .unwrap_or(fair_share)
+        .min(fair_share)
+        .min(remaining_budget)
 }
 
 pub async fn postprocess_plain_text(
@@ -39,8 +103,9 @@ pub async fn postprocess_plain_text(
 
     let mut remaining_budget = tokens_limit;
     let mut new_messages = vec![];
+    let total_messages = plain_text_messages.len();
 
-    for mut msg in plain_text_messages.into_iter() {
+    for (idx, mut msg) in plain_text_messages.into_iter().enumerate() {
         if let Some(ref filter) = msg.output_filter {
             if filter.limit_lines < usize::MAX
                 || filter.limit_chars < usize::MAX
@@ -72,12 +137,11 @@ pub async fn postprocess_plain_text(
         let per_msg_limit = msg.output_filter.as_ref().and_then(|f| f.limit_tokens);
         msg.output_filter = None;
 
-        let effective_limit = match per_msg_limit {
-            Some(msg_limit) => msg_limit.min(remaining_budget),
-            None => remaining_budget,
-        };
+        let messages_left = total_messages.saturating_sub(idx).max(1);
+        let effective_limit =
+            fair_message_token_limit(remaining_budget, messages_left, per_msg_limit);
 
-        if effective_limit < 50 {
+        if effective_limit < MIN_PLAIN_TEXT_MESSAGE_TOKENS {
             msg.content =
                 ChatContent::SimpleText("... truncated (token limit reached)".to_string());
             new_messages.push(msg);
@@ -129,4 +193,71 @@ pub async fn postprocess_plain_text(
     }
 
     (new_messages, remaining_budget)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_message(id: &str, content: String) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            tool_call_id: id.to_string(),
+            content: ChatContent::SimpleText(content),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_plain_text_messages_share_budget() {
+        let messages: Vec<ChatMessage> = (0..4)
+            .map(|idx| {
+                tool_message(
+                    &format!("call_{idx}"),
+                    format!("tool-{idx}: {}", "x".repeat(1000)),
+                )
+            })
+            .collect();
+
+        let (processed, remaining) = postprocess_plain_text(messages, None, 240, &None).await;
+
+        assert_eq!(processed.len(), 4);
+        assert!(remaining < MIN_PLAIN_TEXT_MESSAGE_TOKENS);
+        for (idx, msg) in processed.iter().enumerate() {
+            let text = msg.content.content_text_only();
+            assert!(
+                text.contains(&format!("tool-{idx}:")),
+                "message {idx} should keep its own prefix, got {text:?}"
+            );
+            assert!(text.contains(TRUNCATION_MARKER));
+            assert!(!text.contains("No content: tokens limit reached"));
+        }
+    }
+
+    #[tokio::test]
+    async fn single_huge_line_keeps_prefix_before_truncation_marker() {
+        let content = format!("start:{}", "x".repeat(4_000));
+        let messages = vec![tool_message("call_1", content)];
+
+        let (processed, remaining) = postprocess_plain_text(messages, None, 100, &None).await;
+
+        assert_eq!(processed.len(), 1);
+        let text = processed[0].content.content_text_only();
+        assert!(text.starts_with("start:"));
+        assert!(text.contains(TRUNCATION_MARKER));
+        assert!(!text.contains("No content: tokens limit reached"));
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn single_plain_text_message_can_use_full_budget() {
+        let content = "x".repeat(300);
+        let messages = vec![tool_message("call_1", content.clone())];
+
+        let (processed, remaining) = postprocess_plain_text(messages, None, 100, &None).await;
+
+        assert_eq!(processed.len(), 1);
+        assert_eq!(processed[0].content.content_text_only(), content);
+        assert!(remaining > 0);
+    }
 }

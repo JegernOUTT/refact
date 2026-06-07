@@ -171,7 +171,7 @@ pub async fn handle_v1_chat_command(
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
     let mut session = session_arc.lock().await;
 
-    if session.is_duplicate_request(&request.client_request_id) {
+    if session.has_seen_request(&request.client_request_id) {
         session.emit(ChatEvent::Ack {
             client_request_id: request.client_request_id.clone(),
             accepted: true,
@@ -186,6 +186,7 @@ pub async fn handle_v1_chat_command(
 
     if matches!(request.command, ChatCommand::Abort {}) {
         session.abort_stream();
+        session.remember_accepted_request(&request.client_request_id);
         session.emit(ChatEvent::Ack {
             client_request_id: request.client_request_id,
             accepted: true,
@@ -365,6 +366,7 @@ pub async fn handle_v1_chat_command(
         if let Some(message) = worktree_message {
             session.add_message(message);
         }
+        session.remember_accepted_request(&request.client_request_id);
         session.emit(ChatEvent::Ack {
             client_request_id: request.client_request_id,
             accepted: true,
@@ -378,27 +380,6 @@ pub async fn handle_v1_chat_command(
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .body(Body::from(r#"{"status":"applied"}"#))
-            .unwrap());
-    }
-
-    let is_critical = (session.runtime.state == SessionState::Paused
-        && matches!(
-            request.command,
-            ChatCommand::ToolDecision { .. } | ChatCommand::ToolDecisions { .. }
-        ))
-        || (session.runtime.state == SessionState::WaitingIde
-            && matches!(request.command, ChatCommand::IdeToolResult { .. }));
-
-    if session.command_queue.len() >= max_queue_size() && !is_critical {
-        session.emit(ChatEvent::Ack {
-            client_request_id: request.client_request_id,
-            accepted: false,
-            result: Some(serde_json::json!({"error": "queue full"})),
-        });
-        return Ok(Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"status":"queue_full"}"#))
             .unwrap());
     }
 
@@ -444,14 +425,21 @@ pub async fn handle_v1_chat_command(
     }
 
     let client_request_id_for_ack = request.client_request_id.clone();
-    if request.priority {
-        session.enqueue_priority_command(request);
-    } else {
-        session.command_queue.push_back(request);
-        session.touch();
-        session.emit_queue_update();
+    let enqueue_outcome = session.enqueue_accepted_command(request);
+    if enqueue_outcome == EnqueueCommandOutcome::Full {
+        session.emit(ChatEvent::Ack {
+            client_request_id: client_request_id_for_ack,
+            accepted: false,
+            result: Some(serde_json::json!({"error": "queue full"})),
+        });
+        return Ok(Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"status":"queue_full"}"#))
+            .unwrap());
     }
 
+    session.remember_accepted_request(&client_request_id_for_ack);
     session.emit(ChatEvent::Ack {
         client_request_id: client_request_id_for_ack,
         accepted: true,

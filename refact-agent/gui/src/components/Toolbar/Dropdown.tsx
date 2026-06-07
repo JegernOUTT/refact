@@ -5,7 +5,6 @@ import { useOpenUrl } from "../../hooks/useOpenUrl";
 import { DropdownMenu, HoverCard, Text } from "@radix-ui/themes";
 import {
   BarChartIcon,
-  CodeIcon,
   ExclamationTriangleIcon,
   FileTextIcon,
   GearIcon,
@@ -21,7 +20,6 @@ import styles from "./Toolbar.module.css";
 import { PuzzleIcon } from "../../images/PuzzleIcon";
 
 export type DropdownNavigationOptions =
-  | "fim"
   | "stats"
   | "settings"
   | "hot keys"
@@ -40,7 +38,7 @@ type DropdownProps = {
 };
 
 function linkForBugReports(_host: Config["host"]): string {
-  return "https://github.com/smallcloudai/refact/issues";
+  return "https://github.com/JegernOUTT/refact/issues";
 }
 
 export const Dropdown: React.FC<DropdownProps> = ({
@@ -114,9 +112,6 @@ export const Dropdown: React.FC<DropdownProps> = ({
           }}
         >
           <ExclamationTriangleIcon /> Report a bug
-        </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => handleNavigation("fim")}>
-          <CodeIcon /> Fill-in-the-middle Context
         </DropdownMenu.Item>
         <DropdownMenu.Item onSelect={() => handleNavigation("stats")}>
           <BarChartIcon /> Usage Dashboard

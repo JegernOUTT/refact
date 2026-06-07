@@ -30,6 +30,10 @@ const handlers = [
   trajectorySave,
 ];
 
+const engineConfigState = {
+  config: { host: "vscode" as const, themeProps: {}, lspPort: 8001 },
+};
+
 server.use(...handlers);
 
 const App: React.FC<Partial<ChatFormProps>> = ({ ...props }) => {
@@ -49,7 +53,9 @@ describe("ChatForm", () => {
   test("when I push enter it should call onSubmit", async () => {
     const fakeOnSubmit = vi.fn();
 
-    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />);
+    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />, {
+      preloadedState: engineConfigState,
+    });
 
     const textarea: HTMLTextAreaElement | null =
       app.container.querySelector("textarea");
@@ -65,7 +71,9 @@ describe("ChatForm", () => {
   test("when I hold shift and push enter it should not call onSubmit", async () => {
     const fakeOnSubmit = vi.fn();
 
-    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />);
+    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />, {
+      preloadedState: engineConfigState,
+    });
     const textarea = app.container.querySelector("textarea");
     expect(textarea).not.toBeNull();
     if (textarea) {
@@ -128,7 +136,9 @@ describe("ChatForm", () => {
       }),
     );
 
-    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />);
+    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />, {
+      preloadedState: engineConfigState,
+    });
     const textarea = app.container.querySelector("textarea");
     expect(textarea).not.toBeNull();
     if (!textarea) return;
@@ -201,7 +211,9 @@ describe("ChatForm", () => {
   ])("when pressing %s, it should not submit", async (a) => {
     const fakeOnSubmit = vi.fn();
 
-    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />);
+    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />, {
+      preloadedState: engineConfigState,
+    });
     const textarea = app.container.querySelector("textarea");
     expect(textarea).not.toBeNull();
     if (textarea) {

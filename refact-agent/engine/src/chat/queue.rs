@@ -24,7 +24,7 @@ use super::browser_context;
 use super::content::parse_content_with_attachments;
 use super::generation::{start_generation, prepare_session_preamble_and_knowledge};
 use super::tools::{execute_tools_with_session, resolve_tool_call_aliases};
-use super::trajectories::maybe_save_trajectory;
+use super::trajectories::{maybe_save_trajectory, maybe_save_trajectory_background};
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
 use crate::worktrees::service::WorktreeService;
@@ -248,7 +248,7 @@ pub async fn inject_priority_messages_if_any(
         }
     }
 
-    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+    maybe_save_trajectory_background(app.clone(), session_arc.clone());
     true
 }
 
@@ -852,7 +852,7 @@ pub async fn process_command_queue(
                     return;
                 }
 
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_background(app.clone(), session_arc.clone());
 
                 let session = session_arc.lock().await;
                 if session.closed {
@@ -871,7 +871,7 @@ pub async fn process_command_queue(
                 let cmd = session.command_queue.pop_front();
                 if let Some(ref req) = cmd {
                     if command_triggers_generation(&req.command) {
-                        session.runtime.state = SessionState::Generating;
+                        session.set_runtime_state(SessionState::Generating, None);
                     }
                 }
                 session.emit_queue_update();
@@ -1264,7 +1264,7 @@ pub async fn process_command_queue(
                     let _ = maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
                 }
 
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_background(app.clone(), session_arc.clone());
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1288,7 +1288,7 @@ pub async fn process_command_queue(
                 session.add_message(user_message);
                 drop(session);
 
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_background(app.clone(), session_arc.clone());
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1454,6 +1454,9 @@ pub async fn process_command_queue(
             } => {
                 let mut session = session_arc.lock().await;
                 let completed = session.record_ide_tool_result(tool_call_id, content, tool_failed);
+                if completed {
+                    session.set_runtime_state(SessionState::Generating, None);
+                }
                 drop(session);
                 if !completed {
                     continue;
@@ -1484,8 +1487,9 @@ pub async fn process_command_queue(
                     session.update_message(&message_id, updated_msg);
                     if regenerate && idx + 1 < session.messages.len() {
                         session.truncate_messages(idx + 1);
+                        session.set_runtime_state(SessionState::Generating, None);
                         drop(session);
-                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        maybe_save_trajectory_background(app.clone(), session_arc.clone());
                         prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
                             .await;
                         if aborted_before_start_generation(&session_arc).await {
@@ -1506,8 +1510,9 @@ pub async fn process_command_queue(
                 if let Some(idx) = session.remove_message(&message_id) {
                     if regenerate && idx < session.messages.len() {
                         session.truncate_messages(idx);
+                        session.set_runtime_state(SessionState::Generating, None);
                         drop(session);
-                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        maybe_save_trajectory_background(app.clone(), session_arc.clone());
                         prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
                             .await;
                         if aborted_before_start_generation(&session_arc).await {
@@ -1518,6 +1523,7 @@ pub async fn process_command_queue(
                 }
             }
             ChatCommand::Regenerate {} => {
+                maybe_save_trajectory_background(app.clone(), session_arc.clone());
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1707,6 +1713,7 @@ pub async fn process_command_queue(
                     if let Some(ref skill_name) = pending.skill_activation_name {
                         session.set_active_skill(skill_name.clone());
                     }
+                    session.set_runtime_state(SessionState::Generating, None);
                 }
 
                 if let Some((chat_id, task_id, origin)) = conductor_message {
@@ -1720,7 +1727,7 @@ pub async fn process_command_queue(
                 }
 
                 browser_context::commit_browser_cursors(app.gcx.clone(), &browser_chat_id).await;
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_background(app.clone(), session_arc.clone());
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1860,7 +1867,11 @@ async fn handle_tool_decisions(
             session.runtime.accepted_tool_ids.clear();
             session.runtime.auto_approved_tool_ids.clear();
             session.runtime.paused_message_index = None;
-            session.set_runtime_state(SessionState::Idle, None);
+            if accepted_any {
+                session.set_runtime_state(SessionState::Generating, None);
+            } else {
+                session.set_runtime_state(SessionState::Idle, None);
+            }
         }
 
         if accepted_any || rejected_any {
@@ -2055,11 +2066,10 @@ async fn handle_tool_decisions(
             session.drain_post_tool_side_effects();
             if tool_initiated_stop {
                 session.set_runtime_state(final_state, None);
-            } else {
-                // Always transition to Idle — either normally or after user abort.
-                // abort_stream() may have already set Idle, but set_runtime_state
-                // is idempotent and ensures the UI gets the RuntimeUpdated event.
+            } else if was_aborted {
                 session.set_runtime_state(SessionState::Idle, None);
+            } else {
+                session.set_runtime_state(SessionState::Generating, None);
             }
         }
 
@@ -2070,7 +2080,11 @@ async fn handle_tool_decisions(
             }
         }
 
-        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+        if was_aborted || tool_initiated_stop {
+            maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+        } else {
+            maybe_save_trajectory_background(app.clone(), session_arc.clone());
+        }
 
         if was_aborted || tool_initiated_stop {
             return;

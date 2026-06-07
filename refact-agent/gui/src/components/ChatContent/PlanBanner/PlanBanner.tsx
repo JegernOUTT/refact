@@ -14,6 +14,7 @@ import { Markdown } from "../../Markdown";
 import styles from "./PlanBanner.module.css";
 import { getPlanMetadata } from "../../../services/refact/types";
 import { PlanHistoryModal } from "./PlanHistoryModal";
+import { normalizePlanContent } from "./planContent";
 
 type PlanBannerProps = {
   threadId: string;
@@ -75,7 +76,7 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
     () => (plan ? getPlanMetadata(plan) : undefined),
     [plan],
   );
-  const planText = synthesizedText ?? plan?.content ?? "";
+  const planText = normalizePlanContent(synthesizedText ?? plan?.content ?? "");
 
   useEffect(() => {
     setCollapsed(readCollapsed(threadId));

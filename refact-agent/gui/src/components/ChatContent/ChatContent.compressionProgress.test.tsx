@@ -25,6 +25,7 @@ function makeRuntime({
   isStreaming = false,
   queuedItems = [],
   compressionPhase,
+  compressionReason,
   compressionPulseSeq,
 }: {
   messages?: ChatMessages;
@@ -33,6 +34,7 @@ function makeRuntime({
   isStreaming?: boolean;
   queuedItems?: QueuedItem[];
   compressionPhase?: ChatThreadRuntime["compression_phase"];
+  compressionReason?: ChatThreadRuntime["compression_reason"];
   compressionPulseSeq?: string;
 } = {}): ChatThreadRuntime {
   const chat = createDefaultChatState();
@@ -44,6 +46,7 @@ function makeRuntime({
   runtime.streaming = isStreaming;
   runtime.queued_items = queuedItems;
   runtime.compression_phase = compressionPhase;
+  runtime.compression_reason = compressionReason;
   runtime.compression_pulse_seq = compressionPulseSeq;
   return runtime;
 }
@@ -55,6 +58,7 @@ function makeChatState({
   isStreaming = false,
   queuedItems = [],
   compressionPhase,
+  compressionReason,
   compressionPulseSeq,
   sseStatus,
 }: {
@@ -64,6 +68,7 @@ function makeChatState({
   isStreaming?: boolean;
   queuedItems?: QueuedItem[];
   compressionPhase?: ChatThreadRuntime["compression_phase"];
+  compressionReason?: ChatThreadRuntime["compression_reason"];
   compressionPulseSeq?: string;
   sseStatus?: "disconnected" | "connecting" | "connected";
 } = {}): Partial<RootState> {
@@ -76,6 +81,7 @@ function makeChatState({
   runtime.streaming = isStreaming;
   runtime.queued_items = queuedItems;
   runtime.compression_phase = compressionPhase;
+  runtime.compression_reason = compressionReason;
   runtime.compression_pulse_seq = compressionPulseSeq;
   return {
     chat,
@@ -122,7 +128,7 @@ describe("ChatContent compression progress", () => {
     renderChatContent(makeChatState({ isCompressing: true }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "Compressing context…",
+      "Compacting older context…",
     );
     expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
     expect(
@@ -136,13 +142,91 @@ describe("ChatContent compression progress", () => {
     expect(document.querySelector("canvas")).not.toBeInTheDocument();
   });
 
+  it("renders checking compression status", async () => {
+    renderChatContent(
+      makeChatState({ isCompressing: true, compressionPhase: "checking" }),
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Checking context size…",
+    );
+  });
+
+  it("renders running compression status", async () => {
+    renderChatContent(
+      makeChatState({ isCompressing: true, compressionPhase: "running" }),
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Compacting older context…",
+    );
+  });
+
+  it("renders provider limit compression status", async () => {
+    renderChatContent(
+      makeChatState({
+        isCompressing: true,
+        compressionPhase: "checking",
+        compressionReason: "provider_length_stop",
+      }),
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Compacting context after provider limit…",
+    );
+  });
+
+  it("renders skipped insufficient savings pulse status", () => {
+    vi.useFakeTimers({ now: 0 });
+    renderChatContent(
+      makeChatState({
+        compressionPhase: "skipped",
+        compressionReason: "pressure_low",
+        compressionPulseSeq: "skipped-pulse",
+      }),
+    );
+
+    expect(screen.getByTestId("compression-progress")).toHaveTextContent(
+      "Context already compact enough",
+    );
+  });
+
+  it("renders skipped no eligible segment pulse status", () => {
+    vi.useFakeTimers({ now: 0 });
+    renderChatContent(
+      makeChatState({
+        compressionPhase: "skipped",
+        compressionReason: "no_eligible_segment",
+        compressionPulseSeq: "skipped-pulse",
+      }),
+    );
+
+    expect(screen.getByTestId("compression-progress")).toHaveTextContent(
+      "Nothing safe to compact",
+    );
+  });
+
+  it("renders failed compression pulse status", () => {
+    vi.useFakeTimers({ now: 0 });
+    renderChatContent(
+      makeChatState({
+        compressionPhase: "failed",
+        compressionPulseSeq: "failed-pulse",
+      }),
+    );
+
+    expect(screen.getByTestId("compression-progress")).toHaveTextContent(
+      "Context compaction failed",
+    );
+  });
+
   it("renders footer status before snapshot while compressing", async () => {
     renderChatContent(
       makeChatState({ isCompressing: true, snapshotReceived: false }),
     );
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "Compressing context…",
+      "Compacting older context…",
     );
     expect(
       screen.getByTestId("chat-virtualized-list-wrapper"),
@@ -183,7 +267,7 @@ describe("ChatContent compression progress", () => {
     );
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "Compressing context…",
+      "Compacting older context…",
     );
     expect(screen.getByText("hello")).toBeInTheDocument();
     expect(
@@ -252,7 +336,9 @@ describe("ChatContent compression progress", () => {
       }),
     );
 
-    expect(screen.getByTestId("compression-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("compression-progress")).toHaveTextContent(
+      "Context compacted",
+    );
 
     act(() => {
       vi.advanceTimersByTime(499);

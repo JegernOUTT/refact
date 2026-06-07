@@ -1,5 +1,5 @@
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, waitFor } from "../utils/test-utils";
 import { server } from "../utils/mockServer";
 import { useSidebarSubscription } from "../hooks/useSidebarSubscription";
@@ -17,6 +17,7 @@ const CONFIG_STATE = {
     lspPort: 8001,
     themeProps: {},
     host: "web" as const,
+    engineServed: true,
   },
 };
 
@@ -205,6 +206,10 @@ const chatC = {
 };
 
 describe("useSidebarSubscription", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("uses a relative SSE URL in Vite and engine-served web mode", async () => {
     const requests: string[] = [];
     server.use(
@@ -312,7 +317,7 @@ describe("useSidebarSubscription", () => {
     expect(store.getState().history.loadError).toBeNull();
   });
 
-  it("known_event_with_bad_payload_is_skipped_not_fatal", async () => {
+  it("known_event_with_bad_payload_reports_malformed_stream", async () => {
     server.use(
       sidebarHandler([
         envelope(0, {
@@ -321,19 +326,17 @@ describe("useSidebarSubscription", () => {
           status: "ready",
           snapshot: { tasks: "oops" },
         }),
-        sectionSnapshot(1, "tasks", { tasks: [taskB] }),
       ]),
     );
 
-    const { store } = render(<TestHarness />, { preloadedState: CONFIG_STATE });
+    const { errors, disconnect } = subscribeForTest();
 
     await waitFor(() => {
-      expect(tasksFromStore(store.getState()).map((task) => task.id)).toEqual([
-        "task-b",
-      ]);
-      expect(store.getState().sidebar.sections.tasks.status).toBe("ready");
+      expect(errors.map((error) => error.message)).toContain(
+        "malformed_sidebar_event",
+      );
     });
-    expect(store.getState().history.loadError).toBeNull();
+    disconnect();
   });
 
   it("accepts chat snapshot pagination metadata", async () => {

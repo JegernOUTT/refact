@@ -293,11 +293,11 @@ impl Tool for ToolHandoffToMode {
         if messages.is_empty() {
             return Err("Cannot handoff an empty chat".to_string());
         }
-        let last_assistant_with_tools = messages
+        let last_asst_idx = messages
             .iter()
-            .rev()
-            .find(|m| m.role == "assistant" && m.tool_calls.is_some());
-        if let Some(asst) = last_assistant_with_tools {
+            .rposition(|m| m.role == "assistant" && m.tool_calls.is_some());
+        if let Some(asst_idx) = last_asst_idx {
+            let asst = &messages[asst_idx];
             let call_ids: std::collections::HashSet<&str> = asst
                 .tool_calls
                 .as_ref()
@@ -305,9 +305,12 @@ impl Tool for ToolHandoffToMode {
                 .iter()
                 .map(|c| c.id.as_str())
                 .collect();
-            let result_ids: std::collections::HashSet<&str> = messages
+            let result_ids: std::collections::HashSet<&str> = messages[asst_idx + 1..]
                 .iter()
-                .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
+                .filter(|m| {
+                    (m.role == "tool" || m.role == "diff" || m.role == "context_file")
+                        && !m.tool_call_id.is_empty()
+                })
                 .map(|m| m.tool_call_id.as_str())
                 .collect();
             let mut missing_ids: Vec<&str> = call_ids.difference(&result_ids).copied().collect();
@@ -372,10 +375,14 @@ impl Tool for ToolHandoffToMode {
         let task_meta =
             ensure_task_for_planner_handoff(gcx.clone(), &canonical_mode, existing_task_meta)
                 .await?;
-        let new_chat_id = task_meta
-            .as_ref()
-            .and_then(|meta| meta.planner_chat_id.clone())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let new_chat_id = if canonical_mode == "task_planner" {
+            task_meta
+                .as_ref()
+                .and_then(|meta| meta.planner_chat_id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string())
+        } else {
+            Uuid::new_v4().to_string()
+        };
         let now = chrono::Utc::now().to_rfc3339();
 
         let snapshot_task_meta = task_meta.clone();
@@ -399,7 +406,7 @@ impl Tool for ToolHandoffToMode {
             task_meta: snapshot_task_meta,
             worktree: thread.worktree.clone(),
             parent_id: Some(chat_id.clone()),
-            link_type: Some("mode_transition".to_string()),
+            link_type: Some("handoff".to_string()),
             root_chat_id: thread
                 .root_chat_id
                 .clone()
@@ -1052,5 +1059,36 @@ mod tests {
             "error should be surfaced in tool output, got: {:?}",
             result["initial_plan_error"]
         );
+    }
+
+    #[tokio::test]
+    async fn handoff_accepts_context_file_as_read_tool_completion() {
+        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
+        let mut snap = source_snapshot();
+        snap.messages = vec![
+            ChatMessage::new("user".to_string(), "Read the file.".to_string()),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("".to_string()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: "call-cat".to_string(),
+                    index: Some(0),
+                    function: ChatToolFunction {
+                        name: "cat".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    tool_type: "function".to_string(),
+                    extra_content: None,
+                }]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "context_file".to_string(),
+                tool_call_id: "call-cat".to_string(),
+                content: ChatContent::SimpleText("file contents".to_string()),
+                ..Default::default()
+            },
+        ];
+        tool_with_snapshot(snap).await.unwrap();
     }
 }

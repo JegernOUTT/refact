@@ -741,6 +741,84 @@ fn is_plan_report_tool(name: &str) -> bool {
     matches!(name, "plan" | "task_done")
 }
 
+fn string_list_from_value(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::trim))
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_json::Value::String(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn task_done_report_markdown(raw: &str) -> Option<String> {
+    let obj = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if obj.get("type").and_then(|value| value.as_str()) != Some("task_done") {
+        return None;
+    }
+
+    let summary = obj
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    let report = obj
+        .get("report")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    let files_changed = string_list_from_value(obj.get("files_changed"));
+
+    let mut result = String::new();
+    if !summary.is_empty() && !report.is_empty() && !report.starts_with(summary) {
+        result.push_str(&format!("**{}**\n\n", summary));
+    }
+    if !report.is_empty() {
+        result.push_str(report);
+    } else if !summary.is_empty() {
+        result.push_str(summary);
+    }
+    if !files_changed.is_empty() {
+        if !result.trim().is_empty() {
+            result.push_str("\n\n");
+        }
+        result.push_str("**Files changed:**\n");
+        for file in files_changed {
+            result.push_str(&format!("- `{}`\n", file));
+        }
+    }
+
+    let result = result.trim().to_string();
+    (!result.is_empty()).then_some(result)
+}
+
+fn normalize_plan_report_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    task_done_report_markdown(trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
+fn normalize_plan_message_content(mut message: ChatMessage) -> ChatMessage {
+    if message.role != "plan" {
+        return message;
+    }
+    let ChatContent::SimpleText(text) = &message.content else {
+        return message;
+    };
+    let normalized = normalize_plan_report_text(text);
+    if normalized != *text {
+        message.content = ChatContent::SimpleText(normalized);
+    }
+    message
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -772,11 +850,10 @@ fn deterministic_plan_report_text(messages: &[ChatMessage]) -> Option<String> {
         if message.role != "tool" {
             continue;
         }
-        let is_plan_report = tool_names
-            .get(&message.tool_call_id)
-            .map(|name| is_plan_report_tool(name))
-            .unwrap_or(false);
-        if !is_plan_report {
+        let Some(tool_name) = tool_names.get(&message.tool_call_id).map(String::as_str) else {
+            continue;
+        };
+        if !is_plan_report_tool(tool_name) {
             continue;
         }
         if candidate.is_some() {
@@ -790,7 +867,7 @@ fn deterministic_plan_report_text(messages: &[ChatMessage]) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(normalize_plan_report_text(trimmed))
     }
 }
 
@@ -803,12 +880,13 @@ fn plan_text_from_source_reference(messages: &[ChatMessage], reference: &str) ->
         .trim()
         .parse::<usize>()
         .ok()?;
-    let text = messages.get(idx)?.content.content_text_only();
+    let message = messages.get(idx)?;
+    let text = message.content.content_text_only();
     let trimmed = text.trim();
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(normalize_plan_report_text(trimmed))
     }
 }
 
@@ -838,6 +916,8 @@ fn resolve_pinned_plan_text(
 /// Build a fresh `plan`-role message (the PlanBanner artifact) from pinned plan text,
 /// capping its size to keep new-chat context bounded.
 pub fn make_pinned_plan_message(text: &str, symbol_cap: usize) -> ChatMessage {
+    let normalized_text = normalize_plan_report_text(text);
+    let text = normalized_text.as_str();
     let body: String = if text_symbols(text) > symbol_cap {
         text.chars().take(symbol_cap).collect()
     } else {
@@ -867,7 +947,7 @@ pub fn make_pinned_plan_message(text: &str, symbol_cap: usize) -> ChatMessage {
 /// single deterministic plan-like report pinned as a fresh plan banner.
 pub fn carried_plan_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     if let Some(existing_plan) = current_base_plan_message(messages) {
-        let mut carried = vec![existing_plan.clone()];
+        let mut carried = vec![normalize_plan_message_content(existing_plan.clone())];
         carried.extend(
             messages
                 .iter()
@@ -1078,7 +1158,7 @@ pub async fn assemble_new_chat(
     }
 
     if let Some(existing_plan) = current_base_plan_message(original_messages) {
-        new_messages.push(existing_plan.clone());
+        new_messages.push(normalize_plan_message_content(existing_plan.clone()));
         new_messages.extend(
             original_messages
                 .iter()
@@ -2092,6 +2172,39 @@ MSG_ID:2
     }
 
     #[tokio::test]
+    async fn assemble_new_chat_normalizes_task_done_plan_source_reference() {
+        let task_done_payload = serde_json::json!({
+            "type": "task_done",
+            "summary": "Completed task",
+            "report": "## Report\n\nAll done.",
+            "files_changed": ["src/main.rs"],
+        })
+        .to_string();
+        let messages = vec![
+            assistant_tool_call("call_task_done", "task_done"),
+            tool_result("call_task_done", &task_done_payload),
+        ];
+        let decisions = ParsedDecisions {
+            plan_source: Some("MSG_ID:1".to_string()),
+            ..Default::default()
+        };
+
+        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let plan_messages: Vec<_> = new_messages
+            .iter()
+            .filter(|msg| msg.role == "plan")
+            .collect();
+
+        assert_eq!(plan_messages.len(), 1);
+        let plan_text = plan_messages[0].content.content_text_only();
+        assert!(plan_text.contains("**Completed task**"));
+        assert!(plan_text.contains("## Report"));
+        assert!(plan_text.contains("All done."));
+        assert!(plan_text.contains("- `src/main.rs`"));
+        assert!(!plan_text.contains("task_done"));
+    }
+
+    #[tokio::test]
     async fn assemble_new_chat_existing_plan_wins_over_plan_source() {
         let messages = vec![
             plan_role_message(1, "EXISTING_BASE_PLAN"),
@@ -2114,6 +2227,38 @@ MSG_ID:2
             plan_messages[0].content.content_text_only(),
             "EXISTING_BASE_PLAN"
         );
+    }
+
+    #[tokio::test]
+    async fn assemble_new_chat_normalizes_existing_task_done_plan_role() {
+        let task_done_payload = serde_json::json!({
+            "type": "task_done",
+            "summary": "Completed existing plan",
+            "report": "Existing report body",
+            "files_changed": ["src/existing.rs"],
+        })
+        .to_string();
+        let messages = vec![plan_role_message(1, &task_done_payload)];
+
+        let new_messages = assemble_new_chat(&messages, &ParsedDecisions::default(), &[])
+            .await
+            .unwrap();
+        let plan_messages: Vec<_> = new_messages
+            .iter()
+            .filter(|msg| msg.role == "plan")
+            .collect();
+
+        assert_eq!(plan_messages.len(), 1);
+        let plan_text = plan_messages[0].content.content_text_only();
+        assert!(plan_text.contains("**Completed existing plan**"));
+        assert!(plan_text.contains("Existing report body"));
+        assert!(plan_text.contains("- `src/existing.rs`"));
+        assert_eq!(plan_messages[0].message_id, "plan-1");
+        assert_eq!(
+            plan_messages[0].extra["plan"]["version"],
+            serde_json::json!(1)
+        );
+        assert!(!plan_text.contains("task_done"));
     }
 
     #[tokio::test]
@@ -2183,6 +2328,29 @@ MSG_ID:2
     }
 
     #[test]
+    fn carried_plan_messages_normalizes_existing_task_done_plan_role() {
+        let task_done_payload = serde_json::json!({
+            "type": "task_done",
+            "summary": "Completed existing plan",
+            "report": "Existing report body",
+            "files_changed": ["src/existing.rs"],
+        })
+        .to_string();
+        let messages = vec![plan_role_message(2, &task_done_payload)];
+
+        let carried = carried_plan_messages(&messages);
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].role, "plan");
+        let plan_text = carried[0].content.content_text_only();
+        assert!(plan_text.contains("**Completed existing plan**"));
+        assert!(plan_text.contains("Existing report body"));
+        assert!(plan_text.contains("- `src/existing.rs`"));
+        assert_eq!(carried[0].message_id, "plan-2");
+        assert_eq!(carried[0].extra["plan"]["version"], serde_json::json!(2));
+        assert!(!plan_text.contains("task_done"));
+    }
+
+    #[test]
     fn carried_plan_messages_pins_single_report_when_no_plan_role() {
         let messages = vec![
             assistant_tool_call("call_plan", "plan"),
@@ -2194,6 +2362,31 @@ MSG_ID:2
         assert_eq!(carried[0].role, "plan");
         assert_eq!(carried[0].content.content_text_only(), "REPORT BODY");
         assert_eq!(carried[0].preserve, Some(true));
+    }
+
+    #[test]
+    fn carried_plan_messages_normalizes_single_task_done_report() {
+        let task_done_payload = serde_json::json!({
+            "type": "task_done",
+            "summary": "Completed task",
+            "report": "Done body",
+            "files_changed": "src/lib.rs, src/main.rs",
+        })
+        .to_string();
+        let messages = vec![
+            assistant_tool_call("call_task_done", "task_done"),
+            tool_result("call_task_done", &task_done_payload),
+        ];
+
+        let carried = carried_plan_messages(&messages);
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].role, "plan");
+        let plan_text = carried[0].content.content_text_only();
+        assert!(plan_text.contains("**Completed task**"));
+        assert!(plan_text.contains("Done body"));
+        assert!(plan_text.contains("- `src/lib.rs`"));
+        assert!(plan_text.contains("- `src/main.rs`"));
+        assert!(!plan_text.contains("task_done"));
     }
 
     #[test]

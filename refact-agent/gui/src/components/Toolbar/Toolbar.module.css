@@ -16,13 +16,26 @@
 }
 
 .engineUrl {
+  display: inline-block;
   max-width: 180px;
   overflow: hidden;
   color: var(--gray-10);
+  cursor: pointer;
   font-size: 11px;
   line-height: 1;
+  text-align: left;
+  text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.engineUrl:hover {
+  color: var(--gray-12);
+}
+
+.engineUrl:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 2px;
 }
 
 .iconButton {

@@ -5,7 +5,6 @@ export * from "./useEffectOnce";
 export * from "./usePostMessage";
 export * from "./useUndoRedo";
 export * from "./useMutationObserver";
-export * from "./useEventBusForFIMDebug";
 export * from "./useEventBusForIDE";
 export * from "./useDiffFileReload";
 export * from "./useGetCapsQuery";

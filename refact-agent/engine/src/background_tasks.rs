@@ -79,6 +79,9 @@ pub async fn start_background_tasks(
         tokio::spawn(crate::knowledge_graph::knowledge_cleanup_background_task(
             gcx.clone(),
         )),
+        tokio::spawn(
+            crate::knowledge_graph::cleanup_inactive_memories_on_startup(gcx.clone()),
+        ),
         tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
             gcx.clone(),
         )),

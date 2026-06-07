@@ -301,12 +301,12 @@ describe("SummarizationMessage", () => {
         "Older context was summarized so this chat can continue within the model limit.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Summary kept for the model/u)).toBeInTheDocument();
+    expect(screen.queryByText(/Summary kept for the model/u)).toBeNull();
     const stats = screen.getByTestId("summarization-card-stats");
     expect(stats).toHaveTextContent("Messages compressed");
     expect(stats).toHaveTextContent("4");
-    expect(stats).toHaveTextContent("Summary model");
-    expect(stats).toHaveTextContent("summary-model");
+    expect(stats).not.toHaveTextContent("Summary model");
+    expect(stats).not.toHaveTextContent("summary-model");
     expect(stats).toHaveTextContent("Tokens saved");
     expect(stats).toHaveTextContent("9,000");
     expect(stats).toHaveTextContent("Reduction");
@@ -350,14 +350,96 @@ describe("SummarizationMessage", () => {
     expect(stats).toHaveTextContent("9,000");
     expect(stats).toHaveTextContent("Reduction");
     expect(stats).toHaveTextContent("75%");
-    expect(stats).toHaveTextContent("Summary model");
-    expect(stats).toHaveTextContent("summary-model");
+    expect(stats).not.toHaveTextContent("Summary model");
+    expect(stats).not.toHaveTextContent("summary-model");
     expect(stats).not.toHaveTextContent("Tokens before");
 
     await user.click(screen.getByTestId("summarization-card-header"));
     expect(
-      screen.getByText(/Markdown details stay expandable/u),
+      screen.getByText(/Details are shown in the compact report above/u),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/Markdown details stay expandable/u)).toBeNull();
+  });
+
+  it("legacy compression report copy does not claim original messages remain visible", () => {
+    render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier1_llm",
+          content: "## Legacy report\n\nThis markdown should stay collapsed.",
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            source_message_count: 3,
+            estimated_tokens_saved: 1200,
+          },
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        /Older context was summarized so this chat can continue within the model limit/u,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Original messages remain visible/u),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Messages compressed",
+    );
+  });
+
+  it("compression report copy says original messages remain visible", () => {
+    render(
+      <SummarizationMessage
+        message={makeMessage({
+          summarization_tier: "tier1_llm",
+          content: "## Verbose report\n\nThis markdown should stay collapsed.",
+          compression_report: {
+            kind: "chat_compression_report",
+            compression_kind: "llm_segment_summary",
+            insert_mode: "source_preserving",
+            source_message_count: 3,
+            estimated_tokens_saved: 1200,
+            preserved_context_file_count: 2,
+            compressed_tool_output_count: 1,
+          },
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Original messages remain visible/u),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Messages summarized",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "3",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Tokens saved",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "1,200",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Context files preserved",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "2",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "Tool outputs compressed",
+    );
+    expect(screen.getByTestId("summarization-card-summary")).toHaveTextContent(
+      "1",
+    );
+    expect(
+      screen.queryByText(/This markdown should stay collapsed/u),
+    ).toBeNull();
+    expect(screen.queryByText(/replaced/iu)).toBeNull();
   });
 
   it("toggles expansion from the keyboard", async () => {

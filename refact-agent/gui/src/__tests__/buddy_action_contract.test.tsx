@@ -823,7 +823,7 @@ describe("buddy action execution contract", () => {
         });
       }),
     );
-    const store = setUpStore();
+    const store = setUpStore(CONFIG_STATE);
     const runtime = makeRuntimeEvent({
       id: "runtime-investigate-dismiss-fails",
       controls: [

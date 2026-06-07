@@ -56,8 +56,11 @@ function matchingCompressedAssistantMessage(
     extra: {
       compression: {
         kind: "llm_segment_summary",
+        insert_mode: "source_preserving",
         source_hash: "source-hash-1",
         source_message_ids: ["user-before", "assistant-old-1"],
+        summarized_source_message_ids: ["user-before", "assistant-old-1"],
+        preserved_source_message_ids: [],
         summary_model: "summary-model",
       },
     },
@@ -124,14 +127,41 @@ function matchingLlmCompressionReportMessage(
   overrides: Partial<CompressionReportMessage> = {},
 ): CompressionReportMessage {
   return compressionReportMessage({
+    content:
+      "## Chat context compressed\n\nOriginal messages remain visible in this chat.",
     extra: {
       compression_report: {
         kind: "chat_compression_report",
         compression_kind: "llm_segment_summary",
+        insert_mode: "source_preserving",
         source_hash: "source-hash-1",
         source_message_ids: ["user-before", "assistant-old-1"],
+        summarized_source_message_ids: ["user-before", "assistant-old-1"],
+        preserved_source_message_ids: [],
         source_message_count: 2,
         summary_model: "summary-model",
+        estimated_tokens_saved: 1000,
+      },
+    },
+    ...overrides,
+  });
+}
+
+function legacyLlmCompressionReportMessage(
+  overrides: Partial<CompressionReportMessage> = {},
+): CompressionReportMessage {
+  return compressionReportMessage({
+    content:
+      "## Chat context compressed\n\nOlder messages were summarized for future model context.",
+    extra: {
+      compression_report: {
+        kind: "chat_compression_report",
+        compression_kind: "llm_segment_summary",
+        source_hash: "legacy-source-hash-1",
+        source_message_ids: ["assistant-old-1"],
+        source_message_count: 1,
+        summary_model: "summary-model",
+        estimated_tokens_saved: 1000,
       },
     },
     ...overrides,
@@ -348,6 +378,103 @@ describe("ChatContent display items", () => {
     });
   });
 
+  it("renders source-preserving compression report without hiding original source messages", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before", content: "source user" }),
+      assistantMessage({
+        message_id: "assistant-old-1",
+        content: "source assistant",
+      }),
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+      matchingCompressedAssistantMessage({ message_id: "internal-summary" }),
+      userMessage({ message_id: "user-after", content: "after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "assistant",
+      "summarization",
+      "user",
+    ]);
+    expect(items[1]?.type).toBe("assistant");
+    if (items[1]?.type !== "assistant") {
+      throw new Error("Expected original assistant item");
+    }
+    expect(items[1].message.content).toBe("source assistant");
+  });
+
+  it("hides paired source-preserving internal summary", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      assistantMessage({ message_id: "assistant-old-1" }),
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+      matchingCompressedAssistantMessage({ message_id: "internal-summary" }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(
+      items.some(
+        (item) =>
+          item.type === "summarization" &&
+          item.message.content === "internal compressed summary",
+      ),
+    ).toBe(false);
+    expect(items.filter((item) => item.type === "summarization")).toHaveLength(
+      1,
+    );
+  });
+
+  it("legacy replacement-style report and summary intentionally collapse to one report card", () => {
+    const messages: ChatMessages = [
+      userMessage({ message_id: "user-before" }),
+      legacyLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+      compressedAssistantMessage({
+        message_id: "legacy-internal-summary",
+        extra: {
+          compression: {
+            kind: "llm_segment_summary",
+            source_hash: "legacy-source-hash-1",
+            source_message_ids: ["assistant-old-1"],
+          },
+        },
+      }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+    const reportItem = items.find((item) => item.type === "summarization");
+
+    expect(items.map((item) => item.type)).toEqual([
+      "user",
+      "summarization",
+      "user",
+    ]);
+    expect(items.filter((item) => item.type === "summarization")).toHaveLength(
+      1,
+    );
+    expect(reportItem?.type).toBe("summarization");
+    if (reportItem?.type !== "summarization") {
+      throw new Error("Expected legacy report summarization item");
+    }
+    expect(reportItem.message.content).toContain(
+      "Older messages were summarized",
+    );
+    expect(reportItem.message.content).not.toContain(
+      "Original messages remain visible",
+    );
+    expect(reportItem.message.compression_report?.insert_mode).toBeUndefined();
+  });
+
   it("matching_llm_report_and_summary_render_single_report_card", () => {
     const messages: ChatMessages = [
       userMessage({ message_id: "user-before" }),
@@ -374,7 +501,9 @@ describe("ChatContent display items", () => {
       throw new Error("Expected report summarization item");
     }
     expect(reportItem.messageIndex).toBe(1);
-    expect(reportItem.message.content).toContain("Chat compression report");
+    expect(reportItem.message.content).toContain(
+      "Original messages remain visible",
+    );
   });
 
   it("forward_llm_report_hides_legacy_summary_using_source_message_ids", () => {
@@ -409,7 +538,9 @@ describe("ChatContent display items", () => {
     ]);
     expect(summarizationItems).toHaveLength(1);
     expect(reportItem.messageIndex).toBe(1);
-    expect(reportItem.message.content).toContain("Chat compression report");
+    expect(reportItem.message.content).toContain(
+      "Original messages remain visible",
+    );
   });
 
   it("matching_llm_report_after_summary_does_not_hide_legacy_summary", () => {
@@ -622,6 +753,43 @@ describe("ChatContent display items", () => {
     expect(
       (incrementalItems ?? []).filter((item) => item.type === "summarization"),
     ).toHaveLength(1);
+  });
+
+  it("incremental report+summary inserted after existing source matches full rebuild", () => {
+    const userBefore = userMessage({ message_id: "user-before" });
+    const sourceAssistant = assistantMessage({ message_id: "assistant-old-1" });
+    const userAfter = userMessage({ message_id: "user-after" });
+    const previousMessages: ChatMessages = [
+      userBefore,
+      sourceAssistant,
+      userAfter,
+    ];
+    const nextMessages: ChatMessages = [
+      userBefore,
+      sourceAssistant,
+      matchingLlmCompressionReportMessage({
+        message_id: "compression-report",
+      }),
+      matchingCompressedAssistantMessage({ message_id: "internal-summary" }),
+      userAfter,
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).not.toBeNull();
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    expect(incrementalItems?.map((item) => item.type)).toEqual([
+      "user",
+      "assistant",
+      "summarization",
+      "user",
+    ]);
   });
 
   it("matches full rebuild when appending a compression_report message", () => {
