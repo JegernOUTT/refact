@@ -44,7 +44,9 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
       <span className={styles.identity}>
         <span className={styles.iconWrap}>{getProviderIcon(provider)}</span>
         <span className={styles.copy}>
-          <span className={styles.providerName}>{providerName}</span>
+          <span className={styles.providerName} role="heading" aria-level={3}>
+            {providerName}
+          </span>
           {showInstanceId ? <span className={styles.providerId}>{provider.name}</span> : null}
         </span>
       </span>
