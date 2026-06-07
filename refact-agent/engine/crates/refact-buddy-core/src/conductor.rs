@@ -205,6 +205,12 @@ pub struct DoneWhen {
     pub checklist: Vec<String>,
 }
 
+impl DoneWhen {
+    pub fn has_completion_criteria(&self) -> bool {
+        !self.summary.trim().is_empty() || self.checklist.iter().any(|item| !item.trim().is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ConductorMemo {
@@ -452,6 +458,7 @@ impl Default for ConductorWakeReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalValidationError {
+    MissingDoneWhen,
     MissingWallClockSecs,
     ZeroWallClockSecs,
     MissingNoProgressWakes,
@@ -461,6 +468,9 @@ pub enum GoalValidationError {
 impl fmt::Display for GoalValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingDoneWhen => {
+                write!(f, "goal done_when requires a summary or checklist item")
+            }
             Self::MissingWallClockSecs => write!(f, "goal budget requires wall_clock_secs"),
             Self::ZeroWallClockSecs => {
                 write!(f, "goal budget wall_clock_secs must be greater than zero")
@@ -534,7 +544,16 @@ pub fn parse_goal_doc(content: &str) -> Result<ConductorGoal, GoalDocParseError>
 }
 
 pub fn validate_goal_for_create(goal: &ConductorGoal) -> Result<(), GoalValidationError> {
+    validate_done_when(&goal.done_when)?;
     validate_goal_budget(&goal.budget)
+}
+
+pub fn validate_done_when(done_when: &DoneWhen) -> Result<(), GoalValidationError> {
+    if done_when.has_completion_criteria() {
+        Ok(())
+    } else {
+        Err(GoalValidationError::MissingDoneWhen)
+    }
 }
 
 pub fn validate_goal_budget(budget: &GoalBudget) -> Result<(), GoalValidationError> {
@@ -709,7 +728,10 @@ mod tests {
         assert_eq!(goal.done_when, DoneWhen::default());
         assert_eq!(goal.spent.elapsed_secs, 0);
         assert!(goal.ledger.memos.is_empty());
-        validate_goal_for_create(&goal).unwrap();
+        assert_eq!(
+            validate_goal_for_create(&goal),
+            Err(GoalValidationError::MissingDoneWhen)
+        );
     }
 
     #[test]
@@ -754,6 +776,8 @@ budget:
   no_progress_wakes: 4
   token_ceiling: 123456
   usd_ceiling: 7.25
+done_when:
+  summary: Budget is bounded
 ---
 # Budget aliases
 "#;
@@ -834,11 +858,69 @@ budget:
     }
 
     #[test]
+    fn parse_goal_doc_rejects_missing_done_when() {
+        let doc = r#"---
+title: Missing done when
+budget:
+  wall_clock_secs: 60
+  no_progress_wakes: 2
+---
+# Missing done when
+"#;
+
+        let err = parse_goal_doc(doc).unwrap_err();
+
+        assert_eq!(
+            err,
+            GoalDocParseError::Validation(GoalValidationError::MissingDoneWhen)
+        );
+        assert!(err.to_string().contains("done_when"));
+    }
+
+    #[test]
+    fn validate_goal_for_create_rejects_empty_done_when() {
+        let mut goal = full_goal();
+        goal.done_when = DoneWhen {
+            summary: "   ".to_string(),
+            checklist: vec!["".to_string(), "  ".to_string()],
+        };
+
+        assert_eq!(
+            validate_goal_for_create(&goal),
+            Err(GoalValidationError::MissingDoneWhen)
+        );
+    }
+
+    #[test]
+    fn validate_goal_for_create_accepts_summary_only_done_when() {
+        let mut goal = full_goal();
+        goal.done_when = DoneWhen {
+            summary: "Ready to ship".to_string(),
+            checklist: Vec::new(),
+        };
+
+        validate_goal_for_create(&goal).unwrap();
+    }
+
+    #[test]
+    fn validate_goal_for_create_accepts_checklist_only_done_when() {
+        let mut goal = full_goal();
+        goal.done_when = DoneWhen {
+            summary: "".to_string(),
+            checklist: vec!["   ".to_string(), "Smoke tests pass".to_string()],
+        };
+
+        validate_goal_for_create(&goal).unwrap();
+    }
+
+    #[test]
     fn parse_goal_doc_rejects_missing_wall_clock_budget() {
         let doc = r#"---
 title: Missing wall clock
 budget:
   no_progress_wakes: 2
+done_when:
+  summary: Budget validation still runs
 ---
 # Missing wall clock
 "#;
@@ -857,6 +939,8 @@ budget:
 title: Missing no-progress
 budget:
   wall_clock_secs: 60
+done_when:
+  summary: Budget validation still runs
 ---
 # Missing no-progress
 "#;

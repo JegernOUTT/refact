@@ -188,13 +188,13 @@ pub async fn handle_v1_buddy_conductor_goal_patch(
     }
     if let Some(budget) = req.budget {
         goal.budget = budget;
-        validate_goal_for_create(&goal).map_err(|error| {
-            ScratchError::new(
-                StatusCode::BAD_REQUEST,
-                format!("invalid conductor goal: {error}"),
-            )
-        })?;
     }
+    validate_goal_for_create(&goal).map_err(|error| {
+        ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid conductor goal: {error}"),
+        )
+    })?;
     persist_goal(&project_root, &mut goal).await?;
     let goal = refresh_targets_and_emit(app, goal, None).await;
     Ok(axum::Json(goal))
@@ -647,6 +647,67 @@ mod tests {
 
         assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
         assert!(error.message.contains("wall_clock_secs"));
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_create_rejects_empty_done_when() {
+        let (app, _dir) = test_app().await;
+        let mut req = create_req("goal-empty-done-when");
+        req.done_when = DoneWhen {
+            summary: "   ".to_string(),
+            checklist: vec!["".to_string(), "  ".to_string()],
+        };
+
+        let error = handle_v1_buddy_conductor_goal_create(State(app), axum::Json(req))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("done_when"));
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_create_rejects_missing_done_when() {
+        let (app, _dir) = test_app().await;
+        let req: CreateConductorGoalRequest = serde_json::from_value(json!({
+            "id": "goal-missing-done-when",
+            "title": "Missing done_when",
+            "budget": {
+                "wall_clock_secs": 60,
+                "no_progress_wakes": 2
+            }
+        }))
+        .unwrap();
+
+        let error = handle_v1_buddy_conductor_goal_create(State(app), axum::Json(req))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("done_when"));
+    }
+
+    #[tokio::test]
+    async fn buddy_conductor_routes_patch_rejects_clearing_done_when() {
+        let (app, _dir) = test_app().await;
+        create_goal(app.clone(), "goal-clear-done-when").await;
+
+        let error = handle_v1_buddy_conductor_goal_patch(
+            State(app),
+            Path("goal-clear-done-when".to_string()),
+            axum::Json(PatchConductorGoalRequest {
+                done_when: Some(DoneWhen {
+                    summary: "".to_string(),
+                    checklist: Vec::new(),
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("done_when"));
     }
 
     #[tokio::test]
