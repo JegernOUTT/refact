@@ -1,51 +1,121 @@
 .ToolConfirmationCard {
   width: 100%;
-  padding: 15px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-radius: 8px;
-  background-color: var(--gray-1);
-  flex-shrink: 0; /* this one should fix issue with shrinking */
-  /* Force GPU compositing to fix JCEF repaint issues in JetBrains IDEs */
+  flex-shrink: 0;
+  padding: var(--rf-space-4);
   transform: translateZ(0);
   will-change: transform;
-  & pre {
-    margin: 0;
-  }
+}
+
+.ToolConfirmationLayout {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-4);
+}
+
+.ToolConfirmationContent {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-direction: column;
+  gap: var(--rf-space-3);
 }
 
 .ToolConfirmationHeading {
-  font-size: 14px;
-  opacity: 0.8;
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 650;
+  line-height: var(--rf-line);
 }
 
 .ToolConfirmationText {
-  display: inline-block;
   max-width: 100%;
-  font-size: 15px;
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-4);
+  line-height: var(--rf-line);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.ToolConfirmationTool {
-  font-weight: 700;
+.ToolList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
 }
 
-.ToolConfirmationRule {
-  display: block;
-  font-weight: 700;
+.ToolItem {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-1);
+}
+
+.CommandPreview {
+  max-width: 100%;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+  overflow-wrap: anywhere;
+}
+
+.IntegrationHint {
+  margin: var(--rf-space-3) 0 0;
+}
+
+.ActionRow,
+.PatchActionRow,
+.PrimaryActions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.ActionRow {
+  justify-content: flex-start;
+}
+
+.PatchActionRow {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.PrimaryActions {
+  flex-wrap: wrap;
+}
+
+.CacheGuardScroll {
+  width: 100%;
+  max-height: var(--rf-overlay-popover-max);
+  overflow-y: auto;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
 }
 
 .CacheGuardDiff {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
-  width: 100%;
-  max-height: 360px;
-  overflow: auto;
-  padding: 10px;
-  border: 1px solid var(--gray-6);
-  border-radius: 6px;
-  background-color: var(--gray-2);
-  font-family: var(--default-font-family);
-  font-size: 12px;
+  min-width: max-content;
+  margin: 0;
+  padding: var(--rf-space-3);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
   white-space: pre;
+}
+
+@media (max-width: calc(var(--rf-sidebar-w-min) + var(--rf-space-6))) {
+  .PatchActionRow {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }

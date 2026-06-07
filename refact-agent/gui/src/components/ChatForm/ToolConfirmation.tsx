@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo, useState } from "react";
+import classNames from "classnames";
+import { AlertTriangle, OctagonX } from "lucide-react";
 import { useAppDispatch, useAppSelector, useChatActions } from "../../hooks";
-import { Card, Button, Text, Flex } from "@radix-ui/themes";
 import { Markdown } from "../Markdown";
 import { Link } from "../Link";
 import styles from "./ToolConfirmation.module.css";
@@ -16,7 +17,7 @@ import {
   setAutoApproveEditingTools,
 } from "../../features/Chat";
 import { PATCH_LIKE_FUNCTIONS } from "./constants";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
+import { Badge, Button, Icon, IconButton, Surface } from "../ui";
 
 type ToolConfirmationProps = {
   pauseReasons: ToolConfirmationPauseReason[];
@@ -87,6 +88,10 @@ function extractCacheGuardDiff(command: string): string {
 function extractEstimatedUsd(command: string): string | null {
   const match = command.match(/`\$([0-9]+(?:\.[0-9]+)?)`\s*USD/);
   return match?.[1] ?? null;
+}
+
+function trimCommand(command: string): string {
+  return command.length > 200 ? `${command.slice(0, 200)}...` : command;
 }
 
 export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
@@ -237,45 +242,31 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   }
 
   return (
-    <Card className={styles.ToolConfirmationCard}>
-      <Flex
-        align="start"
-        justify="between"
-        direction="column"
-        wrap="wrap"
-        gap="4"
-      >
-        <Flex align="start" direction="column" gap="3" maxWidth="100%">
-          <Flex
-            align="baseline"
-            gap="1"
-            className={styles.ToolConfirmationHeading}
-          >
-            <Text as="span" color="amber">
-              <ExclamationTriangleIcon />
-            </Text>
-            <Text>Model {allConfirmation ? "wants" : "tried"} to run:</Text>
-          </Flex>
-          {resolvedReasons.map((r) => (
-            <Flex key={r.tool_call_id} direction="column" gap="1">
-              <Markdown>{`\`${r.toolName}\``}</Markdown>
-              {r.command && r.command !== r.toolName && (
-                <Text
-                  size="1"
-                  color="gray"
-                  style={{ fontFamily: "monospace", wordBreak: "break-all" }}
-                >
-                  {r.command.length > 200
-                    ? r.command.slice(0, 200) + "..."
-                    : r.command}
-                </Text>
-              )}
-            </Flex>
-          ))}
-          <Text className={styles.ToolConfirmationText}>
+    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
+      <div className={styles.ToolConfirmationLayout}>
+        <div className={styles.ToolConfirmationContent}>
+          <div className={styles.ToolConfirmationHeading}>
+            <Icon icon={AlertTriangle} size="sm" tone="warning" />
+            <span>Model {allConfirmation ? "wants" : "tried"} to run:</span>
+          </div>
+          <div className={styles.ToolList}>
+            {resolvedReasons.map((r) => (
+              <div className={styles.ToolItem} key={r.tool_call_id}>
+                <Badge tone={r.type === "denial" ? "danger" : "warning"}>
+                  {r.toolName}
+                </Badge>
+                {r.command && r.command !== r.toolName && (
+                  <span className={styles.CommandPreview}>
+                    {trimCommand(r.command)}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className={styles.ToolConfirmationText}>
             <Markdown color="indigo">{message.concat("\n\n")}</Markdown>
             {maybeIntegrationPath && (
-              <Text className={styles.ToolConfirmationText} mt="3">
+              <p className={styles.IntegrationHint}>
                 You can modify the ruleset on{" "}
                 <Link
                   onClick={() => {
@@ -291,32 +282,22 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
                 >
                   Configuration Page
                 </Link>
-              </Text>
+              </p>
             )}
-          </Text>
-        </Flex>
-        <Flex align="end" justify="start" gap="2" direction="row">
-          <Button
-            color="grass"
-            variant="surface"
-            size="1"
-            onClick={confirmToolUsage}
-          >
+          </div>
+        </div>
+        <div className={styles.ActionRow}>
+          <Button variant="primary" size="sm" onClick={confirmToolUsage}>
             {allConfirmation ? "Confirm" : "Continue"}
           </Button>
           {allConfirmation && (
-            <Button
-              color="red"
-              variant="surface"
-              size="1"
-              onClick={handleReject}
-            >
+            <Button variant="danger" size="sm" onClick={handleReject}>
               Stop
             </Button>
           )}
-        </Flex>
-      </Flex>
-    </Card>
+        </div>
+      </div>
+    </Surface>
   );
 };
 
@@ -336,51 +317,39 @@ const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
   const estimatedUsd = extractEstimatedUsd(details);
 
   return (
-    <Card className={styles.ToolConfirmationCard}>
-      <Flex direction="column" gap="3">
-        <Flex
-          align="baseline"
-          gap="1"
-          className={styles.ToolConfirmationHeading}
-        >
-          <Text as="span" color="amber">
-            <ExclamationTriangleIcon />
-          </Text>
-          <Text>Prompt cache may be broken</Text>
-        </Flex>
+    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
+      <div className={styles.ToolConfirmationLayout}>
+        <div className={styles.ToolConfirmationContent}>
+          <div className={styles.ToolConfirmationHeading}>
+            <Icon icon={AlertTriangle} size="sm" tone="warning" />
+            <span>Prompt cache may be broken</span>
+          </div>
 
-        {estimatedUsd && (
-          <Text className={styles.ToolConfirmationText}>
-            Estimated extra cost: <strong>${estimatedUsd} USD</strong>
-          </Text>
-        )}
+          {estimatedUsd && (
+            <p className={styles.ToolConfirmationText}>
+              Estimated extra cost: <strong>${estimatedUsd} USD</strong>
+            </p>
+          )}
 
-        <Text className={styles.ToolConfirmationText}>
-          Force will allow this request once and refresh cache snapshot.
-        </Text>
+          <p className={styles.ToolConfirmationText}>
+            Force will allow this request once and refresh cache snapshot.
+          </p>
 
-        <pre className={styles.CacheGuardDiff}>{diff}</pre>
+          <div className={classNames("scrollX", styles.CacheGuardScroll)}>
+            <pre className={styles.CacheGuardDiff}>{diff}</pre>
+          </div>
+        </div>
 
-        <Flex align="end" justify="start" gap="2" direction="row">
-          <Button
-            color="grass"
-            variant="surface"
-            size="1"
-            onClick={confirmToolUsage}
-          >
+        <div className={styles.ActionRow}>
+          <Button variant="primary" size="sm" onClick={confirmToolUsage}>
             Force and Continue
           </Button>
-          <Button
-            color="red"
-            variant="surface"
-            size="1"
-            onClick={rejectToolUsage}
-          >
+          <Button variant="danger" size="sm" onClick={rejectToolUsage}>
             Stop
           </Button>
-        </Flex>
-      </Flex>
-    </Card>
+        </div>
+      </div>
+    </Surface>
   );
 };
 
@@ -422,59 +391,40 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
   }, [pauseReasons, toolCallsById]);
 
   return (
-    <Card className={styles.ToolConfirmationCard}>
-      <Flex
-        align="start"
-        justify="between"
-        direction="column"
-        wrap="wrap"
-        gap="4"
-      >
-        <Flex align="start" direction="column" gap="3" maxWidth="100%">
-          <Flex
-            align="baseline"
-            gap="1"
-            className={styles.ToolConfirmationHeading}
-          >
-            <Text as="span" color="amber">
-              <ExclamationTriangleIcon />
-            </Text>
-            <Text>Model wants to apply changes:</Text>
-          </Flex>
-          <Text className={styles.ToolConfirmationText}>
+    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
+      <div className={styles.ToolConfirmationLayout}>
+        <div className={styles.ToolConfirmationContent}>
+          <div className={styles.ToolConfirmationHeading}>
+            <Icon icon={AlertTriangle} size="sm" tone="warning" />
+            <span>Model wants to apply changes:</span>
+          </div>
+          <div className={styles.ToolConfirmationText}>
             <Markdown color="indigo">{messageForPatch.concat("\n\n")}</Markdown>
-          </Text>
-        </Flex>
-        <Flex align="center" justify="between" gap="2" width="100%">
-          <Flex gap="2">
+          </div>
+        </div>
+        <div className={styles.PatchActionRow}>
+          <div className={styles.PrimaryActions}>
             <Button
-              color="grass"
-              variant="surface"
-              size="1"
+              variant="primary"
+              size="sm"
               onClick={() => void handleAllowForThisChat()}
-              disabled={isSettingAutoApprove}
+              loading={isSettingAutoApprove}
             >
               {isSettingAutoApprove ? "Setting..." : "Allow for This Chat"}
             </Button>
-            <Button
-              color="grass"
-              variant="surface"
-              size="1"
-              onClick={confirmToolUsage}
-            >
+            <Button variant="primary" size="sm" onClick={confirmToolUsage}>
               Allow Once
             </Button>
-          </Flex>
-          <Button
-            color="red"
-            variant="surface"
-            size="1"
+          </div>
+          <IconButton
+            aria-label="Stop"
+            icon={OctagonX}
+            variant="danger"
+            size="sm"
             onClick={rejectToolUsage}
-          >
-            Stop
-          </Button>
-        </Flex>
-      </Flex>
-    </Card>
+          />
+        </div>
+      </div>
+    </Surface>
   );
 };
