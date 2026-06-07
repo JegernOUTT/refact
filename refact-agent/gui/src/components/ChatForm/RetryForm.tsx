@@ -5,44 +5,42 @@ import React, {
   useRef,
   useState,
 } from "react";
-import {
-  Button,
-  Flex,
-  Box,
-  IconButton,
-  Popover,
-  Text,
-  Separator,
-  Badge,
-} from "@radix-ui/themes";
+import { Check, ChevronDown, Plus, X } from "lucide-react";
 import { FileRejection, useDropzone } from "react-dropzone";
+import classNames from "classnames";
+
 import { TextArea } from "../TextArea";
 import { useAppSelector, useCapsForToolUse } from "../../hooks";
-
 import {
   ProcessedUserMessageContentWithImages,
   UserImage,
   UserMessage,
 } from "../../services/refact";
-import {
-  Cross2Icon,
-  CheckIcon,
-  PlusIcon,
-  ChevronDownIcon,
-} from "@radix-ui/react-icons";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { selectIsStreaming, selectIsWaiting } from "../../features/Chat";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
-import styles from "./ChatForm.module.css";
-import dropdownStyles from "./ChatSettingsDropdown.module.css";
-import classNames from "classnames";
 import { DialogImage } from "../DialogImage";
+import {
+  Button,
+  IconButton,
+  ModelSelector,
+  Popover,
+  type ModelOption,
+  type ModelSelectorBadge,
+  type ModelSelectorGroup,
+} from "../ui";
+import {
+  formatContextWindow,
+  formatPricing,
+} from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
+import styles from "./RetryForm.module.css";
 
 function getTextFromUserMessage(messages: UserMessage["content"]): string {
   if (typeof messages === "string") return messages;
   return messages.reduce<string>((acc, message) => {
-    if ("m_type" in message && message.m_type === "text")
+    if ("m_type" in message && message.m_type === "text") {
       return acc + message.m_content;
+    }
     if ("type" in message && message.type === "text") return acc + message.text;
     return acc;
   }, "");
@@ -53,25 +51,24 @@ function getImageFromUserMessage(
 ): (UserImage | ProcessedUserMessageContentWithImages)[] {
   if (typeof messages === "string") return [];
 
-  const images = messages.reduce<
+  return messages.reduce<
     (UserImage | ProcessedUserMessageContentWithImages)[]
   >((acc, message) => {
-    if ("m_type" in message && message.m_type.startsWith("image/"))
+    if ("m_type" in message && message.m_type.startsWith("image/")) {
       return [...acc, message];
-    if ("type" in message && message.type === "image_url")
+    }
+    if ("type" in message && message.type === "image_url") {
       return [...acc, message];
+    }
     return acc;
   }, []);
-
-  return images;
 }
 
 function getImageContent(
   image: UserImage | ProcessedUserMessageContentWithImages,
 ) {
   if ("type" in image) return image.image_url.url;
-  const base64 = `data:${image.m_type};base64,${image.m_content}`;
-  return base64;
+  return `data:${image.m_type};base64,${image.m_content}`;
 }
 
 export const RetryForm: React.FC<{
@@ -105,15 +102,17 @@ export const RetryForm: React.FC<{
     props.onClose();
   }, [inputImages, inputText, props]);
 
-  // Click outside to cancel edit
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (formRef.current && !formRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (target instanceof Element && target.closest(`.${styles.modelContent}`)) {
+        return;
+      }
+      if (formRef.current && !formRef.current.contains(target)) {
         closeAndReset();
       }
     };
 
-    // Use mousedown to catch the click before focus changes
     document.addEventListener("mousedown", handleClickOutside);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
@@ -142,19 +141,16 @@ export const RetryForm: React.FC<{
 
   const handleOnKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      // Don't handle during IME composition
       if (event.nativeEvent.isComposing) {
         return;
       }
 
-      // Escape: cancel and close
       if (event.key === "Escape") {
         event.preventDefault();
         closeAndReset();
         return;
       }
 
-      // Enter without Shift: submit
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         if (
@@ -163,10 +159,7 @@ export const RetryForm: React.FC<{
         ) {
           handleRetry();
         }
-        return;
       }
-
-      // Shift+Enter: allow newline (default behavior, no preventDefault)
     },
     [closeAndReset, disableInput, textValue, imageValue, handleRetry],
   );
@@ -178,26 +171,16 @@ export const RetryForm: React.FC<{
   }, []);
 
   return (
-    <Box
-      ref={formRef}
-      className={classNames(styles.chatForm, styles.chatFormCompact)}
-    >
+    <div ref={formRef} className={styles.root}>
       <form
+        className={styles.form}
         onSubmit={(event) => {
           event.preventDefault();
           handleRetry();
         }}
       >
-        {/* Attachments at top */}
         {imageValue.length > 0 && (
-          <Flex
-            px="3"
-            py="2"
-            wrap="wrap"
-            direction="row"
-            align="center"
-            gap="2"
-          >
+          <div className={styles.attachments}>
             {imageValue.map((image, index) => {
               return (
                 <RetryImage
@@ -207,54 +190,50 @@ export const RetryForm: React.FC<{
                 />
               );
             })}
-          </Flex>
+          </div>
         )}
 
-        {/* TextArea */}
-        <Box className={styles.textareaWrapper}>
+        <div className={styles.textareaWrapper}>
           <TextArea
             value={textValue}
             onChange={(event) => onChangeTextValue(event.target.value)}
             onKeyDown={handleOnKeyDown}
             autoFocus
-            style={{ boxShadow: "none", outline: "none" }}
           />
-        </Box>
+        </div>
 
-        {/* Bottom controls */}
-        <Flex align="center" gap="2" py="2" px="3">
+        <div className={styles.controls}>
           <Button
-            variant="ghost"
-            color="gray"
-            size="1"
+            leftIcon={X}
+            size="sm"
             type="button"
+            variant="ghost"
             onClick={closeAndReset}
           >
-            <Cross2Icon width={14} height={14} />
             Cancel
           </Button>
 
-          <Box flexGrow="1" />
+          <span className={styles.controlsSpacer} />
 
           <RetryModelSelector disabled={disableInput} />
           {isMultimodalitySupportedForCurrentModel && (
             <RetryDropzone addImage={addImage} />
           )}
           <Button
-            variant="solid"
-            size="1"
-            type="submit"
             disabled={
               disableInput ||
               (textValue.trim().length === 0 && imageValue.length === 0)
             }
+            leftIcon={Check}
+            size="sm"
+            type="submit"
+            variant="primary"
           >
-            <CheckIcon width={14} height={14} />
             Submit
           </Button>
-        </Flex>
+        </div>
       </form>
-    </Box>
+    </div>
   );
 };
 
@@ -306,20 +285,19 @@ const RetryDropzone: React.FC<{
   });
 
   return (
-    <div {...getRootProps()} style={{ display: "flex", alignItems: "center" }}>
-      <input {...getInputProps()} style={{ display: "none" }} />
+    <div {...getRootProps()} className={styles.dropzoneRoot}>
+      <input {...getInputProps()} hidden />
       <Button
-        size="1"
-        variant="ghost"
-        color="gray"
+        leftIcon={Plus}
+        size="sm"
         type="button"
+        variant="ghost"
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
           open();
         }}
       >
-        <PlusIcon width={14} height={14} />
         Add image
       </Button>
     </div>
@@ -331,73 +309,83 @@ const RetryImage: React.FC<{ image: string; onRemove: () => void }> = ({
   onRemove,
 }) => {
   return (
-    <Box position="relative" style={{ display: "inline-block" }}>
+    <span className={styles.imageFrame}>
       <DialogImage src={image} size="5" />
       <IconButton
-        variant="solid"
-        color="gray"
-        size="1"
+        aria-label="Remove image"
+        className={styles.removeImageButton}
+        icon={X}
+        size="sm"
         type="button"
+        variant="soft"
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
           onRemove();
         }}
-        style={{
-          position: "absolute",
-          right: -6,
-          top: -6,
-          width: 18,
-          height: 18,
-          padding: 0,
-          borderRadius: "50%",
-        }}
-      >
-        <Cross2Icon width={10} height={10} />
-      </IconButton>
-    </Box>
+      />
+    </span>
   );
 };
 
 const RetryModelSelector: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
   const caps = useCapsForToolUse();
   const [isOpen, setIsOpen] = useState(false);
-  const selectedModelRef = useRef<HTMLButtonElement>(null);
-  const modelListRef = useRef<HTMLDivElement>(null);
-
-  const currentModelName = caps.currentModel || "Select model";
 
   const groupedModels = useMemo(() => {
     return enrichAndGroupModels(caps.usableModelsForPlan, caps.data);
   }, [caps.usableModelsForPlan, caps.data]);
 
-  useEffect(() => {
-    if (!isOpen) return;
+  const groups = useMemo<ModelSelectorGroup[]>(() => {
+    return groupedModels.map((group) => ({
+      id: group.provider,
+      label: group.displayName,
+    }));
+  }, [groupedModels]);
 
-    const scrollToSelected = () => {
-      const container = modelListRef.current;
-      const selected = selectedModelRef.current;
-      if (container && selected && container.clientHeight > 0) {
-        const containerHeight = container.clientHeight;
-        const selectedTop = selected.offsetTop;
-        const selectedHeight = selected.offsetHeight;
-        container.scrollTop =
-          selectedTop - containerHeight / 2 + selectedHeight / 2;
-        return true;
-      }
-      return false;
-    };
+  const models = useMemo<ModelOption[]>(() => {
+    return groupedModels.flatMap((group) =>
+      group.models.map((model) => {
+        const badges: ModelSelectorBadge[] = [];
+        if (model.isDefault) badges.push("default");
+        if (model.isThinking) badges.push("reasoning");
+        if (model.isLight) badges.push("light");
+        if (model.isBuddy) badges.push("buddy");
+        if (model.isTaskPlannerAgent) badges.push("task-agent");
+        if (model.isChat2) badges.push("chat2");
 
-    let attempts = 0;
-    const maxAttempts = 10;
-    const tryScroll = () => {
-      if (scrollToSelected() || attempts >= maxAttempts) return;
-      attempts++;
-      requestAnimationFrame(tryScroll);
-    };
+        const pricingParts = model.pricing
+          ? formatPricing(model.pricing, true).split("/")
+          : null;
 
-    requestAnimationFrame(tryScroll);
-  }, [isOpen]);
+        return {
+          value: model.value,
+          displayName: model.value,
+          group: group.provider,
+          disabled: model.disabled,
+          pricing: pricingParts
+            ? {
+                prompt: pricingParts[0],
+                output: pricingParts[1],
+              }
+            : undefined,
+          contextWindow: model.nCtx
+            ? `${formatContextWindow(model.nCtx)} ctx`
+            : undefined,
+          badges,
+          capabilities: model.capabilities ? (
+            <span className={styles.capabilities}>
+              {model.capabilities.supportsTools ? <span>Tools</span> : null}
+              {model.capabilities.supportsMultimodality ? <span>Vision</span> : null}
+              {model.capabilities.supportsAgent ? <span>Agent</span> : null}
+            </span>
+          ) : undefined,
+        };
+      }),
+    );
+  }, [groupedModels]);
+
+  const currentModelName = caps.currentModel || "Select model";
 
   const handleModelSelect = useCallback(
     (modelValue: string) => {
@@ -412,102 +400,35 @@ const RetryModelSelector: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
   }
 
   return (
-    <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
-      <Popover.Trigger>
-        <button
-          className={classNames(dropdownStyles.trigger, {
-            [dropdownStyles.disabled]: disabled,
-          })}
+    <Popover open={isOpen} onOpenChange={setIsOpen} responsive={false}>
+      <Popover.Trigger asChild>
+        <Button
+          className={classNames(styles.modelSelector, styles.modelTrigger)}
           disabled={disabled}
+          rightIcon={ChevronDown}
           type="button"
+          variant="soft"
         >
-          <Flex
-            align="center"
-            gap="1"
-            className={dropdownStyles.triggerContent}
-          >
-            <Text size="1" className={dropdownStyles.modelName}>
-              {currentModelName}
-            </Text>
-            <ChevronDownIcon className={dropdownStyles.chevron} />
-          </Flex>
-        </button>
+          <span className={styles.modelTriggerText}>{currentModelName}</span>
+        </Button>
       </Popover.Trigger>
-
       <Popover.Content
-        className={dropdownStyles.content}
-        side="top"
         align="end"
+        className={styles.modelContent}
+        maxHeight="min(520px, calc(100dvh - var(--rf-space-6)))"
+        maxWidth="420px"
+        side="top"
         sideOffset={8}
       >
-        <div className={dropdownStyles.section}>
-          <div className={dropdownStyles.modelList} ref={modelListRef}>
-            {groupedModels.map((group, groupIndex) => (
-              <React.Fragment key={group.provider}>
-                {groupIndex > 0 && (
-                  <Separator
-                    size="4"
-                    className={dropdownStyles.groupSeparator}
-                  />
-                )}
-                <Text
-                  size="1"
-                  color="gray"
-                  className={dropdownStyles.groupHeader}
-                >
-                  {group.displayName}
-                </Text>
-                {group.models.map((model) => {
-                  const isSelected = caps.currentModel === model.value;
-                  return (
-                    <button
-                      key={model.value}
-                      ref={isSelected ? selectedModelRef : undefined}
-                      className={classNames(dropdownStyles.item, {
-                        [dropdownStyles.itemSelected]: isSelected,
-                        [dropdownStyles.itemDisabled]: model.disabled,
-                      })}
-                      onClick={() => handleModelSelect(model.value)}
-                      disabled={disabled ?? model.disabled}
-                      type="button"
-                    >
-                      <Flex align="center" gap="1">
-                        <Text
-                          size="1"
-                          weight="medium"
-                          className={dropdownStyles.itemModelName}
-                        >
-                          {model.value}
-                        </Text>
-                        {model.isDefault && (
-                          <Badge
-                            size="1"
-                            color="blue"
-                            variant="soft"
-                            className={dropdownStyles.badge}
-                          >
-                            Default
-                          </Badge>
-                        )}
-                        {model.isThinking && (
-                          <Badge
-                            size="1"
-                            color="purple"
-                            variant="soft"
-                            className={dropdownStyles.badge}
-                          >
-                            Reasoning
-                          </Badge>
-                        )}
-                      </Flex>
-                    </button>
-                  );
-                })}
-              </React.Fragment>
-            ))}
-          </div>
-        </div>
+        <ModelSelector
+          disabled={disabled}
+          groups={groups}
+          models={models}
+          value={caps.currentModel}
+          variant="inline"
+          onSelect={handleModelSelect}
+        />
       </Popover.Content>
-    </Popover.Root>
+    </Popover>
   );
 };

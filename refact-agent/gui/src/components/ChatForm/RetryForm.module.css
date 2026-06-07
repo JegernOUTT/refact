@@ -1,0 +1,116 @@
+.root {
+  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.form {
+  min-width: 0;
+}
+
+.attachments {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+}
+
+.textareaWrapper {
+  position: relative;
+  --chat-input-padding: var(--rf-space-3);
+}
+
+.textareaWrapper :global(.rt-TextAreaRoot),
+.textareaWrapper :global(.rt-TextAreaRoot.rt-variant-surface) {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  --text-area-background-color: transparent !important;
+  --color-surface: transparent !important;
+}
+
+.textareaWrapper :global(.rt-TextAreaInput) {
+  min-height: 100px;
+  padding: var(--chat-input-padding);
+}
+
+.textareaWrapper :global(.rt-TextAreaInput),
+.textareaWrapper :global(.rt-TextAreaInput:focus),
+.textareaWrapper :global(.rt-TextAreaInput:focus-visible) {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.controls {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+}
+
+.controlsSpacer {
+  flex: 1 1 auto;
+  min-width: var(--rf-space-4);
+}
+
+.dropzoneRoot {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.imageFrame {
+  position: relative;
+  display: inline-block;
+}
+
+.removeImageButton {
+  position: absolute;
+  top: calc(-1 * var(--rf-space-1));
+  right: calc(-1 * var(--rf-space-1));
+  border-radius: var(--rf-radius-pill);
+}
+
+.modelSelector {
+  min-width: 0;
+  max-width: min(100%, 320px);
+}
+
+.modelTrigger {
+  max-width: min(100%, 320px);
+}
+
+.modelTriggerText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modelContent {
+  width: min(420px, calc(100vw - 2 * var(--rf-space-3)));
+}
+
+.capabilities {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root,
+  .controls,
+  .attachments {
+    transition-duration: 0ms;
+  }
+}
