@@ -1,9 +1,10 @@
 import React, { useCallback } from "react";
+import classNames from "classnames";
 import { BarChart3, Box, Settings } from "lucide-react";
 import { Icon } from "../../../../components/ui";
 import { DashboardText as Text } from "../DashboardPrimitives";
-import { useAppDispatch } from "../../../../hooks";
-import { push, type Page } from "../../../Pages/pagesSlice";
+import { useAppDispatch, useAppSelector } from "../../../../hooks";
+import { push, selectCurrentPage, type Page } from "../../../Pages/pagesSlice";
 import styles from "./NavBar.module.css";
 
 type NavItem = {
@@ -30,8 +31,13 @@ const NAV_ITEMS: NavItem[] = [
   },
 ];
 
+function isActivePage(currentPage: Page | undefined, itemPage: Page): boolean {
+  return currentPage?.name === itemPage.name;
+}
+
 export const NavBar: React.FC = () => {
   const dispatch = useAppDispatch();
+  const currentPage = useAppSelector(selectCurrentPage);
 
   const handleClick = useCallback(
     (page: Page) => {
@@ -41,23 +47,29 @@ export const NavBar: React.FC = () => {
   );
 
   return (
-    <nav className={`${styles.nav} rf-enter-rise rf-stagger`}>
-      {NAV_ITEMS.map((item) => (
-        <button
-          key={item.label}
-          type="button"
-          className={`${styles.navButton} rf-pressable`}
-          onClick={() => handleClick(item.page)}
-          aria-label={item.label}
-        >
-          <span className={styles.icon}>
-            <Icon icon={item.icon} size="md" tone="muted" />
-          </span>
-          <Text size="1" tone="muted" className={styles.label}>
-            {item.label}
-          </Text>
-        </button>
-      ))}
+    <nav className={`${styles.nav} rf-glass-panel rf-enter-rise rf-stagger`}>
+      {NAV_ITEMS.map((item) => {
+        const active = isActivePage(currentPage, item.page);
+
+        return (
+          <button
+            key={item.label}
+            type="button"
+            className={classNames(styles.navButton, "rf-pressable")}
+            onClick={() => handleClick(item.page)}
+            aria-label={item.label}
+            aria-current={active ? "page" : undefined}
+            data-active={active || undefined}
+          >
+            <span className={styles.icon}>
+              <Icon icon={item.icon} size="md" tone="muted" />
+            </span>
+            <Text size="1" tone="muted" className={styles.label}>
+              {item.label}
+            </Text>
+          </button>
+        );
+      })}
     </nav>
   );
 };

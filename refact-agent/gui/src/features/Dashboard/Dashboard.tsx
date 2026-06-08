@@ -63,7 +63,7 @@ export const Dashboard: React.FC = () => {
   return (
     <div
       ref={containerRef}
-      className={styles.dashboard}
+      className={`${styles.dashboard} rf-enter`}
       data-breakpoint={breakpoint}
     >
       {isOffline ? (
@@ -74,9 +74,11 @@ export const Dashboard: React.FC = () => {
 
           <div className={styles.sectionDivider} />
 
-          <div ref={splitRef} className={styles.splitContainer}>
+          <div ref={splitRef} className={`${styles.splitContainer} rf-stagger`}>
             <Surface
-              variant="plain"
+              variant="glass"
+              radius="card"
+              animated="rise"
               className={styles.chatsWrapper}
               style={chatsFlexStyle}
               data-collapsed={collapsed.chats || undefined}
@@ -96,7 +98,9 @@ export const Dashboard: React.FC = () => {
             )}
 
             <Surface
-              variant="plain"
+              variant="glass"
+              radius="card"
+              animated="rise"
               className={styles.tasksWrapper}
               data-collapsed={collapsed.tasks || undefined}
             >

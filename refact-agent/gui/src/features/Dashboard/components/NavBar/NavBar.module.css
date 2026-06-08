@@ -1,41 +1,56 @@
 .nav {
   display: flex;
   gap: var(--rf-space-1);
-  padding: var(--rf-space-1) 0;
-  border-top: var(--rf-hairline) solid var(--rf-border);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-card);
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 .navButton {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: var(--rf-space-1) var(--rf-space-1);
-  border-radius: var(--rf-radius-ctl);
+  min-width: 0;
+  padding: var(--rf-space-1);
+  border-radius: var(--rf-radius-chip);
   border: none;
   background: transparent;
+  color: var(--rf-color-muted);
   cursor: pointer;
-  transition: background var(--rf-dur-fast) ease;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .navButton:hover {
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
+}
+
+.navButton[data-active] {
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
 .navButton:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: 1px;
+  outline-offset: var(--rf-hairline);
 }
 
 .icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--rf-color-fg);
+  color: currentColor;
 }
 
 .label {
-  color: var(--rf-color-muted);
+  max-width: 100%;
+  color: currentColor;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
