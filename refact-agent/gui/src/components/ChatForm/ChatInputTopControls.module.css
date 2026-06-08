@@ -7,11 +7,13 @@
 }
 
 .accent > span > svg {
-  color: var(--rf-color-accent);
+  color: var(--rf-color-fg);
+  color: color-mix(in srgb, var(--rf-color-accent) 12%, var(--rf-color-fg));
 }
 
 .dangerIcon > span > svg {
-  color: var(--rf-color-danger);
+  color: var(--rf-color-fg);
+  color: color-mix(in srgb, var(--rf-color-danger) 12%, var(--rf-color-fg));
 }
 
 .divider {
