@@ -82,6 +82,14 @@ function makeConfig(library: "browser" | "node") {
           ),
         },
         setupFiles: ["./src/utils/test-setup.ts"],
+        pool: "forks",
+        poolOptions: {
+          forks: {
+            execArgv: ["--max-old-space-size=4096"],
+            maxForks: 4,
+            minForks: 1,
+          },
+        },
       },
       css: {
         modules: {},
