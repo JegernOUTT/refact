@@ -1,5 +1,4 @@
 import React, { useCallback, useState } from "react";
-import classNames from "classnames";
 import {
   CircleHelp,
   Info,
@@ -23,7 +22,7 @@ import {
 import { ProjectInformationDialog } from "./ProjectInformationDialog";
 import { selectHost } from "../../features/Config/configSlice";
 import { Checkbox } from "../Checkbox";
-import { Tooltip } from "../ui";
+import { IconButton, Tooltip } from "../ui";
 import type { Checkbox as CheckboxType } from "./useCheckBoxes";
 import type { useAttachedFiles } from "./useCheckBoxes";
 import styles from "./ChatInputTopControls.module.css";
@@ -80,18 +79,16 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
         <span className={styles.projectInfoControl}>
           <Tooltip>
             <Tooltip.Trigger asChild>
-              <button
+              <IconButton
+                icon={Info}
+                variant="plain"
+                size="sm"
                 type="button"
-                onClick={() => setDialogOpen(true)}
-                disabled={isDisabled}
                 aria-label="Configure project information"
-                className={classNames(
-                  styles.iconButton,
-                  includeProjectInfo && styles.active,
-                )}
-              >
-                <Info />
-              </button>
+                disabled={isDisabled}
+                className={includeProjectInfo ? styles.accent : undefined}
+                onClick={() => setDialogOpen(true)}
+              />
             </Tooltip.Trigger>
             <Tooltip.Content>
               Project info: {includeProjectInfo ? "ON" : "OFF"}
@@ -101,19 +98,17 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
 
         <Tooltip>
           <Tooltip.Trigger asChild>
-            <button
+            <IconButton
+              icon={Pencil}
+              variant="plain"
+              size="sm"
               type="button"
-              onClick={() => handleEditingChange(!autoApproveEditing)}
-              disabled={isDisabled || !chatId}
               aria-label="Auto-approve file editing tools"
               aria-pressed={autoApproveEditing}
-              className={classNames(
-                styles.iconButton,
-                autoApproveEditing && styles.active,
-              )}
-            >
-              <Pencil />
-            </button>
+              disabled={isDisabled || !chatId}
+              className={autoApproveEditing ? styles.accent : undefined}
+              onClick={() => handleEditingChange(!autoApproveEditing)}
+            />
           </Tooltip.Trigger>
           <Tooltip.Content>
             Auto-approve edits: {autoApproveEditing ? "ON" : "OFF"}
@@ -122,19 +117,17 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
 
         <Tooltip>
           <Tooltip.Trigger asChild>
-            <button
+            <IconButton
+              icon={TriangleAlert}
+              variant="plain"
+              size="sm"
               type="button"
-              onClick={() => handleDangerousChange(!autoApproveDangerous)}
-              disabled={isDisabled || !chatId}
               aria-label="Auto-approve dangerous commands"
               aria-pressed={autoApproveDangerous}
-              className={classNames(
-                styles.iconButton,
-                autoApproveDangerous && styles.danger,
-              )}
-            >
-              <TriangleAlert />
-            </button>
+              disabled={isDisabled || !chatId}
+              className={autoApproveDangerous ? styles.dangerIcon : undefined}
+              onClick={() => handleDangerousChange(!autoApproveDangerous)}
+            />
           </Tooltip.Trigger>
           <Tooltip.Content>
             Auto-approve dangerous: {autoApproveDangerous ? "ON" : "OFF"}
@@ -156,33 +149,33 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
               >
                 <span>{selectedLinesCheckbox.label}</span>
               </Checkbox>
-              <button
+              <IconButton
+                icon={selectedLinesCheckbox.locked ? Lock : Unlock}
+                variant="plain"
+                size="sm"
                 type="button"
-                className={styles.lockButton}
+                aria-label={
+                  selectedLinesCheckbox.locked ? "Locked" : "Unlocked"
+                }
+                disabled={isDisabled || selectedLinesCheckbox.disabled}
                 onClick={() =>
                   onCheckedChange(
                     selectedLinesCheckbox.name,
                     !selectedLinesCheckbox.checked,
                   )
                 }
-                disabled={isDisabled || selectedLinesCheckbox.disabled}
-                aria-label={
-                  selectedLinesCheckbox.locked ? "Locked" : "Unlocked"
-                }
-              >
-                {selectedLinesCheckbox.locked ? <Lock /> : <Unlock />}
-              </button>
+              />
               {selectedLinesCheckbox.info && (
                 <Tooltip>
                   <Tooltip.Trigger asChild>
-                    <button
+                    <IconButton
+                      icon={CircleHelp}
+                      variant="plain"
+                      size="sm"
                       type="button"
-                      className={styles.helpButton}
-                      disabled={isDisabled}
                       aria-label="Selected lines information"
-                    >
-                      <CircleHelp />
-                    </button>
+                      disabled={isDisabled}
+                    />
                   </Tooltip.Trigger>
                   <Tooltip.Content maxWidth="240px">
                     {selectedLinesCheckbox.info.text}
@@ -198,18 +191,16 @@ export const ChatInputTopControls: React.FC<ChatInputTopControlsProps> = ({
             <span className={styles.divider}>|</span>
             <Tooltip>
               <Tooltip.Trigger asChild>
-                <button
+                <IconButton
+                  icon={Plus}
+                  variant="plain"
+                  size="sm"
                   type="button"
-                  onClick={attachedFiles.addFile}
-                  disabled={isDisabled || attachedFiles.attached}
                   aria-label={`Attach ${attachedFiles.activeFile.name}`}
-                  className={classNames(
-                    styles.iconButton,
-                    attachedFiles.attached && styles.active,
-                  )}
-                >
-                  <Plus />
-                </button>
+                  disabled={isDisabled || attachedFiles.attached}
+                  className={attachedFiles.attached ? styles.accent : undefined}
+                  onClick={attachedFiles.addFile}
+                />
               </Tooltip.Trigger>
               <Tooltip.Content>
                 Attach: {attachedFiles.activeFile.name}

@@ -6,50 +6,12 @@
   min-width: 0;
 }
 
-.iconButton {
-  display: inline-flex;
-  width: var(--rf-control-h-sm);
-  min-width: var(--rf-control-h-sm);
-  min-height: var(--rf-control-h-sm);
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: var(--rf-hairline) solid transparent;
-  border-radius: var(--rf-radius-ctl);
-  background: transparent;
-  color: var(--rf-color-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.iconButton:hover:not(:disabled) {
-  background: var(--rf-surface-1);
-  color: var(--rf-color-fg);
-}
-
-.iconButton:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
-}
-
-.iconButton:disabled {
-  cursor: not-allowed;
-  opacity: 0.52;
-}
-
-.iconButton svg {
-  width: var(--rf-icon-md);
-  height: var(--rf-icon-md);
-}
-
-.active {
+.accent > span > svg {
   color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
 }
 
-.danger {
+.dangerIcon > span > svg {
   color: var(--rf-color-danger);
-  background: color-mix(in srgb, var(--rf-color-danger) 14%, transparent);
 }
 
 .divider {
@@ -65,62 +27,10 @@
 }
 
 .selectedLinesGroup {
-  height: var(--rf-control-h-sm);
-}
-.selectedLinesGroup {
   display: flex;
   align-items: center;
   gap: var(--rf-space-1);
-}
-
-.lockButton,
-.helpButton {
-  display: flex;
-  width: var(--rf-control-h-sm);
   height: var(--rf-control-h-sm);
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: var(--rf-radius-ctl);
-  background: transparent;
-  color: var(--rf-color-muted);
-  cursor: pointer;
-  transition:
-    background var(--rf-dur-fast) var(--rf-ease-standard),
-    color var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.lockButton svg,
-.helpButton svg {
-  width: var(--rf-icon-md);
-  height: var(--rf-icon-md);
-}
-
-.lockButton:hover:not(:disabled),
-.helpButton:hover:not(:disabled) {
-  background: var(--rf-surface-1);
-  color: var(--rf-color-fg);
-}
-
-.lockButton:focus-visible,
-.helpButton:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
-}
-
-.lockButton:disabled,
-.helpButton:disabled {
-  cursor: not-allowed;
-  opacity: 0.52;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lockButton,
-  .helpButton {
-    transition: none;
-  }
 }
 
 @container (max-width: 340px) {
