@@ -119,7 +119,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
         <Tooltip>
           <Tooltip.Trigger asChild>
             <IconButton
-              className={styles.toolbarIconButton}
+              className={classNames(styles.toolbarIconButton, "rf-pressable")}
               onClick={handleStart}
               disabled={loading.start}
               aria-label="Start browser"
@@ -136,6 +136,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
               className={classNames(
                 styles.toolbarIconButton,
                 styles.toolbarIconButtonDanger,
+                "rf-pressable",
               )}
               onClick={handleStop}
               disabled={loading.stop}
@@ -153,7 +154,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       <Tooltip>
         <Tooltip.Trigger asChild>
           <IconButton
-            className={styles.toolbarIconButton}
+            className={classNames(styles.toolbarIconButton, "rf-pressable")}
             onClick={() => handleScreenshot(false)}
             disabled={!isConnected || loading.screenshot}
             aria-label="Screenshot"
@@ -167,7 +168,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       <Tooltip>
         <Tooltip.Trigger asChild>
           <IconButton
-            className={styles.toolbarIconButton}
+            className={classNames(styles.toolbarIconButton, "rf-pressable")}
             onClick={() => handleScreenshot(true)}
             disabled={!isConnected || loading.fullpage}
             aria-label="Full page screenshot"
@@ -183,7 +184,7 @@ export const BrowserToolbar = ({ chatId }: BrowserToolbarProps) => {
       <Tooltip>
         <Tooltip.Trigger asChild>
           <IconButton
-            className={classNames(styles.toolbarIconButton, {
+            className={classNames(styles.toolbarIconButton, "rf-pressable", {
               [styles.toolbarIconButtonActive]:
                 runtime?.attach_screenshot_on_send ?? false,
             })}

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import classNames from "classnames";
 import { Dialog, Button, SegmentedControl } from "../../components/ui";
 import { useCheckpoints, useEventsBusForIDE } from "../../hooks";
 import { TruncateLeft } from "../../components/Text";
@@ -59,7 +60,7 @@ export const Checkpoints = () => {
             : checkpointsTitle}
         </Dialog.Title>
         <ScrollArea scrollbars="vertical" className={styles.fileScroll}>
-          <div className={styles.fileList}>
+          <div className={classNames(styles.fileList, "rf-stagger")}>
             {wereFilesChanged &&
               allChangedFiles.map((file, index) => {
                 const formattedWorkspaceFolder = formatPathName(
@@ -68,7 +69,7 @@ export const Checkpoints = () => {
                 return (
                   <div
                     key={`${file.absolute_path}-${index}`}
-                    className={styles.fileRow}
+                    className={classNames(styles.fileRow, "rf-enter-rise")}
                   >
                     <div className={styles.fileInfo}>
                       <TruncateLeft size="2" className={styles.filePathWrap}>

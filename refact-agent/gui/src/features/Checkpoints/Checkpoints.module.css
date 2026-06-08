@@ -19,7 +19,9 @@
   min-width: 0;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   padding: var(--rf-space-2);
 }
 
@@ -69,4 +71,10 @@
   justify-content: flex-start;
   gap: var(--rf-space-3);
   margin-top: var(--rf-space-4);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .fileRow {
+    backdrop-filter: none;
+  }
 }

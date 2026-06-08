@@ -1,4 +1,5 @@
 import React, { useCallback } from "react";
+import classNames from "classnames";
 import { ArrowLeft } from "lucide-react";
 import { ScrollArea } from "../../components/ScrollArea";
 import { Button, EmptyState, LoadingState } from "../../components/ui";
@@ -64,7 +65,7 @@ export const LoginPage: React.FC = () => {
 
   return (
     <ScrollArea scrollbars="vertical" fullHeight>
-      <main className={styles.page}>
+      <main className={classNames(styles.page, "rf-enter")}>
         <section className={styles.hero}>
           <p className={styles.kicker}>Welcome to Refact</p>
           <h2 className={styles.title}>Set Up Providers</h2>
@@ -76,7 +77,7 @@ export const LoginPage: React.FC = () => {
 
         {!currentProvider && (
           <>
-            <div className={styles.providerGrid}>
+            <div className={classNames(styles.providerGrid, "rf-stagger")}>
               {sortedConfiguredProviders.map((provider) => (
                 <ProviderCard
                   key={provider.name}
@@ -107,7 +108,9 @@ export const LoginPage: React.FC = () => {
         )}
 
         {currentProvider && (
-          <section className={styles.providerPreview}>
+          <section
+            className={classNames(styles.providerPreview, "rf-enter-rise")}
+          >
             <div className={styles.providerHeader}>
               <h3 className={styles.providerTitle}>
                 {getProviderName(currentProvider)}

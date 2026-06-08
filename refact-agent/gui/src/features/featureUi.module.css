@@ -43,20 +43,22 @@
   min-width: 0;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   padding: var(--rf-space-4);
 }
 
 .input,
 .textarea {
   width: 100%;
+  max-width: var(--rf-input-max, 100%);
   min-width: 0;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-1);
   color: var(--rf-color-fg);
-  font: inherit;
-  font-size: var(--rf-text-3);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   outline: none;
 }
 
@@ -78,13 +80,21 @@
     color-mix(in srgb, var(--rf-focus-ring) 24%, transparent);
 }
 
+.input:hover,
+.textarea:hover {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
+}
+
 .callout {
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   padding: var(--rf-space-3);
   color: var(--rf-color-muted);
 }
@@ -102,4 +112,11 @@
 .calloutAccent {
   border-color: color-mix(in srgb, var(--rf-color-accent) 34%, transparent);
   color: var(--rf-color-accent);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card,
+  .callout {
+    backdrop-filter: none;
+  }
 }

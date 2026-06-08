@@ -13,7 +13,9 @@
   gap: var(--rf-space-2);
   padding: var(--rf-space-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .timelineTitle {
@@ -50,17 +52,25 @@
 
 .timelineList {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
   max-height: 220px;
+  padding: var(--rf-space-1);
   overflow-y: auto;
 }
 
 .timelineEntry {
   cursor: pointer;
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .timelineEntry:hover {
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-2);
 }
 
 .timelineEntryRow {
@@ -68,6 +78,7 @@
   grid-template-columns: auto auto auto minmax(0, 1fr);
   align-items: center;
   gap: var(--rf-space-2);
+  min-width: 0;
   padding: var(--rf-space-2);
 }
 
@@ -101,9 +112,13 @@
 }
 
 .entryType {
+  min-width: 0;
+  overflow: hidden;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .entrySummary {
@@ -132,4 +147,11 @@
   color: var(--rf-color-faint);
   font-size: var(--rf-text-2);
   text-align: center;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .timelineHeader,
+  .timelineEntry {
+    backdrop-filter: none;
+  }
 }
