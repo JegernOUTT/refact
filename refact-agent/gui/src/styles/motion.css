@@ -144,8 +144,8 @@
 
   .rf-active-pulse,
   .rf-status-pulse {
-    animation: rf-active-breathe calc(var(--rf-dur-slow) * 5) var(--rf-ease-standard)
-      infinite alternate;
+    animation: rf-active-breathe calc(var(--rf-dur-slow) * 5)
+      var(--rf-ease-standard) infinite alternate;
     will-change: filter, opacity, transform;
   }
 

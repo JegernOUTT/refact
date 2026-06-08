@@ -8,7 +8,10 @@
 }
 
 .row {
-  grid-template-columns: minmax(0, 1fr) minmax(160px, min(48%, var(--rf-setting-item-control-max, 360px)));
+  grid-template-columns: minmax(0, 1fr) minmax(
+      160px,
+      min(48%, var(--rf-setting-item-control-max, 360px))
+    );
   align-items: center;
   column-gap: var(--rf-space-5);
 }

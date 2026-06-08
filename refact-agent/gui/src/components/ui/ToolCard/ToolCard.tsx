@@ -6,9 +6,15 @@ import { ChevronDown } from "lucide-react";
 import { Icon } from "../Icon";
 import styles from "./ToolCard.module.css";
 
-export type ToolCardStatus = "idle" | "running" | "success" | "error" | "streaming";
+export type ToolCardStatus =
+  | "idle"
+  | "running"
+  | "success"
+  | "error"
+  | "streaming";
 
-export interface ToolCardProps extends Omit<React.ComponentPropsWithoutRef<"section">, "title"> {
+export interface ToolCardProps
+  extends Omit<React.ComponentPropsWithoutRef<"section">, "title"> {
   title: React.ReactNode;
   icon?: LucideIcon;
   status?: ToolCardStatus;
@@ -19,7 +25,10 @@ export interface ToolCardProps extends Omit<React.ComponentPropsWithoutRef<"sect
   children?: React.ReactNode;
 }
 
-const statusTone: Record<ToolCardStatus, "muted" | "accent" | "success" | "danger"> = {
+const statusTone: Record<
+  ToolCardStatus,
+  "muted" | "accent" | "success" | "danger"
+> = {
   idle: "muted",
   running: "accent",
   success: "success",
@@ -74,7 +83,9 @@ export function ToolCard({
           type="button"
           onClick={toggleOpen}
         >
-          {icon ? <Icon className={styles.leadingIcon} icon={icon} tone={tone} /> : null}
+          {icon ? (
+            <Icon className={styles.leadingIcon} icon={icon} tone={tone} />
+          ) : null}
           <span className={styles.title}>{title}</span>
           <span className={styles.spacer} />
           <Icon className={styles.chevron} icon={ChevronDown} tone="faint" />

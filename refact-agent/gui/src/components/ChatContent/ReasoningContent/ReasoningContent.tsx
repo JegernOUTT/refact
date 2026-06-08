@@ -203,7 +203,9 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
       >
         <span className={styles.iconWrapper}>
           {isActivelyThinking ? (
-            <span className={styles.spinner}><Icon icon={LoaderCircle} size="sm" tone="accent" /></span>
+            <span className={styles.spinner}>
+              <Icon icon={LoaderCircle} size="sm" tone="accent" />
+            </span>
           ) : (
             <Icon icon={Zap} size="sm" tone="accent" />
           )}

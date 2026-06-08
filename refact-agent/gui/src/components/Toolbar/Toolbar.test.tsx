@@ -248,15 +248,13 @@ describe("Toolbar tab parity", () => {
       );
     });
 
-    screen
-      .getByTitle("Middle Chat")
-      .dispatchEvent(
-        new MouseEvent("auxclick", {
-          button: 1,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
+    screen.getByTitle("Middle Chat").dispatchEvent(
+      new MouseEvent("auxclick", {
+        button: 1,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
 
     expect(view.store.getState().chat.open_thread_ids).not.toContain(
       "middle-chat",

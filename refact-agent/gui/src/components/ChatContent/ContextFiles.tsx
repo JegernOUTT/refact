@@ -407,7 +407,6 @@ const _ContextFiles: React.FC<{
           ? "memories_context"
           : "default";
 
-
   const icon =
     variant === "enrichment" ? (
       <Icon icon={Zap} size="sm" tone="accent" />

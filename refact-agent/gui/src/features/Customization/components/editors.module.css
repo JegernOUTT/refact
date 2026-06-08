@@ -201,7 +201,9 @@
   min-width: 0;
   align-items: end;
   gap: var(--rf-space-2);
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, auto) auto;
+  grid-template-columns:
+    minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, auto)
+    auto;
 }
 
 .parameterRow > * {

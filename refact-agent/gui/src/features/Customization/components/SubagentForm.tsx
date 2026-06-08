@@ -340,7 +340,9 @@ const SubchatTab: React.FC<{
         <Field label="Model">
           <FieldText
             value={safeString(subchat.model)}
-            onChange={(value) => patch(["subchat", "model"], value || undefined)}
+            onChange={(value) =>
+              patch(["subchat", "model"], value || undefined)
+            }
             placeholder="Default"
           />
         </Field>
@@ -377,7 +379,9 @@ const SubchatTab: React.FC<{
           <FieldText
             type="number"
             value={safeNumber(subchat.n_ctx)?.toString() ?? ""}
-            onChange={(value) => patch(["subchat", "n_ctx"], parseIntSafe(value))}
+            onChange={(value) =>
+              patch(["subchat", "n_ctx"], parseIntSafe(value))
+            }
             placeholder="Default"
           />
         </Field>

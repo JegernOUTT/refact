@@ -158,10 +158,7 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
           icon
         )}
       </span>
-      <Text
-        size="1"
-        className={styles.summary}
-      >
+      <Text size="1" className={styles.summary}>
         {summary}
       </Text>
       {meta && (

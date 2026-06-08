@@ -116,7 +116,8 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .navItem {
-    transition: color var(--rf-dur-fast) var(--rf-ease-standard),
+    transition:
+      color var(--rf-dur-fast) var(--rf-ease-standard),
       background-color var(--rf-dur-fast) var(--rf-ease-standard),
       border-color var(--rf-dur-fast) var(--rf-ease-standard);
   }

@@ -12,7 +12,9 @@
   --switch-track-h: 20px;
   --switch-thumb-size: 16px;
   --switch-thumb-inset: 2px;
-  --switch-thumb-travel: calc(var(--switch-track-w) - var(--switch-thumb-size) - var(--switch-thumb-inset));
+  --switch-thumb-travel: calc(
+    var(--switch-track-w) - var(--switch-thumb-size) - var(--switch-thumb-inset)
+  );
 
   position: relative;
   box-sizing: border-box;

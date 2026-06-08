@@ -98,7 +98,10 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  max-height: min(calc(100dvh - 15 * var(--rf-space-4)), calc(16 * var(--rf-control-h-lg)));
+  max-height: min(
+    calc(100dvh - 15 * var(--rf-space-4)),
+    calc(16 * var(--rf-control-h-lg))
+  );
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -162,7 +165,6 @@
   flex: 0 1 auto;
   justify-content: flex-end;
 }
-
 
 .formContainer {
   width: 100%;
