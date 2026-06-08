@@ -20,7 +20,7 @@
 
 .hunkHeader {
   min-width: 0;
-  padding: 2px 0;
+  padding: var(--rf-space-2xs) 0;
   white-space: pre-wrap;
   user-select: none;
 }
@@ -59,7 +59,7 @@
 
 .removed {
   color: var(--rf-color-danger);
-  margin-left: 4px;
+  margin-left: var(--rf-space-1);
 }
 
 .hunkActions {

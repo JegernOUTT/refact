@@ -1,5 +1,5 @@
 .content {
-  margin-top: 8px;
+  margin-top: var(--rf-space-2);
 }
 
 .inlineCode {

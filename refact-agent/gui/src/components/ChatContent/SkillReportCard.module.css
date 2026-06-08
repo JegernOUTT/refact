@@ -43,7 +43,7 @@
 
 .actions {
   display: flex;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
   flex-shrink: 0;
   margin-left: auto;
 }

@@ -43,15 +43,15 @@
 }
 
 .entertainmentRow {
-  padding-left: 28px;
-  padding-top: 2px;
-  padding-bottom: 2px;
+  padding-left: calc(var(--rf-control-h-sm) + var(--rf-space-2xs));
+  padding-top: var(--rf-space-2xs);
+  padding-bottom: var(--rf-space-2xs);
 }
 
 .entertainmentContent {
-  padding-left: 28px;
-  padding-top: 2px;
-  padding-bottom: 2px;
+  padding-left: calc(var(--rf-control-h-sm) + var(--rf-space-2xs));
+  padding-top: var(--rf-space-2xs);
+  padding-bottom: var(--rf-space-2xs);
   max-height: 260px;
   overflow-y: auto;
   composes: scrollbarThin from "../../shared/scrollbar.module.css";

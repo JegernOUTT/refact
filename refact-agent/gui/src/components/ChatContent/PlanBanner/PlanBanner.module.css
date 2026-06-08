@@ -5,7 +5,7 @@
   width: 100%;
   box-sizing: border-box;
   background: transparent;
-  padding-bottom: var(--space-1);
+  padding-bottom: var(--rf-space-1);
 }
 
 .container {
@@ -20,12 +20,12 @@
   min-width: 0;
   box-sizing: border-box;
   border-left: 2px solid var(--red-9);
-  padding-left: var(--space-2);
+  padding-left: var(--rf-space-2);
 }
 
 .header {
   cursor: pointer;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   transition: filter 0.15s ease;
 }
 
@@ -55,7 +55,7 @@
 
 .body {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  padding: var(--space-2) 0 var(--space-1);
+  padding: var(--rf-space-2) 0 var(--rf-space-1);
   max-height: 400px;
   overflow: auto;
 }
@@ -71,7 +71,7 @@
 .actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
   flex-shrink: 0;
   margin-left: auto;
 }
@@ -121,17 +121,17 @@
 }
 
 .historyItem {
-  padding: var(--space-3);
+  padding: var(--rf-space-3);
   border: 1px solid var(--gray-a4);
   border-radius: var(--radius-3);
   background: var(--gray-a2);
 }
 
 .historyTitle {
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--rf-space-2);
 }
 
 .historyBody {
-  padding-top: var(--space-2);
+  padding-top: var(--rf-space-2);
   border-top: 1px solid var(--gray-a4);
 }

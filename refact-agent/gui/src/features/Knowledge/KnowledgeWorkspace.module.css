@@ -75,7 +75,7 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2);
+  padding: var(--rf-space-3);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
   background: color-mix(in srgb, var(--rf-surface-glass) 70%, transparent);
 }

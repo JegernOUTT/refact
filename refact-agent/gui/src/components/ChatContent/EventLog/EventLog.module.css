@@ -1,5 +1,5 @@
 .card {
-  margin: var(--space-1) 0 var(--space-2);
+  margin: var(--rf-space-1) 0 var(--rf-space-2);
   border: 1px solid var(--gray-a5);
   background: var(--gray-a2);
 }
@@ -8,7 +8,7 @@
   cursor: pointer;
   color: var(--gray-12);
   list-style-position: outside;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   user-select: none;
 }
 
@@ -21,20 +21,20 @@
 }
 
 .body {
-  padding-top: var(--space-2);
+  padding-top: var(--rf-space-2);
 }
 
 .filters {
-  padding-bottom: var(--space-2);
+  padding-bottom: var(--rf-space-2);
 }
 
 .filterChip {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   border: 1px solid var(--gray-a5);
   border-radius: var(--radius-full);
-  padding: var(--space-1) var(--space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
   color: var(--gray-11);
   background: var(--gray-a2);
   cursor: pointer;
@@ -71,7 +71,7 @@
 
 .entryRow {
   min-width: 0;
-  padding: var(--space-1) var(--space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
 }
 
 .icon {
@@ -88,7 +88,7 @@
 .subkindChip {
   flex: 0 0 auto;
   border-radius: var(--radius-full);
-  padding: 0 var(--space-1);
+  padding: 0 var(--rf-space-1);
   background: var(--accent-a3);
   color: var(--accent-11);
   font-family: var(--code-font-family);
@@ -96,7 +96,7 @@
 
 .source {
   flex: 0 1 auto;
-  min-width: var(--space-7);
+  min-width: var(--rf-space-6);
   color: var(--gray-10);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -105,7 +105,7 @@
 
 .summaryText {
   flex: 1 1 auto;
-  min-width: var(--space-7);
+  min-width: var(--rf-space-6);
   color: var(--gray-12);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -114,7 +114,7 @@
 
 .jsonPanel {
   border-top: 1px solid var(--gray-a4);
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   background: var(--gray-a2);
 }
 
@@ -131,5 +131,5 @@
 
 .emptyState {
   color: var(--gray-10);
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
 }

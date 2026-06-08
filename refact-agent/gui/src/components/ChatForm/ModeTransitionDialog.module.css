@@ -3,11 +3,11 @@
 }
 
 .callout {
-  margin-top: var(--space-3);
+  margin-top: var(--rf-space-3);
 }
 
 .loadingContainer {
-  padding: var(--space-6);
+  padding: var(--rf-space-6);
 }
 
 .progressTrack {

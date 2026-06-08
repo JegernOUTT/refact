@@ -39,7 +39,7 @@
 .argRow {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
 }
 
 .argKey {
