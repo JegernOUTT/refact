@@ -10,6 +10,12 @@
 }
 
 .resultContent {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 300px;
   overflow-y: auto;

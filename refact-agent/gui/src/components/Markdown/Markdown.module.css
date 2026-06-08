@@ -91,11 +91,23 @@
 }
 
 .variant_tool {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
   font-size: var(--rf-text-2);
   line-height: 1.5;
 }
 
 .variant_terminal {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-2);
   line-height: 1.45;
@@ -151,7 +163,7 @@
 
 .shiki_wrapper {
   display: block;
-  margin: var(--rf-space-3) 0;
+  margin: var(--rf-code-block-margin, var(--rf-space-3) 0);
   min-width: 0;
 }
 
@@ -159,10 +171,10 @@
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   position: relative;
   margin: 0;
-  padding: var(--rf-space-3);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background-color: var(--rf-surface-1) !important;
+  padding: var(--rf-code-block-padding, var(--rf-space-3));
+  background-color: var(--rf-code-block-bg, var(--rf-surface-1)) !important;
+  border: var(--rf-code-block-border-width, var(--rf-hairline)) solid var(--rf-border);
+  border-radius: var(--rf-code-block-radius, var(--rf-radius-card));
   overflow-x: visible;
 }
 

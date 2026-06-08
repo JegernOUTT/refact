@@ -157,21 +157,21 @@
 
 .outputSection {
   overflow: hidden;
-  background: var(--rf-surface-1);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
+  background: transparent;
+  border-left: var(--rf-hairline) solid var(--rf-border);
+  border-radius: 0;
 }
 
 .outputHeader {
-  padding: var(--rf-space-1) var(--rf-space-2);
-  background: var(--rf-surface-2);
+  padding: var(--rf-space-1) 0 var(--rf-space-1) var(--rf-space-2);
+  background: transparent;
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .outputBody {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 360px;
-  padding: var(--rf-space-2);
+  padding: var(--rf-space-2) 0 var(--rf-space-2) var(--rf-space-2);
   overflow: auto;
 }
 

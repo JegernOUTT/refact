@@ -45,6 +45,12 @@
 }
 
 .content {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
   min-width: 0;
 }
 

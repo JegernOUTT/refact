@@ -36,7 +36,8 @@
 }
 
 .toggle:hover {
-  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+  background: transparent;
 }
 
 .toggle:focus-visible {
@@ -58,6 +59,10 @@
   overflow-wrap: anywhere;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toggle:hover .title {
+  color: var(--rf-color-accent);
 }
 
 .spacer {
