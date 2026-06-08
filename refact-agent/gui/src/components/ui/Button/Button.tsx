@@ -106,8 +106,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         aria-busy={loading ? true : props["aria-busy"]}
         className={classNames(
           styles.button,
-          styles[`variant-`],
-          styles[`size-`],
+          styles[`variant-${normalizedVariant}`],
+          styles[`size-${normalizedSize}`],
           "rf-pressable",
           className,
         )}
@@ -168,8 +168,8 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
         aria-label={ariaLabel}
         className={classNames(
           styles.iconButton,
-          styles[`variant-`],
-          styles[`size-`],
+          styles[`variant-${normalizedVariant}`],
+          styles[`size-${normalizedSize}`],
           "rf-pressable",
           className,
         )}

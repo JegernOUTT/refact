@@ -25,6 +25,13 @@
   padding: 0;
 }
 
+.iconButton > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
 .button:focus-visible,
 .iconButton:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
@@ -65,8 +72,8 @@
 
 .iconButton.size-sm {
   width: var(--rf-control-h-sm);
-  min-width: calc(var(--rf-control-h-sm) + (var(--rf-hairline) * 2));
-  min-height: calc(var(--rf-control-h-sm) + (var(--rf-hairline) * 2));
+  min-width: var(--rf-control-h-sm);
+  min-height: var(--rf-control-h-sm);
 }
 
 .iconButton.size-md {
@@ -87,11 +94,21 @@
 }
 
 .variant-ghost {
+  border-color: transparent;
   background: transparent;
 }
 
 .variant-ghost:hover:not(:disabled) {
+  border-color: transparent;
   background: var(--rf-surface-1);
+}
+
+.button.variant-ghost {
+  border-color: var(--rf-border);
+}
+
+.button.variant-ghost:hover:not(:disabled) {
+  border-color: var(--rf-border-strong);
 }
 
 .variant-soft {
@@ -127,7 +144,12 @@
 }
 
 .variant-plain:hover:not(:disabled) {
+  border-color: transparent;
   color: var(--rf-color-accent);
+}
+
+.iconButton.variant-plain:hover:not(:disabled) {
+  background: var(--rf-surface-1);
 }
 
 .group {
