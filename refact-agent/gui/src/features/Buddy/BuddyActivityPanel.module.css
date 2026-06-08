@@ -1,5 +1,6 @@
 .panel {
   display: flex;
+  box-sizing: border-box;
   flex-direction: column;
   gap: var(--rf-space-2);
   min-width: 0;
@@ -14,10 +15,13 @@
 
 .panelHeader {
   display: flex;
+  box-sizing: border-box;
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .sectionLabel {
@@ -27,17 +31,22 @@
 }
 
 .filter {
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
   max-width: 320px;
+  overflow: hidden;
 }
 
 .scrollList {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
+  box-sizing: border-box;
   flex: 1 1 auto;
   flex-direction: column;
   gap: var(--rf-space-1);
   min-width: 0;
+  max-width: 100%;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
@@ -45,10 +54,12 @@
 
 .listRow {
   display: flex;
+  box-sizing: border-box;
   align-items: center;
   gap: var(--rf-space-2);
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   padding: var(--rf-space-2);
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
@@ -78,9 +89,11 @@
 
 .listIcon {
   flex: 0 0 18px;
+  min-width: 0;
   width: 18px;
   text-align: center;
   font-size: 14px;
+  overflow: hidden;
 }
 
 .listContent {
@@ -89,6 +102,8 @@
   flex-direction: column;
   gap: var(--rf-space-2xs);
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .listTitle,
@@ -104,6 +119,7 @@
   display: flex;
   align-items: center;
   gap: var(--rf-space-1);
+  max-width: 100%;
   color: var(--rf-color-fg);
   font-size: 12px;
 }
@@ -118,6 +134,7 @@
 .listMeta {
   flex: 0 0 auto;
   font-size: 10px;
+  max-width: 100%;
 }
 
 .emptyText {
@@ -141,6 +158,8 @@
   }
 
   .listMeta {
-    margin-left: calc(var(--rf-icon-lg) + var(--rf-space-2));
+    flex: 1 1 auto;
+    margin-left: 0;
+    padding-left: calc(var(--rf-icon-lg) + var(--rf-space-2));
   }
 }

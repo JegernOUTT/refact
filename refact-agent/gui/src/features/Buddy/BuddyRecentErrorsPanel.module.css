@@ -1,5 +1,6 @@
 .panel {
   display: flex;
+  box-sizing: border-box;
   flex-direction: column;
   gap: var(--rf-space-2);
   min-width: 0;
@@ -14,10 +15,13 @@
 
 .panelHeader {
   display: flex;
+  box-sizing: border-box;
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .sectionLabel {
@@ -29,10 +33,12 @@
 .scrollList {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
+  box-sizing: border-box;
   flex: 1 1 auto;
   flex-direction: column;
   gap: var(--rf-space-1);
   min-width: 0;
+  max-width: 100%;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
@@ -40,11 +46,13 @@
 
 .listRow {
   display: grid;
+  box-sizing: border-box;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: var(--rf-space-2);
   align-items: flex-start;
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   padding: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-color-warning);
   border-radius: var(--rf-radius-ctl);
@@ -62,9 +70,11 @@
 
 .listIcon {
   flex: 0 0 18px;
+  min-width: 0;
   width: 18px;
   text-align: center;
   font-size: 14px;
+  overflow: hidden;
 }
 
 .listContent {
@@ -73,6 +83,8 @@
   flex-direction: column;
   gap: var(--rf-space-2xs);
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .listTitle,
@@ -89,6 +101,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--rf-space-1);
+  max-width: 100%;
   color: var(--rf-color-fg);
   font-size: 12px;
 }
@@ -103,6 +116,7 @@
 .listMeta {
   flex: 0 0 auto;
   font-size: 10px;
+  max-width: 100%;
 }
 
 .errorActions {
@@ -110,6 +124,12 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.errorActions > * {
   min-width: 0;
 }
 
