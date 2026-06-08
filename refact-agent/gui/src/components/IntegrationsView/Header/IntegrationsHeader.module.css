@@ -1,12 +1,47 @@
-.IntegrationsHeader {
+.header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-4);
+}
+
+.fixed {
   position: fixed;
   top: 0;
   left: 0;
-  width: 100%;
   z-index: var(--z-fixed, 400);
 }
 
-.IntegrationsHeaderIcon {
-  max-width: 24px;
-  object-fit: cover;
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-3);
+  width: 100%;
+  min-width: 0;
+}
+
+.info {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.icon {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.name {
+  margin: 0;
+  font-size: var(--rf-font-size-md);
+  font-weight: var(--rf-font-weight-semibold);
+  color: var(--rf-text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

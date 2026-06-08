@@ -166,3 +166,18 @@ describe("SettingsHub — Back button calls onBack", () => {
     expect(onBack).toHaveBeenCalledOnce();
   });
 });
+
+describe("SettingsHub — embedded integrations section", () => {
+  it("passes embedded=true to Integrations so section has no inner Back button", () => {
+    renderHub({ name: "integrations page" });
+    const section = screen.getByTestId("integrations-section");
+    expect(section).toHaveAttribute("data-embedded", "true");
+    expect(screen.getAllByRole("button", { name: /back/i })).toHaveLength(1);
+  });
+
+  it("routes integrations page with integrationPath to integrations section", () => {
+    renderHub({ name: "integrations page", integrationPath: "/some/config.yaml" });
+    expect(screen.getByTestId("integrations-section")).toBeInTheDocument();
+    expect(screen.getByTestId("integrations-section")).toHaveAttribute("data-embedded", "true");
+  });
+});

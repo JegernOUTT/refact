@@ -20,24 +20,6 @@ export type IntegrationsProps = {
   embedded?: boolean;
 };
 
-export type LeftRightPadding =
-  | {
-      initial: string;
-      xl: string;
-      xs?: undefined;
-      sm?: undefined;
-      md?: undefined;
-      lg?: undefined;
-    }
-  | {
-      initial: string;
-      xs: string;
-      sm: string;
-      md: string;
-      lg: string;
-      xl: string;
-    };
-
 export const Integrations: React.FC<IntegrationsProps> = ({
   onCloseIntegrations,
   backFromIntegrations,
@@ -54,18 +36,6 @@ export const Integrations: React.FC<IntegrationsProps> = ({
     };
   }, [dispatch]);
 
-  const LeftRightPadding =
-    host === "web"
-      ? { initial: "5", xl: "9" }
-      : {
-          initial: "2",
-          xs: "2",
-          sm: "4",
-          md: "8",
-          lg: "8",
-          xl: "9",
-        };
-
   const { integrations } = useGetIntegrationsQuery();
   const [isInnerIntegrationSelected, setIsInnerIntegrationSelected] =
     useState<boolean>(false);
@@ -81,7 +51,7 @@ export const Integrations: React.FC<IntegrationsProps> = ({
   const content = (
     <div
       className={classNames(styles.page, {
-        [styles.pageInnerSelected]: isInnerIntegrationSelected,
+        [styles.pageInnerSelected]: isInnerIntegrationSelected && !embedded,
       })}
     >
       {!embedded && !isInnerIntegrationSelected && (
@@ -106,11 +76,11 @@ export const Integrations: React.FC<IntegrationsProps> = ({
       <ScrollArea scrollbars="vertical" fullHeight>
         <div className={styles.scrollContent}>
           <IntegrationsView
-            leftRightPadding={LeftRightPadding}
             handleIfInnerIntegrationWasSet={handleIfInnerIntegrationWasSet}
             integrationsMap={integrations.data}
             isLoading={integrations.isLoading}
             goBack={backFromIntegrations}
+            embedded={embedded}
           />
         </div>
       </ScrollArea>

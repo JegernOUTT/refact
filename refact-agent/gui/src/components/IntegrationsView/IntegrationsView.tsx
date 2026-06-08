@@ -6,7 +6,6 @@ import {
   clearInformation,
   getInformationMessage,
 } from "../../features/Errors/informationSlice";
-import { LeftRightPadding } from "../../features/Integrations/Integrations";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { IntegrationWithIconResponse } from "../../services/refact";
 import { ErrorCallout } from "../Callout";
@@ -21,18 +20,18 @@ import { useIntegrations } from "./hooks/useIntegrations";
 
 type IntegrationViewProps = {
   integrationsMap?: IntegrationWithIconResponse;
-  leftRightPadding: LeftRightPadding;
   isLoading: boolean;
   goBack?: () => void;
   handleIfInnerIntegrationWasSet: (state: boolean) => void;
+  embedded?: boolean;
 };
 
 export const IntegrationsView: FC<IntegrationViewProps> = ({
   integrationsMap,
   isLoading,
-  leftRightPadding,
   goBack,
   handleIfInnerIntegrationWasSet,
+  embedded,
 }) => {
   const dispatch = useAppDispatch();
   const globalError = useAppSelector(getErrorMessage);
@@ -71,7 +70,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
 
     return (
       <IntegrationsHeader
-        leftRightPadding={leftRightPadding}
         handleFormReturn={handleFormReturn}
         handleInstantReturn={goBackAndClearError}
         instantBackReturn={
@@ -85,6 +83,7 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
           ""
         }
         icon={integrationLogo}
+        embedded={embedded}
       />
     );
   };
