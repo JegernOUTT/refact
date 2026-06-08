@@ -1,8 +1,8 @@
 /* eslint-disable react/prop-types */
 import React from "react";
 import classNames from "classnames";
-import { LoaderCircle } from "lucide-react";
 import { Badge as KitBadge } from "./ui/Badge";
+import { Spinner as KitSpinner } from "./ui/Spinner";
 import { Button as KitButton } from "./ui/Button";
 import { Popover as KitPopover } from "./ui/Popover";
 import { Tooltip as KitTooltip } from "./ui/Tooltip";
@@ -349,7 +349,7 @@ export function Checkbox({ checked, onCheckedChange, disabled }: {
 }
 
 export function Spinner({ size: _size }: { size?: string }) {
-  return <LoaderCircle className={styles.spinner} aria-hidden="true" />;
+  return <KitSpinner />;
 }
 
 export { ScrollArea };

@@ -6,8 +6,8 @@ import {
   Button,
   Callout,
   Badge,
-  Spinner,
 } from "@radix-ui/themes";
+import { Spinner } from "../ui";
 import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import {
   createChatWithId,
@@ -258,7 +258,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
             gap="2"
             className={styles.loadingContainer}
           >
-            <Spinner />
+            <Spinner label="Processing" />
             <Text color="gray">{loadingLabel}</Text>
           </Flex>
         )}
@@ -272,7 +272,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
           <Button onClick={() => void handleApply()} disabled={isLoading}>
             {isLoading ? (
               <>
-                <Spinner size="1" />
+                <Spinner size="sm" />
                 {loadingLabel}
               </>
             ) : (

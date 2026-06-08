@@ -20,14 +20,6 @@
   padding: var(--rf-space-6) var(--rf-space-4);
 }
 
-.spinner {
-  width: var(--rf-icon-lg);
-  height: var(--rf-icon-lg);
-  border: var(--rf-hairline) solid var(--rf-border-strong);
-  border-top-color: var(--rf-color-accent);
-  border-radius: var(--rf-radius-pill);
-}
-
 .label {
   max-width: min(38ch, 100%);
   margin: 0;
@@ -44,14 +36,4 @@
   min-width: 0;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .spinner {
-    animation: rf-loading-spin var(--rf-dur-slow) linear infinite;
-  }
-}
 
-@keyframes rf-loading-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}

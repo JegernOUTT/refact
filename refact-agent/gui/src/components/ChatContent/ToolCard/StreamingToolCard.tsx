@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
-import { Flex, Text, Box, Spinner } from "@radix-ui/themes";
+import { Flex, Text, Box } from "@radix-ui/themes";
+import { Spinner } from "../../ui";
 import classNames from "classnames";
 import { useAutoExpandCollapse, ToolStatus } from "./useAutoExpandCollapse";
 import { useAppSelector } from "../../../hooks";
@@ -145,7 +146,7 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
       onClick={onToggle}
     >
       <span className={styles.icon}>
-        {status === "running" ? <Spinner size="1" /> : icon}
+        {status === "running" ? <Spinner size="sm" /> : icon}
       </span>
       <Text
         size="1"

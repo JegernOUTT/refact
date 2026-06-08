@@ -1,6 +1,7 @@
 import React from "react";
 import classNames from "classnames";
 import { Skeleton, SkeletonText } from "../Skeleton";
+import { Spinner } from "../Spinner";
 import styles from "./LoadingState.module.css";
 
 export type LoadingStateVariant = "compact" | "full";
@@ -31,7 +32,7 @@ export function LoadingState({
           <SkeletonText lines={variant === "full" ? 4 : 2} />
         </div>
       ) : (
-        <div className={styles.spinner} aria-hidden="true" />
+        <Spinner label={typeof label === "string" ? label : "Loading"} />
       )}
       {label ? <p className={styles.label}>{label}</p> : null}
     </section>

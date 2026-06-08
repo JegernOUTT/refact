@@ -78,6 +78,8 @@ export type {
 export { Slider } from "./Slider";
 export type { SliderProps } from "./Slider";
 export * from "./Skeleton";
+export { Spinner } from "./Spinner";
+export type { SpinnerProps } from "./Spinner";
 export * from "./StatusDot";
 export * from "./Surface";
 export { Switch } from "./Switch";

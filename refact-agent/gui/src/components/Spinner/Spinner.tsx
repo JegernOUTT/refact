@@ -8,6 +8,8 @@ export type SpinnerProps = {
 
 export const Spinner: React.FC<SpinnerProps> = ({ spinning }) => (
   <pre
+    role={spinning ? "status" : undefined}
+    aria-label={spinning ? "Loading" : undefined}
     aria-busy={spinning}
     className={classNames(styles.spinner, spinning && styles.spinning)}
   />

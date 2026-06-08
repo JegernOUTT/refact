@@ -6,8 +6,8 @@ import {
   Button,
   Callout,
   Badge,
-  Spinner,
 } from "@radix-ui/themes";
+import { Spinner } from "../ui";
 import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
 import { trajectoriesApi } from "../../services/refact/trajectories";
@@ -257,7 +257,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
         {phaseInfo && (
           <Flex direction="column" gap="3" className={styles.loadingContainer}>
             <Flex align="center" justify="center" gap="2">
-              <Spinner />
+              <Spinner label="Processing" />
               <Text color="gray" role="status" aria-live="polite">
                 {phaseInfo.label}
               </Text>
@@ -287,7 +287,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
           <Button onClick={() => void handleApply()} disabled={isBusy}>
             {isBusy ? (
               <>
-                <Spinner size="1" />
+                <Spinner size="sm" />
                 {isSelf ? "Restarting..." : "Switching..."}
               </>
             ) : isSelf ? (

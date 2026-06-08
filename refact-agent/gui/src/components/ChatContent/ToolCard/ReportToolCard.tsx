@@ -6,7 +6,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Flex, Text, Box, Spinner } from "@radix-ui/themes";
+import { Flex, Text, Box } from "@radix-ui/themes";
+import { Spinner } from "../../ui";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
@@ -270,7 +271,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
       onClick={handleAnimatedToggle}
     >
       <span className={styles.icon}>
-        {status === "running" ? <Spinner size="1" /> : icon}
+        {status === "running" ? <Spinner size="sm" /> : icon}
       </span>
       <Text
         size="1"

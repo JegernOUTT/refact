@@ -1,6 +1,5 @@
 import React from "react";
-import { LoaderCircle } from "lucide-react";
-import { Button, Icon } from "../ui";
+import { Button, Spinner } from "../ui";
 import { type ChatLink } from "../../services/refact/links";
 import { useAppSelector, useLinksFromLsp } from "../../hooks";
 import { TruncateRight } from "../Text/TruncateRight";
@@ -28,9 +27,7 @@ export const ChatLinks: React.FC = () => {
   if (linksResult.isLoading || linksResult.isFetching) {
     return (
       <Button variant="soft" disabled>
-        <span className={styles.spinner} aria-hidden="true">
-          <Icon icon={LoaderCircle} size="sm" />
-        </span>
+        <Spinner size="sm" label="Checking for actions" />
         Checking for actions
       </Button>
     );

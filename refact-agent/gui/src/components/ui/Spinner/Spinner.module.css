@@ -9,15 +9,27 @@
   visibility: hidden;
 }
 
-.spinner.spinning::after {
+.spinning::after {
   display: inline-block;
   animation: dots var(--rf-dur-slow) steps(1, end) infinite;
   content: "";
   visibility: inherit;
 }
 
+.sm {
+  font-size: var(--rf-text-1);
+}
+
+.md {
+  font-size: var(--rf-text-2);
+}
+
+.lg {
+  font-size: var(--rf-text-3);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .spinner.spinning::after {
+  .spinning::after {
     animation: none;
     content: "...";
   }
