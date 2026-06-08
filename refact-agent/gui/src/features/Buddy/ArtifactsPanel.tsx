@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge, Button, Card, Text } from "../../components/ui";
+import { Badge, Button, Surface, Text } from "../../components/ui";
 import {
   useApproveBuddyArtifactMutation,
   useGetBuddyArtifactsQuery,
@@ -18,7 +18,12 @@ export const ArtifactsPanel: React.FC = () => {
   const ops = data?.ops ?? [];
 
   return (
-    <Card className={styles.panel} animated="rise">
+    <Surface
+      className={styles.panel}
+      animated="rise"
+      radius="card"
+      variant="glass"
+    >
       <div className={styles.header}>
         <Text as="strong" size="3" weight="bold">
           📥 Memory Ops
@@ -69,7 +74,7 @@ export const ArtifactsPanel: React.FC = () => {
           </tbody>
         </table>
       </div>
-    </Card>
+    </Surface>
   );
 };
 

@@ -49,7 +49,11 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
   };
 
   return (
-    <Surface className={styles.card} radius="control" variant="plain">
+    <Surface
+      className={classNames(styles.card, "rf-pressable")}
+      radius="control"
+      variant="plain"
+    >
       <div className={styles.header}>
         <Badge
           className={classNames(styles.priorityBadge, priorityClass)}

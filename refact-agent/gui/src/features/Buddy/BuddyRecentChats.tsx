@@ -1,4 +1,5 @@
 import React, { useCallback, useState } from "react";
+import classNames from "classnames";
 import { Flex, LoadingState, Text } from "../../components/ui";
 import { ChatBubbleIcon, PlusIcon } from "@radix-ui/react-icons";
 import { useAppDispatch } from "../../hooks";
@@ -87,12 +88,16 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
     </>
   );
   if (!clickable) {
-    return <div className={styles.entryRow}>{content}</div>;
+    return (
+      <div className={classNames(styles.entryRow, "rf-enter-rise")}>
+        {content}
+      </div>
+    );
   }
   return (
     <button
       type="button"
-      className={styles.entryRow}
+      className={classNames(styles.entryRow, "rf-enter-rise", "rf-pressable")}
       onClick={() => onClick(entry)}
       data-clickable
     >
@@ -246,7 +251,7 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
       )}
 
       {conversations.length > 0 && (
-        <div className={styles.entriesScroll}>
+        <div className={classNames(styles.entriesScroll, "rf-stagger")}>
           {conversations.map((entry) => (
             <EntryRow
               key={`${entry.kind}-${entry.id}`}

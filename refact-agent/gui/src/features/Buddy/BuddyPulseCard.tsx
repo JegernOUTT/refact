@@ -10,7 +10,12 @@ export const BuddyPulseCard: React.FC = () => {
 
   if (!pulse) {
     return (
-      <Surface className={styles.card} radius="card" variant="surface-1">
+      <Surface
+        animated="rise"
+        className={styles.card}
+        radius="card"
+        variant="glass"
+      >
         <Text size="1" weight="bold" color="gray" className={styles.label}>
           PULSE
         </Text>
@@ -23,8 +28,9 @@ export const BuddyPulseCard: React.FC = () => {
     <Surface
       className={styles.card}
       data-testid="buddy-pulse-card"
+      animated="rise"
       radius="card"
-      variant="surface-1"
+      variant="glass"
     >
       {pulse.humor && (
         <div className={styles.humor}>

@@ -7,6 +7,7 @@
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* Filter tabs reuse the shared chip pill so the header controls match
@@ -43,14 +44,19 @@
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--rf-space-2);
-  border-radius: var(--rf-radius-chip);
-  border: none;
-  background: transparent;
   width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-2);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: left;
   cursor: default;
-  transition: background 0.12s;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .entryRow[data-clickable] {
@@ -58,7 +64,13 @@
 }
 
 .entryRow[data-clickable]:hover {
+  border-color: var(--rf-border-strong);
   background: var(--rf-surface-2);
+}
+
+.entryRow:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .entryIcon {
@@ -69,9 +81,6 @@
 }
 
 .entryTitle {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -87,8 +96,8 @@
   align-items: center;
   padding: 1px 5px;
   border-radius: var(--rf-radius-chip);
-  background: var(--rf-color-accent-soft);
-  color: var(--rf-color-accent);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
   font-size: 10px;
   font-weight: 500;
   flex-shrink: 0;
@@ -119,7 +128,7 @@
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-1);
 }
 
 @keyframes buddy-spin {

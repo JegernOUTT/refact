@@ -1,4 +1,5 @@
 import React from "react";
+import classNames from "classnames";
 import { Text } from "../../components/ui";
 import { Badge, Surface } from "../../components/ui";
 import { BuddyOpportunityCard } from "./BuddyOpportunityCard";
@@ -19,8 +20,9 @@ export const BuddyOpportunitiesFeed: React.FC = () => {
     <Surface
       className={styles.feed}
       data-testid="buddy-opportunities-feed"
+      animated="rise"
       radius="card"
-      variant="surface-1"
+      variant="glass"
     >
       <div className={styles.header}>
         <Text size="1" weight="bold" color="gray" className={styles.label}>
@@ -38,17 +40,25 @@ export const BuddyOpportunitiesFeed: React.FC = () => {
         </Text>
       ) : (
         <div
-          className={styles.list}
+          className={classNames(styles.list, "rf-stagger")}
           role="list"
           aria-label="Buddy opportunities"
         >
           {unread.map((opp) => (
-            <div key={opp.id} className={styles.item} role="listitem">
+            <div
+              key={opp.id}
+              className={classNames(styles.item, "rf-enter-rise")}
+              role="listitem"
+            >
               <BuddyOpportunityCard opportunity={opp} />
             </div>
           ))}
           {activeSuggestions.map((suggestion) => (
-            <div key={suggestion.id} className={styles.item} role="listitem">
+            <div
+              key={suggestion.id}
+              className={classNames(styles.item, "rf-enter-rise")}
+              role="listitem"
+            >
               <Text size="2" weight="bold">
                 {suggestion.title}
               </Text>

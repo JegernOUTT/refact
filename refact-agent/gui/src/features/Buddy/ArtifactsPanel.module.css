@@ -1,6 +1,9 @@
 .panel {
   display: grid;
   gap: var(--rf-space-3);
+  min-width: 0;
+  overflow: hidden;
+  padding: var(--rf-space-3);
 }
 
 .header {
@@ -21,7 +24,7 @@
 .table th,
 .table td {
   padding: var(--rf-space-2);
-  border-bottom: 1px solid var(--rf-border);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
   text-align: left;
   vertical-align: middle;
 }

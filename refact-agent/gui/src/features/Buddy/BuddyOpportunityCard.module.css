@@ -1,20 +1,19 @@
 .card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: var(--rf-space-2);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-chip);
-  background: var(--rf-surface-1);
+  gap: var(--rf-space-2);
   min-width: 0;
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid transparent;
+  background: transparent;
   transition:
-    background var(--rf-dur-fast) ease,
-    border-color var(--rf-dur-fast) ease;
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .card:hover {
-  background: var(--rf-surface-2);
   border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
 }
 
 .header {
@@ -46,8 +45,8 @@
 }
 
 .priorityNormal {
-  background: var(--rf-color-accent-soft);
-  color: var(--rf-color-accent);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-fg);
 }
 
 .priorityLow {
@@ -58,6 +57,7 @@
 .summary {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .humor {
@@ -69,10 +69,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--rf-space-1);
+  min-width: 0;
 }
 
 .actionError {
   color: var(--rf-color-danger);
+  overflow-wrap: anywhere;
 }
 
 /* Action buttons reuse the page-wide chip pill so every clickable
