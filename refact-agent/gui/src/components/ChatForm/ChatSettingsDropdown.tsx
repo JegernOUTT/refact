@@ -11,7 +11,6 @@ import {
   Skeleton,
   Slider,
   Switch,
-  Callout,
 } from "@radix-ui/themes";
 import { Cross1Icon } from "@radix-ui/react-icons";
 import {
@@ -46,7 +45,6 @@ import {
   setMaxTokens,
 } from "../../features/Chat/Thread";
 import type { ReasoningEffort } from "../../features/Chat/Thread/types";
-import { push } from "../../features/Pages/pagesSlice";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { useThinking } from "../../hooks/useThinking";
 import { formatContextWindow } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
@@ -285,13 +283,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     [caps],
   );
 
-  const handleAddNewModel = useCallback(
-    () => {
-      dispatch(push({ name: "providers page" }));
-    },
-    [dispatch],
-  );
-
   const noop = useCallback(() => {
     /* intentionally empty */
   }, []);
@@ -401,37 +392,11 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
               models={modelSelectorOptions}
               value={caps.currentModel}
               variant="inline"
-              onAddNewModel={handleAddNewModel}
               onSelect={handleModelSelect}
             />
           </div>
 
           <div className={styles.settingsFooter}>
-            {selectedModelDetail &&
-              (selectedModelDetail.nCtx || selectedModelDetail.pricing) && (
-                <>
-                  <Separator size="4" />
-                  <Flex gap="2" align="center" px="2" py="1">
-                    {selectedModelDetail.nCtx && (
-                      <Text size="1" color="gray">
-                        {formatContextWindow(selectedModelDetail.nCtx)} context
-                      </Text>
-                    )}
-                    {selectedModelDetail.pricing && (
-                      <>
-                        <Text size="1" color="gray">
-                          ·
-                        </Text>
-                        <Text size="1" color="gray">
-                          {selectedModelDetail.pricing.prompt}/
-                          {selectedModelDetail.pricing.output} per 1M tokens
-                        </Text>
-                      </>
-                    )}
-                  </Flex>
-                </>
-              )}
-
             <Separator size="4" />
 
             {selectedModelDetail && (
@@ -508,12 +473,10 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                 </Flex>
 
                 {isStartedChat && (
-                  <Callout.Root color="amber" size="1" mt="2">
-                    <Callout.Text>
-                      Changing reasoning mid-chat may break prompt caching (if
-                      enabled) and make the next turn much more expensive.
-                    </Callout.Text>
-                  </Callout.Root>
+                  <div className={styles.reasoningWarning}>
+                    Changing reasoning mid-chat may break prompt caching (if
+                    enabled) and make the next turn much more expensive.
+                  </div>
                 )}
 
                 {isBoostReasoningEnabled && selectedModelDetail && (

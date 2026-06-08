@@ -36,8 +36,6 @@
 
 .searchBox:focus-within {
   border-color: var(--rf-color-accent);
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
 }
 
 .searchInput {
@@ -154,7 +152,7 @@
 .badgeGroup {
   display: inline-flex;
   flex: 0 1 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--rf-space-1);

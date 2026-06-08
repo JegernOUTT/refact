@@ -196,3 +196,13 @@
   background: var(--rf-color-accent-soft);
   border-color: var(--rf-color-accent);
 }
+
+.reasoningWarning {
+  margin-top: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  color: var(--rf-color-warning);
+  background: color-mix(in srgb, var(--rf-color-warning) 12%, transparent);
+  border-radius: var(--rf-radius-ctl);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
+}

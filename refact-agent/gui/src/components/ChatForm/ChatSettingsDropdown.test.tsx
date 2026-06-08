@@ -90,17 +90,4 @@ describe("ChatSettingsDropdown", () => {
     expect(thread?.thinking_budget).toBeNull();
   });
 
-  test("Add new model navigates to providers page", async () => {
-    const { user, store } = render(<ChatSettingsDropdown />, {
-      preloadedState: {
-        chat: chatStateWithReasoning(false),
-        config,
-      },
-    });
-
-    await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
-    await user.click(screen.getByText("Add new model..."));
-
-    expect(store.getState().pages.at(-1)).toEqual({ name: "providers page" });
-  });
 });
