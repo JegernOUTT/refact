@@ -4,10 +4,7 @@ import {
   Flex,
   Text,
   Button,
-  Switch,
   ScrollArea,
-  Slider,
-  Callout,
   Separator,
   Badge,
   IconButton,
@@ -32,6 +29,7 @@ import { useAppDispatch, useAppSelector } from "../../hooks";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { selectCurrentThreadId } from "../../features/Chat";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
+import { Slider, Surface, Switch } from "../ui";
 
 type Props = {
   open: boolean;
@@ -239,9 +237,9 @@ const SectionRow: React.FC<SectionRowProps> = ({
       <Flex align="center" justify="between">
         <Flex align="center" gap="2">
           <Switch
-            size="1"
             checked={config.enabled}
             onCheckedChange={onToggle}
+            className="rf-pressable"
           />
           <Text size="2" weight="medium">
             {meta.label}
@@ -258,7 +256,6 @@ const SectionRow: React.FC<SectionRowProps> = ({
               {fieldLabel}:
             </Text>
             <Slider
-              size="1"
               value={[currentTokens]}
               min={meta.minTokens}
               max={meta.maxTokens}
@@ -308,13 +305,13 @@ const SectionRow: React.FC<SectionRowProps> = ({
                   }}
                 >
                   <Switch
-                    size="1"
                     checked={block.enabled}
                     onCheckedChange={(checked) => {
                       if (block.path) {
                         onFileToggle(block.path, checked);
                       }
                     }}
+                    className="rf-pressable"
                     style={{ flexShrink: 0 }}
                   />
                   <Text
@@ -525,21 +522,29 @@ export const ProjectInformationDialog: React.FC<Props> = ({
         </Dialog.Description>
 
         {saveError && (
-          <Callout.Root color="red" mb="3">
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>{saveError}</Callout.Text>
-          </Callout.Root>
+          <Flex direction="column" mb="3">
+            <Surface variant="glass" radius="card">
+              <Flex align="center" gap="2" p="3">
+                <ExclamationTriangleIcon />
+                <Text color="red" size="2">
+                  {saveError}
+                </Text>
+              </Flex>
+            </Surface>
+          </Flex>
         )}
 
         {saveSuccess && (
-          <Callout.Root color="green" mb="3">
-            <Callout.Icon>
-              <CheckCircledIcon />
-            </Callout.Icon>
-            <Callout.Text>Configuration saved!</Callout.Text>
-          </Callout.Root>
+          <Flex direction="column" mb="3">
+            <Surface variant="glass" radius="card">
+              <Flex align="center" gap="2" p="3">
+                <CheckCircledIcon />
+                <Text color="green" size="2">
+                  Configuration saved!
+                </Text>
+              </Flex>
+            </Surface>
+          </Flex>
         )}
 
         <Flex align="center" justify="between" mb="3">
@@ -552,6 +557,7 @@ export const ProjectInformationDialog: React.FC<Props> = ({
                   dispatch(setIncludeProjectInfo({ chatId, value: enabled }));
                 }
               }}
+              className="rf-pressable"
             />
             <Text weight="medium">Include project information</Text>
           </Flex>
@@ -591,17 +597,19 @@ export const ProjectInformationDialog: React.FC<Props> = ({
         </ScrollArea>
 
         {previewData?.warnings && previewData.warnings.length > 0 && (
-          <Callout.Root color="orange" mt="3">
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>
-              {previewData.warnings.length} warning(s):{" "}
-              {previewData.warnings[0]}
-              {previewData.warnings.length > 1 &&
-                ` (+${previewData.warnings.length - 1} more)`}
-            </Callout.Text>
-          </Callout.Root>
+          <Flex direction="column" mt="3">
+            <Surface variant="glass" radius="card">
+              <Flex align="center" gap="2" p="3">
+                <ExclamationTriangleIcon />
+                <Text color="orange" size="2">
+                  {previewData.warnings.length} warning(s):{" "}
+                  {previewData.warnings[0]}
+                  {previewData.warnings.length > 1 &&
+                    ` (+${previewData.warnings.length - 1} more)`}
+                </Text>
+              </Flex>
+            </Surface>
+          </Flex>
         )}
 
         <Flex gap="3" mt="4" justify="end">

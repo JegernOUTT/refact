@@ -215,9 +215,12 @@
 .stdinInputRow {
   padding: var(--rf-space-2);
   margin-top: var(--rf-space-3);
-  background: var(--rf-color-accent-soft);
-  border: var(--rf-hairline) solid var(--rf-color-accent);
+  background: var(--rf-surface-glass, var(--rf-surface-2));
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-left-color: var(--rf-color-accent);
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .stdinBanner {
@@ -226,6 +229,13 @@
 
 .stdinTextField {
   flex: 1 1 auto;
+  padding: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .stdinInputRow {
+    backdrop-filter: none;
+  }
 }
 
 @keyframes exec-spinner {

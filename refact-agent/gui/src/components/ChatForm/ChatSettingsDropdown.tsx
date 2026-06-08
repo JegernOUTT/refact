@@ -1,12 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect } from "react";
-import {
-  Flex,
-  Text,
-  Separator,
-  Skeleton,
-  Slider,
-  Switch,
-} from "@radix-ui/themes";
+import { Flex, Text, Separator, Skeleton } from "@radix-ui/themes";
 import { Cross1Icon } from "@radix-ui/react-icons";
 import {
   Brain,
@@ -49,6 +42,8 @@ import {
   Icon,
   ModelSelector as KitModelSelector,
   Popover as KitPopover,
+  Slider,
+  Switch,
 } from "../ui";
 import type { ModelOption, ModelSelectorBadge } from "../ui";
 import styles from "./ChatSettingsDropdown.module.css";
@@ -447,7 +442,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                       1K
                     </Text>
                     <Slider
-                      size="1"
                       min={MIN_OUTPUT_TOKENS}
                       max={maxOutputTokens}
                       step={MIN_OUTPUT_TOKENS}
@@ -492,10 +486,10 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                     </Text>
                   </Flex>
                   <Switch
-                    size="1"
                     checked={isBoostReasoningEnabled}
                     onCheckedChange={handleThinkingToggle}
                     disabled={thinkingDisabled}
+                    className="rf-pressable"
                   />
                 </Flex>
 
@@ -558,7 +552,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                             1K
                           </Text>
                           <Slider
-                            size="1"
                             min={1024}
                             max={32768}
                             step={1024}

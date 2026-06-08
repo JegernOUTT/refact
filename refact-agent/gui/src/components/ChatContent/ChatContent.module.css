@@ -65,8 +65,9 @@
   height: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  background: var(--rf-color-accent-soft);
-  border: var(--rf-hairline) solid transparent;
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-left-color: var(--rf-color-accent);
   border-radius: var(--rf-radius-card);
   transition:
     background-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -367,15 +368,15 @@
   margin-left: auto;
   padding: var(--rf-space-2) var(--rf-space-3);
   color: var(--rf-color-fg);
-  background: var(--rf-surface-overlay);
+  background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-overlay);
+  box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .queuedMessagePriority {
-  border-color: var(--rf-color-accent);
+  border-left-color: var(--rf-color-accent);
 }
 
 .queuedMessageMain {
