@@ -413,7 +413,14 @@ export function VirtualizedChatList<T extends { key: string }>({
   return (
     <Box
       ref={wrapperRef}
-      style={{ flexGrow: 1, height: "100%", position: "relative" }}
+      style={{
+        flexGrow: 1,
+        height: "100%",
+        minWidth: 0,
+        maxWidth: "100%",
+        overflow: "hidden",
+        position: "relative",
+      }}
       data-testid="chat-virtualized-list-wrapper"
     >
       {hasMeasuredHeight && (

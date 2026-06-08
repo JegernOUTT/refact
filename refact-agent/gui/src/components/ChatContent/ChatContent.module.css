@@ -1,16 +1,25 @@
 .content {
-  margin-right: var(--rf-space-4);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding-right: var(--rf-space-4);
 }
 
 .chatRoot {
   position: relative;
   flex-grow: 1;
   height: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .chatColumn {
   flex-grow: 1;
   height: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .floatingLinks {

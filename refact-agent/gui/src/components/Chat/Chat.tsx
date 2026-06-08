@@ -86,7 +86,14 @@ export const Chat: React.FC<ChatProps> = ({
   return (
     <DropzoneProvider asChild>
       <Flex
-        style={{ ...style, minHeight: 0, height: "100%" }}
+        style={{
+          ...style,
+          minHeight: 0,
+          minWidth: 0,
+          maxWidth: "100%",
+          height: "100%",
+          overflow: "hidden",
+        }}
         direction="column"
         flexGrow="1"
         width="100%"
@@ -95,7 +102,13 @@ export const Chat: React.FC<ChatProps> = ({
         {isBrowserOpen && <BrowserPanel chatId={chatId} />}
         <Flex
           direction="column"
-          style={{ flex: "1 1 auto", minHeight: 0, overflow: "hidden" }}
+          style={{
+            flex: "1 1 auto",
+            minHeight: 0,
+            minWidth: 0,
+            maxWidth: "100%",
+            overflow: "hidden",
+          }}
         >
           <ChatContent onRetry={handleRetry} onStopStreaming={handleAbort} />
         </Flex>
