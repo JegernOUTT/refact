@@ -236,7 +236,7 @@ const ProviderDefaultModelsSetup: React.FC = () => {
   if (isError) return null;
 
   return (
-    <Surface className={styles.defaultsPanel} variant="surface-1">
+    <Surface className={styles.defaultsPanel} variant="glass" animated="rise">
       <div className={styles.defaultHeader}>
         <div>
           <div className={styles.defaultTitle}>Global default models</div>
@@ -340,7 +340,11 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         </div>
 
         {claudeUsage?.data && !claudeUsage.error ? (
-          <Surface className={styles.usagePanel} variant="plain">
+          <Surface
+            className={styles.usagePanel}
+            variant="glass"
+            animated="rise"
+          >
             <div className={styles.usageTitle}>Usage</div>
             <div className={styles.usageRows}>
               {claudeUsage.data.five_hour ? (
@@ -397,7 +401,11 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         ) : null}
 
         {codexUsage?.data && !codexUsage.error ? (
-          <Surface className={styles.usagePanel} variant="plain">
+          <Surface
+            className={styles.usagePanel}
+            variant="glass"
+            animated="rise"
+          >
             <div className={styles.usageHeader}>
               <div className={styles.usageTitle}>Usage</div>
               {codexUsage.data.plan_type ? (

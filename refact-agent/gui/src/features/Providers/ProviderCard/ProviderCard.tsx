@@ -62,7 +62,9 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
       as="div"
       role="button"
       tabIndex={0}
-      variant="plain"
+      variant="glass"
+      animated="rise"
+      interactive
       onClick={handleSelectProvider}
       onKeyDown={handleCardKeyDown}
       className={styles.providerCard}

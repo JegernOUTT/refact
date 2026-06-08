@@ -24,6 +24,19 @@
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
+.subNav {
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  padding: var(--rf-space-2);
+}
+
 .copy {
   display: grid;
   min-width: min(100%, 260px);
@@ -58,10 +71,6 @@
   gap: var(--rf-space-2);
 }
 
-.subNav {
-  min-width: 0;
-}
-
 .body {
   display: grid;
   min-width: 0;
@@ -85,6 +94,12 @@
   display: grid;
   min-width: 0;
   gap: var(--rf-space-2);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .subNav {
+    backdrop-filter: none;
+  }
 }
 
 @media (width <= 640px) {

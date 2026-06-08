@@ -280,8 +280,10 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
 
   return (
     <Surface
-      variant="plain"
-      className={classNames(styles.modelCard, "rf-enter", {
+      variant="glass"
+      animated="rise"
+      interactive={hasProviderRouting}
+      className={classNames(styles.modelCard, {
         [styles.disabledCard]: isLoading,
         [styles.clickable]: hasProviderRouting,
       })}

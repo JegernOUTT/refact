@@ -292,7 +292,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
 
   if (oauthConnected) {
     return (
-      <Surface className={styles.container} variant="surface-1">
+      <Surface className={styles.container} variant="glass" animated="rise">
         <div className={styles.headerRow}>
           <div className={styles.inlineRow}>
             <span className={`${styles.title} ${styles.connected}`}>
@@ -316,7 +316,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   if (sessionId && authorizeUrl) {
     if (oauthMode === "device" || userCode) {
       return (
-        <Surface className={styles.container} variant="surface-1">
+        <Surface className={styles.container} variant="glass" animated="rise">
           <div className={styles.title}>
             Authorize{" "}
             {(PROVIDER_LOGIN_LABELS[baseProvider] ?? "provider").replace(
@@ -375,7 +375,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
 
     if (oauthMode === "callback" && waitingForCallback) {
       return (
-        <Surface className={styles.container} variant="surface-1">
+        <Surface className={styles.container} variant="glass" animated="rise">
           <div className={styles.title}>Waiting for authentication...</div>
           <div className={styles.copy}>
             Complete the login in the browser window that opened. This page will
@@ -405,7 +405,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     }
 
     return (
-      <Surface className={styles.container} variant="surface-1">
+      <Surface className={styles.container} variant="glass" animated="rise">
         <div className={styles.title}>Paste the authorization code</div>
         <div className={styles.copy}>
           A browser window should have opened. Log in and copy the code shown on
@@ -453,7 +453,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   }
 
   return (
-    <Surface className={styles.container} variant="surface-1">
+    <Surface className={styles.container} variant="glass" animated="rise">
       <div className={styles.headerRow}>
         <div className={styles.title}>{loginLabel}</div>
         <Button

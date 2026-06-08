@@ -33,7 +33,7 @@ export const ConfiguredProvidersView: React.FC<
       {sortedConfiguredProviders.length > 0 ? (
         <div className={styles.providersGrid}>
           {sortedConfiguredProviders.map((provider, idx) => (
-            <div className="rf-enter" key={`${provider.name}_${idx}`}>
+            <div className="rf-enter-rise" key={`${provider.name}_${idx}`}>
               <ProviderCard
                 provider={provider}
                 setCurrentProvider={handleSetCurrentProvider}

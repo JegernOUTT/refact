@@ -21,7 +21,16 @@
   width: min(max-content, calc(100vw - var(--rf-space-4)));
   max-width: calc(100vw - var(--rf-space-4));
   transform: translateX(-50%);
-  background-color: var(--rf-color-accent-soft);
+  border: var(--rf-hairline) solid var(--rf-border);
+  background-color: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .popup {
+    backdrop-filter: none;
+  }
 }
 
 .popup_ide {

@@ -115,8 +115,9 @@ export const ModelCard: FC<ModelCardProps> = ({
 
   return (
     <Surface
-      variant="plain"
-      className={classNames(styles.modelCard, "rf-enter", {
+      variant="glass"
+      animated="rise"
+      className={classNames(styles.modelCard, {
         [styles.disabledCard]: isSavingModel,
       })}
     >

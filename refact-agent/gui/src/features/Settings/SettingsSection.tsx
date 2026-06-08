@@ -35,7 +35,7 @@ export function SettingsSection({
       className={classNames(
         styles.section,
         styles[width],
-        "rf-enter",
+        "rf-enter-rise",
         className,
       )}
     >

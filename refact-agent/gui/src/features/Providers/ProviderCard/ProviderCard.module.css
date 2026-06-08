@@ -2,30 +2,43 @@
   display: grid;
   width: 100%;
   min-width: 0;
+  box-sizing: border-box;
   min-height: calc(var(--rf-control-h-lg) + var(--rf-space-5));
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--rf-space-3);
   padding: var(--rf-space-3);
-  border: var(--rf-hairline) solid transparent;
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
   color: var(--rf-color-fg);
   text-align: left;
   cursor: pointer;
   user-select: none;
+  backdrop-filter: blur(var(--rf-blur-overlay));
   transition:
     background var(--rf-dur-fast) var(--rf-ease-standard),
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard),
     opacity var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .providerCard:hover {
-  border-color: var(--rf-border);
-  background: var(--rf-surface-1);
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
 }
 
 .providerCard:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-hairline);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .providerCard {
+    backdrop-filter: none;
+  }
 }
 
 .identity,

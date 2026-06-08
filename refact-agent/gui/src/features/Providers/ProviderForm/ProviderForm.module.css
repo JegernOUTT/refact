@@ -28,12 +28,15 @@
   gap: var(--rf-space-3);
 }
 
-.usagePanel {
-  padding-block: var(--rf-space-2);
-}
-
+.usagePanel,
 .defaultsPanel {
   padding: var(--rf-space-3);
+}
+
+.usagePanel,
+.defaultsPanel,
+.codeBox {
+  box-sizing: border-box;
 }
 
 .usageHeader,
@@ -104,7 +107,7 @@
   width: 100%;
   overflow: hidden;
   border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-glass);
 }
 
 .usageBarFill {

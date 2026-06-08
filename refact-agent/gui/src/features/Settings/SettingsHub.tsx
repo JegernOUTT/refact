@@ -132,7 +132,7 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
         </Button>
       </div>
       <SettingsShell
-        className={styles.shell}
+        className={`${styles.shell} rf-enter-rise`}
         sections={SETTINGS_SECTIONS}
         active={activeSection}
         onSectionChange={handleSectionChange}
