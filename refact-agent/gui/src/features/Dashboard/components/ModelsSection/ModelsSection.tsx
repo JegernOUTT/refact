@@ -33,7 +33,7 @@ function ModelRow({
   return (
     <HoverCard.Root openDelay={300} closeDelay={100}>
       <HoverCard.Trigger>
-        <div className={styles.modelRow}>
+        <div className={`${styles.modelRow} rf-enter-rise rf-pressable`}>
           <Text size="1" tone="muted" className={styles.modelLabel}>
             {label}
           </Text>

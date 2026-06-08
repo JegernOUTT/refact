@@ -167,7 +167,11 @@ function ModelRow({
   return (
     <HoverCard.Root openDelay={300} closeDelay={100}>
       <HoverCard.Trigger>
-        <Flex align="center" gap="2" style={{ cursor: "help" }}>
+        <Flex
+          align="center"
+          gap="2"
+          className={`${styles.modelRow} rf-pressable`}
+        >
           <Text size="1" tone="muted" style={{ minWidth: 70, flexShrink: 0 }}>
             {label}
           </Text>
@@ -202,14 +206,14 @@ function DefaultModelsCard() {
   const { data: caps, isLoading } = useGetCapsQuery(undefined);
 
   return (
-    <div className={styles.card}>
+    <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
       <Flex justify="between" align="center" className={styles.cardTitle}>
         <Text size="1" weight="bold" tone="muted">
           DEFAULT MODELS
         </Text>
         <button
           type="button"
-          className={styles.configureButton}
+          className={`${styles.configureButton} rf-pressable`}
           onClick={() => dispatch(push({ name: "default models" }))}
         >
           <Text size="1">Configure</Text>
@@ -447,7 +451,7 @@ function ProviderQuotaCard() {
   );
 
   return (
-    <div className={styles.card}>
+    <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
       <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
         PROVIDER QUOTAS
       </Text>
@@ -508,15 +512,15 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
     }
     return (
       <div className={styles.statsGrid} data-breakpoint={breakpoint}>
-        <div className={styles.card}>
+        <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
           <Skeleton width="100%" height="100px" />
         </div>
         {breakpoint !== "narrow" && (
           <>
-            <div className={styles.card}>
+            <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
               <Skeleton width="100%" height="100px" />
             </div>
-            <div className={styles.card}>
+            <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
               <Skeleton width="100%" height="100px" />
             </div>
           </>
@@ -594,7 +598,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
       <DefaultModelsCard />
       <ProviderQuotaCard />
       {/* Card 1: 7-Day Activity */}
-      <div className={styles.card}>
+      <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
         <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
           7-DAY ACTIVITY
         </Text>
@@ -717,7 +721,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
       </div>
 
       {/* Card 2: Project Pulse */}
-      <div className={styles.card}>
+      <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
         <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
           PROJECT PULSE
         </Text>
@@ -892,7 +896,7 @@ export const StatsStrip: React.FC<StatsStripProps> = ({
       </div>
 
       {/* Card 3: Spending */}
-      <div className={styles.card}>
+      <div className={`${styles.card} rf-glass-panel rf-enter-rise`}>
         <Text size="1" weight="bold" tone="muted" className={styles.cardTitle}>
           SPENDING
         </Text>

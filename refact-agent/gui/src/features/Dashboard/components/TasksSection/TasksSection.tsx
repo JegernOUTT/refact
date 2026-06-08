@@ -292,7 +292,7 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
                 <div
                   role="button"
                   tabIndex={0}
-                  className={styles.taskItem}
+                  className={`${styles.taskItem} rf-enter-rise rf-pressable`}
                   onClick={() => handleTaskClick(task)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {

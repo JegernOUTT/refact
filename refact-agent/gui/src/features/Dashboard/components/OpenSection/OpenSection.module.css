@@ -40,11 +40,12 @@
 
 .grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--rf-space-3);
+  min-width: 0;
 }
 
 .grid[data-breakpoint="medium"],
 .grid[data-breakpoint="wide"] {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }

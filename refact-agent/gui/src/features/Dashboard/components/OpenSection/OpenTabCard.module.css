@@ -4,16 +4,15 @@
   gap: var(--rf-space-2);
   padding: var(--rf-space-3);
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-1);
-  border: var(--rf-hairline) solid var(--rf-border);
   cursor: pointer;
   text-align: left;
   width: 100%;
   min-width: 0;
   overflow: hidden;
   transition:
-    background var(--rf-dur-fast) ease,
-    border-color var(--rf-dur-fast) ease;
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .card:hover {

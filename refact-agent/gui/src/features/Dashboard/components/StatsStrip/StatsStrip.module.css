@@ -23,10 +23,19 @@
   flex-direction: column;
   gap: var(--rf-space-2);
   padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   flex-shrink: 0;
   min-width: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .narrowStats {
+    backdrop-filter: none;
+  }
 }
 
 .card {
@@ -35,7 +44,6 @@
   gap: var(--rf-space-3);
   padding: var(--rf-space-3);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
   overflow: hidden;
   min-width: 0;
 }
@@ -45,6 +53,7 @@
   letter-spacing: 0.05em;
   padding-bottom: var(--rf-space-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
+  border-image: linear-gradient(90deg, var(--rf-border), transparent) 1;
 }
 
 .cardSection {
@@ -56,7 +65,24 @@
 
 .cardDivider {
   height: var(--rf-hairline);
-  background: var(--rf-border);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--rf-border),
+    transparent
+  );
+}
+
+.modelRow {
+  border-radius: var(--rf-radius-ctl);
+  cursor: help;
+  max-width: 100%;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  transition: background var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.modelRow:hover {
+  background: var(--rf-surface-1);
 }
 
 .modeFill {
@@ -69,6 +95,25 @@
 
 .configureButton {
   flex-shrink: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: transparent;
+  color: var(--rf-color-fg);
+  cursor: pointer;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.configureButton:hover {
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border-strong);
+}
+
+.configureButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .hoverTrigger {

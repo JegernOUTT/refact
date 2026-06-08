@@ -43,7 +43,9 @@
   background: transparent;
   cursor: pointer;
   color: var(--rf-color-fg);
-  transition: background var(--rf-dur-fast) ease;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .configureButton:hover {
@@ -65,16 +67,21 @@
   flex-direction: column;
 }
 
+.models[data-breakpoint="narrow"] .modelRow {
+  width: 100%;
+}
+
 .modelRow {
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
   padding: var(--rf-space-1) var(--rf-space-2);
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-1);
+  background: transparent;
   cursor: help;
   min-width: 0;
-  transition: background var(--rf-dur-fast) ease;
+  max-width: 100%;
+  transition: background var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .modelRow:hover {

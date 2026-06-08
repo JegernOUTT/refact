@@ -33,7 +33,7 @@ export const OpenTabCard: React.FC<OpenTabCardProps> = ({
   return (
     <button
       type="button"
-      className={styles.card}
+      className={`${styles.card} rf-glass-panel rf-enter-rise rf-pressable`}
       data-active={isActive || undefined}
       onClick={onClick}
     >
