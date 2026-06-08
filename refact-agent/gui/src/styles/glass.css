@@ -1,0 +1,12 @@
+.rf-glass-panel {
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .rf-glass-panel {
+    backdrop-filter: none;
+  }
+}

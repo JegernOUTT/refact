@@ -13,6 +13,7 @@
 .surface1,
 .surface2,
 .surface3,
+.glass,
 .overlay,
 .selected {
   border: var(--rf-hairline) solid var(--rf-border);
@@ -29,6 +30,12 @@
 .surface3 {
   border-color: var(--rf-border-strong);
   background: var(--rf-surface-3);
+}
+
+.glass {
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .overlay {
@@ -63,6 +70,7 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
+  .glass,
   .overlay {
     backdrop-filter: none;
   }

@@ -7,6 +7,7 @@ export type SurfaceVariant =
   | "surface-1"
   | "surface-2"
   | "surface-3"
+  | "glass"
   | "overlay"
   | "selected";
 
@@ -30,6 +31,7 @@ const variantClass: Record<SurfaceVariant, string> = {
   "surface-1": styles.surface1,
   "surface-2": styles.surface2,
   "surface-3": styles.surface3,
+  glass: styles.glass,
   overlay: styles.overlay,
   selected: styles.selected,
 };

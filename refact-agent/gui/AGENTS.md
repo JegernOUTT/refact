@@ -279,8 +279,10 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 
 - Panel-less by default: inline content, especially tool cards and transcript content, should not gain boxes, fills, or heavy borders.
 - Kit Menu, Select, and Combobox item rows follow the ModelSelector row language: transparent idle rows, no per-row border/box/radius, `--rf-surface-1` hover, and `--rf-color-accent-soft` selected tint with accent-colored marker. Preserve the glass overlay container and keep overlay content as the single scroll owner.
+- Neutral-gray glass is the shared inline panel treatment. Use `Surface variant="glass"` when JSX can use the kit primitive, or `.rf-glass-panel` for global/module CSS surfaces that need the same recipe. Both read from `--rf-surface-glass` and `--rf-elev-panel`, with blur driven by `--rf-blur-overlay`.
+- Glassy panel backgrounds must stay neutral gray, never periwinkle or blue. `--rf-color-accent-soft` is reserved for selected/active states and must not be used as a panel or card fill.
 - Surfaces are reserved for overlays, fields, selected/active state, and true containment. When used, keep them barely visible with tokenized borders/backgrounds.
-- JCEF/JetBrains (`[data-host="jetbrains"]`) forces solid overlay surfaces and disables blur for performance.
+- JCEF/JetBrains (`[data-host="jetbrains"]`) forces solid overlay/glass surfaces and disables blur for performance. `prefers-reduced-transparency: reduce` also resolves overlay/glass surfaces to solid readable panels.
 
 ### Motion
 
