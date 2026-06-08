@@ -7,7 +7,6 @@ import {
   FieldSwitch,
   FieldText,
   FieldTextarea,
-  Surface,
 } from "../../components/ui";
 import {
   type CreateCronRequest,
@@ -129,78 +128,77 @@ export const CronCreateForm: React.FC<CronCreateFormProps> = ({
   const errorMessage = localError ?? backendError;
 
   return (
-    <Surface className={styles.card} variant="surface-1">
-      <form className={styles.form} onSubmit={submitForm}>
-        <div className={styles.sectionHeader}>
-          <h2 className={styles.sectionTitle}>Create schedule</h2>
-          <p className={styles.sectionHint}>Schedule a prompt for the current chat.</p>
-        </div>
-        <div className={styles.inlineFields}>
-          <Field label="Cron expression" required>
-            <FieldText
-              value={cron}
-              onChange={handleCronChange}
-              aria-label="Cron expression"
-              placeholder="7 * * * *"
-            />
-          </Field>
-          <Field label="Preset">
-            <FieldSelect
-              value={preset}
-              options={PRESET_OPTIONS}
-              onChange={setSelectedPreset}
-              aria-label="Cron preset"
-            />
-          </Field>
-        </div>
-        <Field
-          label="Description"
-          helper={`${description.length}/80`}
-          required
-        >
+    <form className={styles.form} onSubmit={submitForm}>
+      <div className={styles.formIntro}>
+        <p className={styles.sectionHint}>
+          Use standard 5-field cron syntax. Examples: hourly{" "}
+          <code>7 * * * *</code>, weekdays <code>3 9 * * 1-5</code>.
+        </p>
+      </div>
+      <div className={styles.inlineFields}>
+        <Field label="Cron expression" required>
           <FieldText
-            value={description}
-            maxLength={80}
-            onChange={setDescription}
-            aria-label="Description"
+            className={styles.fieldControl}
+            value={cron}
+            onChange={handleCronChange}
+            aria-label="Cron expression"
+            placeholder="7 * * * *"
           />
         </Field>
-        <Field label="Prompt" required>
-          <FieldTextarea
-            value={prompt}
-            onChange={setPrompt}
-            aria-label="Prompt"
-            rows={4}
+        <Field label="Preset">
+          <FieldSelect
+            value={preset}
+            options={PRESET_OPTIONS}
+            onChange={setSelectedPreset}
+            aria-label="Cron preset"
           />
         </Field>
-        <div className={styles.toggles}>
-          <Field label="Recurring" helper="Run on every matching schedule.">
-            <FieldSwitch
-              checked={recurring}
-              onChange={setRecurring}
-              aria-label="Recurring"
-            />
-          </Field>
-          <Field label="Durable" helper="Persist this schedule for the project.">
-            <FieldSwitch
-              checked={durable}
-              onChange={setDurable}
-              aria-label="Durable"
-            />
-          </Field>
-        </div>
-        {errorMessage ? <FieldError>{errorMessage}</FieldError> : null}
-        <div className={styles.formActions}>
-          <Button
-            type="submit"
-            variant="primary"
-            loading={isLoading}
-            disabled={capExceeded}
-          >
-            {isLoading ? "Creating…" : "Create"}
-          </Button>
-        </div>
-      </form>
-    </Surface>
+      </div>
+      <Field label="Description" helper={`${description.length}/80`} required>
+        <FieldText
+          className={styles.fieldControl}
+          value={description}
+          maxLength={80}
+          onChange={setDescription}
+          aria-label="Description"
+        />
+      </Field>
+      <Field label="Prompt" required>
+        <FieldTextarea
+          className={styles.fieldControl}
+          value={prompt}
+          onChange={setPrompt}
+          aria-label="Prompt"
+          rows={4}
+        />
+      </Field>
+      <div className={styles.toggles}>
+        <Field label="Recurring" helper="Run on every matching schedule.">
+          <FieldSwitch
+            checked={recurring}
+            onChange={setRecurring}
+            aria-label="Recurring"
+          />
+        </Field>
+        <Field label="Durable" helper="Persist this schedule for the project.">
+          <FieldSwitch
+            checked={durable}
+            onChange={setDurable}
+            aria-label="Durable"
+          />
+        </Field>
+      </div>
+      {errorMessage ? <FieldError>{errorMessage}</FieldError> : null}
+      <div className={styles.formActions}>
+        <Button
+          type="submit"
+          variant="primary"
+          loading={isLoading}
+          disabled={capExceeded}
+        >
+          {isLoading ? "Creating…" : "Create"}
+        </Button>
+      </div>
+    </form>
   );
 };

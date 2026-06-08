@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import { Button, FieldError } from "../../components/ui";
+import { Badge, Button, FieldError } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   type CreateCronRequest,
@@ -24,7 +24,10 @@ type SchedulerPanelProps = {
   embedded?: boolean;
 };
 
-export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack, embedded }) => {
+export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
+  onBack,
+  embedded,
+}) => {
   const {
     data: tasks = [],
     isFetching,
@@ -37,6 +40,9 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack, embedded
   const lastCronFireAt = useAppSelector(selectLastCronFireAt);
   const currentThreadId = useAppSelector(selectCurrentThreadId);
   const currentMode = useAppSelector(selectThreadMode);
+
+  const recurringCount = tasks.filter((task) => task.recurring).length;
+  const durableCount = tasks.filter((task) => task.durable).length;
 
   const sortedTasks = useMemo(
     () =>
@@ -78,29 +84,45 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack, embedded
           Back
         </Button>
       )}
-      <Button variant="soft" onClick={() => void refetch()} leftIcon={RefreshCw}>
+      <Button
+        variant="soft"
+        onClick={() => void refetch()}
+        leftIcon={RefreshCw}
+      >
         Refresh
       </Button>
     </>
   );
 
+  const summary = (
+    <div className={styles.summaryBadges} aria-label="Scheduler summary">
+      <Badge tone="default">{tasks.length} total</Badge>
+      <Badge tone="success">{recurringCount} recurring</Badge>
+      <Badge tone="accent">{durableCount} durable</Badge>
+    </div>
+  );
+
   return (
     <SettingsSection
       title="Scheduler"
-      description="Create, review, and delete cron prompts."
+      description="Create, review, and delete scheduled prompts for the current chat."
       actions={actions}
+      subNav={summary}
     >
-      <CronCreateForm
-        onSubmit={handleCreate}
-        isLoading={createState.isLoading}
-        error={createState.error}
-        taskCount={tasks.length}
-      />
+      <SettingsGroup title="Create schedule">
+        <CronCreateForm
+          onSubmit={handleCreate}
+          isLoading={createState.isLoading}
+          error={createState.error}
+          taskCount={tasks.length}
+        />
+      </SettingsGroup>
       <SettingsGroup title="Scheduled prompts">
         <div className={styles.sectionStack}>
           <div className={styles.listHeader}>
             <p className={styles.sectionHint}>
-              Human schedule, next fire, scope, and delete actions.
+              Review the next fire time, schedule scope, recurrence, and prompt
+              description.
             </p>
             {lastCronFireAt ? (
               <span className={styles.lastFired}>
@@ -108,7 +130,9 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack, embedded
               </span>
             ) : null}
           </div>
-          {error ? <FieldError>{schedulerErrorMessage(error)}</FieldError> : null}
+          {error ? (
+            <FieldError>{schedulerErrorMessage(error)}</FieldError>
+          ) : null}
           {deleteState.error ? (
             <FieldError>{schedulerErrorMessage(deleteState.error)}</FieldError>
           ) : null}

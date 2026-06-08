@@ -1,32 +1,76 @@
-.sectionStack {
+.summaryBadges {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.sectionStack,
+.form,
+.jobList,
+.jobTitleBlock,
+.jobMetaItem {
   display: grid;
   min-width: 0;
+}
+
+.sectionStack,
+.jobList {
   gap: var(--rf-space-3);
+}
+
+.form {
+  gap: var(--rf-space-4);
+}
+
+.formIntro {
+  min-width: 0;
+  padding-bottom: var(--rf-space-1);
 }
 
 .sectionHint,
 .lastFired,
-.scheduleCron {
+.jobCron,
+.jobMeta dt,
+.jobMeta dd,
+.jobDescription {
   margin: 0;
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
   line-height: var(--rf-line);
 }
 
-.form {
-  display: grid;
-  gap: var(--rf-space-3);
+.sectionHint,
+.lastFired,
+.jobCron,
+.jobMeta dt {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.sectionHint {
+  max-width: 72ch;
+}
+
+.sectionHint code,
+.jobCron {
+  overflow-wrap: anywhere;
+  font-family: var(--rf-font-mono);
 }
 
 .inlineFields {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 180px);
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.45fr);
   gap: var(--rf-space-3);
   align-items: start;
 }
 
+.fieldControl {
+  box-sizing: border-box;
+}
+
 .toggles {
   display: grid;
+  min-width: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--rf-space-3);
 }
@@ -34,83 +78,106 @@
 .formActions {
   display: flex;
   min-width: 0;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: var(--rf-space-2);
 }
 
 .listHeader {
   display: flex;
   min-width: 0;
-  align-items: start;
+  flex-wrap: wrap;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: var(--rf-space-3);
+  gap: var(--rf-space-2) var(--rf-space-3);
 }
 
 .lastFired {
-  flex-shrink: 0;
-  padding-top: var(--rf-space-1);
+  flex: 0 1 auto;
 }
 
-.scrollX {
+.emptyState {
   min-width: 0;
-  overflow-x: auto;
 }
 
-.table {
-  width: 100%;
-  min-width: 720px;
-  border-collapse: collapse;
-  font-size: var(--rf-text-2);
-}
-
-.table th,
-.table td {
-  padding: var(--rf-space-2);
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
-  text-align: left;
-  vertical-align: top;
-}
-
-.table th {
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
-  font-weight: 650;
-}
-
-.actions {
-  text-align: right;
-}
-
-.scheduleCell {
+.jobCard {
   display: grid;
   min-width: 0;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-3);
+}
+
+.jobHeader {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2) var(--rf-space-3);
+}
+
+.jobTitleBlock {
+  flex: 1 1 0;
   gap: var(--rf-space-1);
 }
 
-.scheduleTitle {
-  overflow: hidden;
+.jobTitle {
+  margin: 0;
+  overflow-wrap: anywhere;
   color: var(--rf-color-fg);
-  font-weight: 650;
-  text-overflow: ellipsis;
+  font: 700 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
 }
 
-.empty {
-  padding: var(--rf-space-4);
-  color: var(--rf-color-muted);
+.jobBadges {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+}
+
+.jobDescription {
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  text-align: center;
+}
+
+.jobMeta {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-3);
+  margin: 0;
+}
+
+.jobMetaItem {
+  gap: var(--rf-space-1);
+}
+
+.jobMeta dd {
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  font-weight: 650;
+}
+
+.jobActions {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-end;
 }
 
 @media (width <= 640px) {
   .inlineFields,
-  .toggles {
+  .toggles,
+  .jobMeta {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .listHeader {
-    display: grid;
-  }
-
-  .lastFired {
-    padding-top: 0;
+  .formActions,
+  .jobActions,
+  .jobBadges {
+    justify-content: flex-start;
   }
 }
