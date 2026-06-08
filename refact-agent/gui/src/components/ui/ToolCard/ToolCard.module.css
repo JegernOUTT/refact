@@ -8,18 +8,12 @@
   border-radius: var(--rf-radius-card);
 }
 
-.root:focus-within {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
-}
-
 .header {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
   padding: var(--rf-space-1) 0;
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .toggle {

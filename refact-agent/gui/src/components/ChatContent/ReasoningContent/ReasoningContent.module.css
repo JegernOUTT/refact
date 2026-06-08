@@ -3,10 +3,14 @@
 }
 
 .header {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-width: 0;
+  min-height: var(--rf-control-h-sm);
   padding: var(--rf-space-1) 0;
   cursor: pointer;
   user-select: none;
-  min-height: 24px;
   transition: filter 0.15s ease;
 }
 
@@ -18,13 +22,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  min-width: 20px;
-  height: 16px;
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  width: var(--rf-control-h-sm);
+  height: var(--rf-icon-md);
 }
 
 .iconWrapper svg {
@@ -33,12 +33,12 @@
 }
 
 .summary {
+  flex: 1 1 auto;
+  min-width: 0;
   color: inherit;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
-  min-width: 0;
 }
 
 .contentWrapper {
