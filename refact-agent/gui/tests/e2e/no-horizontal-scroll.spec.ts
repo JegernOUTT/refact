@@ -6,6 +6,7 @@ import { expect, test } from "@playwright/test";
 type OverflowReport = {
   docOverflow: boolean;
   offenders: string[];
+  innerScrollOffenders: string[];
 };
 
 const widths = [240, 360, 768, 1280] as const;
@@ -80,34 +81,64 @@ test.describe("no page-level horizontal scroll", () => {
           }
         }
 
-        const overflow = await page.evaluate<OverflowReport>(() => {
-          const docOverflow =
-            document.documentElement.scrollWidth >
-            document.documentElement.clientWidth + 1;
-          const offenders = [...document.querySelectorAll("*")]
-            .filter((el) => {
-              if (el.closest(".scrollX")) return false;
-              const style = getComputedStyle(el);
-              return (
-                el.scrollWidth > el.clientWidth + 1 &&
-                style.overflowX !== "auto" &&
-                style.overflowX !== "scroll"
-              );
-            })
-            .slice(0, 5)
-            .map((el) => {
-              if (typeof el.className === "string" && el.className) {
-                return el.className;
-              }
-              return el.tagName.toLowerCase();
-            });
-          return { docOverflow, offenders };
-        });
+        const overflow = await page.evaluate<OverflowReport, boolean>(
+          (checkInnerScroll) => {
+            const describeElement = (el: Element) => {
+              const className =
+                typeof el.className === "string" ? el.className.trim() : "";
+              const testId = el.getAttribute("data-testid");
+              const element = el.getAttribute("data-element");
+              const label = el.getAttribute("aria-label");
+              const descriptor = testId ?? element ?? label ?? className;
+              const size = `${el.scrollWidth}x${el.clientWidth}`;
+              return descriptor
+                ? `${el.tagName.toLowerCase()}.${descriptor} ${size}`
+                : `${el.tagName.toLowerCase()} ${size}`;
+            };
+            const docOverflow =
+              document.documentElement.scrollWidth >
+              document.documentElement.clientWidth + 1;
+            const offenders = [...document.querySelectorAll("*")]
+              .filter((el) => {
+                if (el.closest(".scrollX")) return false;
+                const style = getComputedStyle(el);
+                return (
+                  el.scrollWidth > el.clientWidth + 1 &&
+                  style.overflowX !== "auto" &&
+                  style.overflowX !== "scroll"
+                );
+              })
+              .slice(0, 5)
+              .map(describeElement);
+            const innerScrollOffenders = checkInnerScroll
+              ? [...document.querySelectorAll("*")]
+                  .filter((el) => {
+                    if (el.closest(".scrollX")) return false;
+                    const style = getComputedStyle(el);
+                    return (
+                      el.scrollWidth > el.clientWidth + 2 &&
+                      (style.overflowX === "auto" ||
+                        style.overflowX === "scroll")
+                    );
+                  })
+                  .slice(0, 5)
+                  .map(describeElement)
+              : [];
+            return { docOverflow, offenders, innerScrollOffenders };
+          },
+          route.path.includes("route=settings"),
+        );
 
         expect(
           overflow.docOverflow,
           `offenders: ${overflow.offenders.join(" | ")}`,
         ).toBe(false);
+        expect(
+          overflow.innerScrollOffenders,
+          `inner scroll offenders: ${overflow.innerScrollOffenders.join(
+            " | ",
+          )}`,
+        ).toEqual([]);
       });
     }
   }
