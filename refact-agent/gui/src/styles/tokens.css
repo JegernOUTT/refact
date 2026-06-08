@@ -14,13 +14,13 @@
   --rf-surface-overlay: rgba(18, 20, 25, 0.82);
   --rf-border: rgba(255, 255, 255, 0.06);
   --rf-border-strong: rgba(255, 255, 255, 0.11);
-  --rf-color-accent: var(--accent-9, #6f8bff);
-  --rf-color-accent-soft: rgba(111, 139, 255, 0.16);
+  --rf-color-accent: #7f93d8;
+  --rf-color-accent-soft: rgba(127, 147, 216, 0.12);
   --rf-color-success: #5fae8b;
   --rf-color-warning: #cda04e;
   --rf-color-danger: #d8736d;
   --rf-color-info: var(--rf-color-accent);
-  --rf-focus-ring: rgba(111, 139, 255, 0.7);
+  --rf-focus-ring: rgba(127, 147, 216, 0.55);
   --rf-radius-chip: 6px;
   --rf-radius-ctl: 8px;
   --rf-radius-card: 10px;
@@ -78,15 +78,70 @@
   [data-appearance="dark"] {
     --rf-color-accent-soft: color-mix(
       in oklab,
-      var(--rf-color-accent) 16%,
+      var(--rf-color-accent) 12%,
       transparent
     );
     --rf-focus-ring: color-mix(
       in oklab,
-      var(--rf-color-accent) 70%,
+      var(--rf-color-accent) 55%,
       transparent
     );
   }
+}
+
+.dark[data-accent-color="blue"],
+[data-appearance="dark"][data-accent-color="blue"],
+.dark [data-accent-color="blue"],
+[data-appearance="dark"] [data-accent-color="blue"] {
+  --accent-a3: rgba(127, 147, 216, 0.12);
+  --accent-a7: rgba(127, 147, 216, 0.28);
+  --accent-a8: rgba(127, 147, 216, 0.38);
+  --accent-a11: #a8b8ee;
+  --accent-8: #7084c7;
+  --accent-9: var(--rf-color-accent);
+  --accent-10: #8b9ede;
+  --accent-11: #a8b8ee;
+  --accent-indicator: var(--rf-color-accent);
+  --accent-track: var(--rf-color-accent);
+}
+
+.dark [data-color="blue"],
+[data-appearance="dark"] [data-color="blue"] {
+  --accent-a3: rgba(127, 147, 216, 0.12);
+  --accent-a7: rgba(127, 147, 216, 0.28);
+  --accent-a8: rgba(127, 147, 216, 0.38);
+  --accent-a11: #a8b8ee;
+  --accent-8: #7084c7;
+  --accent-9: var(--rf-color-accent);
+  --accent-10: #8b9ede;
+  --accent-11: #a8b8ee;
+  --accent-indicator: var(--rf-color-accent);
+  --accent-track: var(--rf-color-accent);
+  --blue-a7: var(--accent-a7);
+  --blue-9: var(--rf-color-accent);
+  --blue-11: var(--accent-11);
+}
+
+.dark,
+[data-appearance="dark"] {
+  --accent-a3: rgba(127, 147, 216, 0.12);
+  --accent-a7: rgba(127, 147, 216, 0.28);
+  --accent-a8: rgba(127, 147, 216, 0.38);
+  --accent-a11: #a8b8ee;
+  --accent-8: #7084c7;
+  --accent-9: var(--rf-color-accent);
+  --accent-10: #8b9ede;
+  --accent-11: #a8b8ee;
+  --accent-indicator: var(--rf-color-accent);
+  --accent-track: var(--rf-color-accent);
+  --accent-contrast: #0c0d0f;
+  --blue-a3: var(--accent-a3);
+  --blue-a7: var(--accent-a7);
+  --blue-a8: var(--accent-a8);
+  --blue-8: var(--accent-8);
+  --blue-9: var(--rf-color-accent);
+  --blue-10: var(--accent-10);
+  --blue-11: var(--accent-11);
 }
 
 /* Semantic tokens */
@@ -102,7 +157,26 @@
   --rf-surface-overlay: rgba(255, 255, 255, 0.92);
   --rf-border: rgba(0, 0, 0, 0.08);
   --rf-border-strong: rgba(0, 0, 0, 0.14);
+  --rf-color-accent: var(--accent-9, #006adc);
+  --rf-color-accent-soft: rgba(0, 106, 220, 0.12);
+  --rf-focus-ring: rgba(0, 106, 220, 0.5);
   --rf-elev-overlay: 0 14px 40px rgba(0, 0, 0, 0.16);
+}
+
+@supports (--rf-color-accent-soft: color-mix(in oklab, #000 16%, transparent)) {
+  .light,
+  [data-appearance="light"] {
+    --rf-color-accent-soft: color-mix(
+      in oklab,
+      var(--rf-color-accent) 16%,
+      transparent
+    );
+    --rf-focus-ring: color-mix(
+      in oklab,
+      var(--rf-color-accent) 50%,
+      transparent
+    );
+  }
 }
 
 /* Theme adapters */
