@@ -8,9 +8,18 @@
 }
 
 .root {
+  --switch-track-w: 36px;
+  --switch-track-h: 20px;
+  --switch-thumb-size: 16px;
+  --switch-thumb-inset: 2px;
+  --switch-thumb-travel: calc(var(--switch-track-w) - var(--switch-thumb-size) - var(--switch-thumb-inset));
+
   position: relative;
-  width: 44px;
-  height: var(--rf-control-h);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  width: var(--switch-track-w);
+  height: var(--switch-track-h);
   padding: 0;
   background: var(--rf-surface-2);
   border: var(--rf-hairline) solid var(--rf-border-strong);
@@ -44,16 +53,16 @@
 
 .thumb {
   display: block;
-  width: calc(var(--rf-control-h) - 8px);
-  height: calc(var(--rf-control-h) - 8px);
+  width: var(--switch-thumb-size);
+  height: var(--switch-thumb-size);
   background: var(--rf-color-fg);
   border-radius: var(--rf-radius-pill);
   box-shadow: var(--rf-elev-overlay);
-  transform: translateX(var(--rf-space-1));
+  transform: translateX(var(--switch-thumb-inset));
 }
 
 .root[data-state="checked"] .thumb {
-  transform: translateX(calc(44px - var(--rf-control-h) + var(--rf-space-1)));
+  transform: translateX(var(--switch-thumb-travel));
 }
 
 .label {
