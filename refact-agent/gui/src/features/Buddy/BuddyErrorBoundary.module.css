@@ -7,6 +7,7 @@
 }
 
 .card {
+  composes: rf-enter-rise from global;
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-4);
@@ -21,18 +22,22 @@
 
 .reportPanel {
   padding: var(--rf-space-3);
-  border: 1px solid var(--rf-border);
+  border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .valueText {
   min-width: 0;
   flex: 1;
   padding: var(--rf-space-2) var(--rf-space-3);
-  border: 1px solid var(--rf-border-strong);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .monoText {
@@ -44,6 +49,7 @@
 }
 
 .copyButton {
+  transform: translateY(0) scale(1);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -61,6 +67,9 @@
   background: var(--rf-surface-2);
   color: var(--rf-color-fg);
 }
+.copyButton:active:not(:disabled) {
+  transform: translateY(1px) scale(0.98);
+}
 
 .copyButton:disabled {
   cursor: not-allowed;
@@ -68,6 +77,7 @@
 }
 
 .copyAllButton {
+  transform: translateY(0) scale(1);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -85,8 +95,53 @@
 .copyAllButton:hover:not(:disabled) {
   background: var(--rf-surface-2);
 }
+.copyAllButton:active:not(:disabled) {
+  transform: translateY(1px) scale(0.98);
+}
 
 .copyAllButton:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .copyButton,
+  .copyAllButton {
+    transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+    will-change: transform;
+  }
+
+  .copyButton:hover:not(:disabled),
+  .copyAllButton:hover:not(:disabled) {
+    transform: translateY(-1px) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copyButton,
+  .copyButton:hover:not(:disabled),
+  .copyButton:active:not(:disabled),
+  .copyAllButton,
+  .copyAllButton:hover:not(:disabled),
+  .copyAllButton:active:not(:disabled) {
+    transition: none;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .reportPanel,
+  .valueText {
+    backdrop-filter: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .root {
+    padding: var(--rf-space-2);
+  }
+
+  .card {
+    padding: var(--rf-space-3);
+  }
 }

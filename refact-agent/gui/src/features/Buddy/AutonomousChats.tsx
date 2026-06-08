@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo } from "react";
 import { MessageCircle } from "lucide-react";
-import { Card, Icon, LoadingState, Surface, Text } from "../../components/ui";
+import { Icon, LoadingState, Surface, Text } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import { openExistingBuddyChat } from "../Chat/Thread";
 import { useGetBuddyConversationsQuery } from "../../services/refact/buddy";
@@ -93,7 +93,7 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
       )}
 
       {!isLoading && groups.length === 0 && (
-        <Surface className={styles.emptyCard} variant="plain" animated="rise">
+        <Surface className={styles.emptyCard} variant="plain" radius="card">
           <Icon icon={MessageCircle} size="md" tone="muted" />
           <Text size="1" color="gray">
             No autonomous chats yet
@@ -102,10 +102,11 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
       )}
 
       {groups.map((group) => (
-        <Card
+        <Surface
           key={group.workflowId}
           className={styles.groupCard}
-          animated="rise"
+          radius="card"
+          variant="plain"
         >
           <div className={styles.groupHeader}>
             <div className={styles.groupTitleWrap}>
@@ -146,7 +147,7 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
               </button>
             ))}
           </div>
-        </Card>
+        </Surface>
       ))}
     </section>
   );

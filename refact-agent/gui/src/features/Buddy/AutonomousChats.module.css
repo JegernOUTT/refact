@@ -26,8 +26,12 @@
 
 .groupCard,
 .emptyCard {
-  background: var(--rf-surface-1);
-  border: 1px solid var(--rf-border);
+  composes: rf-enter-rise from global;
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  padding: var(--rf-space-3);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .groupIcon {
@@ -47,15 +51,17 @@
 }
 
 .chatList {
+  composes: rf-stagger from global;
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-1);
 }
 
 .chatRow {
+  composes: rf-enter-rise rf-pressable from global;
   align-items: center;
   background: transparent;
-  border: 0;
+  border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-chip);
   color: inherit;
   cursor: pointer;
@@ -69,8 +75,28 @@
 
 .chatRow:hover,
 .chatRow:focus-visible {
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-glass);
+  border-color: var(--rf-border);
   outline: none;
+}
+
+.groupCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.emptyCard {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .groupCard,
+  .emptyCard {
+    backdrop-filter: none;
+  }
 }
 
 .chatIcon {

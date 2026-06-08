@@ -1,17 +1,22 @@
 .bar {
+  composes: rf-stagger from global;
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-2);
 }
 
 .card {
+  composes: rf-enter-rise from global;
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
+  min-width: 0;
   padding: var(--rf-space-2);
-  background: var(--rf-surface-1);
-  border: 1px solid;
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border) !important;
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .canvasWrap {
@@ -21,7 +26,7 @@
 .bubble {
   flex: 1;
   min-width: 0;
-  border-left: 2px solid;
+  border-left: var(--rf-hairline) solid var(--rf-border) !important;
   padding-left: var(--rf-space-2);
 }
 
@@ -36,4 +41,23 @@
 
 .actions {
   flex-shrink: 0;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    backdrop-filter: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .card {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .actions {
+    width: 100%;
+  }
 }

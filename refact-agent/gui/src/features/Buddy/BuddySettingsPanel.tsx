@@ -247,8 +247,8 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
         ) : null}
       </div>
 
-      <div className={styles.sectionGrid}>
-        <div className={styles.section}>
+      <div className={`${styles.sectionGrid} rf-stagger`}>
+        <div className={`${styles.section} rf-enter-rise`}>
           <Text size="1" weight="bold" color="gray" className={styles.label}>
             CORE
           </Text>
@@ -275,7 +275,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           </div>
         </div>
 
-        <div className={styles.section}>
+        <div className={`${styles.section} rf-enter-rise`}>
           <Text size="1" weight="bold" color="gray" className={styles.label}>
             DIAGNOSTICS &amp; ISSUES
           </Text>
@@ -303,7 +303,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           </div>
         </div>
 
-        <div className={styles.sectionWide}>
+        <div className={`${styles.sectionWide} rf-enter-rise`}>
           <Text size="1" weight="bold" color="gray" className={styles.label}>
             CHAT &amp; NOTIFICATIONS
           </Text>
@@ -376,7 +376,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           </div>
         </div>
 
-        <div className={styles.section}>
+        <div className={`${styles.section} rf-enter-rise`}>
           <Text size="1" weight="bold" color="gray" className={styles.label}>
             PERSONALITY
           </Text>
@@ -424,7 +424,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           </div>
         </div>
 
-        <div className={styles.section}>
+        <div className={`${styles.section} rf-enter-rise`}>
           <Text size="1" weight="bold" color="gray" className={styles.label}>
             SCHEDULE
           </Text>
@@ -454,7 +454,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           </div>
         </div>
 
-        <div className={styles.sectionWide}>
+        <div className={`${styles.sectionWide} rf-enter-rise`}>
           <Field
             label={
               <Text
@@ -493,7 +493,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
           ) : null}
         </div>
 
-        <div className={styles.sectionWide}>
+        <div className={`${styles.sectionWide} rf-enter-rise`}>
           <div className={styles.sectionHeader}>
             <Text size="1" weight="bold" color="gray" className={styles.label}>
               OBSERVERS
@@ -524,7 +524,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
         </div>
 
         <div
-          className={styles.sectionWide}
+          className={`${styles.sectionWide} rf-enter-rise`}
           data-testid="buddy-storage-diagnostics"
         >
           <Text size="1" weight="bold" color="gray" className={styles.label}>

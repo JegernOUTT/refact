@@ -1,6 +1,9 @@
 .card {
-  background: var(--rf-surface-1);
-  border: 1px solid var(--rf-border);
+  composes: rf-enter-rise from global;
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .heatmap {
@@ -37,12 +40,14 @@
 }
 
 .typeList {
+  composes: rf-stagger from global;
   display: flex;
   flex-wrap: wrap;
   gap: var(--rf-space-1);
 }
 
 .typeChip {
+  composes: rf-enter-rise from global;
   background: var(--rf-surface-2);
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
@@ -55,4 +60,10 @@
 .caption {
   border-top: 1px solid var(--rf-border);
   padding-top: var(--rf-space-2);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    backdrop-filter: none;
+  }
 }
