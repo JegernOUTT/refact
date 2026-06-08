@@ -4,8 +4,9 @@ import { useAppDispatch } from "../../hooks";
 import { change } from "../Pages/pagesSlice";
 import type { Page } from "../Pages/pagesSlice";
 import type { Config } from "../Config/configSlice";
-import { SETTINGS_SECTIONS, settingsPageToSection, settingsSectionToPage } from "./index";
+import { SETTINGS_SECTIONS } from "./settingsSections";
 import type { SettingsSectionId } from "./settingsSections";
+import { settingsPageToSection, settingsSectionToPage } from "./settingsRoutes";
 import { Button, SettingsShell } from "../../components/ui";
 import { Providers } from "../Providers";
 import { DefaultModels } from "../DefaultModels";
@@ -51,28 +52,38 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
             backFromProviders={onBack}
           />
         );
-      case "models":
+      case "models": {
+        const draftId = page.name === "default models" ? page.draftId : undefined;
+
         return (
           <DefaultModels
+            key={`models-${draftId ?? ""}`}
             embedded
             host={host}
             tabbed={tabbed}
             backFromDefaultModels={onBack}
-            draftId={page.name === "default models" ? page.draftId : undefined}
+            draftId={draftId}
           />
         );
-      case "customization":
+      }
+      case "customization": {
+        const kind = page.name === "customization" ? page.kind : undefined;
+        const configId = page.name === "customization" ? page.configId : undefined;
+        const draftId = page.name === "customization" ? page.draftId : undefined;
+
         return (
           <Customization
+            key={`cust-${kind ?? ""}-${configId ?? ""}-${draftId ?? ""}`}
             embedded
             host={host}
             tabbed={tabbed}
             backFromCustomization={onBack}
-            initialKind={page.name === "customization" ? page.kind : undefined}
-            initialConfigId={page.name === "customization" ? page.configId : undefined}
-            draftId={page.name === "customization" ? page.draftId : undefined}
+            initialKind={kind}
+            initialConfigId={configId}
+            draftId={draftId}
           />
         );
+      }
       case "integrations":
         return (
           <Integrations
@@ -88,18 +99,24 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
         return <SchedulerPanel embedded onBack={onBack} />;
       case "documentation":
         return <DocumentationSettingsSection />;
-      case "extensions":
+      case "extensions": {
+        const tab = page.name === "extensions" ? page.tab : undefined;
+        const itemId = page.name === "extensions" ? page.itemId : undefined;
+        const draftId = page.name === "extensions" ? page.draftId : undefined;
+
         return (
           <Extensions
+            key={`ext-${tab ?? ""}-${itemId ?? ""}-${draftId ?? ""}`}
             embedded
             host={host}
             tabbed={tabbed}
             backFromExtensions={onBack}
-            initialTab={page.name === "extensions" ? page.tab : undefined}
-            initialItemId={page.name === "extensions" ? page.itemId : undefined}
-            draftId={page.name === "extensions" ? page.draftId : undefined}
+            initialTab={tab}
+            initialItemId={itemId}
+            draftId={draftId}
           />
         );
+      }
     }
   };
 
