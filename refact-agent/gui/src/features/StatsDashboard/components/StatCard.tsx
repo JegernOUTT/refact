@@ -31,7 +31,7 @@ export const StatCard: React.FC<StatCardProps> = ({
   icon = Activity,
   tone = "accent",
 }) => (
-  <Card animated="rise" className={styles.card} interactive>
+  <Card animated="rise" className={styles.card}>
     <div className={styles.header}>
       <span className={styles.iconShell}>
         <Icon icon={icon} size="md" tone={tone === "muted" ? "muted" : tone} />

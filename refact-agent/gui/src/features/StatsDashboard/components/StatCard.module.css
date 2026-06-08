@@ -3,8 +3,10 @@
   flex-direction: column;
   gap: var(--rf-space-2);
   min-height: 100%;
-  background: transparent;
-  border-color: transparent;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .header {
@@ -23,7 +25,7 @@
   height: var(--rf-control-h-sm);
   color: var(--rf-color-accent);
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-2);
 }
 
 .title,
@@ -59,4 +61,10 @@
 .subtitle {
   color: var(--rf-color-faint);
   font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    backdrop-filter: none;
+  }
 }

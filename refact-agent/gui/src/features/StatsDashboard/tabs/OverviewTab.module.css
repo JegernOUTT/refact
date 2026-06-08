@@ -21,8 +21,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-3);
-  background: transparent;
-  border-color: transparent;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .quotaHeader,
@@ -99,6 +101,10 @@
 }
 
 .tableWrapper {
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   overflow-x: auto;
 }
 
@@ -137,5 +143,12 @@
 @media (prefers-reduced-motion: reduce) {
   .usageBarFill {
     transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .quotaCard,
+  .tableWrapper {
+    backdrop-filter: none;
   }
 }

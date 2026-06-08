@@ -130,7 +130,7 @@ const ClaudeCodeInstanceCard: React.FC<{
   if (!data.five_hour && !data.seven_day) return null;
 
   return (
-    <Card animated="rise" className={styles.quotaCard} interactive>
+    <Card animated="rise" className={styles.quotaCard}>
       <div className={styles.quotaHeader}>
         <div className={styles.quotaLabel}>
           <Icon icon={ServerCog} size="md" tone="accent" />
@@ -183,7 +183,7 @@ const OpenAICodexInstanceCard: React.FC<{
   if (!data?.rate_limit) return null;
 
   return (
-    <Card animated="rise" className={styles.quotaCard} interactive>
+    <Card animated="rise" className={styles.quotaCard}>
       <div className={styles.quotaHeader}>
         <div className={styles.quotaLabel}>
           <Icon icon={Bot} size="md" tone="accent" />
@@ -265,7 +265,7 @@ const ProviderQuotaSection: React.FC = () => {
         <Icon icon={Gauge} size="md" tone="accent" />
         Provider Quotas
       </h3>
-      <div className={styles.quotaGrid}>
+      <div className={`${styles.quotaGrid} rf-stagger`}>
         {claudeInstances.map((p) => (
           <ClaudeCodeInstanceCard
             key={`claude:${p.name}`}
@@ -405,7 +405,10 @@ export const OverviewTab: React.FC<Props> = ({ dateRange }) => {
                 <Icon icon={CalendarClock} size="md" tone="accent" />
                 Top Conversations by Token Usage
               </h3>
-              <Surface className={styles.tableWrapper} variant="plain">
+              <Surface
+                className={`${styles.tableWrapper} rf-enter-rise`}
+                variant="plain"
+              >
                 <table className={styles.table}>
                   <thead>
                     <tr>
