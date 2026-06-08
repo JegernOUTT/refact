@@ -1,4 +1,6 @@
 .root {
+  --rf-toolcard-indent: calc(var(--rf-control-h-sm) + var(--rf-space-2));
+
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
@@ -89,7 +91,7 @@
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2) 0;
+  padding: var(--rf-space-2) 0 var(--rf-space-2) var(--rf-toolcard-indent);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);

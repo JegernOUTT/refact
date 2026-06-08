@@ -71,7 +71,7 @@
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   padding: var(--rf-space-2) 0 var(--rf-space-1);
-  padding-left: 28px;
+  padding-left: calc(var(--rf-control-h-sm) + var(--rf-space-2));
   max-height: 400px;
   overflow-y: auto;
 }
