@@ -156,6 +156,15 @@
 .textareaWrapper textarea {
   min-height: 100px;
   padding: var(--chat-input-padding);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.textareaWrapper textarea:focus,
+.textareaWrapper textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .chatFormExpanded .textareaWrapper textarea {
