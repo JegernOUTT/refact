@@ -7,7 +7,10 @@ import {
   providersApi,
   capsApi,
 } from "../../../services/refact";
-import type { OAuthStartMode, OAuthStartResponse } from "../../../services/refact";
+import type {
+  OAuthStartMode,
+  OAuthStartResponse,
+} from "../../../services/refact";
 import { useAppDispatch } from "../../../hooks";
 import { useOpenUrl } from "../../../hooks/useOpenUrl";
 import { Button, FieldText, Surface } from "../../../components/ui";
@@ -29,9 +32,13 @@ type ProviderOAuthProps = {
   authStatus: string;
 };
 
-function inferOAuthMode(providerName: string, response: OAuthStartResponse): OAuthStartMode {
+function inferOAuthMode(
+  providerName: string,
+  response: OAuthStartResponse,
+): OAuthStartMode {
   if (response.mode) return response.mode;
-  if (response.user_code !== undefined || providerName === "github_copilot") return "device";
+  if (response.user_code !== undefined || providerName === "github_copilot")
+    return "device";
   if (PROVIDERS_WITH_AUTO_CALLBACK.includes(providerName)) return "callback";
   return "manual_code";
 }
@@ -53,7 +60,9 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   const [oauthMode, setOauthMode] = useState<OAuthStartMode | null>(null);
   const [userCode, setUserCode] = useState<string | null>(null);
   const [instructions, setInstructions] = useState<string | null>(null);
-  const [pollIntervalSeconds, setPollIntervalSeconds] = useState<number | null>(null);
+  const [pollIntervalSeconds, setPollIntervalSeconds] = useState<number | null>(
+    null,
+  );
   const [deviceStatus, setDeviceStatus] = useState<string | null>(null);
   const [isDevicePolling, setIsDevicePolling] = useState(false);
   const [devicePollTick, setDevicePollTick] = useState(0);
@@ -61,7 +70,9 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [waitingForCallback, setWaitingForCallback] = useState(false);
-  const callbackPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const callbackPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
   const devicePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loginLabel = PROVIDER_LOGIN_LABELS[baseProvider] ?? "Login";
@@ -164,7 +175,11 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     setError(null);
     setIsLoading(true);
     try {
-      const result = await oauthExchange({ providerName, session_id: sessionId, code: "" }).unwrap();
+      const result = await oauthExchange({
+        providerName,
+        session_id: sessionId,
+        code: "",
+      }).unwrap();
       if (result.success) {
         resetOAuthState();
         invalidateProviderAndCaps();
@@ -176,11 +191,20 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       setDevicePollTick((tick) => tick + 1);
     } catch (e) {
       setIsDevicePolling(false);
-      setError(e instanceof Error ? e.message : "Failed to check authorization");
+      setError(
+        e instanceof Error ? e.message : "Failed to check authorization",
+      );
     } finally {
       setIsLoading(false);
     }
-  }, [invalidateProviderAndCaps, oauthExchange, pollIntervalSeconds, providerName, resetOAuthState, sessionId]);
+  }, [
+    invalidateProviderAndCaps,
+    oauthExchange,
+    pollIntervalSeconds,
+    providerName,
+    resetOAuthState,
+    sessionId,
+  ]);
 
   useEffect(() => {
     if (!isDevicePolling || !sessionId) return;
@@ -192,14 +216,26 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     return () => {
       clearDevicePollTimer();
     };
-  }, [clearDevicePollTimer, devicePollTick, handlePollDeviceOAuth, isDevicePolling, pollIntervalSeconds, sessionId]);
+  }, [
+    clearDevicePollTimer,
+    devicePollTick,
+    handlePollDeviceOAuth,
+    isDevicePolling,
+    pollIntervalSeconds,
+    sessionId,
+  ]);
 
   useEffect(() => {
     if (waitingForCallback && oauthConnected) {
       resetOAuthState();
       invalidateProviderAndCaps();
     }
-  }, [invalidateProviderAndCaps, oauthConnected, resetOAuthState, waitingForCallback]);
+  }, [
+    invalidateProviderAndCaps,
+    oauthConnected,
+    resetOAuthState,
+    waitingForCallback,
+  ]);
 
   useEffect(() => {
     if (!waitingForCallback) return;
@@ -215,7 +251,11 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     setError(null);
     setIsLoading(true);
     try {
-      const result = await oauthExchange({ providerName, session_id: sessionId, code: code.trim() }).unwrap();
+      const result = await oauthExchange({
+        providerName,
+        session_id: sessionId,
+        code: code.trim(),
+      }).unwrap();
       if (!result.success) {
         setError(result.auth_status || "OAuth authorization is not complete");
         return;
@@ -255,10 +295,17 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       <Surface className={styles.container} variant="surface-1">
         <div className={styles.headerRow}>
           <div className={styles.inlineRow}>
-            <span className={`${styles.title} ${styles.connected}`}>Connected</span>
+            <span className={`${styles.title} ${styles.connected}`}>
+              Connected
+            </span>
             <span className={styles.copy}>{authStatus}</span>
           </div>
-          <Button variant="danger" size="sm" disabled={isLoading} onClick={() => void handleLogout()}>
+          <Button
+            variant="danger"
+            size="sm"
+            disabled={isLoading}
+            onClick={() => void handleLogout()}
+          >
             Disconnect
           </Button>
         </div>
@@ -271,9 +318,16 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       return (
         <Surface className={styles.container} variant="surface-1">
           <div className={styles.title}>
-            Authorize {(PROVIDER_LOGIN_LABELS[baseProvider] ?? "provider").replace("Login with ", "")}
+            Authorize{" "}
+            {(PROVIDER_LOGIN_LABELS[baseProvider] ?? "provider").replace(
+              "Login with ",
+              "",
+            )}
           </div>
-          <div className={styles.copy}>{instructions ?? "Open the verification page and enter the code shown below."}</div>
+          <div className={styles.copy}>
+            {instructions ??
+              "Open the verification page and enter the code shown below."}
+          </div>
           {userCode ? (
             <div>
               <div className={styles.copy}>User code</div>
@@ -295,14 +349,24 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
           </div>
           <div className={styles.copy}>
             {deviceStatus ?? "Waiting for device authorization"}
-            {pollIntervalSeconds ? ` Checking every ${pollIntervalSeconds} seconds.` : ""}
+            {pollIntervalSeconds
+              ? ` Checking every ${pollIntervalSeconds} seconds.`
+              : ""}
           </div>
           <div className={styles.actionRow}>
-            <Button variant="primary" onClick={handleOpenAuthorizeUrl}>Open verification page</Button>
-            <Button variant="soft" disabled={isLoading} onClick={() => void handlePollDeviceOAuth()}>
+            <Button variant="primary" onClick={handleOpenAuthorizeUrl}>
+              Open verification page
+            </Button>
+            <Button
+              variant="soft"
+              disabled={isLoading}
+              onClick={() => void handlePollDeviceOAuth()}
+            >
               {isLoading ? "Checking..." : "Retry"}
             </Button>
-            <Button variant="ghost" size="sm" onClick={handleCancel}>Cancel</Button>
+            <Button variant="ghost" size="sm" onClick={handleCancel}>
+              Cancel
+            </Button>
           </div>
           {error ? <div className={styles.errorText}>{error}</div> : null}
         </Surface>
@@ -313,7 +377,10 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
       return (
         <Surface className={styles.container} variant="surface-1">
           <div className={styles.title}>Waiting for authentication...</div>
-          <div className={styles.copy}>Complete the login in the browser window that opened. This page will update automatically.</div>
+          <div className={styles.copy}>
+            Complete the login in the browser window that opened. This page will
+            update automatically.
+          </div>
           <div className={styles.actionRow}>
             <span className={styles.copy}>
               Browser didn&apos;t open?{" "}
@@ -328,7 +395,9 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
                 Click here
               </a>
             </span>
-            <Button variant="ghost" size="sm" onClick={handleCancel}>Cancel</Button>
+            <Button variant="ghost" size="sm" onClick={handleCancel}>
+              Cancel
+            </Button>
           </div>
           {error ? <div className={styles.errorText}>{error}</div> : null}
         </Surface>
@@ -338,7 +407,10 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     return (
       <Surface className={styles.container} variant="surface-1">
         <div className={styles.title}>Paste the authorization code</div>
-        <div className={styles.copy}>A browser window should have opened. Log in and copy the code shown on the page.</div>
+        <div className={styles.copy}>
+          A browser window should have opened. Log in and copy the code shown on
+          the page.
+        </div>
         <div className={styles.actionRow}>
           <FieldText
             className={styles.fullWidthInput}
@@ -349,7 +421,11 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
               if (event.key === "Enter") void handleExchangeCode();
             }}
           />
-          <Button variant="primary" disabled={isLoading || !code.trim()} onClick={() => void handleExchangeCode()}>
+          <Button
+            variant="primary"
+            disabled={isLoading || !code.trim()}
+            onClick={() => void handleExchangeCode()}
+          >
             {isLoading ? "Connecting..." : "Connect"}
           </Button>
         </div>
@@ -367,7 +443,9 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
               Click here
             </a>
           </span>
-          <Button variant="ghost" size="sm" onClick={handleCancel}>Cancel</Button>
+          <Button variant="ghost" size="sm" onClick={handleCancel}>
+            Cancel
+          </Button>
         </div>
         {error ? <div className={styles.errorText}>{error}</div> : null}
       </Surface>
@@ -378,7 +456,11 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     <Surface className={styles.container} variant="surface-1">
       <div className={styles.headerRow}>
         <div className={styles.title}>{loginLabel}</div>
-        <Button variant="primary" disabled={isLoading} onClick={() => void handleStartOAuth()}>
+        <Button
+          variant="primary"
+          disabled={isLoading}
+          onClick={() => void handleStartOAuth()}
+        >
           {isLoading ? "Starting..." : "Login"}
         </Button>
       </div>

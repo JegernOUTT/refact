@@ -115,7 +115,6 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
 
   return (
     <ToolCard
-
       icon={<Icon icon={Search} size="sm" tone="muted" />}
       summary={summary}
       status="success"
@@ -124,9 +123,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
     >
       {results.length > 0 && (
         <Box>
-          <Text size="1">
-            Results ({results.length})
-          </Text>
+          <Text size="1">Results ({results.length})</Text>
           <Box className={styles.resultList}>
             {results.map((r, idx) => {
               const title = r.title ?? "(no title)";
@@ -162,9 +159,7 @@ const WebSearchBlock: React.FC<{ group: WebSearchGroup }> = ({ group }) => {
         </Box>
       )}
       {results.length === 0 && !group.result && (
-        <Text size="1">
-          Waiting for results…
-        </Text>
+        <Text size="1">Waiting for results…</Text>
       )}
     </ToolCard>
   );
@@ -191,9 +186,7 @@ export const ServerContentBlocks: React.FC<ServerContentBlocksProps> = ({
       ))}
       {ungrouped.length > 0 && (
         <Box mt="2">
-          <Text size="1">
-            Server blocks ({ungrouped.length})
-          </Text>
+          <Text size="1">Server blocks ({ungrouped.length})</Text>
 
           <pre className={`scrollX ${chatStyles.serverBlocksRaw}`}>
             {JSON.stringify(ungrouped, null, 2)}

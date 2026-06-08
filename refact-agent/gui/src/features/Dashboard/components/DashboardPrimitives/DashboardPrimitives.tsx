@@ -96,7 +96,8 @@ interface DashboardTextFieldContextValue {
   size?: "1";
 }
 
-const DashboardTextFieldContext = React.createContext<DashboardTextFieldContextValue>({});
+const DashboardTextFieldContext =
+  React.createContext<DashboardTextFieldContextValue>({});
 
 interface DashboardTextFieldRootProps
   extends Omit<React.ComponentProps<"div">, "onChange"> {
@@ -209,13 +210,20 @@ export const DashboardHoverCard = {
   Content: DashboardHoverCardContent,
 };
 
-export interface DashboardBadgeProps extends React.ComponentProps<typeof KitBadge> {
+export interface DashboardBadgeProps
+  extends React.ComponentProps<typeof KitBadge> {
   color?: string;
   variant?: string;
   size?: string;
 }
 
-export function DashboardBadge({ color, size, variant, tone, ...props }: DashboardBadgeProps) {
+export function DashboardBadge({
+  color,
+  size,
+  variant,
+  tone,
+  ...props
+}: DashboardBadgeProps) {
   void color;
   void size;
   void variant;

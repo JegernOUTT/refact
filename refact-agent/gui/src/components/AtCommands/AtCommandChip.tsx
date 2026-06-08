@@ -18,7 +18,10 @@ type AtCommandChipProps = {
   onClick?: () => void;
 };
 
-const CHIP_ICONS: Record<ChipDisplayInfo["type"], React.ComponentProps<typeof Icon>["icon"]> = {
+const CHIP_ICONS: Record<
+  ChipDisplayInfo["type"],
+  React.ComponentProps<typeof Icon>["icon"]
+> = {
   file: File,
   web: Globe,
   tree: Rows3,

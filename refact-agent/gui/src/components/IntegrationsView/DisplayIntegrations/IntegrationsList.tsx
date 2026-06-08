@@ -4,7 +4,10 @@ import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
-import { SettingsGroup, SettingsSection } from "../../../features/Settings/SettingsSection";
+import {
+  SettingsGroup,
+  SettingsSection,
+} from "../../../features/Settings/SettingsSection";
 import { GlobalIntegrations } from "./GlobalIntegrations";
 import { NewIntegrations } from "./NewIntegrations";
 import { ProjectIntegrations } from "./ProjectIntegrations";
@@ -59,7 +62,8 @@ export const IntegrationsList: FC<IntegrationsListProps> = ({
       />
       <SettingsGroup title="Add new integration">
         <p className={styles.groupDescription}>
-          Configure another integration or MCP command-line server from the available templates.
+          Configure another integration or MCP command-line server from the
+          available templates.
         </p>
         <NewIntegrations
           availableIntegrationsToConfigure={availableIntegrationsToConfigure}

@@ -10,7 +10,11 @@ type MaybePromise = Promise<void> | void;
 type DocumentationActionsProps = {
   source: DocumentationSource;
   deleteDocumentation: (url: string) => MaybePromise;
-  editDocumentation: (url: string, maxDepth: number, maxPages: number) => MaybePromise;
+  editDocumentation: (
+    url: string,
+    maxDepth: number,
+    maxPages: number,
+  ) => MaybePromise;
   refetchDocumentation: (url: string) => MaybePromise;
 };
 
@@ -83,18 +87,30 @@ export const DocumentationActions: React.FC<DocumentationActionsProps> = ({
         </Menu.Trigger>
         <Menu.Content>
           <Menu.Item onSelect={() => setIsDialogOpen(true)}>Edit</Menu.Item>
-          <Menu.Item onSelect={() => void refetchDocumentation(source.url)}>Refetch</Menu.Item>
+          <Menu.Item onSelect={() => void refetchDocumentation(source.url)}>
+            Refetch
+          </Menu.Item>
           <Menu.Separator />
-          <Menu.Item onClick={() => void deleteDocumentation(source.url)}>Delete</Menu.Item>
+          <Menu.Item onClick={() => void deleteDocumentation(source.url)}>
+            Delete
+          </Menu.Item>
         </Menu.Content>
       </Menu>
-      <Dialog open={isDialogOpen && !isDropdownOpen} onOpenChange={setIsDialogOpen}>
+      <Dialog
+        open={isDialogOpen && !isDropdownOpen}
+        onOpenChange={setIsDialogOpen}
+      >
         <Dialog.Content maxWidth="450px">
           <Dialog.Title>{`Edit ${source.url}`}</Dialog.Title>
-          <Dialog.Description>Update crawl limits for this documentation source.</Dialog.Description>
+          <Dialog.Description>
+            Update crawl limits for this documentation source.
+          </Dialog.Description>
           <div className={styles.dialogBody}>
             {formError ? <FieldError>{formError}</FieldError> : null}
-            <Field label="Max depth" helper="How many link levels to follow from the root.">
+            <Field
+              label="Max depth"
+              helper="How many link levels to follow from the root."
+            >
               <FieldText
                 value={maxDepth}
                 onChange={setMaxDepth}
@@ -104,7 +120,10 @@ export const DocumentationActions: React.FC<DocumentationActionsProps> = ({
                 placeholder="Enter the max depth"
               />
             </Field>
-            <Field label="Max pages" helper="The maximum number of pages to index.">
+            <Field
+              label="Max pages"
+              helper="The maximum number of pages to index."
+            >
               <FieldText
                 value={maxPages}
                 onChange={setMaxPages}
@@ -127,7 +146,11 @@ export const DocumentationActions: React.FC<DocumentationActionsProps> = ({
             >
               Cancel
             </Button>
-            <Button variant="primary" onClick={() => void handleSave()} loading={isSaving}>
+            <Button
+              variant="primary"
+              onClick={() => void handleSave()}
+              loading={isSaving}
+            >
               Save
             </Button>
           </div>

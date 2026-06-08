@@ -146,7 +146,8 @@
 .cardInstalling {
   border-color: var(--rf-color-accent);
   background: var(--rf-color-accent-soft);
-  animation: marketplace-install-pulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
+  animation: marketplace-install-pulse var(--rf-dur-slow)
+    var(--rf-ease-standard) infinite;
 }
 
 .grid > *:nth-child(2) {

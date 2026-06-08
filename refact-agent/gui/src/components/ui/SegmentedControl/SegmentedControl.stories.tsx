@@ -30,17 +30,31 @@ function SegmentedDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
           <p className={storyStyles.description}>
             Compact selector with a transform-only sliding indicator.
           </p>
-          <SegmentedControl options={densityOptions} value={value} onValueChange={setValue} />
+          <SegmentedControl
+            options={densityOptions}
+            value={value}
+            onValueChange={setValue}
+          />
           <SegmentedControl
             size="sm"
-            options={[...densityOptions, { value: "disabled", label: "Disabled", disabled: true }]}
+            options={[
+              ...densityOptions,
+              { value: "disabled", label: "Disabled", disabled: true },
+            ]}
             value="compact"
             onValueChange={() => undefined}
           />
         </section>
-        <section className={`${storyStyles.panel} ${storyStyles.narrowPanel}`} data-appearance="light">
+        <section
+          className={`${storyStyles.panel} ${storyStyles.narrowPanel}`}
+          data-appearance="light"
+        >
           <p className={storyStyles.description}>Light + narrow container.</p>
-          <SegmentedControl options={densityOptions} value="compact" onValueChange={() => undefined} />
+          <SegmentedControl
+            options={densityOptions}
+            value="compact"
+            onValueChange={() => undefined}
+          />
         </section>
       </div>
     </div>

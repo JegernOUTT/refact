@@ -132,7 +132,6 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useGetPing();
   useBrowserOnlineStatus();
 
-
   const config = useConfig();
 
   useEffectOnce(() => {
@@ -575,7 +574,6 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
               />
             )}
             {!pageSwitching && renderedPage.name === "buddy" && <BuddyHome />}
-
           </PageWrapper>
           <ProcessCompletedToasts />
         </>

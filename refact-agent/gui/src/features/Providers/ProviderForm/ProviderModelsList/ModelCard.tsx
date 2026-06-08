@@ -2,7 +2,13 @@ import { useCallback, useMemo, type FC } from "react";
 import classNames from "classnames";
 import { MoreVertical } from "lucide-react";
 
-import { Badge, IconButton, Menu, Surface, Tooltip } from "../../../../components/ui";
+import {
+  Badge,
+  IconButton,
+  Menu,
+  Surface,
+  Tooltip,
+} from "../../../../components/ui";
 import { ModelCardPopup } from "./components/ModelCardPopup";
 import {
   CapabilityIcons,
@@ -134,7 +140,9 @@ export const ModelCard: FC<ModelCardProps> = ({
         <div className={styles.modelCopy}>
           <div className={styles.modelTitleRow}>
             <span className={styles.modelName}>{name}</span>
-            <Badge tone={enabled ? "success" : "muted"}>{enabled ? "Active" : "Inactive"}</Badge>
+            <Badge tone={enabled ? "success" : "muted"}>
+              {enabled ? "Active" : "Inactive"}
+            </Badge>
           </div>
 
           <div className={styles.modelMetaRow}>
@@ -142,17 +150,23 @@ export const ModelCard: FC<ModelCardProps> = ({
               <Tooltip>
                 <Tooltip.Trigger asChild>
                   <span>
-                    <ModelDetailIcon icon={<PricingIcon />}>{model.pricingLabel}</ModelDetailIcon>
+                    <ModelDetailIcon icon={<PricingIcon />}>
+                      {model.pricingLabel}
+                    </ModelDetailIcon>
                   </span>
                 </Tooltip.Trigger>
-                <Tooltip.Content>Price per 1M tokens (prompt/output)</Tooltip.Content>
+                <Tooltip.Content>
+                  Price per 1M tokens (prompt/output)
+                </Tooltip.Content>
               </Tooltip>
             ) : null}
             {model.nCtxLabel ? (
               <Tooltip>
                 <Tooltip.Trigger asChild>
                   <span>
-                    <ModelDetailIcon icon={<ContextWindowIcon />}>{model.nCtxLabel}</ModelDetailIcon>
+                    <ModelDetailIcon icon={<ContextWindowIcon />}>
+                      {model.nCtxLabel}
+                    </ModelDetailIcon>
                   </span>
                 </Tooltip.Trigger>
                 <Tooltip.Content>
@@ -160,14 +174,21 @@ export const ModelCard: FC<ModelCardProps> = ({
                 </Tooltip.Content>
               </Tooltip>
             ) : null}
-            {model.capabilities ? <CapabilityIcons capabilities={model.capabilities} size="1" /> : null}
+            {model.capabilities ? (
+              <CapabilityIcons capabilities={model.capabilities} size="1" />
+            ) : null}
           </div>
         </div>
 
         {visibleDropdownOptions.length > 0 ? (
           <Menu open={dropdownOpen} onOpenChange={setDropdownOpen}>
             <Menu.Trigger asChild>
-              <IconButton size="sm" variant="ghost" aria-label="Model actions" icon={MoreVertical} />
+              <IconButton
+                size="sm"
+                variant="ghost"
+                aria-label="Model actions"
+                icon={MoreVertical}
+              />
             </Menu.Trigger>
             <Menu.Content side="bottom" align="end" maxWidth="260px">
               {visibleDropdownOptions.map(({ label, onClick }) => (

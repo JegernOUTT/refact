@@ -37,7 +37,10 @@
 }
 
 .content {
-  --rf-overlay-ideal-width: var(--rf-overlay-max-width, var(--rf-overlay-popover-max));
+  --rf-overlay-ideal-width: var(
+    --rf-overlay-max-width,
+    var(--rf-overlay-popover-max)
+  );
   --rf-overlay-ideal-height: var(--rf-overlay-max-height, auto);
 
   z-index: var(--rf-z-popover);

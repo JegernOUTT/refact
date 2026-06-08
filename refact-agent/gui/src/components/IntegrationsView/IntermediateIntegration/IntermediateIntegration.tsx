@@ -120,7 +120,9 @@ export const IntermediateIntegration: FC<IntegrationCmdlineProps> = ({
                     color={errorMessage ? "red" : undefined}
                     wasInteracted
                   />
-                  {errorMessage && <p className={styles.error}>{errorMessage}</p>}
+                  {errorMessage && (
+                    <p className={styles.error}>{errorMessage}</p>
+                  )}
                 </div>
               </div>
             )}

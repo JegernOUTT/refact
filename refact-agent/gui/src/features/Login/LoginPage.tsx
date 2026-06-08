@@ -81,7 +81,9 @@ export const LoginPage: React.FC = () => {
                 <ProviderCard
                   key={provider.name}
                   provider={provider}
-                  setCurrentProvider={() => setCurrentProviderName(provider.name)}
+                  setCurrentProvider={() =>
+                    setCurrentProviderName(provider.name)
+                  }
                 />
               ))}
             </div>
@@ -94,12 +96,13 @@ export const LoginPage: React.FC = () => {
             {!providersQuery.isSuccess && !providersQuery.isError && (
               <LoadingState label="Waiting for the local Refact engine before loading providers." />
             )}
-            {providersQuery.isSuccess && sortedConfiguredProviders.length === 0 && (
-              <EmptyState
-                title="No providers found"
-                description="Restart the local Refact engine, then open the Providers screen again."
-              />
-            )}
+            {providersQuery.isSuccess &&
+              sortedConfiguredProviders.length === 0 && (
+                <EmptyState
+                  title="No providers found"
+                  description="Restart the local Refact engine, then open the Providers screen again."
+                />
+              )}
           </>
         )}
 

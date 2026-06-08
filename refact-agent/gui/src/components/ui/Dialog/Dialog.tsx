@@ -4,7 +4,10 @@ import classNames from "classnames";
 
 import { Portal } from "../../Portal";
 import { overlayStyle } from "../overlayTypes";
-import type { ModalOverlayContentProps, ModalOverlayProps } from "../overlayTypes";
+import type {
+  ModalOverlayContentProps,
+  ModalOverlayProps,
+} from "../overlayTypes";
 import styles from "./Dialog.module.css";
 
 export type DialogProps = ModalOverlayProps;
@@ -31,7 +34,11 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
         <Portal>
           <DialogPrimitive.Content
             ref={ref}
-            className={classNames(styles.content, "rf-popover-motion", className)}
+            className={classNames(
+              styles.content,
+              "rf-popover-motion",
+              className,
+            )}
             style={overlayStyle(maxWidth, maxHeight)}
           >
             <div className={styles.inner}>{children}</div>

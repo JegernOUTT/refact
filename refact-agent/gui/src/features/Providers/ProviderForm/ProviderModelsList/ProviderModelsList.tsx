@@ -2,7 +2,14 @@ import { useMemo, useState, type FC } from "react";
 import classNames from "classnames";
 import { Info, Plus } from "lucide-react";
 
-import { Badge, Button, EmptyState, ErrorState, FieldText, Icon } from "../../../../components/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  FieldText,
+  Icon,
+} from "../../../../components/ui";
 import type { ProviderListItem } from "../../../../services/refact";
 import {
   useGetAvailableModelsQuery,
@@ -20,7 +27,9 @@ export type ProviderModelsListProps = {
   provider: ProviderListItem;
 };
 
-export const ProviderModelsList: FC<ProviderModelsListProps> = ({ provider }) => {
+export const ProviderModelsList: FC<ProviderModelsListProps> = ({
+  provider,
+}) => {
   const [searchQuery, setSearchQuery] = useState("");
   const baseProvider = provider.base_provider;
   const isCustomProvider = baseProvider === "custom";
@@ -33,7 +42,9 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({ provider }) =>
   } = useGetAvailableModelsQuery({ providerName: provider.name });
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [editingModel, setEditingModel] = useState<AvailableModel | undefined>();
+  const [editingModel, setEditingModel] = useState<
+    AvailableModel | undefined
+  >();
   const { data: openRouterAccount } = useGetOpenRouterAccountInfoQuery(
     { providerName: provider.name, useInstanceRoute: true },
     {
@@ -90,9 +101,13 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({ provider }) =>
   if (isLoading) return <Spinner spinning />;
 
   if (isError) {
-    const err = error as { status?: unknown; data?: { detail?: unknown } } | undefined;
+    const err = error as
+      | { status?: unknown; data?: { detail?: unknown } }
+      | undefined;
     const errorMessage = err?.status
-      ? `${String(err.status)}: ${err.data?.detail ? String(err.data.detail) : "Unknown error"}`
+      ? `${String(err.status)}: ${
+          err.data?.detail ? String(err.data.detail) : "Unknown error"
+        }`
       : "Failed to load models";
 
     return (
@@ -121,7 +136,9 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({ provider }) =>
         <div className={styles.modelsHeaderCopy}>
           <h3 className={styles.modelsTitle}>Available Models</h3>
           <Badge tone="muted">
-            {isCustomProvider && totalModels === 0 ? "None" : `${enabledCount}/${totalModels} enabled`}
+            {isCustomProvider && totalModels === 0
+              ? "None"
+              : `${enabledCount}/${totalModels} enabled`}
           </Badge>
           {totalModels > 0 ? (
             <FieldText
@@ -134,7 +151,12 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({ provider }) =>
         </div>
 
         {!provider.readonly ? (
-          <Button size="sm" variant="soft" leftIcon={Plus} onClick={handleOpenCreateModal}>
+          <Button
+            size="sm"
+            variant="soft"
+            leftIcon={Plus}
+            onClick={handleOpenCreateModal}
+          >
             Add Custom Model
           </Button>
         ) : null}
@@ -150,10 +172,13 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({ provider }) =>
       {baseProvider === "openrouter" && openRouterAccount?.data ? (
         <div className={styles.notice} role="status">
           <Icon icon={Info} size="sm" tone="accent" />
-          OpenRouter balance: {openRouterAccount.data.remaining?.toFixed(2) ?? "0.00"}
+          OpenRouter balance:{" "}
+          {openRouterAccount.data.remaining?.toFixed(2) ?? "0.00"}
           {" / "}
           {openRouterAccount.data.limit?.toFixed(2) ?? "0.00"} USD
-          {openRouterAccount.data.key_label ? ` · Key: ${openRouterAccount.data.key_label}` : ""}
+          {openRouterAccount.data.key_label
+            ? ` · Key: ${openRouterAccount.data.key_label}`
+            : ""}
         </div>
       ) : null}
 
@@ -166,7 +191,9 @@ export const ProviderModelsList: FC<ProviderModelsListProps> = ({ provider }) =>
                 : "No models available for this provider."
               : "No models match your search."}
           </span>
-          {!provider.readonly ? <span>Click &quot;Add Custom Model&quot; to define your own.</span> : null}
+          {!provider.readonly ? (
+            <span>Click &quot;Add Custom Model&quot; to define your own.</span>
+          ) : null}
         </div>
       ) : (
         <div className={classNames(styles.modelsList, "rf-stagger")}>

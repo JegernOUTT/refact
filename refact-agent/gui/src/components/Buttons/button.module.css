@@ -16,11 +16,7 @@
 }
 
 .button_faded {
-  mask-image: linear-gradient(
-    to top,
-    var(--rf-color-bg) 50%,
-    transparent 100%
-  );
+  mask-image: linear-gradient(to top, var(--rf-color-bg) 50%, transparent 100%);
 }
 
 .flipIcon svg {

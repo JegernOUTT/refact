@@ -24,7 +24,9 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
       <div className={styles.cardColumn}>
         <div className={styles.cardMeta}>
           <div className={styles.cardTitle}>
-            <p className={classNames(styles.text, styles.truncate)}>{item.name}</p>
+            <p className={classNames(styles.text, styles.truncate)}>
+              {item.name}
+            </p>
             <p className={classNames(styles.smallText, styles.truncate)}>
               {item.publisher}
             </p>
@@ -32,7 +34,9 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
           <Badge tone="accent">{item.kind}</Badge>
         </div>
 
-        <p className={styles.description}>{item.description || "No description"}</p>
+        <p className={styles.description}>
+          {item.description || "No description"}
+        </p>
 
         {item.body_preview && (
           <p className={styles.bodyPreview}>{item.body_preview}</p>
@@ -53,7 +57,9 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
             {item.source_label}
           </Badge>
           {item.installed_scopes.length > 0 && (
-            <span className={classNames(styles.cardActionRow, styles.successText)}>
+            <span
+              className={classNames(styles.cardActionRow, styles.successText)}
+            >
               <Icon icon={Check} size="sm" tone="success" />
               <span className={styles.smallText}>
                 Installed: {item.installed_scopes.join(", ")}

@@ -78,11 +78,21 @@ const wideColumns: DataTableColumn<ProviderRow>[] = columns.map((column) => ({
   cell: (row) => <span className={styles.wideCell}>{column.cell(row)}</span>,
 }));
 
-function TableDemo({ narrow = false, wide = false }: { narrow?: boolean; wide?: boolean }) {
+function TableDemo({
+  narrow = false,
+  wide = false,
+}: {
+  narrow?: boolean;
+  wide?: boolean;
+}) {
   return (
     <div className={narrow ? styles.narrow : styles.stack}>
       <DataTable
-        caption={wide ? "Wide/raw mode keeps an intentional scroll island" : "Responsive providers"}
+        caption={
+          wide
+            ? "Wide/raw mode keeps an intentional scroll island"
+            : "Responsive providers"
+        }
         columns={wide ? wideColumns : columns}
         enableSorting
         getRowId={(row) => row.id}

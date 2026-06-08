@@ -35,10 +35,20 @@ describe("NavBar", () => {
   it("does not show the removed settings cards", () => {
     renderNavBar();
 
-    expect(screen.queryByRole("button", { name: "Integrations" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Providers" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Modes" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Scheduler" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Extensions" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Integrations" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Providers" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Modes" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Scheduler" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Extensions" }),
+    ).not.toBeInTheDocument();
   });
 });

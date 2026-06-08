@@ -481,7 +481,9 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
                 icon={showSource ? Eye : Code}
               />
             </Tooltip.Trigger>
-            <Tooltip.Content>{showSource ? "Show diagram" : "Show source"}</Tooltip.Content>
+            <Tooltip.Content>
+              {showSource ? "Show diagram" : "Show source"}
+            </Tooltip.Content>
           </Tooltip>
           {onCopyClick && (
             <Tooltip>

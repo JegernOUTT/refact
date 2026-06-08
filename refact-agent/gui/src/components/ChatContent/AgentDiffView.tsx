@@ -37,15 +37,22 @@ function groupDiffChunks(chunks: DiffChunk[]): GroupedDiffChunks {
   return groupBy(chunks, (chunk) => chunk.file_name);
 }
 
-function normalizeGroupedDiffs(groupedDiffs: GroupedDiffChunks): Record<string, DiffChunk[]> {
+function normalizeGroupedDiffs(
+  groupedDiffs: GroupedDiffChunks,
+): Record<string, DiffChunk[]> {
   return Object.fromEntries(
     Object.entries(groupedDiffs).map(([file, diffs]) => [file, diffs ?? []]),
   );
 }
 
-export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({ report }) => {
+export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
+  report,
+}) => {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const groupedDiffs = useMemo(() => groupDiffChunks(report.diffChunks), [report.diffChunks]);
+  const groupedDiffs = useMemo(
+    () => groupDiffChunks(report.diffChunks),
+    [report.diffChunks],
+  );
   const selectedDiffs = useMemo(() => {
     if (!selectedFile) return normalizeGroupedDiffs(groupedDiffs);
     return { [selectedFile]: groupedDiffs[selectedFile] ?? [] };
@@ -83,11 +90,15 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({ report }) =>
         </div>
         <div className={styles.stats}>
           <span className={styles.statMuted}>{report.stats.files} files</span>
-          {report.stats.added > 0 && <span className={styles.added}>+{report.stats.added}</span>}
+          {report.stats.added > 0 && (
+            <span className={styles.added}>+{report.stats.added}</span>
+          )}
           {report.stats.removed > 0 && (
             <span className={styles.removed}>−{report.stats.removed}</span>
           )}
-          <span className={styles.statMuted}>{countLines(report.body)} lines</span>
+          <span className={styles.statMuted}>
+            {countLines(report.body)} lines
+          </span>
         </div>
         {report.truncated && (
           <div className={styles.truncation}>
@@ -130,9 +141,16 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({ report }) =>
               </div>
             </nav>
           )}
-          <div className={classNames(styles.diffPane, !shouldShowFileTree && styles.diffPaneFull)}>
+          <div
+            className={classNames(
+              styles.diffPane,
+              !shouldShowFileTree && styles.diffPaneFull,
+            )}
+          >
             {selectedFileHasNoDiffs ? (
-              <div className={styles.emptyDiffMessage}>No diff hunks for this file.</div>
+              <div className={styles.emptyDiffMessage}>
+                No diff hunks for this file.
+              </div>
             ) : showRenderedDiff ? (
               <div className={editToolStyles.diffContent}>
                 {Object.entries(selectedDiffs).flatMap(([fileName, diffs]) =>
@@ -148,7 +166,10 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({ report }) =>
               </div>
             ) : (
               <div className={styles.rawDiff}>
-                <ShikiCodeBlock showLineNumbers={false} className="language-text">
+                <ShikiCodeBlock
+                  showLineNumbers={false}
+                  className="language-text"
+                >
                   {report.body}
                 </ShikiCodeBlock>
               </div>
@@ -166,9 +187,17 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
   const isStreaming = useAppSelector(selectIsStreaming);
   const isWaiting = useAppSelector(selectIsWaiting);
 
-  const maybeResult = useAppSelector((state) => selectToolResultById(state, toolCall.id));
-  const content = maybeResult && typeof maybeResult.content === "string" ? maybeResult.content : null;
-  const report = useMemo(() => (content ? parseAgentDiffOutput(content) : null), [content]);
+  const maybeResult = useAppSelector((state) =>
+    selectToolResultById(state, toolCall.id),
+  );
+  const content =
+    maybeResult && typeof maybeResult.content === "string"
+      ? maybeResult.content
+      : null;
+  const report = useMemo(
+    () => (content ? parseAgentDiffOutput(content) : null),
+    [content],
+  );
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult && (isStreaming || isWaiting)) return "running";

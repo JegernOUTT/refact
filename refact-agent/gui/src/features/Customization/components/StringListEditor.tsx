@@ -64,7 +64,12 @@ export const StringListEditor: React.FC<StringListEditorProps> = ({
       <div className={styles.stringListStack}>
         <div className={styles.chipList}>
           {value.map((item, index) => (
-            <Chip key={index} removable radius="chip" onRemove={() => removeItem(index)}>
+            <Chip
+              key={index}
+              removable
+              radius="chip"
+              onRemove={() => removeItem(index)}
+            >
               {item}
             </Chip>
           ))}

@@ -42,7 +42,6 @@
   max-width: 480px;
 }
 
-
 .dialogContent {
   width: min(480px, calc(100vw - 2 * var(--rf-space-3)));
 }

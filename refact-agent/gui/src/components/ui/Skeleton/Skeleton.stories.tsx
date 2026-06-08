@@ -19,7 +19,11 @@ function SkeletonGallery() {
           <div className={styles.listSkeleton}>
             {Array.from({ length: 4 }).map((_, index) => (
               <div className={styles.listRow} key={index}>
-                <Skeleton height="var(--rf-control-h)" radius="pill" width="var(--rf-control-h)" />
+                <Skeleton
+                  height="var(--rf-control-h)"
+                  radius="pill"
+                  width="var(--rf-control-h)"
+                />
                 <SkeletonText lines={2} />
               </div>
             ))}

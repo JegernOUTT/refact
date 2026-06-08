@@ -39,7 +39,9 @@ const TooltipRoot: React.FC<TooltipProps> = ({
       delayDuration={delayDuration}
       skipDelayDuration={skipDelayDuration}
     >
-      <TooltipPrimitive.Root {...props}>{wrappedChildren}</TooltipPrimitive.Root>
+      <TooltipPrimitive.Root {...props}>
+        {wrappedChildren}
+      </TooltipPrimitive.Root>
     </TooltipPrimitive.Provider>
   );
 };
@@ -69,7 +71,11 @@ const TooltipContent = React.forwardRef<HTMLDivElement, TooltipContentProps>(
             align={align}
             sideOffset={sideOffset}
             collisionPadding={collisionPadding}
-            className={classNames(styles.content, "rf-popover-motion", className)}
+            className={classNames(
+              styles.content,
+              "rf-popover-motion",
+              className,
+            )}
             style={overlayStyle(maxWidth, maxHeight)}
           >
             {children}

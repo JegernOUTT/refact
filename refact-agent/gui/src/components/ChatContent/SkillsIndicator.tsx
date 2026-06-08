@@ -43,15 +43,15 @@ export const SkillsIndicator: React.FC<SkillsIndicatorProps> = ({ chatId }) => {
       {activeSkill !== null ? (
         <>
           <span className={styles.muted}>Active skill:</span>
-          <Badge tone="accent">
-            {activeSkill}
-          </Badge>
+          <Badge tone="accent">{activeSkill}</Badge>
           {skillsAvailable > 0 && (
             <span className={styles.muted}>· {skillsAvailable} available</span>
           )}
         </>
       ) : (
-        <span className={styles.muted}>Skills: {skillsAvailable} available</span>
+        <span className={styles.muted}>
+          Skills: {skillsAvailable} available
+        </span>
       )}
     </div>
   );

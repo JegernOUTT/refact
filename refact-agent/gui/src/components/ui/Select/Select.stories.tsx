@@ -22,7 +22,8 @@ function SelectDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
         <section className={storyStyles.panel}>
           <h3 className={storyStyles.title}>Select</h3>
           <p className={storyStyles.description}>
-            Panel-less Radix Select rows with grouped items, selected tint, hover state, and clamped overlay surface.
+            Panel-less Radix Select rows with grouped items, selected tint,
+            hover state, and clamped overlay surface.
           </p>
           <div className={storyStyles.row}>
             <Select defaultOpen value={value} onValueChange={setValue}>
@@ -48,7 +49,10 @@ function SelectDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
             </Select>
           </div>
         </section>
-        <section className={`${storyStyles.panel} ${storyStyles.narrowPanel}`} data-appearance="light">
+        <section
+          className={`${storyStyles.panel} ${storyStyles.narrowPanel}`}
+          data-appearance="light"
+        >
           <p className={storyStyles.description}>Light + narrow container.</p>
           <Select defaultValue="small">
             <Select.Trigger />

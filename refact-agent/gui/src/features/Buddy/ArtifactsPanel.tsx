@@ -73,7 +73,9 @@ export const ArtifactsPanel: React.FC = () => {
   );
 };
 
-function statusTone(status: ArtifactStatus): "default" | "success" | "danger" | "warning" {
+function statusTone(
+  status: ArtifactStatus,
+): "default" | "success" | "danger" | "warning" {
   const normalized = status.toLowerCase();
   if (normalized === "applied") return "success";
   if (normalized === "rejected" || normalized === "failed") return "danger";

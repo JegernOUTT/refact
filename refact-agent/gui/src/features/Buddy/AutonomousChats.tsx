@@ -102,11 +102,20 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
       )}
 
       {groups.map((group) => (
-        <Card key={group.workflowId} className={styles.groupCard} animated="rise">
+        <Card
+          key={group.workflowId}
+          className={styles.groupCard}
+          animated="rise"
+        >
           <div className={styles.groupHeader}>
             <div className={styles.groupTitleWrap}>
               <span className={styles.groupIcon}>⚙️</span>
-              <Text as="strong" size="2" weight="bold" className={styles.groupTitle}>
+              <Text
+                as="strong"
+                size="2"
+                weight="bold"
+                className={styles.groupTitle}
+              >
                 {workflowTitle(group.workflowId)}
               </Text>
             </div>
@@ -124,12 +133,16 @@ export const AutonomousChats: React.FC<AutonomousChatsProps> = ({
               >
                 <span className={styles.chatIcon}>{entry.icon}</span>
                 <span className={styles.chatContent}>
-                  <span className={styles.chatTitle}>{entry.title || "Untitled"}</span>
+                  <span className={styles.chatTitle}>
+                    {entry.title || "Untitled"}
+                  </span>
                   <span className={styles.chatMeta}>
                     {entry.message_count} entries · {entry.status}
                   </span>
                 </span>
-                <span className={styles.chatTime}>{relativeTime(entry.updated_at)}</span>
+                <span className={styles.chatTime}>
+                  {relativeTime(entry.updated_at)}
+                </span>
               </button>
             ))}
           </div>

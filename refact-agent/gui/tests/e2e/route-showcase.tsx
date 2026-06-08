@@ -177,7 +177,8 @@ const caps: CapsResponse = {
   chat_model_2: "openai_codex_personal/gpt-5.5-mini",
   task_planner_agent_model: "openai_codex_personal/gpt-5.5-planner",
   chat_thinking_model: "openai_codex_personal/gpt-5.5-thinking",
-  chat_light_model: "local_experimental_provider_with_long_name/tiny-but-useful-model",
+  chat_light_model:
+    "local_experimental_provider_with_long_name/tiny-but-useful-model",
   chat_buddy_model: "openai_codex_personal/gpt-5.5-buddy",
   chat_models: {
     "openai_codex_personal/gpt-5.5": chatModel("openai_codex_personal/gpt-5.5"),
@@ -193,9 +194,10 @@ const caps: CapsResponse = {
     "openai_codex_personal/gpt-5.5-buddy": chatModel(
       "openai_codex_personal/gpt-5.5-buddy",
     ),
-    "local_experimental_provider_with_long_name/tiny-but-useful-model": chatModel(
-      "local_experimental_provider_with_long_name/tiny-but-useful-model",
-    ),
+    "local_experimental_provider_with_long_name/tiny-but-useful-model":
+      chatModel(
+        "local_experimental_provider_with_long_name/tiny-but-useful-model",
+      ),
   },
   code_chat_default_system_prompt: "",
   completion_models: {},
@@ -264,7 +266,11 @@ const registry = {
     ),
   ],
   code_lens: [
-    configItem("code_lens", "long_code_lens_action_name", "Long Code Lens Action"),
+    configItem(
+      "code_lens",
+      "long_code_lens_action_name",
+      "Long Code Lens Action",
+    ),
   ],
   errors: [],
   has_project_root: true,
@@ -298,7 +304,8 @@ const extensions: ExtRegistryResponse = {
   skills: [
     {
       name: "responsive-skill-with-a-very-long-name",
-      description: "A long skill description that should wrap inside the settings hub.",
+      description:
+        "A long skill description that should wrap inside the settings hub.",
       source: "/tmp/skills/responsive.md",
       source_label: "global",
       scope: "global",
@@ -309,7 +316,8 @@ const extensions: ExtRegistryResponse = {
   slash_commands: [
     {
       name: "responsive-command-with-a-very-long-name",
-      description: "A long command description that should wrap inside the settings hub.",
+      description:
+        "A long command description that should wrap inside the settings hub.",
       source: "/tmp/commands/responsive.md",
       source_label: "global",
       scope: "global",
@@ -335,7 +343,8 @@ const cronTasks = [
     id: "responsive-cron-task",
     cron: "*/15 * * * *",
     human_schedule: "Every fifteen minutes with a long schedule description",
-    description: "Responsive scheduler task with a deliberately long description",
+    description:
+      "Responsive scheduler task with a deliberately long description",
     prompt: "Check responsive settings state",
     recurring: true,
     durable: true,
@@ -363,14 +372,17 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   );
   const path = url.pathname;
   if (path === "/v1/ping") return Promise.resolve(new Response("pong"));
-  if (path === "/v1/providers") return Promise.resolve(jsonResponse(providerList));
+  if (path === "/v1/providers")
+    return Promise.resolve(jsonResponse(providerList));
   if (path === "/v1/caps") return Promise.resolve(jsonResponse(caps));
   if (path === "/v1/defaults") return Promise.resolve(jsonResponse(defaults));
   if (path === "/v1/customization/registry") {
     return Promise.resolve(jsonResponse(registry));
   }
-  if (path === "/v1/integrations") return Promise.resolve(jsonResponse(integrations));
-  if (path === "/v1/scheduler/cron") return Promise.resolve(jsonResponse(cronTasks));
+  if (path === "/v1/integrations")
+    return Promise.resolve(jsonResponse(integrations));
+  if (path === "/v1/scheduler/cron")
+    return Promise.resolve(jsonResponse(cronTasks));
   if (path === "/v1/docs-list") {
     return Promise.resolve(
       jsonResponse([
@@ -383,7 +395,8 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       ]),
     );
   }
-  if (path === "/v1/ext/registry") return Promise.resolve(jsonResponse(extensions));
+  if (path === "/v1/ext/registry")
+    return Promise.resolve(jsonResponse(extensions));
   return nativeFetch(input, init);
 };
 

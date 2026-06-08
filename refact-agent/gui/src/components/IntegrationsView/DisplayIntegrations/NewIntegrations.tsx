@@ -23,7 +23,9 @@ export const NewIntegrations: FC<NewIntegrationsProps> = ({
     {availableIntegrationsToConfigure?.map((integration, index) => (
       <IntegrationCard
         isNotConfigured
-        key={`project-${index}-${JSON.stringify(integration.integr_config_path)}`}
+        key={`project-${index}-${JSON.stringify(
+          integration.integr_config_path,
+        )}`}
         integration={integration}
         handleIntegrationShowUp={handleIntegrationShowUp}
       />

@@ -112,7 +112,10 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
                     setBaseBranchPickerOpen(true);
                   }}
                   onBlur={() => {
-                    window.setTimeout(() => setBaseBranchPickerOpen(false), 120);
+                    window.setTimeout(
+                      () => setBaseBranchPickerOpen(false),
+                      120,
+                    );
                   }}
                   onChange={(value) => {
                     setBaseBranch(value);

@@ -50,8 +50,8 @@ export const Checkpoints = () => {
     >
       <Dialog.Content className={styles.CheckpointsDialog}>
         <Dialog.Description>
-          Restores chat and your project&apos;s files back to a snapshot taken at
-          this point
+          Restores chat and your project&apos;s files back to a snapshot taken
+          at this point
         </Dialog.Description>
         <Dialog.Title>
           {errorLog.length >= 1
@@ -78,7 +78,11 @@ export const Checkpoints = () => {
                             event.preventDefault();
                             openFile({ file_path: file.absolute_path });
                           }}
-                          className={file.status === "DELETED" ? styles.deletedLink : undefined}
+                          className={
+                            file.status === "DELETED"
+                              ? styles.deletedLink
+                              : undefined
+                          }
                         >
                           {formatPathName(file.absolute_path)}
                         </Link>

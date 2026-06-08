@@ -90,7 +90,8 @@ const MODEL_TYPE_LABELS: Record<
   chat_buddy: {
     title: "Companion Model",
     shortLabel: "Companion",
-    description: "Model used by your companion for background tasks and suggestions.",
+    description:
+      "Model used by your companion for background tasks and suggestions.",
     icon: Rabbit,
   },
 };
@@ -159,14 +160,21 @@ const ModelTypeSection: React.FC<{
             layout="stack"
           >
             <div className={styles.samplingWrap}>
-              <ModelSamplingParams model={effectiveModel} values={config} onChange={handleSamplingChange} />
+              <ModelSamplingParams
+                model={effectiveModel}
+                values={config}
+                onChange={handleSamplingChange}
+              />
             </div>
           </SettingItem>
         </SettingsGroup>
       ) : (
         <div className={`${styles.notice} rf-enter`}>
           <Icon icon={Info} size="sm" tone="muted" />
-          <span>No model selected. Features that require this model type will ask you to configure it.</span>
+          <span>
+            No model selected. Features that require this model type will ask
+            you to configure it.
+          </span>
         </div>
       )}
     </div>
@@ -321,7 +329,9 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     return <PageWrapper host={host}>{errorContent}</PageWrapper>;
   }
 
-  const activeKey = MODEL_TYPE_KEYS.includes(activeSection) ? activeSection : "chat";
+  const activeKey = MODEL_TYPE_KEYS.includes(activeSection)
+    ? activeSection
+    : "chat";
 
   const saveAction = (
     <Button

@@ -11,7 +11,11 @@ export type FormFieldsProps = {
   onChange: (updatedProviderData: ProviderFormValues) => void;
 };
 
-export const FormFields: FC<FormFieldsProps> = ({ providerData, fields, onChange }) => {
+export const FormFields: FC<FormFieldsProps> = ({
+  providerData,
+  fields,
+  onChange,
+}) => {
   return Object.entries(fields).map(([key, value], idx) => {
     if (key === "endpoint_style") {
       return (
@@ -25,7 +29,9 @@ export const FormFields: FC<FormFieldsProps> = ({ providerData, fields, onChange
                 { value: "openai", label: "OpenAI" },
                 { value: "hf", label: "HuggingFace" },
               ]}
-              onChange={(newValue) => onChange({ ...providerData, endpoint_style: newValue })}
+              onChange={(newValue) =>
+                onChange({ ...providerData, endpoint_style: newValue })
+              }
               disabled={providerData.readonly}
             />
           }
@@ -42,7 +48,9 @@ export const FormFields: FC<FormFieldsProps> = ({ providerData, fields, onChange
           <FieldText
             id={key}
             value={value.toString()}
-            onChange={(newValue) => onChange({ ...providerData, [key]: newValue })}
+            onChange={(newValue) =>
+              onChange({ ...providerData, [key]: newValue })
+            }
             disabled={providerData.readonly}
           />
         }

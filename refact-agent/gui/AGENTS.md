@@ -335,7 +335,7 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 | Item        | Values                                                                 |
 | ----------- | ---------------------------------------------------------------------- |
 | Controls    | default `30px`, small `26px`, large `36px`                             |
-| Switches    | track `36×20px`, thumb `16px`, inset `2px`, visual travel `18px`         |
+| Switches    | track `36×20px`, thumb `16px`, inset `2px`, visual travel `18px`       |
 | Icons       | default `15px`, small `13px`, large `18px`, tap target at least `28px` |
 | Spacing     | `4 / 8 / 12 / 16 / 22 / 32px`                                          |
 | Radii       | chip `6px`, control `8px`, card/popover `10px`, pill `999px`           |

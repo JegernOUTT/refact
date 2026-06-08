@@ -158,7 +158,10 @@
 
 .code_block::selection,
 .code_block ::selection {
-  background-color: var(--refact-chat-code-selection-color, var(--rf-color-accent-soft));
+  background-color: var(
+    --refact-chat-code-selection-color,
+    var(--rf-color-accent-soft)
+  );
 }
 
 .shiki_wrapper {
@@ -173,7 +176,8 @@
   margin: 0;
   padding: var(--rf-code-block-padding, var(--rf-space-3));
   background-color: var(--rf-code-block-bg, var(--rf-surface-1)) !important;
-  border: var(--rf-code-block-border-width, var(--rf-hairline)) solid var(--rf-border);
+  border: var(--rf-code-block-border-width, var(--rf-hairline)) solid
+    var(--rf-border);
   border-radius: var(--rf-code-block-radius, var(--rf-radius-card));
   overflow-x: visible;
 }

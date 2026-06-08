@@ -8,8 +8,8 @@ function CardGallery() {
       <header className={styles.header}>
         <h2 className={styles.title}>Cards are restrained surfaces</h2>
         <p className={styles.note}>
-          Panel-less content stays the default. Reach for Card only for overlays,
-          selected state, or true containment.
+          Panel-less content stays the default. Reach for Card only for
+          overlays, selected state, or true containment.
         </p>
       </header>
       <div className={styles.grid}>

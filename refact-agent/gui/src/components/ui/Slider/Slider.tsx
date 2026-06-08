@@ -24,7 +24,10 @@ export const Slider = React.forwardRef<HTMLSpanElement, SliderProps>(
           <SliderPrimitive.Thumb
             key={index}
             className={styles.thumb}
-            aria-label={props["aria-label"] ?? (typeof label === "string" ? label : "Slider value")}
+            aria-label={
+              props["aria-label"] ??
+              (typeof label === "string" ? label : "Slider value")
+            }
           />
         ))}
       </SliderPrimitive.Root>
@@ -38,7 +41,9 @@ export const Slider = React.forwardRef<HTMLSpanElement, SliderProps>(
       <label className={styles.field}>
         <span className={styles.header}>
           <span>{label}</span>
-          {valueLabel ? <span className={styles.value}>{valueLabel}</span> : null}
+          {valueLabel ? (
+            <span className={styles.value}>{valueLabel}</span>
+          ) : null}
         </span>
         {control}
       </label>

@@ -19,18 +19,23 @@ export function KnowledgeWorkspace() {
   const allDocNodes = useMemo(() => {
     if (!graph) return [];
     return graph.nodes.filter((node) => {
-      const isDocNode = node.node_type === "doc" || node.node_type.startsWith("doc_");
+      const isDocNode =
+        node.node_type === "doc" || node.node_type.startsWith("doc_");
       if (!isDocNode) return false;
 
       const kind = node.node_type.replace("doc_", "").toLowerCase();
-      return kind !== "deprecated" && kind !== "archived" && kind !== "trajectory";
+      return (
+        kind !== "deprecated" && kind !== "archived" && kind !== "trajectory"
+      );
     });
   }, [graph]);
 
   const docDocEdges = useMemo(() => {
     if (!graph) return [];
     const docIds = new Set(allDocNodes.map((n) => n.id));
-    return graph.edges.filter((edge) => docIds.has(edge.source) && docIds.has(edge.target));
+    return graph.edges.filter(
+      (edge) => docIds.has(edge.source) && docIds.has(edge.target),
+    );
   }, [graph, allDocNodes]);
 
   const linkedIds = useMemo(() => {
@@ -95,7 +100,10 @@ export function KnowledgeWorkspace() {
   return (
     <Surface className={styles.workspace} radius="none">
       <Surface className={styles.editorSection} variant="plain">
-        <MemoryDetailsEditor memory={selectedMemory} onMemoryDeleted={handleMemoryDeleted} />
+        <MemoryDetailsEditor
+          memory={selectedMemory}
+          onMemoryDeleted={handleMemoryDeleted}
+        />
       </Surface>
 
       <Surface className={styles.listSection} variant="plain">

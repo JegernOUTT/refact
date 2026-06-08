@@ -1,9 +1,23 @@
-import { type FC, type MouseEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type FC,
+  type MouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import classNames from "classnames";
 import { Pencil, Trash2 } from "lucide-react";
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 
-import { Badge, Button, IconButton, Surface, Switch, Tooltip } from "../../../../components/ui";
+import {
+  Badge,
+  Button,
+  IconButton,
+  Surface,
+  Switch,
+  Tooltip,
+} from "../../../../components/ui";
 import {
   ContextWindowIcon,
   MaxOutputIcon,
@@ -40,8 +54,10 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   onEditModel,
 }) => {
   const [toggleModel, { isLoading: isToggling }] = useToggleModelMutation();
-  const [setModelProvider, { isLoading: isSettingProvider }] = useSetModelProviderMutation();
-  const [removeCustomModel, { isLoading: isRemoving }] = useRemoveCustomModelMutation();
+  const [setModelProvider, { isLoading: isSettingProvider }] =
+    useSetModelProviderMutation();
+  const [removeCustomModel, { isLoading: isRemoving }] =
+    useRemoveCustomModelMutation();
   const [optimisticEnabled, setOptimisticEnabled] = useState(model.enabled);
   const [optimisticSelectedProvider, setOptimisticSelectedProvider] = useState(
     model.selected_provider ?? "",
@@ -60,7 +76,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
 
   const providerVariants = useMemo(() => {
     if (!model.provider_variants?.length) return [];
-    return [...model.provider_variants].sort((a, b) => a.id.localeCompare(b.id));
+    return [...model.provider_variants].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    );
   }, [model.provider_variants]);
 
   const availableProviders = useMemo(() => {
@@ -80,9 +98,13 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   );
 
   const resolvedProviderVariants =
-    providerVariants.length > 0 ? providerVariants : endpointsData?.provider_variants ?? [];
+    providerVariants.length > 0
+      ? providerVariants
+      : endpointsData?.provider_variants ?? [];
   const resolvedAvailableProviders =
-    availableProviders.length > 0 ? availableProviders : endpointsData?.available_providers ?? [];
+    availableProviders.length > 0
+      ? availableProviders
+      : endpointsData?.available_providers ?? [];
 
   const hasProviderRouting =
     baseProvider === "openrouter" ||
@@ -94,7 +116,11 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
     async (checked: boolean) => {
       setOptimisticEnabled(checked);
       try {
-        await toggleModel({ providerName, modelId: model.id, enabled: checked }).unwrap();
+        await toggleModel({
+          providerName,
+          modelId: model.id,
+          enabled: checked,
+        }).unwrap();
       } catch {
         setOptimisticEnabled(!checked);
       }
@@ -133,7 +159,11 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
         if (!optimisticEnabled) {
           setOptimisticEnabled(true);
           try {
-            await toggleModel({ providerName, modelId: model.id, enabled: true }).unwrap();
+            await toggleModel({
+              providerName,
+              modelId: model.id,
+              enabled: true,
+            }).unwrap();
           } catch {
             setOptimisticEnabled(false);
           }
@@ -161,7 +191,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   const formatPrice = (price?: number | null) =>
     typeof price === "number" ? `$${price.toFixed(2)}` : "–";
 
-  const renderProviderRow = (variant: (typeof resolvedProviderVariants)[number]) => {
+  const renderProviderRow = (
+    variant: (typeof resolvedProviderVariants)[number],
+  ) => {
     const isSelected = optimisticSelectedProvider === variant.id;
     return (
       <div
@@ -170,13 +202,24 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
           [styles.providerRowSelected]: isSelected,
         })}
       >
-        <span className={styles.providerCellPrimary}>{variant.tag ?? variant.name ?? variant.id}</span>
-        <span>{variant.context_length ? formatContextSize(variant.context_length) : "–"}</span>
-        <span>{variant.max_output_tokens ? formatContextSize(variant.max_output_tokens) : "–"}</span>
+        <span className={styles.providerCellPrimary}>
+          {variant.tag ?? variant.name ?? variant.id}
+        </span>
+        <span>
+          {variant.context_length
+            ? formatContextSize(variant.context_length)
+            : "–"}
+        </span>
+        <span>
+          {variant.max_output_tokens
+            ? formatContextSize(variant.max_output_tokens)
+            : "–"}
+        </span>
         <span>{formatPrice(variant.pricing?.prompt)}</span>
         <span>{formatPrice(variant.pricing?.generated)}</span>
         <span>
-          {formatPrice(variant.pricing?.cache_read)} / {formatPrice(variant.pricing?.cache_creation)}
+          {formatPrice(variant.pricing?.cache_read)} /{" "}
+          {formatPrice(variant.pricing?.cache_creation)}
         </span>
         <span>
           {typeof variant.latency_last_30m === "number"
@@ -194,7 +237,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
             : "–"}
         </span>
         <span className={styles.providerCellCaps}>
-          {variant.supported_parameters?.length ? variant.supported_parameters.join(", ") : "–"}
+          {variant.supported_parameters?.length
+            ? variant.supported_parameters.join(", ")
+            : "–"}
         </span>
         <Button
           size="sm"
@@ -245,7 +290,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
       <div className={styles.modelHeader}>
         <div className={styles.modelCopy}>
           <div className={styles.modelTitleRow}>
-            <span className={styles.modelName}>{model.display_name ?? model.id}</span>
+            <span className={styles.modelName}>
+              {model.display_name ?? model.id}
+            </span>
             {model.is_custom ? <Badge tone="accent">Custom</Badge> : null}
           </div>
 
@@ -258,7 +305,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                   </ModelDetailIcon>
                 </span>
               </Tooltip.Trigger>
-              <Tooltip.Content>Context window: {model.n_ctx.toLocaleString()} tokens</Tooltip.Content>
+              <Tooltip.Content>
+                Context window: {model.n_ctx.toLocaleString()} tokens
+              </Tooltip.Content>
             </Tooltip>
             {model.supports_tools ? (
               <Tooltip>
@@ -267,7 +316,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                     <ModelDetailIcon icon={<ToolsIcon />} />
                   </span>
                 </Tooltip.Trigger>
-                <Tooltip.Content>Supports tool/function calling</Tooltip.Content>
+                <Tooltip.Content>
+                  Supports tool/function calling
+                </Tooltip.Content>
               </Tooltip>
             ) : null}
             {model.supports_multimodality ? (
@@ -280,9 +331,9 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                 <Tooltip.Content>Supports images/vision</Tooltip.Content>
               </Tooltip>
             ) : null}
-            {(!!model.reasoning_effort_options?.length ||
-              (model.supports_thinking_budget ?? false) ||
-              (model.supports_adaptive_thinking_budget ?? false)) ? (
+            {!!model.reasoning_effort_options?.length ||
+            (model.supports_thinking_budget ?? false) ||
+            (model.supports_adaptive_thinking_budget ?? false) ? (
               <Tooltip>
                 <Tooltip.Trigger asChild>
                   <span>
@@ -292,7 +343,8 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                 <Tooltip.Content>Supports reasoning</Tooltip.Content>
               </Tooltip>
             ) : null}
-            {typeof model.max_output_tokens === "number" && model.max_output_tokens > 0 ? (
+            {typeof model.max_output_tokens === "number" &&
+            model.max_output_tokens > 0 ? (
               <Tooltip>
                 <Tooltip.Trigger asChild>
                   <span>
@@ -311,17 +363,23 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                 <Tooltip.Trigger asChild>
                   <span>
                     <ModelDetailIcon icon={<PricingIcon />}>
-                      ${model.pricing.prompt.toFixed(2)}/${model.pricing.generated.toFixed(2)}
+                      ${model.pricing.prompt.toFixed(2)}/$
+                      {model.pricing.generated.toFixed(2)}
                     </ModelDetailIcon>
                   </span>
                 </Tooltip.Trigger>
-                <Tooltip.Content>Pricing per 1M tokens (input/output)</Tooltip.Content>
+                <Tooltip.Content>
+                  Pricing per 1M tokens (input/output)
+                </Tooltip.Content>
               </Tooltip>
             ) : null}
           </div>
 
           {hasProviderRouting ? (
-            <RadixCollapsible.Root open={detailsOpen} onOpenChange={setDetailsOpen}>
+            <RadixCollapsible.Root
+              open={detailsOpen}
+              onOpenChange={setDetailsOpen}
+            >
               <RadixCollapsible.Content className={styles.providerPanel}>
                 <span className={styles.mutedText}>
                   Selecting a provider will enable the model automatically.
@@ -343,7 +401,8 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                     </div>
                     <div
                       className={classNames(styles.providerRow, {
-                        [styles.providerRowSelected]: optimisticSelectedProvider === "",
+                        [styles.providerRowSelected]:
+                          optimisticSelectedProvider === "",
                       })}
                     >
                       <span className={styles.providerCellPrimary}>Auto</span>
@@ -368,17 +427,27 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                         {renderAutoProviderButton()}
                       </div>
                       {resolvedAvailableProviders.length === 0 ? (
-                        <span className={styles.mutedText}>No provider routing data available.</span>
+                        <span className={styles.mutedText}>
+                          No provider routing data available.
+                        </span>
                       ) : null}
                       {resolvedAvailableProviders.map((provider) => {
-                        const isSelected = optimisticSelectedProvider === provider;
+                        const isSelected =
+                          optimisticSelectedProvider === provider;
                         return (
-                          <div className={styles.availableProviderRow} key={provider}>
-                            <span className={styles.providerCellPrimary}>{provider}</span>
+                          <div
+                            className={styles.availableProviderRow}
+                            key={provider}
+                          >
+                            <span className={styles.providerCellPrimary}>
+                              {provider}
+                            </span>
                             <Button
                               size="sm"
                               variant={isSelected ? "primary" : "soft"}
-                              disabled={isSelected || isReadonlyProvider || isLoading}
+                              disabled={
+                                isSelected || isReadonlyProvider || isLoading
+                              }
                               onClick={(event) => {
                                 event.stopPropagation();
                                 void handleProviderSelect(provider);
@@ -404,14 +473,20 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                 <IconButton
                   size="sm"
                   variant="ghost"
-                  aria-label={model.is_custom ? "Edit custom model" : "Edit model capabilities"}
+                  aria-label={
+                    model.is_custom
+                      ? "Edit custom model"
+                      : "Edit model capabilities"
+                  }
                   icon={Pencil}
                   onClick={handleEdit}
                   disabled={isLoading}
                 />
               </Tooltip.Trigger>
               <Tooltip.Content>
-                {model.is_custom ? "Edit custom model" : "Edit model capabilities"}
+                {model.is_custom
+                  ? "Edit custom model"
+                  : "Edit model capabilities"}
               </Tooltip.Content>
             </Tooltip>
           ) : null}

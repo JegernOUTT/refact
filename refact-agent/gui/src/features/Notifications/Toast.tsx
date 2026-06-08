@@ -19,7 +19,9 @@ const AUTO_DISMISS_MS = 8000;
 const SCROLL_RETRY_MS = 80;
 const SCROLL_ATTEMPTS = 20;
 
-function statusIcon(notification: ProcessCompletedNotification): IconProps["icon"] {
+function statusIcon(
+  notification: ProcessCompletedNotification,
+): IconProps["icon"] {
   if (notification.status === "killed") return OctagonX;
   if (notification.status === "exited" && notification.exitCode === 0) {
     return CheckCircle2;
@@ -27,7 +29,9 @@ function statusIcon(notification: ProcessCompletedNotification): IconProps["icon
   return CircleX;
 }
 
-function statusTone(notification: ProcessCompletedNotification): IconProps["tone"] {
+function statusTone(
+  notification: ProcessCompletedNotification,
+): IconProps["tone"] {
   if (notification.status === "killed") return "warning";
   if (notification.status === "exited" && notification.exitCode === 0) {
     return "success";

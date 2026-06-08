@@ -32,7 +32,9 @@ export function eventSubkindIcon(subkind: EventSubkind): LucideIcon {
   return EVENT_SUBKIND_ICONS[subkind] ?? Info;
 }
 
-export function eventSubkindIconElement(subkind: EventSubkind): React.ReactElement {
+export function eventSubkindIconElement(
+  subkind: EventSubkind,
+): React.ReactElement {
   return React.createElement(Icon, {
     icon: eventSubkindIcon(subkind),
     size: "sm",

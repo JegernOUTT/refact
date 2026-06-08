@@ -50,7 +50,8 @@
 
 .errorCallout {
   background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
-  border: var(--rf-hairline) solid color-mix(in oklab, var(--rf-color-danger) 40%, transparent);
+  border: var(--rf-hairline) solid
+    color-mix(in oklab, var(--rf-color-danger) 40%, transparent);
   border-radius: var(--rf-radius-chip);
   padding: var(--rf-space-2);
   margin-bottom: var(--rf-space-3);

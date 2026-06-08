@@ -243,7 +243,9 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
                 icon={showSource ? Eye : Code}
               />
             </Tooltip.Trigger>
-            <Tooltip.Content>{showSource ? "Show preview" : "Show source"}</Tooltip.Content>
+            <Tooltip.Content>
+              {showSource ? "Show preview" : "Show source"}
+            </Tooltip.Content>
           </Tooltip>
           <div className={styles.tab_bar_spacer} />
           <Tooltip>

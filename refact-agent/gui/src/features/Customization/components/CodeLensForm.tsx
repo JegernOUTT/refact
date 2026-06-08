@@ -45,7 +45,10 @@ export const CodeLensForm: React.FC<CodeLensFormProps> = ({
       </Field>
 
       <div className={styles.switchGrid}>
-        <Field label="Auto Submit" helper="Automatically send message when clicked.">
+        <Field
+          label="Auto Submit"
+          helper="Automatically send message when clicked."
+        >
           <FieldSwitch
             checked={autoSubmit}
             onChange={(checked) => patch(["auto_submit"], checked)}

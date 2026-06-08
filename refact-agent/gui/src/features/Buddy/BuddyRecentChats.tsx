@@ -216,7 +216,9 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
         </Flex>
       )}
 
-      {isLoading && <LoadingState label="Loading recent chats" variant="compact" />}
+      {isLoading && (
+        <LoadingState label="Loading recent chats" variant="compact" />
+      )}
 
       {!isLoading && conversations.length === 0 && (
         <Flex

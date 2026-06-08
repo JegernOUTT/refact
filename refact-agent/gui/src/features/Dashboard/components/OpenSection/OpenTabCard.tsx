@@ -1,5 +1,8 @@
 import React from "react";
-import { DashboardBadge as Badge, DashboardText as Text } from "../DashboardPrimitives";
+import {
+  DashboardBadge as Badge,
+  DashboardText as Text,
+} from "../DashboardPrimitives";
 import { StatusDot } from "../../../../components/StatusDot";
 import { getStatusFromSessionState } from "../../../../utils/sessionStatus";
 import { getModeColor } from "../../../../utils/modeColors";

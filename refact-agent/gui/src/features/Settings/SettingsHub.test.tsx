@@ -176,8 +176,14 @@ describe("SettingsHub — embedded integrations section", () => {
   });
 
   it("routes integrations page with integrationPath to integrations section", () => {
-    renderHub({ name: "integrations page", integrationPath: "/some/config.yaml" });
+    renderHub({
+      name: "integrations page",
+      integrationPath: "/some/config.yaml",
+    });
     expect(screen.getByTestId("integrations-section")).toBeInTheDocument();
-    expect(screen.getByTestId("integrations-section")).toHaveAttribute("data-embedded", "true");
+    expect(screen.getByTestId("integrations-section")).toHaveAttribute(
+      "data-embedded",
+      "true",
+    );
   });
 });

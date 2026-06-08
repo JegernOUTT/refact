@@ -1,6 +1,9 @@
 import { Flex } from "@radix-ui/themes";
 import { FC } from "react";
-import { CustomBoolField, CustomInputField } from "../../components/IntegrationsView/CustomFieldsAndWidgets";
+import {
+  CustomBoolField,
+  CustomInputField,
+} from "../../components/IntegrationsView/CustomFieldsAndWidgets";
 import { SmartLink } from "../../components/SmartLink";
 import { ParametersTable } from "../../components/IntegrationsView/IntegrationsTable/ParametersTable";
 import { Markdown } from "../../components/Markdown";
@@ -91,7 +94,10 @@ const FieldContent: FC<{
       const valuesForTable = values?.[fieldKey] ?? [];
       if (areToolParameters(valuesForTable)) {
         return (
-          <ParametersTable initialData={valuesForTable} onToolParameters={(data) => onChange(fieldKey, data)} />
+          <ParametersTable
+            initialData={valuesForTable}
+            onToolParameters={(data) => onChange(fieldKey, data)}
+          />
         );
       }
       break;
@@ -100,14 +106,18 @@ const FieldContent: FC<{
       return (
         <div className={styles.scrollX}>
           <Markdown>
-            {"```json\n" + JSON.stringify(values ? values[fieldKey] : {}, null, 2) + "\n```"}
+            {"```json\n" +
+              JSON.stringify(values ? values[fieldKey] : {}, null, 2) +
+              "\n```"}
           </Markdown>
         </div>
       );
     }
     case "string_array": {
       const valuesForTable = values?.[fieldKey];
-      const tableData = isMCPArgumentsArray(valuesForTable) ? valuesForTable : [];
+      const tableData = isMCPArgumentsArray(valuesForTable)
+        ? valuesForTable
+        : [];
 
       return (
         <KeyValueTable
@@ -180,7 +190,10 @@ const SmartLinks: FC<{
   integrationPath: string;
   integrationProject: string;
 }> = ({ smartlinks, integrationName, integrationPath, integrationProject }) => {
-  if (!smartlinks || smartlinks.every((link) => link.sl_goto?.startsWith("EDITOR"))) {
+  if (
+    !smartlinks ||
+    smartlinks.every((link) => link.sl_goto?.startsWith("EDITOR"))
+  ) {
     return null;
   }
 

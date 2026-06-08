@@ -123,7 +123,11 @@ export const SelectionToolbar: React.FC = () => {
       </Tooltip>
       <Tooltip delayDuration={150}>
         <Tooltip.Trigger asChild>
-          <button className={`${styles.item} rf-pressable`} onClick={onReply} type="button">
+          <button
+            className={`${styles.item} rf-pressable`}
+            onClick={onReply}
+            type="button"
+          >
             <Icon icon={MessageCircle} size="sm" tone="muted" />
           </button>
         </Tooltip.Trigger>

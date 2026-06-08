@@ -32,7 +32,10 @@ import {
   useCreateConfigMutation,
   useDeleteConfigMutation,
 } from "../../services/refact/customization";
-import type { ConfigItem, ConfigKind } from "../../services/refact/customization";
+import type {
+  ConfigItem,
+  ConfigKind,
+} from "../../services/refact/customization";
 import { useGetDraftQuery } from "../../services/refact/buddy";
 import type { Config } from "../Config/configSlice";
 import {
@@ -92,7 +95,9 @@ const ConfigList: React.FC<{
             key={item.id}
             role="button"
             tabIndex={0}
-            className={`${styles.configRow} ${selectedId === item.id ? styles.selected : ""}`}
+            className={`${styles.configRow} ${
+              selectedId === item.id ? styles.selected : ""
+            }`}
             onClick={() => onSelect(item.id)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
@@ -313,7 +318,8 @@ export const ConfigEditor: React.FC<{
   }, [configJson, kind, configId, saveConfig, onSaved, targetScope, draftId]);
 
   if (isLoading || draftLoading) return <Spinner />;
-  if (error) return <span className={styles.errorText}>Error loading config</span>;
+  if (error)
+    return <span className={styles.errorText}>Error loading config</span>;
   if (!configJson) return <span className={styles.mutedText}>Loading...</span>;
 
   const canSaveToLocal = configItem.local_path !== "";
@@ -376,7 +382,11 @@ export const ConfigEditor: React.FC<{
       </div>
       {view === "form" ? (
         <div className={styles.formContainer}>
-          <FormEditor kind={kind} config={configJson} onPatch={handleFormPatch} />
+          <FormEditor
+            kind={kind}
+            config={configJson}
+            onPatch={handleFormPatch}
+          />
         </div>
       ) : (
         <textarea
@@ -631,13 +641,21 @@ export const Customization: React.FC<CustomizationProps> = ({
   const backButton = !embedded ? (
     host === "vscode" && !tabbed ? (
       <div className={styles.backRow}>
-        <Button variant="soft" onClick={backFromCustomization} leftIcon={ArrowLeft}>
+        <Button
+          variant="soft"
+          onClick={backFromCustomization}
+          leftIcon={ArrowLeft}
+        >
           Back
         </Button>
       </div>
     ) : (
       <div className={styles.backRow}>
-        <Button variant="ghost" onClick={backFromCustomization} leftIcon={ArrowLeft}>
+        <Button
+          variant="ghost"
+          onClick={backFromCustomization}
+          leftIcon={ArrowLeft}
+        >
           Back
         </Button>
       </div>
@@ -748,5 +766,9 @@ export const Customization: React.FC<CustomizationProps> = ({
   );
 
   if (embedded) return inner;
-  return <PageWrapper host={host} noPadding>{inner}</PageWrapper>;
+  return (
+    <PageWrapper host={host} noPadding>
+      {inner}
+    </PageWrapper>
+  );
 };

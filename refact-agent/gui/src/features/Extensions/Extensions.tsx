@@ -153,7 +153,9 @@ export const Extensions: React.FC<ExtensionsProps> = ({
         <LoadingState label="Loading extensions registry" />
       </SettingsSection>
     );
-    return embedded ? loadingContent : (
+    return embedded ? (
+      loadingContent
+    ) : (
       <PageWrapper host={host} noPadding>
         {loadingContent}
       </PageWrapper>
@@ -173,7 +175,9 @@ export const Extensions: React.FC<ExtensionsProps> = ({
         />
       </SettingsSection>
     );
-    return embedded ? errorContent : (
+    return embedded ? (
+      errorContent
+    ) : (
       <PageWrapper host={host} noPadding>
         {errorContent}
       </PageWrapper>
@@ -323,5 +327,9 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   );
 
   if (embedded) return inner;
-  return <PageWrapper host={host} noPadding>{inner}</PageWrapper>;
+  return (
+    <PageWrapper host={host} noPadding>
+      {inner}
+    </PageWrapper>
+  );
 };

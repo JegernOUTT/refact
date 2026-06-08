@@ -50,7 +50,10 @@ function useChatModes(modesResponse = modes) {
   );
 }
 
-function renderModeSelect(ui: React.ReactElement, chat = createDefaultChatState()) {
+function renderModeSelect(
+  ui: React.ReactElement,
+  chat = createDefaultChatState(),
+) {
   return render(ui, {
     preloadedState: {
       chat,
@@ -76,14 +79,18 @@ describe("ModeSelect", () => {
   });
 
   test("shows selected mode title and tool count in the trigger", async () => {
-    renderModeSelect(<ModeSelect selectedMode="agent" onModeChange={vi.fn()} />);
+    renderModeSelect(
+      <ModeSelect selectedMode="agent" onModeChange={vi.fn()} />,
+    );
 
     await waitFor(() => expect(screen.getByText("Agent")).toBeInTheDocument());
     expect(screen.getByText("12 tools")).toBeInTheDocument();
   });
 
   test("lists modes with descriptions, tags, tool counts, synthetic task planner, and create action", async () => {
-    const { user } = renderModeSelect(<ModeSelect selectedMode="agent" onModeChange={vi.fn()} />);
+    const { user } = renderModeSelect(
+      <ModeSelect selectedMode="agent" onModeChange={vi.fn()} />,
+    );
 
     await user.click(await screen.findByRole("button", { name: /Agent/ }));
 
@@ -97,7 +104,9 @@ describe("ModeSelect", () => {
 
   test("selecting a mode before chat starts applies mode and thread defaults directly", async () => {
     const onModeChange = vi.fn();
-    const { user } = renderModeSelect(<ModeSelect selectedMode="agent" onModeChange={onModeChange} />);
+    const { user } = renderModeSelect(
+      <ModeSelect selectedMode="agent" onModeChange={onModeChange} />,
+    );
 
     await user.click(await screen.findByRole("button", { name: /Agent/ }));
     await user.click(screen.getByRole("button", { name: /Ask/ }));
@@ -125,7 +134,9 @@ describe("ModeSelect", () => {
   });
 
   test("Create new mode navigates to customization modes page", async () => {
-    const { user, store } = renderModeSelect(<ModeSelect selectedMode="agent" onModeChange={vi.fn()} />);
+    const { user, store } = renderModeSelect(
+      <ModeSelect selectedMode="agent" onModeChange={vi.fn()} />,
+    );
 
     await user.click(await screen.findByRole("button", { name: /Agent/ }));
     await user.click(screen.getByText("Create new mode..."));

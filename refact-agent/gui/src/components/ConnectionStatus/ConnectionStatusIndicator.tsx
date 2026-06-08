@@ -84,9 +84,17 @@ export const ConnectionStatusIndicator: React.FC = () => {
           >
             <span className={styles.indicator}>
               {isRefreshing ? (
-                <Icon icon={LoaderCircle} size="sm" className={styles.iconRefreshing} />
+                <Icon
+                  icon={LoaderCircle}
+                  size="sm"
+                  className={styles.iconRefreshing}
+                />
               ) : (
-                <Icon icon={CheckCircle} size="sm" className={styles.iconConnected} />
+                <Icon
+                  icon={CheckCircle}
+                  size="sm"
+                  className={styles.iconConnected}
+                />
               )}
             </span>
           </button>
@@ -111,11 +119,23 @@ export const ConnectionStatusIndicator: React.FC = () => {
         >
           <span className={styles.indicator}>
             {isRefreshing ? (
-              <Icon icon={LoaderCircle} size="sm" className={styles.iconRefreshing} />
+              <Icon
+                icon={LoaderCircle}
+                size="sm"
+                className={styles.iconRefreshing}
+              />
             ) : isReconnecting ? (
-              <Icon icon={RefreshCw} size="sm" className={styles.iconReconnecting} />
+              <Icon
+                icon={RefreshCw}
+                size="sm"
+                className={styles.iconReconnecting}
+              />
             ) : (
-              <Icon icon={XCircle} size="sm" className={styles.iconDisconnected} />
+              <Icon
+                icon={XCircle}
+                size="sm"
+                className={styles.iconDisconnected}
+              />
             )}
           </span>
         </button>

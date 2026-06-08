@@ -74,7 +74,8 @@
 .input:focus-visible,
 .textarea:focus-visible {
   border-color: var(--rf-focus-ring);
-  box-shadow: 0 0 0 var(--rf-focus-ring-w) color-mix(in srgb, var(--rf-focus-ring) 24%, transparent);
+  box-shadow: 0 0 0 var(--rf-focus-ring-w)
+    color-mix(in srgb, var(--rf-focus-ring) 24%, transparent);
 }
 
 .callout {

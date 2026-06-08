@@ -57,14 +57,19 @@ export const IntegrationPathField: React.FC<IntegrationPathFieldProps> = ({
             </span>
           </HoverCardPrimitive.Trigger>
           <HoverCardPrimitive.Portal>
-          <HoverCardPrimitive.Portal>
-            <HoverCardPrimitive.Content className="rf-popover-motion" side="right" align="center">
-              <Surface variant="overlay" radius="card">
-                <p className={styles.text}>Full project path:</p>
-                <p className={styles.text}>{projectInfo.fullPath}</p>
-              </Surface>
-            </HoverCardPrimitive.Content>
-          </HoverCardPrimitive.Portal>          </HoverCardPrimitive.Portal>
+            <HoverCardPrimitive.Portal>
+              <HoverCardPrimitive.Content
+                className="rf-popover-motion"
+                side="right"
+                align="center"
+              >
+                <Surface variant="overlay" radius="card">
+                  <p className={styles.text}>Full project path:</p>
+                  <p className={styles.text}>{projectInfo.fullPath}</p>
+                </Surface>
+              </HoverCardPrimitive.Content>
+            </HoverCardPrimitive.Portal>{" "}
+          </HoverCardPrimitive.Portal>
         </HoverCardPrimitive.Root>
       </span>
     );

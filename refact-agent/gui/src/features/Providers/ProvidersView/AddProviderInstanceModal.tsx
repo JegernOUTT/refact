@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Dialog, FieldSelect, FieldStack, FieldText } from "../../../components/ui";
-
+import {
+  Button,
+  Dialog,
+  FieldSelect,
+  FieldStack,
+  FieldText,
+} from "../../../components/ui";
 
 import type { ProviderListItem } from "../../../services/refact";
 import {
@@ -133,14 +138,11 @@ export const AddProviderInstanceModal: React.FC<
     [baseProvider, displayNameTouched],
   );
 
-  const handleDisplayNameChange = useCallback(
-    (nextDisplayName: string) => {
-      setDisplayName(nextDisplayName);
-      setDisplayNameTouched(true);
-      setLocalError(null);
-    },
-    [],
-  );
+  const handleDisplayNameChange = useCallback((nextDisplayName: string) => {
+    setDisplayName(nextDisplayName);
+    setDisplayNameTouched(true);
+    setLocalError(null);
+  }, []);
 
   const handleSubmit = useCallback(async () => {
     const trimmedInstanceId = instanceId.trim();
@@ -220,14 +222,19 @@ export const AddProviderInstanceModal: React.FC<
               control={
                 <FieldSelect
                   value={baseProvider}
-                  options={baseOptions.map((option) => ({ value: option.id, label: option.label }))}
+                  options={baseOptions.map((option) => ({
+                    value: option.id,
+                    label: option.label,
+                  }))}
                   onChange={handleBaseProviderChange}
                   disabled={isLoading}
                 />
               }
             />
           ) : (
-            <div className={styles.errorText}>No user-creatable base providers are available.</div>
+            <div className={styles.errorText}>
+              No user-creatable base providers are available.
+            </div>
           )}
 
           <FieldStack
@@ -261,14 +268,22 @@ export const AddProviderInstanceModal: React.FC<
             }
           />
 
-          {localError ? <div className={styles.errorText}>{localError}</div> : null}
+          {localError ? (
+            <div className={styles.errorText}>{localError}</div>
+          ) : null}
         </div>
 
         <div className={styles.dialogActions}>
           <Dialog.Close asChild>
-            <Button variant="soft" disabled={isLoading}>Cancel</Button>
+            <Button variant="soft" disabled={isLoading}>
+              Cancel
+            </Button>
           </Dialog.Close>
-          <Button variant="primary" onClick={() => void handleSubmit()} disabled={!canSubmit}>
+          <Button
+            variant="primary"
+            onClick={() => void handleSubmit()}
+            disabled={!canSubmit}
+          >
             {isLoading ? "Creating..." : "Create instance"}
           </Button>
         </div>

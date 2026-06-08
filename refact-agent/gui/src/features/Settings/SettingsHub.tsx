@@ -33,7 +33,8 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
   tabbed,
 }) => {
   const dispatch = useAppDispatch();
-  const activeSection: SettingsSectionId = settingsPageToSection(page) ?? "general";
+  const activeSection: SettingsSectionId =
+    settingsPageToSection(page) ?? "general";
 
   const handleSectionChange = (id: string) => {
     dispatch(change(settingsSectionToPage(id as SettingsSectionId)));
@@ -53,7 +54,8 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
           />
         );
       case "models": {
-        const draftId = page.name === "default models" ? page.draftId : undefined;
+        const draftId =
+          page.name === "default models" ? page.draftId : undefined;
 
         return (
           <DefaultModels
@@ -68,8 +70,10 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
       }
       case "customization": {
         const kind = page.name === "customization" ? page.kind : undefined;
-        const configId = page.name === "customization" ? page.configId : undefined;
-        const draftId = page.name === "customization" ? page.draftId : undefined;
+        const configId =
+          page.name === "customization" ? page.configId : undefined;
+        const draftId =
+          page.name === "customization" ? page.draftId : undefined;
 
         return (
           <Customization

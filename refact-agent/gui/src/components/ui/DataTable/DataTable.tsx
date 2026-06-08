@@ -21,10 +21,8 @@ export interface DataTableColumn<T> {
   hideLabelOnCard?: boolean;
 }
 
-export interface DataTableProps<T> extends Omit<
-  React.ComponentProps<"div">,
-  "children"
-> {
+export interface DataTableProps<T>
+  extends Omit<React.ComponentProps<"div">, "children"> {
   columns: DataTableColumn<T>[];
   rows: T[];
   getRowId: (row: T, index: number) => string;

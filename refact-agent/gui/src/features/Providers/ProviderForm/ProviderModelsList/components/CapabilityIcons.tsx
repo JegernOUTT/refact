@@ -31,7 +31,9 @@ export const ModelDetailIcon: FC<ModelDetailIconProps> = ({
   <span className={styles.modelDetailIcon}>
     <span
       className={
-        tone === "accent" ? styles.modelDetailIconGlyphAccent : styles.modelDetailIconGlyph
+        tone === "accent"
+          ? styles.modelDetailIconGlyphAccent
+          : styles.modelDetailIconGlyph
       }
     >
       {icon}
@@ -42,10 +44,18 @@ export const ModelDetailIcon: FC<ModelDetailIconProps> = ({
 
 type DetailSvgIconProps = ComponentProps<typeof Gauge>;
 
-export const ContextWindowIcon: FC<DetailSvgIconProps> = (props) => <Gauge {...props} />;
-export const MaxOutputIcon: FC<DetailSvgIconProps> = (props) => <Scissors {...props} />;
-export const PricingIcon: FC<DetailSvgIconProps> = (props) => <BarChart {...props} />;
-export const ToolsIcon: FC<DetailSvgIconProps> = (props) => <Settings {...props} />;
+export const ContextWindowIcon: FC<DetailSvgIconProps> = (props) => (
+  <Gauge {...props} />
+);
+export const MaxOutputIcon: FC<DetailSvgIconProps> = (props) => (
+  <Scissors {...props} />
+);
+export const PricingIcon: FC<DetailSvgIconProps> = (props) => (
+  <BarChart {...props} />
+);
+export const ToolsIcon: FC<DetailSvgIconProps> = (props) => (
+  <Settings {...props} />
+);
 export const VisionIcon: FC<DetailSvgIconProps> = (props) => <Eye {...props} />;
 export const ReasoningIcon: FC<DetailSvgIconProps> = (props) => (
   <svg
@@ -95,9 +105,9 @@ export const CapabilityIcons: FC<CapabilityIconsProps> = ({ capabilities }) => {
           <Bot />
         </span>
       ) : null}
-      {(!!capabilities.reasoningEffortOptions?.length ||
-        (capabilities.supportsThinkingBudget ?? false) ||
-        (capabilities.supportsAdaptiveThinkingBudget ?? false)) ? (
+      {!!capabilities.reasoningEffortOptions?.length ||
+      (capabilities.supportsThinkingBudget ?? false) ||
+      (capabilities.supportsAdaptiveThinkingBudget ?? false) ? (
         <span title="Reasoning" className={styles.modelDetailIconGlyphAccent}>
           <ReasoningIcon />
         </span>

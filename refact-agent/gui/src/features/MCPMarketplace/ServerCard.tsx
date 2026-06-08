@@ -51,7 +51,9 @@ export const ServerCard: React.FC<ServerCardProps> = ({
             </div>
           )}
           <div className={styles.cardTitle}>
-            <p className={classNames(styles.text, styles.truncate)}>{server.name}</p>
+            <p className={classNames(styles.text, styles.truncate)}>
+              {server.name}
+            </p>
             <p className={classNames(styles.smallText, styles.truncate)}>
               {server.publisher}
             </p>
@@ -73,13 +75,17 @@ export const ServerCard: React.FC<ServerCardProps> = ({
 
         <div className={styles.cardFooter}>
           {server.verified && (
-            <span className={classNames(styles.statusRow, styles.verifiedBadge)}>
+            <span
+              className={classNames(styles.statusRow, styles.verifiedBadge)}
+            >
               <Icon icon={Star} size="sm" tone="success" />
               <span className={styles.smallText}>Verified</span>
             </span>
           )}
           {server.use_count !== undefined && server.use_count > 0 && (
-            <span className={styles.smallText}>{server.use_count} installs</span>
+            <span className={styles.smallText}>
+              {server.use_count} installs
+            </span>
           )}
           {sourceLabel && (
             <Badge tone="muted" className={styles.sourceBadgeInCard}>
@@ -90,7 +96,13 @@ export const ServerCard: React.FC<ServerCardProps> = ({
         <div className={styles.cardActionRow}>
           {isInstalled ? (
             <>
-              <span className={classNames(styles.statusRow, styles.grow, styles.successText)}>
+              <span
+                className={classNames(
+                  styles.statusRow,
+                  styles.grow,
+                  styles.successText,
+                )}
+              >
                 <Icon icon={Check} size="sm" tone="success" />
                 <span className={styles.smallText}>Installed</span>
               </span>

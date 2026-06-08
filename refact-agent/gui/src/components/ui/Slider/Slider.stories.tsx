@@ -21,7 +21,9 @@ function SliderDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
       <div className={storyStyles.storyShell}>
         <section className={storyStyles.panel}>
           <h3 className={storyStyles.title}>Slider</h3>
-          <p className={storyStyles.description}>Token styled Radix Slider with hover and focus states.</p>
+          <p className={storyStyles.description}>
+            Token styled Radix Slider with hover and focus states.
+          </p>
           <Slider
             label="Temperature"
             max={100}
@@ -33,7 +35,10 @@ function SliderDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
           <Slider defaultValue={[25, 75]} label="Range" max={100} step={5} />
           <Slider defaultValue={[32]} disabled label="Disabled" max={100} />
         </section>
-        <section className={`${storyStyles.panel} ${storyStyles.narrowPanel}`} data-appearance="light">
+        <section
+          className={`${storyStyles.panel} ${storyStyles.narrowPanel}`}
+          data-appearance="light"
+        >
           <p className={storyStyles.description}>Light + narrow container.</p>
           <Slider defaultValue={[64]} label="Light slider" max={100} />
         </section>

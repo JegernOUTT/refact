@@ -58,7 +58,12 @@ const AddSourceForm: React.FC = () => {
           }
         }}
       />
-      <Button variant="primary" size="sm" onClick={() => void handleAdd()} disabled={!url.trim()}>
+      <Button
+        variant="primary"
+        size="sm"
+        onClick={() => void handleAdd()}
+        disabled={!url.trim()}
+      >
         Add by URL
       </Button>
     </div>
@@ -94,22 +99,27 @@ export const MarketplaceSourceSettings: React.FC<
                       ? source.description
                       : source.repo_url ?? "Marketplace source"}
                   </p>
-                  {!source.removable && <p className={styles.smallText}>Built-in</p>}
-                  {source.error && <p className={styles.errorText}>{source.error}</p>}
+                  {!source.removable && (
+                    <p className={styles.smallText}>Built-in</p>
+                  )}
+                  {source.error && (
+                    <p className={styles.errorText}>{source.error}</p>
+                  )}
                 </div>
-                {source.source_kind !== "builtin_embedded" && source.enabled && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={isRefreshing}
-                    loading={isRefreshing}
-                    leftIcon={RefreshCw}
-                    onClick={() => void refreshSource({ id: source.id })}
-                    title="Re-sync from source"
-                  >
-                    Sync
-                  </Button>
-                )}
+                {source.source_kind !== "builtin_embedded" &&
+                  source.enabled && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={isRefreshing}
+                      loading={isRefreshing}
+                      leftIcon={RefreshCw}
+                      onClick={() => void refreshSource({ id: source.id })}
+                      title="Re-sync from source"
+                    >
+                      Sync
+                    </Button>
+                  )}
                 {source.removable && (
                   <Button
                     size="sm"

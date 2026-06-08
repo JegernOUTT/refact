@@ -10,8 +10,14 @@
 }
 
 .content {
-  max-width: min(var(--rf-overlay-popover-max), calc(100vw - 2 * var(--rf-space-3)));
-  max-height: min(calc(var(--rf-control-h) * 10), calc(100dvh - var(--rf-space-5)));
+  max-width: min(
+    var(--rf-overlay-popover-max),
+    calc(100vw - 2 * var(--rf-space-3))
+  );
+  max-height: min(
+    calc(var(--rf-control-h) * 10),
+    calc(100dvh - var(--rf-space-5))
+  );
   z-index: var(--rf-z-popover);
 }
 

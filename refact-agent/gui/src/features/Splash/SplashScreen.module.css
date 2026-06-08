@@ -25,7 +25,8 @@
   position: absolute;
   width: 22rem;
   height: 22rem;
-  border: var(--rf-hairline) solid color-mix(in srgb, var(--rf-color-danger) 24%, transparent);
+  border: var(--rf-hairline) solid
+    color-mix(in srgb, var(--rf-color-danger) 24%, transparent);
   border-radius: var(--rf-radius-pill);
   content: "";
   opacity: 0.45;
@@ -80,7 +81,9 @@
   z-index: 1;
   width: 64px;
   height: 64px;
-  filter: drop-shadow(0 10px 24px color-mix(in srgb, var(--rf-color-danger) 32%, transparent));
+  filter: drop-shadow(
+    0 10px 24px color-mix(in srgb, var(--rf-color-danger) 32%, transparent)
+  );
 }
 
 .copy {

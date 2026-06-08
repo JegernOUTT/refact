@@ -45,7 +45,8 @@
 }
 
 .popover__scroll:hover {
-  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong)) transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong))
+    transparent;
 }
 
 .popover__box {

@@ -33,6 +33,9 @@ export function Badge({
   ...props
 }: BadgeProps) {
   return (
-    <span className={classNames(styles.badge, toneClass[tone], className)} {...props} />
+    <span
+      className={classNames(styles.badge, toneClass[tone], className)}
+      {...props}
+    />
   );
 }

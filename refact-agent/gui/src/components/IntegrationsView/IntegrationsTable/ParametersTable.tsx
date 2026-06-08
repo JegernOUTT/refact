@@ -13,13 +13,23 @@ type ParametersTableProps = {
   onToolParameters: (data: ToolParameterEntity[]) => void;
 };
 
-export const ParametersTable: FC<ParametersTableProps> = ({ initialData, onToolParameters }) => {
+export const ParametersTable: FC<ParametersTableProps> = ({
+  initialData,
+  onToolParameters,
+}) => {
   const [data, setData] = useState<ToolParameterEntity[]>(initialData);
-  const [previousData, setPreviousData] = useState<ToolParameterEntity[]>(initialData);
+  const [previousData, setPreviousData] =
+    useState<ToolParameterEntity[]>(initialData);
 
-  const createRow = useCallback((): ToolParameterEntity => ({ name: "", description: "", type: "string" }), []);
+  const createRow = useCallback(
+    (): ToolParameterEntity => ({ name: "", description: "", type: "string" }),
+    [],
+  );
 
-  const isDataChanged = useMemo(() => !isEqual(previousData, data), [previousData, data]);
+  const isDataChanged = useMemo(
+    () => !isEqual(previousData, data),
+    [previousData, data],
+  );
 
   const updateData = useCallback(() => {
     setPreviousData(data);
@@ -64,7 +74,9 @@ export const ParametersTable: FC<ParametersTableProps> = ({ initialData, onToolP
           return null;
         }
 
-        debugTables(`[DEBUG VALIDATION]: field ${columnId} is not written in snake case`);
+        debugTables(
+          `[DEBUG VALIDATION]: field ${columnId} is not written in snake case`,
+        );
         return `The value "${value}" must be written in snake case.`;
       }}
       value={data}

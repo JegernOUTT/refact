@@ -84,7 +84,9 @@ export const FeatureMenu: React.FC = () => {
     <Dialog open={success} onOpenChange={reset}>
       <Dialog.Content>
         <Dialog.Title>Hidden Features Menu</Dialog.Title>
-        <Dialog.Description>Toggle experimental features that are not shown in regular settings.</Dialog.Description>
+        <Dialog.Description>
+          Toggle experimental features that are not shown in regular settings.
+        </Dialog.Description>
         <div className={`${styles.body} rf-enter`}>
           {keysAndValues.length === 0 ? (
             <p className={styles.empty}>No hidden features</p>
@@ -97,20 +99,27 @@ export const FeatureMenu: React.FC = () => {
             >
               <div className={`${styles.featureList} rf-stagger`}>
                 {keysAndValues.map(([feature, value]) => {
-                  const setInSettings = feature === "ast" || feature === "vecdb";
+                  const setInSettings =
+                    feature === "ast" || feature === "vecdb";
                   return (
-                    <div className={`${styles.featureRow} rf-enter`} key={feature}>
+                    <div
+                      className={`${styles.featureRow} rf-enter`}
+                      key={feature}
+                    >
                       <div className={styles.featureCopy}>
                         <span className={styles.featureName}>{feature}</span>
                         {setInSettings ? (
                           <span className={styles.featureHint}>
-                            Option set in <Link onClick={handleSettingsClick}>settings</Link>
+                            Option set in{" "}
+                            <Link onClick={handleSettingsClick}>settings</Link>
                           </span>
                         ) : null}
                       </div>
                       <FieldSwitch
                         checked={value}
-                        onChange={() => dispatch(changeFeature({ feature, value: !value }))}
+                        onChange={() =>
+                          dispatch(changeFeature({ feature, value: !value }))
+                        }
                         disabled={setInSettings}
                       />
                     </div>

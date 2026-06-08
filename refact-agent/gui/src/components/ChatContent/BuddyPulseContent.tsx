@@ -54,8 +54,8 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
         onClick={() => setExpanded((x) => !x)}
       >
         <h3 className={styles.headerTitle}>
-          <Icon icon={Sparkles} size="sm" tone="accent" /> Project pulse · updated{" "}
-          {minutesAgo}m ago
+          <Icon icon={Sparkles} size="sm" tone="accent" /> Project pulse ·
+          updated {minutesAgo}m ago
         </h3>
       </button>
       {expanded && (
@@ -133,7 +133,8 @@ export const BuddyPulseContent = ({ rawExtra }: Props) => {
 const Section = ({ icon, title, count, children }: SectionProps) => (
   <section className={styles.section}>
     <h4 className={styles.sectionTitle}>
-      <Icon icon={icon} size="sm" tone="muted" /> {title} <Badge tone="muted">{count}</Badge>
+      <Icon icon={icon} size="sm" tone="muted" /> {title}{" "}
+      <Badge tone="muted">{count}</Badge>
     </h4>
     <div className={styles.sectionBody}>{children}</div>
   </section>

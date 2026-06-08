@@ -63,7 +63,12 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
       <ScrollArea scrollbars="vertical" fullHeight>
         <div className={styles.pageStack}>
           <div className={styles.header}>
-            <Button variant="ghost" size="sm" leftIcon={ArrowLeft} onClick={back}>
+            <Button
+              variant="ghost"
+              size="sm"
+              leftIcon={ArrowLeft}
+              onClick={back}
+            >
               Back
             </Button>
             <h2 className={styles.title}>Marketplace</h2>

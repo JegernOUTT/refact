@@ -10,7 +10,8 @@ export interface SkeletonProps extends React.ComponentPropsWithoutRef<"div"> {
   radius?: SkeletonRadius;
 }
 
-export interface SkeletonTextProps extends React.ComponentPropsWithoutRef<"div"> {
+export interface SkeletonTextProps
+  extends React.ComponentPropsWithoutRef<"div"> {
   lines?: number;
   radius?: SkeletonRadius;
 }
@@ -23,7 +24,10 @@ const radiusClass: Record<SkeletonRadius, string> = {
   pill: styles.radiusPill,
 };
 
-function skeletonStyle(width?: string, height?: string): React.CSSProperties | undefined {
+function skeletonStyle(
+  width?: string,
+  height?: string,
+): React.CSSProperties | undefined {
   if (!width && !height) return undefined;
   return {
     ...(width ? { "--skeleton-width": width } : {}),
@@ -42,7 +46,12 @@ export function Skeleton({
   return (
     <div
       aria-hidden="true"
-      className={classNames("rf-shimmer", styles.skeleton, radiusClass[radius], className)}
+      className={classNames(
+        "rf-shimmer",
+        styles.skeleton,
+        radiusClass[radius],
+        className,
+      )}
       style={{ ...skeletonStyle(width, height), ...style }}
       {...props}
     />

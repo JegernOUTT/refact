@@ -68,7 +68,9 @@ describe("ChatSettingsDropdown", () => {
     await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
     await user.click(await screen.findByRole("switch"));
 
-    const thread = store.getState().chat.threads[store.getState().chat.current_thread_id]?.thread;
+    const thread =
+      store.getState().chat.threads[store.getState().chat.current_thread_id]
+        ?.thread;
     expect(thread?.boost_reasoning).toBe(true);
     expect(thread?.temperature).toBeNull();
   });
@@ -84,10 +86,11 @@ describe("ChatSettingsDropdown", () => {
     await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
     await user.click(await screen.findByRole("switch"));
 
-    const thread = store.getState().chat.threads[store.getState().chat.current_thread_id]?.thread;
+    const thread =
+      store.getState().chat.threads[store.getState().chat.current_thread_id]
+        ?.thread;
     expect(thread?.boost_reasoning).toBe(false);
     expect(thread?.reasoning_effort).toBeNull();
     expect(thread?.thinking_budget).toBeNull();
   });
-
 });

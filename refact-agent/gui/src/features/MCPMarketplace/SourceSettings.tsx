@@ -117,14 +117,20 @@ const AddCustomSourceForm: React.FC<AddCustomSourceFormProps> = ({
     <div className={styles.addSourceSection}>
       <p className={sharedStyles.text}>Add Custom Source</p>
       {error && (
-        <div className={classNames(sharedStyles.notice, sharedStyles.noticeDanger)}>
+        <div
+          className={classNames(sharedStyles.notice, sharedStyles.noticeDanger)}
+        >
           <Icon icon={Info} tone="danger" />
           <p className={sharedStyles.smallText}>{error}</p>
         </div>
       )}
       <label className={sharedStyles.configField}>
         <span className={sharedStyles.smallText}>Label</span>
-        <FieldText placeholder="My Registry" value={label} onChange={setLabel} />
+        <FieldText
+          placeholder="My Registry"
+          value={label}
+          onChange={setLabel}
+        />
       </label>
       <label className={sharedStyles.configField}>
         <span className={sharedStyles.smallText}>URL</span>

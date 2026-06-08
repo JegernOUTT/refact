@@ -47,18 +47,46 @@ export const SchemaField: React.FC<SchemaFieldProps> = ({
     field.key.toLowerCase().includes("secret");
 
   if (field.f_type === "boolean") {
-    return <BooleanField field={field} value={value} disabled={disabled} onSave={onSave} />;
+    return (
+      <BooleanField
+        field={field}
+        value={value}
+        disabled={disabled}
+        onSave={onSave}
+      />
+    );
   }
 
   if (isSecret) {
-    return <SecretField field={field} value={value} disabled={disabled} onSave={onSave} />;
+    return (
+      <SecretField
+        field={field}
+        value={value}
+        disabled={disabled}
+        onSave={onSave}
+      />
+    );
   }
 
   if (field.f_type === "integer" || field.f_type === "number") {
-    return <NumberField field={field} value={value} disabled={disabled} onSave={onSave} />;
+    return (
+      <NumberField
+        field={field}
+        value={value}
+        disabled={disabled}
+        onSave={onSave}
+      />
+    );
   }
 
-  return <StringField field={field} value={value} disabled={disabled} onSave={onSave} />;
+  return (
+    <StringField
+      field={field}
+      value={value}
+      disabled={disabled}
+      onSave={onSave}
+    />
+  );
 };
 
 function FieldActions({ field }: { field: SchemaFieldDef }) {
@@ -87,10 +115,18 @@ function resetStatusLater(
   setSaveState: React.Dispatch<React.SetStateAction<FieldSaveState>>,
   state: FieldSaveState,
 ) {
-  timerRef.current = setTimeout(() => setSaveState("idle"), state === "saved" ? 1500 : 2000);
+  timerRef.current = setTimeout(
+    () => setSaveState("idle"),
+    state === "saved" ? 1500 : 2000,
+  );
 }
 
-const NumberField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSave }) => {
+const NumberField: React.FC<SchemaFieldProps> = ({
+  field,
+  value,
+  disabled,
+  onSave,
+}) => {
   const valueToString = useCallback(
     (candidate: unknown) => String(candidate ?? field.f_default ?? ""),
     [field.f_default],
@@ -150,7 +186,12 @@ const NumberField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSav
   );
 };
 
-const BooleanField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSave }) => {
+const BooleanField: React.FC<SchemaFieldProps> = ({
+  field,
+  value,
+  disabled,
+  onSave,
+}) => {
   const [saveState, setSaveState] = useState<FieldSaveState>("idle");
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => () => clearTimeout(timerRef.current), []);
@@ -187,7 +228,12 @@ const BooleanField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSa
   );
 };
 
-const SecretField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSave }) => {
+const SecretField: React.FC<SchemaFieldProps> = ({
+  field,
+  value,
+  disabled,
+  onSave,
+}) => {
   const isMasked = value === "***";
   const [localValue, setLocalValue] = useState("");
   const [revealed, setRevealed] = useState(false);
@@ -240,8 +286,13 @@ const SecretField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSav
     }
   }, [field.key, onSave]);
 
-  const displayValue = editing ? localValue : isMasked ? "" : String(value ?? "");
-  const placeholder = isMasked && !editing ? "••••••••  (saved)" : field.f_placeholder ?? "";
+  const displayValue = editing
+    ? localValue
+    : isMasked
+      ? ""
+      : String(value ?? "");
+  const placeholder =
+    isMasked && !editing ? "••••••••  (saved)" : field.f_placeholder ?? "";
 
   return (
     <SettingItem
@@ -290,8 +341,15 @@ const SecretField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSav
   );
 };
 
-const StringField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSave }) => {
-  const [localValue, setLocalValue] = useState(String(value ?? field.f_default ?? ""));
+const StringField: React.FC<SchemaFieldProps> = ({
+  field,
+  value,
+  disabled,
+  onSave,
+}) => {
+  const [localValue, setLocalValue] = useState(
+    String(value ?? field.f_default ?? ""),
+  );
   const [saveState, setSaveState] = useState<FieldSaveState>("idle");
   const originalValueRef = useRef(value);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -355,7 +413,9 @@ const StringField: React.FC<SchemaFieldProps> = ({ field, value, disabled, onSav
   );
 };
 
-export const SaveIndicator: React.FC<{ state: FieldSaveState }> = ({ state }) => {
+export const SaveIndicator: React.FC<{ state: FieldSaveState }> = ({
+  state,
+}) => {
   if (state === "idle") return null;
 
   return <SaveStatus state={state} />;

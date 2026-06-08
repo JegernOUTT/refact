@@ -1,11 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import classNames from "classnames";
-import {
-  Button,
-  FieldTextarea,
-  Switch,
-  Text,
-} from "../../components/ui";
+import { Button, FieldTextarea, Switch, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   selectBuddySettings,

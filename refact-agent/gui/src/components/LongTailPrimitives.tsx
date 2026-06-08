@@ -65,7 +65,8 @@ const space = (value: Space | undefined): string | undefined => {
   if (value == null) return undefined;
   if (typeof value === "object") return undefined;
   const normalized = String(value);
-  if (normalized.endsWith("px") || normalized.includes("var(")) return normalized;
+  if (normalized.endsWith("px") || normalized.includes("var("))
+    return normalized;
   return `var(--rf-space-${normalized})`;
 };
 
@@ -124,7 +125,19 @@ export const Box = React.forwardRef<HTMLDivElement, CommonProps>(
 Box.displayName = "Box";
 
 export const Flex = React.forwardRef<HTMLDivElement, FlexProps>(
-  ({ className, style, direction = "row", align, justify, gap, wrap, ...props }, ref) => {
+  (
+    {
+      className,
+      style,
+      direction = "row",
+      align,
+      justify,
+      gap,
+      wrap,
+      ...props
+    },
+    ref,
+  ) => {
     return (
       <Box
         {...props}
@@ -176,10 +189,17 @@ export function Text({
 
 export function Heading({ as = "h4", className, ...props }: CommonProps) {
   const Component = as;
-  return <Component {...props} className={classNames(styles.heading, className)} />;
+  return (
+    <Component {...props} className={classNames(styles.heading, className)} />
+  );
 }
 
-export function Code({ className, size: _size, variant: _variant, ...props }: CommonProps) {
+export function Code({
+  className,
+  size: _size,
+  variant: _variant,
+  ...props
+}: CommonProps) {
   return <code {...props} className={classNames(styles.code, className)} />;
 }
 
@@ -205,7 +225,12 @@ export const Card = React.forwardRef<HTMLDivElement, CommonProps>(
 );
 Card.displayName = "Card";
 
-export function Badge({ color, variant: _variant, size: _size, ...props }: CommonProps) {
+export function Badge({
+  color,
+  variant: _variant,
+  size: _size,
+  ...props
+}: CommonProps) {
   const tone =
     color === "red" || color === "tomato"
       ? "danger"
@@ -219,7 +244,12 @@ export function Badge({ color, variant: _variant, size: _size, ...props }: Commo
   return <KitBadge {...props} tone={tone} />;
 }
 
-export function Button({ variant, color, size, ...props }: CommonProps & { disabled?: boolean }) {
+export function Button({
+  variant,
+  color,
+  size,
+  ...props
+}: CommonProps & { disabled?: boolean }) {
   const kitVariant =
     color === "red"
       ? "danger"
@@ -318,7 +348,10 @@ export const HoverCard = Object.assign(HoverCardRoot, {
   Content: HoverCardContent,
 });
 
-function TabsList({ size: _size, ...props }: React.ComponentProps<typeof KitTabs.List> & { size?: string }) {
+function TabsList({
+  size: _size,
+  ...props
+}: React.ComponentProps<typeof KitTabs.List> & { size?: string }) {
   return <KitTabsList {...props} />;
 }
 
@@ -333,7 +366,11 @@ export const Tabs = Object.assign(TabsRootCompat, {
   Content: KitTabs.Content,
 });
 
-export function Checkbox({ checked, onCheckedChange, disabled }: {
+export function Checkbox({
+  checked,
+  onCheckedChange,
+  disabled,
+}: {
   checked?: boolean;
   onCheckedChange?: (checked: boolean) => void;
   disabled?: boolean;

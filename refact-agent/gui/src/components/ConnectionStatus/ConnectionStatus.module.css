@@ -18,13 +18,15 @@
 }
 
 .reconnectingPulse {
-  animation: reconnectingPulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
+  animation: reconnectingPulse var(--rf-dur-slow) var(--rf-ease-standard)
+    infinite;
 }
 
 @keyframes reconnectingPulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 color-mix(in oklab, var(--rf-color-warning) 35%, transparent);
+    box-shadow: 0 0 0 0
+      color-mix(in oklab, var(--rf-color-warning) 35%, transparent);
   }
   50% {
     box-shadow: 0 0 0 var(--rf-space-1) transparent;

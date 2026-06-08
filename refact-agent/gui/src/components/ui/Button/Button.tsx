@@ -25,7 +25,10 @@ export interface ButtonProps extends React.ComponentPropsWithoutRef<"button"> {
 }
 
 export interface IconButtonProps
-  extends Omit<React.ComponentPropsWithoutRef<"button">, "aria-label" | "children"> {
+  extends Omit<
+    React.ComponentPropsWithoutRef<"button">,
+    "aria-label" | "children"
+  > {
   "aria-label": string;
   icon: LucideIcon;
   variant?: ButtonVariant;
@@ -37,7 +40,9 @@ export interface ButtonGroupProps extends React.ComponentProps<"div"> {
   children?: React.ReactNode;
 }
 
-function normalizeVariant(variant: ButtonVariant): Exclude<ButtonVariant, "solid" | "outline"> {
+function normalizeVariant(
+  variant: ButtonVariant,
+): Exclude<ButtonVariant, "solid" | "outline"> {
   if (variant === "solid") return "primary";
   if (variant === "outline") return "soft";
   return variant;
@@ -50,7 +55,9 @@ function normalizeSize(size: ButtonSize): Exclude<ButtonSize, "1" | "2" | "3"> {
   return size;
 }
 
-function getIconTone(variant: ButtonVariant): React.ComponentProps<typeof Icon>["tone"] {
+function getIconTone(
+  variant: ButtonVariant,
+): React.ComponentProps<typeof Icon>["tone"] {
   variant = normalizeVariant(variant);
   if (variant === "primary") {
     return "accent";
@@ -63,7 +70,9 @@ function getIconTone(variant: ButtonVariant): React.ComponentProps<typeof Icon>[
   return "default";
 }
 
-function getIconSize(size: ButtonSize): React.ComponentProps<typeof Icon>["size"] {
+function getIconSize(
+  size: ButtonSize,
+): React.ComponentProps<typeof Icon>["size"] {
   size = normalizeSize(size);
   if (size === "sm") {
     return "sm";
@@ -131,7 +140,11 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 );
 Button.displayName = "Button";
 
-export function ButtonGroup({ children, className, ...props }: ButtonGroupProps) {
+export function ButtonGroup({
+  children,
+  className,
+  ...props
+}: ButtonGroupProps) {
   return (
     <div {...props} className={classNames(styles.group, className)}>
       {children}
@@ -176,8 +189,15 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
         disabled={isDisabled}
         type={type}
       >
-        <span aria-hidden="true" className={loading ? styles.spinner : undefined}>
-          <Icon icon={loading ? LoaderCircle : icon} size={iconSize} tone={iconTone} />
+        <span
+          aria-hidden="true"
+          className={loading ? styles.spinner : undefined}
+        >
+          <Icon
+            icon={loading ? LoaderCircle : icon}
+            size={iconSize}
+            tone={iconTone}
+          />
         </span>
       </button>
     );

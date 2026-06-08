@@ -115,9 +115,7 @@ const MaybeInteractiveElement: React.FC<{
     return child;
   });
 
-  return (
-    <div className={styles.maybe_pin}>{processed}</div>
-  );
+  return <div className={styles.maybe_pin}>{processed}</div>;
 };
 
 const _Markdown: React.FC<MarkdownProps> = ({
@@ -241,13 +239,23 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <strong {...props} />;
       },
       b({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <span {...props} className={classNames(styles.bold, props.className)} />;
+        return (
+          <span
+            {...props}
+            className={classNames(styles.bold, props.className)}
+          />
+        );
       },
       i({ color: _color, ref: _ref, node: _node, ...props }) {
         return <em {...props} />;
       },
       table({ color: _color, ref: _ref, node: _node, ...props }) {
-        return <table {...props} className={classNames(styles.table, props.className)} />;
+        return (
+          <table
+            {...props}
+            className={classNames(styles.table, props.className)}
+          />
+        );
       },
       tbody({ color: _color, ref: _ref, node: _node, ...props }) {
         return <tbody {...props} />;

@@ -27,7 +27,12 @@ const states: {
   { status: "success", title: "Patch applied", icon: CheckCircle2 },
   { status: "error", title: "Tool failed", icon: XCircle },
   { status: "streaming", title: "Streaming logs", icon: Loader2 },
-  { status: "idle", title: "Collapsed by default", icon: Clock3, defaultOpen: false },
+  {
+    status: "idle",
+    title: "Collapsed by default",
+    icon: Clock3,
+    defaultOpen: false,
+  },
 ];
 
 function ToolBody({ status }: { status: ToolCardStatus }) {
@@ -35,10 +40,13 @@ function ToolBody({ status }: { status: ToolCardStatus }) {
     <>
       <p className={styles.copy}>
         Presentational shell for {status} tool output. The body owns no vertical
-        scroll and wide code or diff previews live in explicit horizontal scroll islands.
+        scroll and wide code or diff previews live in explicit horizontal scroll
+        islands.
       </p>
       <div className="scrollX">
-        <pre className={styles.codeBlock}>{`$ refact tool --status ${status}\nstdout: useful preview that can be wider than the card without creating page overflow`}</pre>
+        <pre
+          className={styles.codeBlock}
+        >{`$ refact tool --status ${status}\nstdout: useful preview that can be wider than the card without creating page overflow`}</pre>
       </div>
     </>
   );

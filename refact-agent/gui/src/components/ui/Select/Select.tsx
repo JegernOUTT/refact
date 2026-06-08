@@ -38,7 +38,9 @@ const SelectTrigger = React.forwardRef<HTMLButtonElement, SelectTriggerProps>(
         ref={ref}
         className={classNames(styles.trigger, className)}
       >
-        <SelectPrimitive.Value placeholder={placeholder}>{children}</SelectPrimitive.Value>
+        <SelectPrimitive.Value placeholder={placeholder}>
+          {children}
+        </SelectPrimitive.Value>
         <SelectPrimitive.Icon className={styles.icon}>
           <Icon icon={ChevronDown} size="sm" />
         </SelectPrimitive.Icon>
@@ -69,14 +71,20 @@ const SelectContent = React.forwardRef<HTMLDivElement, SelectContentProps>(
           <SelectPrimitive.Content
             ref={ref}
             align={align}
-            className={classNames(styles.content, "rf-popover-motion", className)}
+            className={classNames(
+              styles.content,
+              "rf-popover-motion",
+              className,
+            )}
             collisionPadding={collisionPadding}
             position={position}
             side={side}
             sideOffset={sideOffset}
             style={overlayStyle(maxWidth, maxHeight)}
           >
-            <SelectPrimitive.Viewport className={styles.viewport}>{children}</SelectPrimitive.Viewport>
+            <SelectPrimitive.Viewport className={styles.viewport}>
+              {children}
+            </SelectPrimitive.Viewport>
           </SelectPrimitive.Content>
         </Portal>
       </SelectPrimitive.Portal>
@@ -106,7 +114,11 @@ SelectItem.displayName = "Select.Item";
 const SelectGroup = SelectPrimitive.Group;
 const SelectLabel = React.forwardRef<HTMLDivElement, SelectLabelProps>(
   ({ className, ...props }, ref) => (
-    <SelectPrimitive.Label {...props} ref={ref} className={classNames(styles.label, className)} />
+    <SelectPrimitive.Label
+      {...props}
+      ref={ref}
+      className={classNames(styles.label, className)}
+    />
   ),
 );
 SelectLabel.displayName = "Select.Label";

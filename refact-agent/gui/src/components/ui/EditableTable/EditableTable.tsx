@@ -27,10 +27,8 @@ export type EditableTableValidate<T extends EditableTableRow> = (params: {
   value: string;
 }) => React.ReactNode;
 
-export interface EditableTableProps<T extends EditableTableRow> extends Omit<
-  React.ComponentProps<"div">,
-  "children" | "onChange"
-> {
+export interface EditableTableProps<T extends EditableTableRow>
+  extends Omit<React.ComponentProps<"div">, "children" | "onChange"> {
   columns: EditableTableColumn<T>[];
   value: T[];
   onChange: (value: T[]) => void;
@@ -150,7 +148,9 @@ export function EditableTable<T extends EditableTableRow>({
     emitChange([...rows, { id: nextId(), value: createRow() }]);
   };
 
-  const gridTemplateColumns = `${columns.map((column) => column.width ?? "minmax(0, 1fr)").join(" ")} auto`;
+  const gridTemplateColumns = `${columns
+    .map((column) => column.width ?? "minmax(0, 1fr)")
+    .join(" ")} auto`;
 
   return (
     <div {...props} className={classNames(styles.root, className)}>

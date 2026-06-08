@@ -74,7 +74,10 @@
 
 .stateGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(calc(var(--rf-control-h-lg) * 8), 1fr));
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(calc(var(--rf-control-h-lg) * 8), 1fr)
+  );
   gap: var(--rf-space-3);
 }
 

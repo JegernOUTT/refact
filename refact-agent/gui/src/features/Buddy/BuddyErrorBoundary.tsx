@@ -208,11 +208,7 @@ const ChatCrashReportPanel: React.FC = () => {
             </Text>
           </button>
           {copyAllError && (
-            <Text
-              size="1"
-             
-              data-testid="copy-crash-thread-json-error"
-            >
+            <Text size="1" data-testid="copy-crash-thread-json-error">
               {copyAllError}
             </Text>
           )}

@@ -52,7 +52,9 @@ export const MarketplaceSourceSelector: React.FC<
         >
           {source.label}
           {source.item_count !== undefined && ` (${source.item_count})`}
-          {source.error && <Icon icon={AlertTriangle} size="sm" tone="danger" />}
+          {source.error && (
+            <Icon icon={AlertTriangle} size="sm" tone="danger" />
+          )}
         </Badge>
       ))}
       <Badge

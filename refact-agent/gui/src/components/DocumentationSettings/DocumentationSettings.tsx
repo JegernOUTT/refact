@@ -1,7 +1,14 @@
 import { useState } from "react";
 import { BookOpen, Plus } from "lucide-react";
 
-import { Button, Dialog, Field, FieldText, SettingItem, SettingsShell } from "../ui";
+import {
+  Button,
+  Dialog,
+  Field,
+  FieldText,
+  SettingItem,
+  SettingsShell,
+} from "../ui";
 import { DocumentationActions } from "./DocumentationActions";
 import styles from "./DocumentationSettings.module.css";
 
@@ -16,16 +23,28 @@ type MaybePromise = Promise<void> | void;
 
 export type DocumentationSettingsProps = {
   sources: DocumentationSource[];
-  addDocumentation: (url: string, maxDepth: number, maxPages: number) => MaybePromise;
+  addDocumentation: (
+    url: string,
+    maxDepth: number,
+    maxPages: number,
+  ) => MaybePromise;
   deleteDocumentation: (url: string) => MaybePromise;
   refetchDocumentation: (url: string) => MaybePromise;
-  editDocumentation: (url: string, maxDepth: number, maxPages: number) => MaybePromise;
+  editDocumentation: (
+    url: string,
+    maxDepth: number,
+    maxPages: number,
+  ) => MaybePromise;
   embedded?: boolean;
   hideAddAction?: boolean;
 };
 
 export type AddDocumentationActionProps = {
-  addDocumentation: (url: string, maxDepth: number, maxPages: number) => MaybePromise;
+  addDocumentation: (
+    url: string,
+    maxDepth: number,
+    maxPages: number,
+  ) => MaybePromise;
   disabled?: boolean;
 };
 
@@ -114,10 +133,21 @@ export const AddDocumentationAction: React.FC<AddDocumentationActionProps> = ({
           Add a documentation source that the chat assistant can use.
         </Dialog.Description>
         <div className={styles.dialogBody}>
-          <Field label="URL" helper="The root documentation URL to crawl." error={formError}>
-            <FieldText value={url} onChange={setUrl} placeholder="Enter the documentation URL" />
+          <Field
+            label="URL"
+            helper="The root documentation URL to crawl."
+            error={formError}
+          >
+            <FieldText
+              value={url}
+              onChange={setUrl}
+              placeholder="Enter the documentation URL"
+            />
           </Field>
-          <Field label="Max depth" helper="How many link levels to follow from the root.">
+          <Field
+            label="Max depth"
+            helper="How many link levels to follow from the root."
+          >
             <FieldText
               value={maxDepth}
               onChange={setMaxDepth}
@@ -127,7 +157,10 @@ export const AddDocumentationAction: React.FC<AddDocumentationActionProps> = ({
               placeholder="Enter the max depth"
             />
           </Field>
-          <Field label="Max pages" helper="The maximum number of pages to index.">
+          <Field
+            label="Max pages"
+            helper="The maximum number of pages to index."
+          >
             <FieldText
               value={maxPages}
               onChange={setMaxPages}
@@ -139,10 +172,18 @@ export const AddDocumentationAction: React.FC<AddDocumentationActionProps> = ({
           </Field>
         </div>
         <div className={styles.dialogActions}>
-          <Button variant="ghost" onClick={() => handleOpenChange(false)} disabled={isSubmitting}>
+          <Button
+            variant="ghost"
+            onClick={() => handleOpenChange(false)}
+            disabled={isSubmitting}
+          >
             Cancel
           </Button>
-          <Button variant="primary" onClick={() => void handleAdd()} loading={isSubmitting}>
+          <Button
+            variant="primary"
+            onClick={() => void handleAdd()}
+            loading={isSubmitting}
+          >
             Add
           </Button>
         </div>
@@ -190,7 +231,8 @@ export const DocumentationSettings: React.FC<DocumentationSettingsProps> = ({
           </div>
         ) : (
           <div className={styles.empty}>
-            No documentation has been added yet. Add documentation that the chat assistant can use.
+            No documentation has been added yet. Add documentation that the chat
+            assistant can use.
           </div>
         )}
       </SettingItem>
@@ -220,4 +262,3 @@ export const DocumentationSettings: React.FC<DocumentationSettingsProps> = ({
     </SettingsShell>
   );
 };
-

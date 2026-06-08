@@ -29,7 +29,8 @@ export interface FieldProps extends React.ComponentProps<"div"> {
 export type FieldRowProps = Omit<FieldProps, "layout">;
 export type FieldStackProps = Omit<FieldProps, "layout">;
 
-export interface FieldErrorProps extends Omit<React.ComponentProps<"p">, "children" | "className"> {
+export interface FieldErrorProps
+  extends Omit<React.ComponentProps<"p">, "children" | "className"> {
   children?: React.ReactNode;
   className?: string;
 }
@@ -59,7 +60,8 @@ export interface FieldSelectOption {
   disabled?: boolean;
 }
 
-export interface FieldSelectProps extends Omit<SelectProps, "children" | "onValueChange"> {
+export interface FieldSelectProps
+  extends Omit<SelectProps, "children" | "onValueChange"> {
   value: string;
   options: FieldSelectOption[];
   placeholder?: string;
@@ -68,14 +70,20 @@ export interface FieldSelectProps extends Omit<SelectProps, "children" | "onValu
 }
 
 export interface FieldSwitchProps
-  extends Omit<SwitchProps, "checked" | "label" | "onChange" | "onCheckedChange"> {
+  extends Omit<
+    SwitchProps,
+    "checked" | "label" | "onChange" | "onCheckedChange"
+  > {
   checked: boolean;
   onChange: (checked: boolean) => void;
   onCommit?: (checked: boolean) => void;
 }
 
 export interface FieldSliderProps
-  extends Omit<SliderProps, "onChange" | "onValueChange" | "onValueCommit" | "value"> {
+  extends Omit<
+    SliderProps,
+    "onChange" | "onValueChange" | "onValueCommit" | "value"
+  > {
   value: number[];
   onChange: (value: number[]) => void;
   onCommit?: (value: number[]) => void;
@@ -143,7 +151,12 @@ export function FieldError({ children, className, ...props }: FieldErrorProps) {
   );
 }
 
-export function SaveStatus({ className, label, state = "idle", ...props }: SaveStatusProps) {
+export function SaveStatus({
+  className,
+  label,
+  state = "idle",
+  ...props
+}: SaveStatusProps) {
   if (state === "idle") {
     return null;
   }
@@ -155,17 +168,30 @@ export function SaveStatus({ className, label, state = "idle", ...props }: SaveS
     <span
       {...props}
       aria-live="polite"
-      className={classNames(styles.saveStatus, styles[`saveStatus-${state}`], className)}
+      className={classNames(
+        styles.saveStatus,
+        styles[`saveStatus-${state}`],
+        className,
+      )}
       role="status"
     >
-      <Icon icon={icon} size="sm" tone={state === "error" ? "danger" : state === "saved" ? "success" : "muted"} />
+      <Icon
+        icon={icon}
+        size="sm"
+        tone={
+          state === "error" ? "danger" : state === "saved" ? "success" : "muted"
+        }
+      />
       {statusLabel}
     </span>
   );
 }
 
 export const FieldText = React.forwardRef<HTMLInputElement, FieldTextProps>(
-  ({ className, onBlur, onChange, onCommit, type = "text", value, ...props }, ref) => (
+  (
+    { className, onBlur, onChange, onCommit, type = "text", value, ...props },
+    ref,
+  ) => (
     <input
       {...props}
       ref={ref}
@@ -182,24 +208,31 @@ export const FieldText = React.forwardRef<HTMLInputElement, FieldTextProps>(
 );
 FieldText.displayName = "FieldText";
 
-export const FieldTextarea = React.forwardRef<HTMLTextAreaElement, FieldTextareaProps>(
-  ({ className, onBlur, onChange, onCommit, value, ...props }, ref) => (
-    <textarea
-      {...props}
-      ref={ref}
-      className={classNames(styles.textarea, className)}
-      value={value}
-      onBlur={(event) => {
-        onBlur?.(event);
-        onCommit?.(event.currentTarget.value);
-      }}
-      onChange={(event) => onChange(event.currentTarget.value)}
-    />
-  ),
-);
+export const FieldTextarea = React.forwardRef<
+  HTMLTextAreaElement,
+  FieldTextareaProps
+>(({ className, onBlur, onChange, onCommit, value, ...props }, ref) => (
+  <textarea
+    {...props}
+    ref={ref}
+    className={classNames(styles.textarea, className)}
+    value={value}
+    onBlur={(event) => {
+      onBlur?.(event);
+      onCommit?.(event.currentTarget.value);
+    }}
+    onChange={(event) => onChange(event.currentTarget.value)}
+  />
+));
 FieldTextarea.displayName = "FieldTextarea";
 
-export function FieldSelect({ onChange, onCommit, options, placeholder, ...props }: FieldSelectProps) {
+export function FieldSelect({
+  onChange,
+  onCommit,
+  options,
+  placeholder,
+  ...props
+}: FieldSelectProps) {
   return (
     <Select
       {...props}
@@ -208,10 +241,17 @@ export function FieldSelect({ onChange, onCommit, options, placeholder, ...props
         onCommit?.(nextValue);
       }}
     >
-      <Select.Trigger className={styles.selectTrigger} placeholder={placeholder} />
+      <Select.Trigger
+        className={styles.selectTrigger}
+        placeholder={placeholder}
+      />
       <Select.Content maxHeight="260px" maxWidth="360px">
         {options.map((option) => (
-          <Select.Item disabled={option.disabled} key={option.value} value={option.value}>
+          <Select.Item
+            disabled={option.disabled}
+            key={option.value}
+            value={option.value}
+          >
             {option.label}
           </Select.Item>
         ))}
@@ -220,20 +260,21 @@ export function FieldSelect({ onChange, onCommit, options, placeholder, ...props
   );
 }
 
-export const FieldSwitch = React.forwardRef<HTMLButtonElement, FieldSwitchProps>(
-  ({ checked, className, onChange, onCommit, ...props }, ref) => (
-    <Switch
-      {...props}
-      ref={ref}
-      checked={checked}
-      className={classNames(styles.switchControl, className)}
-      onCheckedChange={(nextChecked) => {
-        onChange(nextChecked);
-        onCommit?.(nextChecked);
-      }}
-    />
-  ),
-);
+export const FieldSwitch = React.forwardRef<
+  HTMLButtonElement,
+  FieldSwitchProps
+>(({ checked, className, onChange, onCommit, ...props }, ref) => (
+  <Switch
+    {...props}
+    ref={ref}
+    checked={checked}
+    className={classNames(styles.switchControl, className)}
+    onCheckedChange={(nextChecked) => {
+      onChange(nextChecked);
+      onCommit?.(nextChecked);
+    }}
+  />
+));
 FieldSwitch.displayName = "FieldSwitch";
 
 export const FieldSlider = React.forwardRef<HTMLSpanElement, FieldSliderProps>(

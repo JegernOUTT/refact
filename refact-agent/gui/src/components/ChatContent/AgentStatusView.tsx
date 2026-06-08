@@ -74,7 +74,9 @@ function isStatusTab(value: string): value is AgentStatusTab {
   return STATUS_TABS.includes(value as AgentStatusTab);
 }
 
-function priorityBadgeTone(priority: string): React.ComponentProps<typeof Badge>["tone"] {
+function priorityBadgeTone(
+  priority: string,
+): React.ComponentProps<typeof Badge>["tone"] {
   switch (priority) {
     case "P0":
       return "danger";
@@ -102,7 +104,9 @@ function stateClass(state: AgentStatusState): string {
   }
 }
 
-function stateStatus(state: AgentStatusState): React.ComponentProps<typeof StatusDot>["status"] {
+function stateStatus(
+  state: AgentStatusState,
+): React.ComponentProps<typeof StatusDot>["status"] {
   switch (state) {
     case "failed":
       return "error";
@@ -143,7 +147,10 @@ function tabCount(rows: AgentStatusRow[], tab: AgentStatusTab): number {
   return rows.filter((row) => row.state === tab).length;
 }
 
-function renderDetailValue(value: string | null, empty: string): React.ReactNode {
+function renderDetailValue(
+  value: string | null,
+  empty: string,
+): React.ReactNode {
   if (!value) return <span className={styles.mutedValue}>{empty}</span>;
   return value;
 }
@@ -183,8 +190,13 @@ function AgentRowCard({
             <span className={styles.cardTitle}>{row.title}</span>
           </div>
           <div className={styles.stateRow}>
-            <StatusDot status={stateStatus(row.state)} pulse={row.state === "running"} />
-            <span className={classNames(styles.stateText, stateClass(row.state))}>
+            <StatusDot
+              status={stateStatus(row.state)}
+              pulse={row.state === "running"}
+            />
+            <span
+              className={classNames(styles.stateText, stateClass(row.state))}
+            >
               {row.stateText}
             </span>
           </div>
@@ -253,7 +265,10 @@ function AgentRowCard({
           <div className={styles.detailBlock}>
             <span className={styles.detailLabel}>Last status update</span>
             <div className={styles.detailValue}>
-              {renderDetailValue(row.lastStatusUpdate, "Not included in compact output.")}
+              {renderDetailValue(
+                row.lastStatusUpdate,
+                "Not included in compact output.",
+              )}
             </div>
           </div>
           <div className={styles.detailBlock}>
@@ -279,7 +294,9 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
   const [tab, setTab] = useState<AgentStatusTab>("all");
   const [priority, setPriority] = useState<PriorityFilter>("all");
   const [ageFilter, setAgeFilter] = useState<AgeFilter>("all");
-  const [expandedRows, setExpandedRows] = useState<ReadonlySet<string>>(() => new Set());
+  const [expandedRows, setExpandedRows] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [dialog, setDialog] = useState<DialogState>(null);
   const [steerMessage, setSteerMessage] = useState("");
   const [cancelReason, setCancelReason] = useState(DEFAULT_CANCEL_REASON);
@@ -309,7 +326,12 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
   }, []);
 
   const handleAgeChange = useCallback((value: string) => {
-    if (value === "all" || value === "15" || value === "60" || value === "240") {
+    if (
+      value === "all" ||
+      value === "15" ||
+      value === "60" ||
+      value === "240"
+    ) {
       setAgeFilter(value);
     }
   }, []);
@@ -368,7 +390,11 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
     if (!dialog || dialog.kind !== "cancel") return;
     void submitCommand(
       `Cancel ${dialog.row.cardId}`,
-      formatAgentActionCommand("cancel", dialog.row.cardId, cancelReason.trim()),
+      formatAgentActionCommand(
+        "cancel",
+        dialog.row.cardId,
+        cancelReason.trim(),
+      ),
     );
   }, [cancelReason, dialog, submitCommand]);
 
@@ -380,16 +406,30 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
     <div className={styles.root}>
       {alertCount > 0 && (
         <div className={styles.stickyAlerts}>
-          <div className={classNames(styles.alert, alerts.failed > 0 && styles.alertDanger)}>
-            <Icon icon={CircleAlert} size="sm" tone={alerts.failed > 0 ? "danger" : "warning"} />
+          <div
+            className={classNames(
+              styles.alert,
+              alerts.failed > 0 && styles.alertDanger,
+            )}
+          >
+            <Icon
+              icon={CircleAlert}
+              size="sm"
+              tone={alerts.failed > 0 ? "danger" : "warning"}
+            />
             <span>
-              {alerts.stuck} stuck, {alerts.failed} failed, {alerts.paused} needing approval
+              {alerts.stuck} stuck, {alerts.failed} failed, {alerts.paused}{" "}
+              needing approval
             </span>
           </div>
         </div>
       )}
 
-      <div className={styles.tabsList} role="tablist" aria-label="Agent status filters">
+      <div
+        className={styles.tabsList}
+        role="tablist"
+        aria-label="Agent status filters"
+      >
         {STATUS_TABS.map((item) => (
           <Button
             key={item}
@@ -460,15 +500,22 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
       </div>
 
       {visibleRows.length === 0 && (
-        <div className={styles.emptyState}>No agents match the selected filters.</div>
+        <div className={styles.emptyState}>
+          No agents match the selected filters.
+        </div>
       )}
 
-      <Dialog open={dialog !== null} onOpenChange={(open) => !open && closeDialog()}>
+      <Dialog
+        open={dialog !== null}
+        onOpenChange={(open) => !open && closeDialog()}
+      >
         <Dialog.Content className={styles.dialogContent}>
           {dialog?.kind === "queued" && (
             <>
               <Dialog.Title>{dialog.title}</Dialog.Title>
-              <Dialog.Description>The command was sent through the chat queue.</Dialog.Description>
+              <Dialog.Description>
+                The command was sent through the chat queue.
+              </Dialog.Description>
               <div className={styles.commandPreview}>{dialog.command}</div>
             </>
           )}
@@ -476,7 +523,9 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
           {dialog?.kind === "steer" && (
             <>
               <Dialog.Title>Steer {dialog.row.cardId}</Dialog.Title>
-              <Dialog.Description>Send a planner steering message to this agent.</Dialog.Description>
+              <Dialog.Description>
+                Send a planner steering message to this agent.
+              </Dialog.Description>
               <FieldTextarea
                 aria-label="Steering message"
                 value={steerMessage}
@@ -490,7 +539,9 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
           {dialog?.kind === "cancel" && (
             <>
               <Dialog.Title>Cancel {dialog.row.cardId}</Dialog.Title>
-              <Dialog.Description>Confirm cancellation and optionally edit the reason.</Dialog.Description>
+              <Dialog.Description>
+                Confirm cancellation and optionally edit the reason.
+              </Dialog.Description>
               <FieldText
                 aria-label="Cancel reason"
                 value={cancelReason}
@@ -507,7 +558,11 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
           )}
 
           <div className={styles.dialogActions}>
-            <Button variant="soft" onClick={closeDialog} disabled={isSubmitting}>
+            <Button
+              variant="soft"
+              onClick={closeDialog}
+              disabled={isSubmitting}
+            >
               {dialog?.kind === "queued" ? "Close" : "Cancel"}
             </Button>
             {dialog?.kind === "steer" && (
@@ -537,7 +592,9 @@ export const AgentStatusContent: React.FC<AgentStatusContentProps> = ({
   );
 };
 
-export const AgentStatusView: React.FC<AgentStatusViewProps> = ({ toolCall }) => {
+export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
+  toolCall,
+}) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
   const isStreaming = useAppSelector(selectIsStreaming);
@@ -546,9 +603,17 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({ toolCall }) =>
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
-  const maybeResult = useAppSelector((state) => selectToolResultById(state, toolCall.id));
-  const content = maybeResult && typeof maybeResult.content === "string" ? maybeResult.content : null;
-  const report = useMemo(() => (content ? parseAgentStatusOutput(content) : null), [content]);
+  const maybeResult = useAppSelector((state) =>
+    selectToolResultById(state, toolCall.id),
+  );
+  const content =
+    maybeResult && typeof maybeResult.content === "string"
+      ? maybeResult.content
+      : null;
+  const report = useMemo(
+    () => (content ? parseAgentStatusOutput(content) : null),
+    [content],
+  );
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult && (isStreaming || isWaiting)) return "running";
@@ -556,9 +621,13 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({ toolCall }) =>
     return maybeResult.tool_failed ? "error" : "success";
   }, [isStreaming, isWaiting, maybeResult]);
 
-  const alerts = report ? mergeAgentAlerts(report.alerts, countAgentAlerts(report.rows)) : EMPTY_ALERTS;
+  const alerts = report
+    ? mergeAgentAlerts(report.alerts, countAgentAlerts(report.rows))
+    : EMPTY_ALERTS;
   const alertCount = alerts.stuck + alerts.failed + alerts.paused;
-  const summary = report ? `Check agents: ${report.rows.length} agents` : "Check agents";
+  const summary = report
+    ? `Check agents: ${report.rows.length} agents`
+    : "Check agents";
   const meta = report && alertCount > 0 ? `${alertCount} alerts` : undefined;
 
   const handleSubmitCommand = useCallback(

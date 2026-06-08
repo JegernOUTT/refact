@@ -25,7 +25,12 @@ export const CapabilityBadge: FC<CapabilityBadgeProps> = ({
       onClick={interactive ? onClick : undefined}
       className={interactive ? styles.capabilityBadgeInteractive : undefined}
     >
-      {name} {displayValue ? displayValue : <Icon icon={enabled ? Check : X} size="sm" />}
+      {name}{" "}
+      {displayValue ? (
+        displayValue
+      ) : (
+        <Icon icon={enabled ? Check : X} size="sm" />
+      )}
     </Badge>
   );
 };

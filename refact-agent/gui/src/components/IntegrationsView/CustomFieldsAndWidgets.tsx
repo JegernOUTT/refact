@@ -122,7 +122,12 @@ export const CustomBoolField = ({
 
   return (
     <div>
-      <FieldSwitch name={name} id={id} checked={checked} onChange={onCheckedChange} />
+      <FieldSwitch
+        name={name}
+        id={id}
+        checked={checked}
+        onChange={onCheckedChange}
+      />
       <input type="hidden" name={name} value={checked ? "on" : "off"} />
     </div>
   );

@@ -39,8 +39,9 @@ function EditableTableDemo() {
   return (
     <div className={styles.stack}>
       <p className={styles.note}>
-        Press Enter inside a cell to move to the same column on the next row. Enter on the last row
-        creates a new row and focuses it. The second row starts invalid to show cell validation.
+        Press Enter inside a cell to move to the same column on the next row.
+        Enter on the last row creates a new row and focuses it. The second row
+        starts invalid to show cell validation.
       </p>
       <EditableTable
         addLabel="Add parameter"

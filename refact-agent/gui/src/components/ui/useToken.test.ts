@@ -22,7 +22,10 @@ function createColorSchemeMatchMediaMock(): {
   setDarkScheme: (enabled: boolean) => void;
 } {
   let darkScheme = false;
-  const listeners = new Map<string, Set<(event: MediaQueryListEvent) => void>>();
+  const listeners = new Map<
+    string,
+    Set<(event: MediaQueryListEvent) => void>
+  >();
 
   const getListeners = (query: string) => {
     const existing = listeners.get(query);
@@ -51,7 +54,9 @@ function createColorSchemeMatchMediaMock(): {
         listener: EventListenerOrEventListenerObject,
       ) => {
         if (typeof listener === "function") {
-          getListeners(query).add(listener as (event: MediaQueryListEvent) => void);
+          getListeners(query).add(
+            listener as (event: MediaQueryListEvent) => void,
+          );
         }
       },
       removeEventListener: (

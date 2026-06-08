@@ -111,7 +111,10 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
             </Badge>
           )}
           {hasDeps && (
-            <Badge tone="muted" title={`Depends on: ${card.depends_on.join(", ")}`}>
+            <Badge
+              tone="muted"
+              title={`Depends on: ${card.depends_on.join(", ")}`}
+            >
               <span className={styles.inlineBadgeContent}>
                 <Icon icon={Link2} size="sm" /> {card.depends_on.length}
               </span>
@@ -145,7 +148,12 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
 }) => {
   return (
     <section
-      className={classNames(styles.kanbanColumn, columnToneClass(column.id), "rf-enter", "rf-stagger")}
+      className={classNames(
+        styles.kanbanColumn,
+        columnToneClass(column.id),
+        "rf-enter",
+        "rf-stagger",
+      )}
     >
       <header className={styles.kanbanColumnHeader}>
         <h3 className={styles.kanbanColumnTitle}>{column.title}</h3>

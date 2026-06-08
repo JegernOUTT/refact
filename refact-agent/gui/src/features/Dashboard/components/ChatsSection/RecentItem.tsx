@@ -98,10 +98,7 @@ function WorktreeBadge({ node }: { node: HistoryTreeNode }) {
 
   return (
     <Tooltip content={`Worktree: ${fullLabel}`}>
-      <Badge
-        tone="success"
-        className={styles.worktreeBadge}
-      >
+      <Badge tone="success" className={styles.worktreeBadge}>
         <span className={styles.worktreeName}>{label}</span>
         {hasDiffStats(node) && (
           <span className={styles.diffStatsBadge}>
@@ -402,9 +399,7 @@ export const RecentItem: React.FC<RecentItemProps> = ({
           </Text>
         </span>
       </HoverCard.Trigger>
-      <HoverCard.Content
-        className={styles.hoverCard}
-      >
+      <HoverCard.Content className={styles.hoverCard}>
         <ItemHoverContent node={node} relation={relation} />
       </HoverCard.Content>
     </HoverCard.Root>

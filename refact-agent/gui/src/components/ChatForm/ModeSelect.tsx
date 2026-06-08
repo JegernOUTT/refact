@@ -190,7 +190,12 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
       {toolsCount > 0 && (
         <span className={styles.triggerMeta}>{toolsCount} tools</span>
       )}
-      <Icon icon={ChevronDown} size="sm" tone="muted" className={styles.chevron} />
+      <Icon
+        icon={ChevronDown}
+        size="sm"
+        tone="muted"
+        className={styles.chevron}
+      />
     </span>
   );
 

@@ -27,11 +27,16 @@ export const KeyValueTable: FC<KeyValueTableProps> = ({
   columnNames = ["Key", "Value"],
   emptyMessage,
 }) => {
-  const [nextOrder, setNextOrder] = useState(() => Object.keys(initialData).length);
+  const [nextOrder, setNextOrder] = useState(
+    () => Object.keys(initialData).length,
+  );
   const [data, setData] = useState<MCPEnvs>(() => initialData);
   const [previousData, setPreviousData] = useState<MCPEnvs>(() => initialData);
-  const [previousInitialData, setPreviousInitialData] = useState<Record<string, string>>(initialData);
-  const [keyOrders, setKeyOrders] = useState<Record<string, number>>(() => makeKeyOrders(initialData));
+  const [previousInitialData, setPreviousInitialData] =
+    useState<Record<string, string>>(initialData);
+  const [keyOrders, setKeyOrders] = useState<Record<string, number>>(() =>
+    makeKeyOrders(initialData),
+  );
 
   const tableData = useMemo(
     () =>
@@ -48,7 +53,10 @@ export const KeyValueTable: FC<KeyValueTableProps> = ({
     [data, keyOrders],
   );
 
-  const isDataChanged = useMemo(() => !isEqual(previousData, data), [previousData, data]);
+  const isDataChanged = useMemo(
+    () => !isEqual(previousData, data),
+    [previousData, data],
+  );
 
   const updateData = useCallback(() => {
     setPreviousData(data);
@@ -75,21 +83,18 @@ export const KeyValueTable: FC<KeyValueTableProps> = ({
     debugIntegrations(`[DEBUG]: KeyValueTable data changed: `, tableData);
   }, [tableData]);
 
-  const handleRowsChange = useCallback(
-    (nextRows: KeyValueRow[]) => {
-      const nextData: MCPEnvs = {};
-      const nextOrders: Record<string, number> = {};
+  const handleRowsChange = useCallback((nextRows: KeyValueRow[]) => {
+    const nextData: MCPEnvs = {};
+    const nextOrders: Record<string, number> = {};
 
-      nextRows.forEach((row) => {
-        nextData[row.key] = row.value;
-        nextOrders[row.key] = row.order;
-      });
+    nextRows.forEach((row) => {
+      nextData[row.key] = row.value;
+      nextOrders[row.key] = row.order;
+    });
 
-      setData(nextData);
-      setKeyOrders(nextOrders);
-    },
-    [],
-  );
+    setData(nextData);
+    setKeyOrders(nextOrders);
+  }, []);
 
   const createRow = useCallback((): KeyValueRow => {
     const key = `${Object.keys(data).length}`;
@@ -131,5 +136,7 @@ export const KeyValueTable: FC<KeyValueTableProps> = ({
 };
 
 function makeKeyOrders(data: Record<string, string>): Record<string, number> {
-  return Object.fromEntries(Object.keys(data).map((key, index) => [key, index]));
+  return Object.fromEntries(
+    Object.keys(data).map((key, index) => [key, index]),
+  );
 }

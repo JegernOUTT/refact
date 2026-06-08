@@ -18,7 +18,8 @@ const DiffLine: React.FC<{
   sign: string;
   line: string;
 }> = ({ lineNumber, sign, line }) => {
-  const toneClass = sign === "-" ? styles.diff_line_remove : styles.diff_line_add;
+  const toneClass =
+    sign === "-" ? styles.diff_line_remove : styles.diff_line_add;
   return (
     <Flex className={classNames(styles.diff_line, toneClass)}>
       <Text size="2" className={styles.diff_line_number}>
@@ -79,11 +80,7 @@ export const Diff: React.FC<DiffProps> = ({ diff }) => {
   const isRename = diff.file_action === "rename" && diff.file_name_rename;
 
   return (
-    <Flex
-      className={styles.diff}
-      py="2"
-      direction="column"
-    >
+    <Flex className={styles.diff} py="2" direction="column">
       {isRename && (
         <Flex py="1" px="2">
           <Text size="1" className={styles.diffRenameText}>
@@ -157,9 +154,14 @@ function buildDiffTitleNodes(
           className={styles.diffTitleNode}
           key={fullPath + "-" + diffForFile.length}
         >
-          {name} {addCount > 0 && <span className={styles.diffAddedText}>+{addCount}</span>}
+          {name}{" "}
+          {addCount > 0 && (
+            <span className={styles.diffAddedText}>+{addCount}</span>
+          )}
           {addCount > 0 && removeCount > 0 && " "}
-          {removeCount > 0 && <span className={styles.diffRemovedText}>-{removeCount}</span>}
+          {removeCount > 0 && (
+            <span className={styles.diffRemovedText}>-{removeCount}</span>
+          )}
         </Text>,
       );
     }
@@ -267,7 +269,9 @@ export const DiffForm: React.FC<{
                   <Text
                     as="span"
                     className={classNames({
-                      [styles.diffRenameText]: Boolean(renameAction?.file_name_rename),
+                      [styles.diffRenameText]: Boolean(
+                        renameAction?.file_name_rename,
+                      ),
                       [styles.diffFilePath]: !renameAction?.file_name_rename,
                     })}
                   >
@@ -317,7 +321,6 @@ const _GroupedDiffs: React.FC<GroupedDiffsProps> = ({
   return (
     <Container>
       <Flex direction="column" gap="4" py="4" className="rf-enter-rise">
-
         <DiffContent
           diffs={groupedByFileName}
           open={open}

@@ -146,7 +146,9 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
 
   return (
     <div className={styles.root}>
-      <p className={styles.text}>Enter the command or URL for your MCP server:</p>
+      <p className={styles.text}>
+        Enter the command or URL for your MCP server:
+      </p>
 
       <FieldText
         placeholder="npx -y @modelcontextprotocol/server-github"

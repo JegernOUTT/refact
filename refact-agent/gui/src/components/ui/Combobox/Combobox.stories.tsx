@@ -30,7 +30,8 @@ function ComboboxDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
         <section className={storyStyles.panel}>
           <h3 className={storyStyles.title}>Combobox</h3>
           <p className={storyStyles.description}>
-            Panel-less Ariakit combobox rows with selected tint, hover state, and clamped popover surface.
+            Panel-less Ariakit combobox rows with selected tint, hover state,
+            and clamped popover surface.
           </p>
           <Combobox
             items={items}
@@ -41,9 +42,17 @@ function ComboboxDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
             onValueChange={setValue}
           />
         </section>
-        <section className={`${storyStyles.panel} ${storyStyles.narrowPanel}`} data-appearance="light">
+        <section
+          className={`${storyStyles.panel} ${storyStyles.narrowPanel}`}
+          data-appearance="light"
+        >
           <p className={storyStyles.description}>Light + narrow container.</p>
-          <Combobox items={items} placeholder="Filter" value="" onValueChange={() => undefined} />
+          <Combobox
+            items={items}
+            placeholder="Filter"
+            value=""
+            onValueChange={() => undefined}
+          />
         </section>
       </div>
     </div>

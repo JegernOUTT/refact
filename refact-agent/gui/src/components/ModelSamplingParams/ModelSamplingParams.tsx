@@ -85,19 +85,29 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
             />
           </div>
 
-          <div className="rf-expand-grid" data-open={values.boost_reasoning ? true : undefined}>
+          <div
+            className="rf-expand-grid"
+            data-open={values.boost_reasoning ? true : undefined}
+          >
             <div>
               {values.boost_reasoning ? (
                 <div className={styles.reasoningSection}>
-                  {reasoningEffortOptions != null && reasoningEffortOptions.length > 0 ? (
+                  {reasoningEffortOptions != null &&
+                  reasoningEffortOptions.length > 0 ? (
                     <div className={styles.effortRow}>
                       <span className={styles.label}>Effort</span>
                       <SegmentedControl
                         className={styles.segmented}
                         size="sm"
                         value={values.reasoning_effort ?? "medium"}
-                        onValueChange={(level) => onChange("reasoning_effort", level)}
-                        options={reasoningEffortOptions.map((level) => ({ value: level, label: level, disabled }))}
+                        onValueChange={(level) =>
+                          onChange("reasoning_effort", level)
+                        }
+                        options={reasoningEffortOptions.map((level) => ({
+                          value: level,
+                          label: level,
+                          disabled,
+                        }))}
                       />
                     </div>
                   ) : null}
@@ -106,7 +116,9 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
                     <div className={styles.sliderRow}>
                       <div className={styles.sliderHeader}>
                         <span className={styles.label}>Thinking tokens</span>
-                        <span className={styles.value}>{values.thinking_budget ?? 16384}</span>
+                        <span className={styles.value}>
+                          {values.thinking_budget ?? 16384}
+                        </span>
                       </div>
                       <div className={styles.sliderTrack}>
                         <span className={styles.boundary}>1K</span>
@@ -135,7 +147,9 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
         <div className={styles.sliderHeader}>
           <span className={styles.label}>Max tokens</span>
           <span className={styles.valueGroup}>
-            <span className={styles.value}>{values.max_new_tokens ?? `${defaultMaxTokens} (default)`}</span>
+            <span className={styles.value}>
+              {values.max_new_tokens ?? `${defaultMaxTokens} (default)`}
+            </span>
             {values.max_new_tokens != null ? (
               <IconButton
                 className={styles.resetButton}
@@ -161,7 +175,9 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
             disabled={disabled}
             aria-label="Max tokens"
           />
-          <span className={styles.boundary}>{formatTokens(maxOutputTokens)}</span>
+          <span className={styles.boundary}>
+            {formatTokens(maxOutputTokens)}
+          </span>
         </div>
       </div>
     </div>

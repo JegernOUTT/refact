@@ -7,7 +7,8 @@ import styles from "./SettingItem.module.css";
 
 export type SettingItemLayout = "row" | "stack";
 
-export interface SettingItemProps extends Omit<React.ComponentProps<"div">, "title"> {
+export interface SettingItemProps
+  extends Omit<React.ComponentProps<"div">, "title"> {
   title: React.ReactNode;
   description?: React.ReactNode;
   control?: React.ReactNode;
@@ -31,13 +32,18 @@ export function SettingItem({
   const content = control ?? children;
 
   return (
-    <div {...props} className={classNames(styles.item, styles[layout], className)}>
+    <div
+      {...props}
+      className={classNames(styles.item, styles[layout], className)}
+    >
       <div className={styles.copy}>
         <div className={styles.titleRow}>
           <h3 className={styles.title}>{title}</h3>
           <SaveStatus label={saveStatusLabel} state={saveStatus} />
         </div>
-        {description ? <p className={styles.description}>{description}</p> : null}
+        {description ? (
+          <p className={styles.description}>{description}</p>
+        ) : null}
       </div>
       {content ? <div className={styles.control}>{content}</div> : null}
     </div>

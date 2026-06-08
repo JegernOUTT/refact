@@ -107,7 +107,9 @@ describe("ToolConfirmation", () => {
     expect(screen.getByText(/- cached prefix/u)).toBeInTheDocument();
     expect(screen.getByText(/\+ changed prefix/u)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /force and continue/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /force and continue/i }),
+    );
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(lastCommandBody(fetchMock)).toMatchObject({
       type: "tool_decisions",
@@ -132,7 +134,9 @@ describe("ToolConfirmation", () => {
       patchToolCall("patch-2", "src/components/nested/Bar.module.css"),
     ]);
 
-    expect(screen.getByText("Model wants to apply changes:")).toBeInTheDocument();
+    expect(
+      screen.getByText("Model wants to apply changes:"),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Patch/u)).toBeInTheDocument();
     expect(screen.getByText("Foo.tsx")).toBeInTheDocument();
     expect(screen.getByText("Bar.module.css")).toBeInTheDocument();
@@ -148,7 +152,9 @@ describe("ToolConfirmation", () => {
     });
 
     fetchMock.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: /allow for this chat/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /allow for this chat/i }),
+    );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const bodies = commandBodies(fetchMock);
     expect(bodies[0]).toMatchObject({

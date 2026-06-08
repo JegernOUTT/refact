@@ -143,8 +143,16 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
               </Flex>
             )}
             {citations && citations.length > 0 && (
-              <Flex direction="column" gap="1" className={styles.serverSourcesList}>
-                <Text size="1" weight="medium" className={styles.serverSourcesText}>
+              <Flex
+                direction="column"
+                gap="1"
+                className={styles.serverSourcesList}
+              >
+                <Text
+                  size="1"
+                  weight="medium"
+                  className={styles.serverSourcesText}
+                >
                   Sources:
                 </Text>
                 {citations

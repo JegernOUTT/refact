@@ -24,7 +24,10 @@ export const ConfirmationTable: FC<ConfirmationTableProps> = ({
   const [data, setData] = useState<string[]>(initialData);
   const [previousData, setPreviousData] = useState<string[]>(initialData);
 
-  const isDataChanged = useMemo(() => !isEqual(previousData, data), [previousData, data]);
+  const isDataChanged = useMemo(
+    () => !isEqual(previousData, data),
+    [previousData, data],
+  );
 
   const updateData = useCallback(() => {
     setPreviousData(data);
@@ -37,7 +40,10 @@ export const ConfirmationTable: FC<ConfirmationTableProps> = ({
     }
   }, [updateData, isDataChanged]);
 
-  const rows = useMemo<ConfirmationRow[]>(() => data.map((value) => ({ value })), [data]);
+  const rows = useMemo<ConfirmationRow[]>(
+    () => data.map((value) => ({ value })),
+    [data],
+  );
 
   return (
     <EditableTable<ConfirmationRow>

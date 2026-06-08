@@ -85,7 +85,10 @@ export const Callout: React.FC<CalloutProps> = ({
       variant="surface-1"
     >
       <Flex direction="row" align="center" gap="4">
-        <Icon icon={type === "error" ? AlertTriangle : Info} tone={type === "error" ? "danger" : "accent"} />
+        <Icon
+          icon={type === "error" ? AlertTriangle : Info}
+          tone={type === "error" ? "danger" : "accent"}
+        />
         <Flex direction="column" align="start" gap="1">
           <Text as="div" className={styles.callout_text} wrap="wrap">
             {children}

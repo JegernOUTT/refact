@@ -38,7 +38,12 @@ export const SetupActionsSection: React.FC<Props> = ({
         aria-expanded={!collapsed}
         rightIcon={collapsed ? ChevronDown : ChevronUp}
       >
-        <DashboardText size="1" weight="bold" tone="muted" className={styles.label}>
+        <DashboardText
+          size="1"
+          weight="bold"
+          tone="muted"
+          className={styles.label}
+        >
           PROJECT SETUP
         </DashboardText>
       </Button>

@@ -157,7 +157,9 @@ const _SvgBlock: React.FC<SvgBlockProps> = ({ code, onCopyClick }) => {
                 icon={showSource ? Eye : Code}
               />
             </Tooltip.Trigger>
-            <Tooltip.Content>{showSource ? "Show rendered" : "Show source"}</Tooltip.Content>
+            <Tooltip.Content>
+              {showSource ? "Show rendered" : "Show source"}
+            </Tooltip.Content>
           </Tooltip>
           {onCopyClick && (
             <Tooltip>

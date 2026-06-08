@@ -16,8 +16,13 @@ export type ProvidersProps = {
   tabbed: Config["tabbed"];
   embedded?: boolean;
 };
-export const Providers: React.FC<ProvidersProps> = ({ backFromProviders, host, embedded }) => {
-  const { data: configuredProvidersData, isSuccess } = useGetConfiguredProvidersQuery();
+export const Providers: React.FC<ProvidersProps> = ({
+  backFromProviders,
+  host,
+  embedded,
+}) => {
+  const { data: configuredProvidersData, isSuccess } =
+    useGetConfiguredProvidersQuery();
 
   if (!isSuccess) return <Spinner spinning />;
 

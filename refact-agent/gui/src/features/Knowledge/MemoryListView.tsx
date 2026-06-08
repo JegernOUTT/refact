@@ -1,7 +1,15 @@
 import { useEffect, useRef } from "react";
 import type React from "react";
 import classNames from "classnames";
-import { BookOpen, FileText, Link2, Repeat2, Search, Star, Target } from "lucide-react";
+import {
+  BookOpen,
+  FileText,
+  Link2,
+  Repeat2,
+  Search,
+  Star,
+  Target,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Badge, Icon, Surface, VirtualList } from "../../components/ui";
@@ -24,7 +32,10 @@ const KIND_CONFIG = {
 } as const;
 
 type KindKey = keyof typeof KIND_CONFIG;
-type KindConfig = { icon: LucideIcon; tone: React.ComponentProps<typeof Icon>["tone"] };
+type KindConfig = {
+  icon: LucideIcon;
+  tone: React.ComponentProps<typeof Icon>["tone"];
+};
 
 function getKindConfig(kind: string | undefined): KindConfig {
   if (kind && kind in KIND_CONFIG) {
@@ -79,7 +90,10 @@ export function MemoryListView({
 
           return (
             <Surface
-              className={classNames(styles.cardFrame, isSelected && styles.selected)}
+              className={classNames(
+                styles.cardFrame,
+                isSelected && styles.selected,
+              )}
               key={memory.memid}
               variant={isSelected ? "selected" : "plain"}
               animated="rise"
@@ -92,20 +106,31 @@ export function MemoryListView({
                     cardRefs.current.delete(memory.memid);
                   }
                 }}
-                className={classNames(styles.card, isSelected && styles.selected)}
+                className={classNames(
+                  styles.card,
+                  isSelected && styles.selected,
+                )}
                 onClick={() => onSelectId(memory.memid)}
                 type="button"
                 aria-pressed={isSelected}
               >
                 <div className={styles.header}>
                   <div className={styles.headerLeft}>
-                    <span className={styles.kindBadge} aria-label={`Kind: ${kind}`}>
+                    <span
+                      className={styles.kindBadge}
+                      aria-label={`Kind: ${kind}`}
+                    >
                       <Icon icon={kindConfig.icon} tone={kindConfig.tone} />
                     </span>
-                    <span className={styles.title}>{memory.title ?? "Untitled"}</span>
+                    <span className={styles.title}>
+                      {memory.title ?? "Untitled"}
+                    </span>
                   </div>
                   {isLinked ? (
-                    <span className={styles.linkBadge} aria-label="Linked in graph">
+                    <span
+                      className={styles.linkBadge}
+                      aria-label="Linked in graph"
+                    >
                       <Icon icon={Link2} size="sm" tone="accent" />
                     </span>
                   ) : null}
@@ -126,7 +151,9 @@ export function MemoryListView({
                           </Badge>
                         ))}
                         {memory.tags.length > 3 ? (
-                          <span className={styles.tagMore}>+{memory.tags.length - 3}</span>
+                          <span className={styles.tagMore}>
+                            +{memory.tags.length - 3}
+                          </span>
                         ) : null}
                       </div>
                     </div>

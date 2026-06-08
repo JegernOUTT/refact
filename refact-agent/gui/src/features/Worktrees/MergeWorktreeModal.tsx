@@ -251,7 +251,9 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                   { value: "squash", label: "Squash merge" },
                   { value: "merge", label: "Regular merge" },
                 ]}
-                onChange={(value) => setStrategy(value as WorktreeMergeStrategy)}
+                onChange={(value) =>
+                  setStrategy(value as WorktreeMergeStrategy)
+                }
                 disabled={mergeState.isLoading}
                 aria-label="Merge strategy"
               />
@@ -300,7 +302,9 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                   <Badge tone={resultTone(merged, conflicted)}>
                     {result.status ?? (merged ? "merged" : "finished")}
                   </Badge>
-                  {result.strategy && <Badge tone="muted">{result.strategy}</Badge>}
+                  {result.strategy && (
+                    <Badge tone="muted">{result.strategy}</Badge>
+                  )}
                 </div>
                 <p
                   className={`${styles.resultSummary} ${
@@ -325,9 +329,9 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                 )}
                 {result.cleanup && (
                   <p className={styles.metaText}>
-                    Cleanup: worktree {" "}
-                    {result.cleanup.worktree_deleted ? "deleted" : "kept"}, branch {" "}
-                    {result.cleanup.branch_deleted ? "deleted" : "kept"}
+                    Cleanup: worktree{" "}
+                    {result.cleanup.worktree_deleted ? "deleted" : "kept"},
+                    branch {result.cleanup.branch_deleted ? "deleted" : "kept"}
                   </p>
                 )}
                 {conflicted && (
@@ -366,7 +370,10 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
                 {warnings.length > 0 && (
                   <div className={styles.warningStack}>
                     {warnings.map((warning, index) => (
-                      <p key={`${index}-${warning}`} className={styles.warningText}>
+                      <p
+                        key={`${index}-${warning}`}
+                        className={styles.warningText}
+                      >
                         {warning}
                       </p>
                     ))}

@@ -11,7 +11,12 @@ import {
   DashboardText,
   DashboardTextField,
 } from "../DashboardPrimitives";
-import { ChevronDown, ChevronUp, MessageSquarePlus, Search } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  MessageSquarePlus,
+  Search,
+} from "lucide-react";
 import { CollapsePanel } from "../../../../components/shared/CollapsePanel";
 import {
   Button,
@@ -227,7 +232,12 @@ export const ChatsSection: React.FC<ChatsSectionProps> = ({
             aria-expanded={!collapsed}
             rightIcon={collapsed ? ChevronDown : ChevronUp}
           >
-            <DashboardText size="1" weight="bold" tone="muted" className={styles.label}>
+            <DashboardText
+              size="1"
+              weight="bold"
+              tone="muted"
+              className={styles.label}
+            >
               CHATS
             </DashboardText>
           </Button>

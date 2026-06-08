@@ -14,7 +14,10 @@ import {
   Surface,
 } from "../../components/ui";
 import type { KnowledgeMemoRecord } from "../../services/refact/types";
-import { useDeleteMemoryMutation, useUpdateMemoryMutation } from "../../services/refact/knowledgeGraphApi";
+import {
+  useDeleteMemoryMutation,
+  useUpdateMemoryMutation,
+} from "../../services/refact/knowledgeGraphApi";
 import styles from "./MemoryDetailsEditor.module.css";
 
 interface MemoryDetailsEditorProps {
@@ -66,7 +69,10 @@ export function MemoryDetailsEditor({
     }
   }, [memory]);
 
-  const handleFieldChange = (field: keyof DraftMemory, value: string | string[]) => {
+  const handleFieldChange = (
+    field: keyof DraftMemory,
+    value: string | string[],
+  ) => {
     setDraft((prev) => ({ ...prev, [field]: value }));
     setIsDirty(true);
   };
@@ -137,13 +143,24 @@ export function MemoryDetailsEditor({
     );
   }
 
-  const canSave = Boolean(memory.file_path && isDirty && draft.title && draft.content);
+  const canSave = Boolean(
+    memory.file_path && isDirty && draft.title && draft.content,
+  );
   const canDelete = Boolean(memory.file_path);
 
   return (
     <Surface className={styles.container} radius="none">
       <div className={styles.scrollArea}>
-        <FieldStack label={<>TITLE {isDirty ? <span className={styles.dirtyIndicator}>●</span> : null}</>}>
+        <FieldStack
+          label={
+            <>
+              TITLE{" "}
+              {isDirty ? (
+                <span className={styles.dirtyIndicator}>●</span>
+              ) : null}
+            </>
+          }
+        >
           <FieldText
             value={draft.title}
             onChange={(value) => handleFieldChange("title", value)}
@@ -153,13 +170,21 @@ export function MemoryDetailsEditor({
         </FieldStack>
 
         <FieldStack label="KIND">
-          <Surface className={styles.readOnlyValue} radius="control" variant="surface-1">
+          <Surface
+            className={styles.readOnlyValue}
+            radius="control"
+            variant="surface-1"
+          >
             {draft.kind}
           </Surface>
         </FieldStack>
 
         <FieldStack label="CREATED">
-          <Surface className={styles.readOnlyValue} radius="control" variant="surface-1">
+          <Surface
+            className={styles.readOnlyValue}
+            radius="control"
+            variant="surface-1"
+          >
             {memory.created ?? "—"}
           </Surface>
         </FieldStack>
@@ -192,11 +217,15 @@ export function MemoryDetailsEditor({
         </FieldStack>
 
         <FieldStack label="FILE PATH">
-          <Surface className={styles.readOnlyValue} radius="control" variant="surface-1">
+          <Surface
+            className={styles.readOnlyValue}
+            radius="control"
+            variant="surface-1"
+          >
             {memory.file_path ?? (
               <span className={styles.warning}>
-                <Icon icon={AlertTriangle} size="sm" tone="warning" /> This memory has no file path and
-                cannot be edited
+                <Icon icon={AlertTriangle} size="sm" tone="warning" /> This
+                memory has no file path and cannot be edited
               </span>
             )}
           </Surface>
@@ -261,7 +290,10 @@ export function MemoryDetailsEditor({
             <div className={styles.dialogBody}>
               <p>You have unsaved changes. Discard them?</p>
               <ButtonGroup className={styles.dialogActions}>
-                <Button variant="ghost" onClick={() => setShowDiscardDialog(false)}>
+                <Button
+                  variant="ghost"
+                  onClick={() => setShowDiscardDialog(false)}
+                >
                   Cancel
                 </Button>
                 <Button variant="danger" onClick={handleDiscardChanges}>

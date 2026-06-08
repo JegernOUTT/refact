@@ -48,7 +48,11 @@ function parseVerification(value: unknown): VerificationResult[] | null {
     ) {
       return null;
     }
-    if (exitCode !== undefined && exitCode !== null && typeof exitCode !== "number") {
+    if (
+      exitCode !== undefined &&
+      exitCode !== null &&
+      typeof exitCode !== "number"
+    ) {
       return null;
     }
     out.push({
@@ -90,7 +94,11 @@ function parseFinalReport(content: string): FinalReport | null {
   } catch {
     return null;
   }
-  if (!isRecord(raw) || typeof raw.summary !== "string" || typeof raw.success !== "boolean") {
+  if (
+    !isRecord(raw) ||
+    typeof raw.summary !== "string" ||
+    typeof raw.success !== "boolean"
+  ) {
     return null;
   }
   const files = optionalStringArray(raw.files_changed);
@@ -99,7 +107,14 @@ function parseFinalReport(content: string): FinalReport | null {
   const followups = parseFollowups(raw.followup_cards);
   const risks = optionalStringArray(raw.risks);
   const assumptions = optionalStringArray(raw.assumptions);
-  if (!files || !tests || !verification || !followups || !risks || !assumptions) {
+  if (
+    !files ||
+    !tests ||
+    !verification ||
+    !followups ||
+    !risks ||
+    !assumptions
+  ) {
     return null;
   }
   return {
@@ -118,14 +133,20 @@ function truncate(text: string): string {
   return text.length > 220 ? `${text.slice(0, 219)}…` : text;
 }
 
-const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+const Section: React.FC<{ title: string; children: React.ReactNode }> = ({
+  title,
+  children,
+}) => (
   <section className={styles.section}>
     <div className={styles.sectionTitle}>{title}</div>
     {children}
   </section>
 );
 
-const TextDetails: React.FC<{ title: string; items: string[] }> = ({ title, items }) =>
+const TextDetails: React.FC<{ title: string; items: string[] }> = ({
+  title,
+  items,
+}) =>
   items.length > 0 ? (
     <details className={styles.details}>
       <summary>
@@ -218,7 +239,9 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
                   )}
                 </summary>
                 {item.output_tail && (
-                  <ShikiCodeBlock showLineNumbers={false}>{item.output_tail}</ShikiCodeBlock>
+                  <ShikiCodeBlock showLineNumbers={false}>
+                    {item.output_tail}
+                  </ShikiCodeBlock>
                 )}
               </details>
             ))}
@@ -236,7 +259,9 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
                   <span className={styles.followupTitle}>{card.title}</span>
                   <Badge tone="muted">{card.priority}</Badge>
                 </div>
-                <p className={styles.followupInstructions}>{truncate(card.instructions)}</p>
+                <p className={styles.followupInstructions}>
+                  {truncate(card.instructions)}
+                </p>
               </article>
             ))}
           </div>

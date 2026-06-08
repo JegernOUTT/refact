@@ -17,7 +17,10 @@ export const SlashCommandSuggestion: React.FC<SlashCommandSuggestionProps> = ({
     {detail?.description && (
       <span className={styles.description}>{detail.description}</span>
     )}
-    <Badge tone={detail?.kind === "skill" ? "accent" : "muted"} className={styles.badge}>
+    <Badge
+      tone={detail?.kind === "skill" ? "accent" : "muted"}
+      className={styles.badge}
+    >
       {detail?.kind === "skill" ? "skill" : "cmd"}
     </Badge>
   </div>

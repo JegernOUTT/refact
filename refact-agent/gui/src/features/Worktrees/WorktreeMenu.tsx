@@ -278,7 +278,9 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
           <div className={styles.section}>
             <span className={styles.sectionHeader}>Existing</span>
             <div className={styles.list}>
-              {isLoading && <span className={styles.emptyText}>Loading...</span>}
+              {isLoading && (
+                <span className={styles.emptyText}>Loading...</span>
+              )}
               {!isLoading && records.length === 0 && (
                 <span className={styles.emptyText}>None yet</span>
               )}
@@ -382,7 +384,9 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
 
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <Dialog.Content maxWidth="420px">
-          <div {...dialogNonInteractiveCloseHandlers(() => setDeleteOpen(false))}>
+          <div
+            {...dialogNonInteractiveCloseHandlers(() => setDeleteOpen(false))}
+          >
             <Dialog.Title>Delete worktree</Dialog.Title>
             <Dialog.Description>
               Delete or discard the selected worktree from disk.
@@ -391,7 +395,9 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
             <div className={styles.modalFields}>
               <div className={styles.dialogOverlayText}>
                 <span className={styles.labelText}>
-                  {currentWorktree ? displayName(currentWorktree) : "No worktree"}
+                  {currentWorktree
+                    ? displayName(currentWorktree)
+                    : "No worktree"}
                 </span>
                 {currentWorktree && (
                   <span className={styles.path}>{currentWorktree.root}</span>
@@ -400,8 +406,8 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
 
               {sharedCount > 1 && (
                 <p className={styles.warningBox}>
-                  This worktree is shared by {sharedCount} references. Deleting it
-                  may affect other chats that use the same worktree.
+                  This worktree is shared by {sharedCount} references. Deleting
+                  it may affect other chats that use the same worktree.
                 </p>
               )}
 
@@ -409,7 +415,9 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
                 <input
                   type="checkbox"
                   checked={deleteBranch}
-                  onChange={(event) => setDeleteBranch(event.currentTarget.checked)}
+                  onChange={(event) =>
+                    setDeleteBranch(event.currentTarget.checked)
+                  }
                   disabled={deleteState.isLoading}
                 />
                 Delete git branch too

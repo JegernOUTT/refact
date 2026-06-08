@@ -161,19 +161,27 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
       <div className={styles.breakdownGrid}>
         <span className={styles.breakdownLabel}>Actions:</span>
         <span className={styles.breakdownCount}>{info.action_count}</span>
-        <span className={styles.breakdownSize}>{formatKB(info.action_bytes)}</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.action_bytes)}
+        </span>
 
         <span className={styles.breakdownLabel}>Console:</span>
         <span className={styles.breakdownCount}>{info.console_count}</span>
-        <span className={styles.breakdownSize}>{formatKB(info.console_bytes)}</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.console_bytes)}
+        </span>
 
         <span className={styles.breakdownLabel}>Network:</span>
         <span className={styles.breakdownCount}>{info.network_count}</span>
-        <span className={styles.breakdownSize}>{formatKB(info.network_bytes)}</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.network_bytes)}
+        </span>
 
         <span className={styles.breakdownLabel}>Mutations:</span>
         <span className={styles.breakdownCount}>—</span>
-        <span className={styles.breakdownSize}>{formatKB(info.mutation_bytes)}</span>
+        <span className={styles.breakdownSize}>
+          {formatKB(info.mutation_bytes)}
+        </span>
       </div>
 
       <div className={styles.sliderContainer}>
@@ -236,7 +244,11 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
       <p className={styles.liveTotal}>Estimated: {formatKB(estimated)}</p>
 
       <div className={styles.actions}>
-        <Button size="sm" variant="soft" onClick={() => void handleIncludeAll()}>
+        <Button
+          size="sm"
+          variant="soft"
+          onClick={() => void handleIncludeAll()}
+        >
           Include All
         </Button>
         <Button
@@ -246,10 +258,18 @@ export const BrowserContextGuard: React.FC<BrowserContextGuardProps> = ({
         >
           Include Selected
         </Button>
-        <Button size="sm" variant="soft" onClick={() => void handleSkipContext()}>
+        <Button
+          size="sm"
+          variant="soft"
+          onClick={() => void handleSkipContext()}
+        >
           Skip Context
         </Button>
-        <Button size="sm" variant="danger" onClick={() => void handleCancelSend()}>
+        <Button
+          size="sm"
+          variant="danger"
+          onClick={() => void handleCancelSend()}
+        >
           Cancel Send
         </Button>
       </div>

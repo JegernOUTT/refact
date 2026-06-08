@@ -50,13 +50,11 @@
 
 .active {
   background: var(--rf-color-accent);
-
 }
 
 .completed {
   background: var(--rf-color-success);
 }
-
 
 .hoverCard {
   max-width: 280px;

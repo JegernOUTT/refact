@@ -2,7 +2,12 @@
 // Add future component exports below in ALPHABETICAL order, one per line, to minimize merge conflicts.
 export * from "./Badge";
 export { Button, ButtonGroup } from "./Button";
-export type { ButtonGroupProps, ButtonProps, ButtonSize, ButtonVariant } from "./Button";
+export type {
+  ButtonGroupProps,
+  ButtonProps,
+  ButtonSize,
+  ButtonVariant,
+} from "./Button";
 export * from "./Card";
 export * from "./DataTable";
 export * from "./Chip";
@@ -51,7 +56,10 @@ export type {
   PopoverTriggerProps,
 } from "./Popover";
 export { SegmentedControl } from "./SegmentedControl";
-export type { SegmentedControlOption, SegmentedControlProps } from "./SegmentedControl";
+export type {
+  SegmentedControlOption,
+  SegmentedControlProps,
+} from "./SegmentedControl";
 export { Select } from "./Select";
 export * from "./SettingItem";
 export * from "./SettingsShell";
@@ -85,7 +93,12 @@ export * from "./Surface";
 export { Switch } from "./Switch";
 export type { SwitchProps } from "./Switch";
 export { Tabs } from "./Tabs";
-export type { TabsContentProps, TabsListProps, TabsProps, TabsTriggerProps } from "./Tabs";
+export type {
+  TabsContentProps,
+  TabsListProps,
+  TabsProps,
+  TabsTriggerProps,
+} from "./Tabs";
 export * from "./Text";
 export * from "./ToolCard";
 export { Tooltip } from "./Tooltip";

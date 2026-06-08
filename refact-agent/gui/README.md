@@ -65,7 +65,7 @@ Scripts come from `package.json`:
 | `npm run test:integration` | Run integration tests under `src/__tests__/integration/` |
 | `npm run test:all`         | Run all Vitest tests                                     |
 | `npm run test:e2e`         | Run Playwright e2e suite (no-horizontal-scroll gate)     |
-| `npm run test:e2e:install` | Install Playwright browsers (chromium)                  |
+| `npm run test:e2e:install` | Install Playwright browsers (chromium)                   |
 | `npm run test:e2e:serve`   | Serve the e2e harness via Vite on `127.0.0.1:4173`       |
 | `npm run format:check`     | Check Prettier formatting                                |
 | `npm run format`           | Apply Prettier formatting                                |

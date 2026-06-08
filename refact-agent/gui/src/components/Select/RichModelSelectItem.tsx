@@ -50,7 +50,10 @@ export const RichModelSelectItem: React.FC<RichModelSelectItemProps> = ({
 
       <div className={styles.meta}>
         {pricing && (
-          <span className={styles.metaText} title={formatPricing(pricing, false)}>
+          <span
+            className={styles.metaText}
+            title={formatPricing(pricing, false)}
+          >
             {formatPricing(pricing, true)}
           </span>
         )}

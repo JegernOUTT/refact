@@ -12,7 +12,8 @@ export interface SettingsShellSection {
   icon?: LucideIcon;
 }
 
-export interface SettingsShellProps extends Omit<React.ComponentProps<"div">, "title"> {
+export interface SettingsShellProps
+  extends Omit<React.ComponentProps<"div">, "title"> {
   sections: SettingsShellSection[];
   active: string;
   onSectionChange: (sectionId: string) => void;
@@ -33,7 +34,8 @@ export function SettingsShell({
   title,
   ...props
 }: SettingsShellProps) {
-  const activeSection = sections.find((section) => section.id === active) ?? sections[0];
+  const activeSection =
+    sections.find((section) => section.id === active) ?? sections[0];
 
   return (
     <div {...props} className={classNames(styles.shell, className)}>
@@ -41,11 +43,16 @@ export function SettingsShell({
         {title ?? description ? (
           <div className={styles.mobileHeader}>
             {title ? <h2 className={styles.title}>{title}</h2> : null}
-            {description ? <p className={styles.description}>{description}</p> : null}
+            {description ? (
+              <p className={styles.description}>{description}</p>
+            ) : null}
           </div>
         ) : null}
         <Select value={activeSection.id} onValueChange={onSectionChange}>
-          <Select.Trigger aria-label={navLabel} className={styles.sectionSelect} />
+          <Select.Trigger
+            aria-label={navLabel}
+            className={styles.sectionSelect}
+          />
           <Select.Content maxHeight="260px" maxWidth="360px">
             {sections.map((section) => (
               <Select.Item key={section.id} value={section.id}>
@@ -59,7 +66,9 @@ export function SettingsShell({
         {title ?? description ? (
           <div className={styles.header}>
             {title ? <h2 className={styles.title}>{title}</h2> : null}
-            {description ? <p className={styles.description}>{description}</p> : null}
+            {description ? (
+              <p className={styles.description}>{description}</p>
+            ) : null}
           </div>
         ) : null}
         <nav className={styles.nav}>
@@ -71,7 +80,9 @@ export function SettingsShell({
               type="button"
               onClick={() => onSectionChange(section.id)}
             >
-              {section.icon ? <Icon icon={section.icon} size="sm" tone="muted" /> : null}
+              {section.icon ? (
+                <Icon icon={section.icon} size="sm" tone="muted" />
+              ) : null}
               <span>{section.label}</span>
             </button>
           ))}

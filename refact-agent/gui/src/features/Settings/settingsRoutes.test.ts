@@ -3,7 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { Page } from "../Pages/pagesSlice";
 import type { SettingsSectionId } from "./settingsSections";
 import { SETTINGS_SECTIONS } from "./settingsSections";
-import { isSettingsPage, settingsPageToSection, settingsSectionToPage } from "./settingsRoutes";
+import {
+  isSettingsPage,
+  settingsPageToSection,
+  settingsSectionToPage,
+} from "./settingsRoutes";
 
 const ALL_SECTION_IDS: SettingsSectionId[] = SETTINGS_SECTIONS.map((s) => s.id);
 
@@ -20,7 +24,10 @@ describe("isSettingsPage", () => {
       { name: "extensions" },
     ];
     for (const page of settingsPages) {
-      expect(isSettingsPage(page), `expected isSettingsPage to be true for "${page.name}"`).toBe(true);
+      expect(
+        isSettingsPage(page),
+        `expected isSettingsPage to be true for "${page.name}"`,
+      ).toBe(true);
     }
   });
 
@@ -34,7 +41,10 @@ describe("isSettingsPage", () => {
       { name: "knowledge graph" },
     ];
     for (const page of nonSettingsPages) {
-      expect(isSettingsPage(page), `expected isSettingsPage to be false for "${page.name}"`).toBe(false);
+      expect(
+        isSettingsPage(page),
+        `expected isSettingsPage to be false for "${page.name}"`,
+      ).toBe(false);
     }
   });
 });
@@ -62,7 +72,9 @@ describe("settingsPageToSection", () => {
       [{ name: "extensions" }, "extensions"],
     ];
     for (const [page, expectedId] of cases) {
-      expect(settingsPageToSection(page), `failed for "${page.name}"`).toBe(expectedId);
+      expect(settingsPageToSection(page), `failed for "${page.name}"`).toBe(
+        expectedId,
+      );
     }
   });
 
@@ -73,7 +85,10 @@ describe("settingsPageToSection", () => {
       { name: "stats dashboard" },
     ];
     for (const page of nonSettingsPages) {
-      expect(settingsPageToSection(page), `expected null for "${page.name}"`).toBeNull();
+      expect(
+        settingsPageToSection(page),
+        `expected null for "${page.name}"`,
+      ).toBeNull();
     }
   });
 });

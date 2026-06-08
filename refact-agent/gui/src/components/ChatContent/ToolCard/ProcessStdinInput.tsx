@@ -70,7 +70,6 @@ export const ProcessStdinInput: React.FC<ProcessStdinInputProps> = ({
           </Box>
           <Button
             type="submit"
-
             size="sm"
             disabled={!canSend}
             onClick={(event) => event.stopPropagation()}

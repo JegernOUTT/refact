@@ -52,8 +52,12 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({
         >
           {source.label}
           {source.server_count !== undefined && ` (${source.server_count})`}
-          {source.status === "error" && <Icon icon={AlertTriangle} size="sm" tone="danger" />}
-          {source.needs_api_key && !source.has_api_key && <Icon icon={IdCard} size="sm" tone="warning" />}
+          {source.status === "error" && (
+            <Icon icon={AlertTriangle} size="sm" tone="danger" />
+          )}
+          {source.needs_api_key && !source.has_api_key && (
+            <Icon icon={IdCard} size="sm" tone="warning" />
+          )}
         </Badge>
       ))}
       <Badge

@@ -1,9 +1,4 @@
-import React, {
-  useCallback,
-  useMemo,
-  useState,
-  useEffect,
-} from "react";
+import React, { useCallback, useMemo, useState, useEffect } from "react";
 import {
   Flex,
   Text,
@@ -106,19 +101,38 @@ function modelBadges(model: {
   ].filter((badge): badge is ModelSelectorBadge => badge !== null);
 }
 
-function CapabilityIcons({ capabilities }: { capabilities?: ModelCapabilities }) {
+function CapabilityIcons({
+  capabilities,
+}: {
+  capabilities?: ModelCapabilities;
+}) {
   if (!capabilities) return null;
 
   return (
     <span className={styles.capabilityIcons}>
       {capabilities.supportsTools && (
-        <Icon icon={Wrench} size="sm" tone="muted" aria-label="Supports tools" />
+        <Icon
+          icon={Wrench}
+          size="sm"
+          tone="muted"
+          aria-label="Supports tools"
+        />
       )}
       {capabilities.supportsMultimodality && (
-        <Icon icon={Images} size="sm" tone="muted" aria-label="Supports images" />
+        <Icon
+          icon={Images}
+          size="sm"
+          tone="muted"
+          aria-label="Supports images"
+        />
       )}
       {capabilities.supportsClicks && (
-        <Icon icon={MousePointer2} size="sm" tone="muted" aria-label="Computer use" />
+        <Icon
+          icon={MousePointer2}
+          size="sm"
+          tone="muted"
+          aria-label="Computer use"
+        />
       )}
       {capabilities.supportsAgent && (
         <Icon icon={Rocket} size="sm" tone="muted" aria-label="Agent mode" />
@@ -198,8 +212,12 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           group: group.provider,
           disabled: model.disabled || isInteractionDisabled,
           badges: modelBadges(model),
-          pricing: model.pricing ? formatPricingDetailed(model.pricing) : undefined,
-          contextWindow: model.nCtx ? formatContextWindow(model.nCtx) : undefined,
+          pricing: model.pricing
+            ? formatPricingDetailed(model.pricing)
+            : undefined,
+          contextWindow: model.nCtx
+            ? formatContextWindow(model.nCtx)
+            : undefined,
           capabilities: <CapabilityIcons capabilities={model.capabilities} />,
         })),
       ),
@@ -355,7 +373,12 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           </Text>
         </>
       )}
-      <Icon icon={ChevronDown} className={styles.chevron} size="sm" tone="muted" />
+      <Icon
+        icon={ChevronDown}
+        className={styles.chevron}
+        size="sm"
+        tone="muted"
+      />
     </Flex>
   );
 
@@ -415,7 +438,11 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                       {displayMaxTokens ?? `${defaultMaxTokens} (default)`}
                     </Text>
                   </Flex>
-                  <Flex align="center" gap="2" className={styles.sliderContainer}>
+                  <Flex
+                    align="center"
+                    gap="2"
+                    className={styles.sliderContainer}
+                  >
                     <Text size="1" color="gray">
                       1K
                     </Text>
@@ -494,7 +521,8 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                                   key={level}
                                   type="button"
                                   className={`${styles.effortButton} ${
-                                    (threadReasoningEffort ?? "medium") === level
+                                    (threadReasoningEffort ?? "medium") ===
+                                    level
                                       ? styles.effortButtonActive
                                       : ""
                                   }`}

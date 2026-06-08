@@ -47,7 +47,12 @@ const StatusBadge: React.FC<{ status: ProviderStatus }> = ({ status }) => {
 };
 
 const UsageBar: React.FC<{ pct: number }> = ({ pct }) => (
-  <progress className={styles.usageBar} max={100} value={pct} aria-label={`${Math.round(pct)}% used`} />
+  <progress
+    className={styles.usageBar}
+    max={100}
+    value={pct}
+    aria-label={`${Math.round(pct)}% used`}
+  />
 );
 
 const ClaudeWindowRow: React.FC<{
@@ -123,15 +128,41 @@ const DEFAULT_MODEL_FIELDS: {
   label: string;
   description: string;
 }[] = [
-  { key: "chat", label: "Default chat", description: "Primary model for normal conversations." },
-  { key: "chat_model_2", label: "Chat model 2", description: "Secondary chat model slot for future chat workflows." },
-  { key: "task_planner_agent_model", label: "Task planner agent", description: "Model used by task management when spawning task agents." },
-  { key: "chat_light", label: "Light", description: "Fast model used by quick subagents and gathering steps." },
-  { key: "chat_thinking", label: "Thinking", description: "Reasoning model used by planning, review, and research." },
-  { key: "chat_buddy", label: "Companion", description: "Background companion model." },
+  {
+    key: "chat",
+    label: "Default chat",
+    description: "Primary model for normal conversations.",
+  },
+  {
+    key: "chat_model_2",
+    label: "Chat model 2",
+    description: "Secondary chat model slot for future chat workflows.",
+  },
+  {
+    key: "task_planner_agent_model",
+    label: "Task planner agent",
+    description: "Model used by task management when spawning task agents.",
+  },
+  {
+    key: "chat_light",
+    label: "Light",
+    description: "Fast model used by quick subagents and gathering steps.",
+  },
+  {
+    key: "chat_thinking",
+    label: "Thinking",
+    description: "Reasoning model used by planning, review, and research.",
+  },
+  {
+    key: "chat_buddy",
+    label: "Companion",
+    description: "Background companion model.",
+  },
 ];
 
-function normalizeProviderDefaults(defaults: ProviderDefaults | undefined): ProviderDefaults {
+function normalizeProviderDefaults(
+  defaults: ProviderDefaults | undefined,
+): ProviderDefaults {
   return {
     chat: defaults?.chat ?? {},
     chat_model_2: defaults?.chat_model_2 ?? {},
@@ -145,10 +176,17 @@ function normalizeProviderDefaults(defaults: ProviderDefaults | undefined): Prov
 }
 
 const ProviderDefaultModelsSetup: React.FC = () => {
-  const { data: defaults, isLoading, isError, refetch } = useGetDefaultsQuery(undefined);
+  const {
+    data: defaults,
+    isLoading,
+    isError,
+    refetch,
+  } = useGetDefaultsQuery(undefined);
   const { data: caps, refetch: refetchCaps } = useGetCapsQuery(undefined);
   const [updateDefaults, { isLoading: isSaving }] = useUpdateDefaultsMutation();
-  const [localDefaults, setLocalDefaults] = useState<ProviderDefaults>(() => normalizeProviderDefaults(undefined));
+  const [localDefaults, setLocalDefaults] = useState<ProviderDefaults>(() =>
+    normalizeProviderDefaults(undefined),
+  );
   const [hasChanges, setHasChanges] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -171,14 +209,17 @@ const ProviderDefaultModelsSetup: React.FC = () => {
     [caps],
   );
 
-  const handleModelChange = useCallback((key: DefaultModelKey, model: string) => {
-    setLocalDefaults((prev) => ({
-      ...prev,
-      [key]: { ...(prev[key] ?? {}), model } as ModelTypeDefaults,
-    }));
-    setHasChanges(true);
-    setSaveError(null);
-  }, []);
+  const handleModelChange = useCallback(
+    (key: DefaultModelKey, model: string) => {
+      setLocalDefaults((prev) => ({
+        ...prev,
+        [key]: { ...(prev[key] ?? {}), model } as ModelTypeDefaults,
+      }));
+      setHasChanges(true);
+      setSaveError(null);
+    },
+    [],
+  );
 
   const handleSave = useCallback(async () => {
     try {
@@ -200,17 +241,29 @@ const ProviderDefaultModelsSetup: React.FC = () => {
         <div>
           <div className={styles.defaultTitle}>Global default models</div>
           <div className={styles.defaultDescription}>
-            These defaults apply across all providers. Enable provider models above, then choose which model type each feature should use. Empty slots stay unset.
+            These defaults apply across all providers. Enable provider models
+            above, then choose which model type each feature should use. Empty
+            slots stay unset.
           </div>
         </div>
-        <Button variant="primary" size="sm" onClick={() => void handleSave()} disabled={!hasChanges || isSaving || isLoading}>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => void handleSave()}
+          disabled={!hasChanges || isSaving || isLoading}
+        >
           {isSaving ? "Saving..." : "Save"}
         </Button>
       </div>
       {saveError ? <div className={styles.errorText}>{saveError}</div> : null}
       <div className={styles.defaultRows}>
         {DEFAULT_MODEL_FIELDS.map(({ key, label, description }) => (
-          <SettingItem key={key} title={label} description={description} layout="stack">
+          <SettingItem
+            key={key}
+            title={label}
+            description={description}
+            layout="stack"
+          >
             <ModelSelector
               value={localDefaults[key]?.model}
               onValueChange={(model) => handleModelChange(key, model)}
@@ -228,20 +281,24 @@ const ProviderDefaultModelsSetup: React.FC = () => {
   );
 };
 
-export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) => {
+export const ProviderForm: React.FC<ProviderFormProps> = ({
+  currentProvider,
+}) => {
   const baseProvider = currentProvider.base_provider;
   const { data: openRouterHealth } = useGetOpenRouterHealthQuery(
     { providerName: currentProvider.name, useInstanceRoute: true },
     { skip: baseProvider !== "openrouter" },
   );
-  const { data: claudeUsage, isError: claudeUsageError } = useGetClaudeCodeUsageQuery(
-    { providerName: currentProvider.name, useInstanceRoute: true },
-    { skip: baseProvider !== "claude_code", pollingInterval: 60_000 },
-  );
-  const { data: codexUsage, isError: codexUsageError } = useGetOpenAICodexUsageQuery(
-    { providerName: currentProvider.name, useInstanceRoute: true },
-    { skip: baseProvider !== "openai_codex", pollingInterval: 60_000 },
-  );
+  const { data: claudeUsage, isError: claudeUsageError } =
+    useGetClaudeCodeUsageQuery(
+      { providerName: currentProvider.name, useInstanceRoute: true },
+      { skip: baseProvider !== "claude_code", pollingInterval: 60_000 },
+    );
+  const { data: codexUsage, isError: codexUsageError } =
+    useGetOpenAICodexUsageQuery(
+      { providerName: currentProvider.name, useInstanceRoute: true },
+      { skip: baseProvider !== "openai_codex", pollingInterval: 60_000 },
+    );
   const {
     areShowingExtraFields,
     formValues,
@@ -259,8 +316,10 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) =
   }
 
   const hasOAuth = parsedSchema.oauth?.supported === true;
-  const status: ProviderStatus = detailedProvider?.status ?? currentProvider.status;
-  const hasCredentials = detailedProvider?.has_credentials ?? currentProvider.has_credentials;
+  const status: ProviderStatus =
+    detailedProvider?.status ?? currentProvider.status;
+  const hasCredentials =
+    detailedProvider?.has_credentials ?? currentProvider.has_credentials;
   const isReadonly = formValues.readonly;
 
   return (
@@ -274,7 +333,9 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) =
             </Badge>
           ) : null}
           {parsedSchema.description ? (
-            <div className={styles.providerDescription}>{parsedSchema.description.trim().split("\n")[0]}</div>
+            <div className={styles.providerDescription}>
+              {parsedSchema.description.trim().split("\n")[0]}
+            </div>
           ) : null}
         </div>
 
@@ -282,23 +343,47 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) =
           <Surface className={styles.usagePanel} variant="plain">
             <div className={styles.usageTitle}>Usage</div>
             <div className={styles.usageRows}>
-              {claudeUsage.data.five_hour ? <ClaudeWindowRow label="Session (5 hour)" w={claudeUsage.data.five_hour} /> : null}
-              {claudeUsage.data.seven_day ? <ClaudeWindowRow label="Weekly" w={claudeUsage.data.seven_day} /> : null}
+              {claudeUsage.data.five_hour ? (
+                <ClaudeWindowRow
+                  label="Session (5 hour)"
+                  w={claudeUsage.data.five_hour}
+                />
+              ) : null}
+              {claudeUsage.data.seven_day ? (
+                <ClaudeWindowRow
+                  label="Weekly"
+                  w={claudeUsage.data.seven_day}
+                />
+              ) : null}
               {claudeUsage.data.extra_usage ? (
                 <div className={styles.usageRow}>
                   <div className={styles.usageRowHeader}>
                     <span>Extra usage</span>
                     <span>
-                      {claudeUsage.data.extra_usage.is_enabled ? "enabled" : "disabled"}
+                      {claudeUsage.data.extra_usage.is_enabled
+                        ? "enabled"
+                        : "disabled"}
                       {" · $"}
-                      {claudeUsage.data.extra_usage.used_credits.toFixed(2)} spent
-                      {typeof claudeUsage.data.extra_usage.monthly_limit === "number"
-                        ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(0)} limit`
+                      {claudeUsage.data.extra_usage.used_credits.toFixed(
+                        2,
+                      )}{" "}
+                      spent
+                      {typeof claudeUsage.data.extra_usage.monthly_limit ===
+                      "number"
+                        ? ` / $${claudeUsage.data.extra_usage.monthly_limit.toFixed(
+                            0,
+                          )} limit`
                         : " / unlimited"}
                     </span>
                   </div>
-                  {typeof claudeUsage.data.extra_usage.utilization === "number" ? (
-                    <UsageBar pct={Math.max(0, Math.min(claudeUsage.data.extra_usage.utilization, 100))} />
+                  {typeof claudeUsage.data.extra_usage.utilization ===
+                  "number" ? (
+                    <UsageBar
+                      pct={Math.max(
+                        0,
+                        Math.min(claudeUsage.data.extra_usage.utilization, 100),
+                      )}
+                    />
                   ) : null}
                 </div>
               ) : null}
@@ -306,37 +391,59 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) =
           </Surface>
         ) : null}
         {claudeUsage?.error != null || claudeUsageError ? (
-          <div className={styles.defaultDescription}>Usage: {claudeUsage?.error ?? "Failed to load"}</div>
+          <div className={styles.defaultDescription}>
+            Usage: {claudeUsage?.error ?? "Failed to load"}
+          </div>
         ) : null}
 
         {codexUsage?.data && !codexUsage.error ? (
           <Surface className={styles.usagePanel} variant="plain">
             <div className={styles.usageHeader}>
               <div className={styles.usageTitle}>Usage</div>
-              {codexUsage.data.plan_type ? <Badge tone="accent">{codexUsage.data.plan_type}</Badge> : null}
+              {codexUsage.data.plan_type ? (
+                <Badge tone="accent">{codexUsage.data.plan_type}</Badge>
+              ) : null}
             </div>
             <div className={styles.usageRows}>
               {codexUsage.data.rate_limit?.primary_window ? (
-                <CodexWindowRow label="Session (5 hour)" w={codexUsage.data.rate_limit.primary_window} limitReached={codexUsage.data.rate_limit.limit_reached} />
+                <CodexWindowRow
+                  label="Session (5 hour)"
+                  w={codexUsage.data.rate_limit.primary_window}
+                  limitReached={codexUsage.data.rate_limit.limit_reached}
+                />
               ) : null}
-              {codexUsage.data.rate_limit?.secondary_window ? <CodexWindowRow label="Weekly" w={codexUsage.data.rate_limit.secondary_window} /> : null}
+              {codexUsage.data.rate_limit?.secondary_window ? (
+                <CodexWindowRow
+                  label="Weekly"
+                  w={codexUsage.data.rate_limit.secondary_window}
+                />
+              ) : null}
               {codexUsage.data.code_review_rate_limit?.primary_window ? (
                 <CodexWindowRow
                   label="Code review (weekly)"
                   w={codexUsage.data.code_review_rate_limit.primary_window}
-                  limitReached={codexUsage.data.code_review_rate_limit.limit_reached}
+                  limitReached={
+                    codexUsage.data.code_review_rate_limit.limit_reached
+                  }
                 />
               ) : null}
               {codexUsage.data.credits ? (
                 <div className={styles.defaultDescription}>
-                  Credits: {codexUsage.data.credits.unlimited ? "unlimited" : codexUsage.data.credits.has_credits ? `${codexUsage.data.credits.balance} remaining` : "none"}
+                  Credits:{" "}
+                  {codexUsage.data.credits.unlimited
+                    ? "unlimited"
+                    : codexUsage.data.credits.has_credits
+                      ? `${codexUsage.data.credits.balance} remaining`
+                      : "none"}
                 </div>
               ) : null}
             </div>
           </Surface>
         ) : null}
         {codexUsage?.error != null || codexUsageError ? (
-          <div className={styles.defaultDescription}>Usage: {codexUsage?.error ?? "Failed to load"}</div>
+          <div className={styles.defaultDescription}>
+            Usage: {codexUsage?.error ?? "Failed to load"}
+          </div>
         ) : null}
 
         <div className={styles.formSection}>
@@ -345,22 +452,39 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) =
               <ProviderOAuth
                 providerName={currentProvider.name}
                 baseProvider={baseProvider}
-                oauthConnected={Boolean("oauth_connected" in formValues && formValues.oauth_connected)}
-                authStatus={"auth_status" in formValues ? String(formValues.auth_status) : ""}
+                oauthConnected={Boolean(
+                  "oauth_connected" in formValues && formValues.oauth_connected,
+                )}
+                authStatus={
+                  "auth_status" in formValues
+                    ? String(formValues.auth_status)
+                    : ""
+                }
               />
             </>
           ) : null}
 
           <div className={styles.formFields}>
             {importantFields.map((field) => (
-              <SchemaField key={field.key} field={field} value={formValues[field.key]} disabled={isReadonly} onSave={handleFieldSave} />
+              <SchemaField
+                key={field.key}
+                field={field}
+                value={formValues[field.key]}
+                disabled={isReadonly}
+                onSave={handleFieldSave}
+              />
             ))}
           </div>
 
           {extraFields.length > 0 ? (
             <>
               <div className={styles.advancedToggleWrap}>
-                <Button className={styles.extraButton} variant="ghost" size="sm" onClick={() => setAreShowingExtraFields((prev) => !prev)}>
+                <Button
+                  className={styles.extraButton}
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setAreShowingExtraFields((prev) => !prev)}
+                >
                   {areShowingExtraFields ? "Hide" : "Show"} advanced fields
                 </Button>
               </div>
@@ -368,7 +492,13 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) =
               {areShowingExtraFields ? (
                 <div className={styles.formFields}>
                   {extraFields.map((field) => (
-                    <SchemaField key={field.key} field={field} value={formValues[field.key]} disabled={isReadonly} onSave={handleFieldSave} />
+                    <SchemaField
+                      key={field.key}
+                      field={field}
+                      value={formValues[field.key]}
+                      disabled={isReadonly}
+                      onSave={handleFieldSave}
+                    />
                   ))}
                 </div>
               ) : null}
@@ -376,7 +506,9 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({ currentProvider }) =
           ) : null}
         </div>
 
-        {hasCredentials ? <ProviderModelsList provider={currentProvider} /> : null}
+        {hasCredentials ? (
+          <ProviderModelsList provider={currentProvider} />
+        ) : null}
         {hasCredentials ? <ProviderDefaultModelsSetup /> : null}
       </div>
     </div>

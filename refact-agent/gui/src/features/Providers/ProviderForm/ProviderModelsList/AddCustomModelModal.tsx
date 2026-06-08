@@ -1,6 +1,12 @@
 import { type FC, useCallback, useEffect, useMemo, useState } from "react";
 
-import { Button, Dialog, FieldStack, FieldText, Switch } from "../../../../components/ui";
+import {
+  Button,
+  Dialog,
+  FieldStack,
+  FieldText,
+  Switch,
+} from "../../../../components/ui";
 import {
   useAddCustomModelMutation,
   type AddCustomModelRequest,
@@ -19,7 +25,9 @@ export type AddCustomModelModalProps = {
 const DEFAULT_CONTEXT_LENGTH = "4096";
 
 function toInputValue(value: number | null | undefined): string {
-  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  return typeof value === "number" && Number.isFinite(value)
+    ? String(value)
+    : "";
 }
 
 function parseOptionalNumber(value: string): number | undefined {
@@ -55,7 +63,8 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
   const [supportsTools, setSupportsTools] = useState(false);
   const [supportsMultimodality, setSupportsMultimodality] = useState(false);
   const [supportsThinkingBudget, setSupportsThinkingBudget] = useState(false);
-  const [supportsAdaptiveThinkingBudget, setSupportsAdaptiveThinkingBudget] = useState(false);
+  const [supportsAdaptiveThinkingBudget, setSupportsAdaptiveThinkingBudget] =
+    useState(false);
   const [supportsPromptCache, setSupportsPromptCache] = useState(true);
   const [tokenizer, setTokenizer] = useState("");
   const [reasoningEffortOptions, setReasoningEffortOptions] = useState("");
@@ -73,10 +82,14 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
     setSupportsTools(model?.supports_tools ?? false);
     setSupportsMultimodality(model?.supports_multimodality ?? false);
     setSupportsThinkingBudget(model?.supports_thinking_budget ?? false);
-    setSupportsAdaptiveThinkingBudget(model?.supports_adaptive_thinking_budget ?? false);
+    setSupportsAdaptiveThinkingBudget(
+      model?.supports_adaptive_thinking_budget ?? false,
+    );
     setSupportsPromptCache(model?.supports_cache_control ?? true);
     setTokenizer(model?.tokenizer ?? "");
-    setReasoningEffortOptions(model?.reasoning_effort_options?.join(", ") ?? "");
+    setReasoningEffortOptions(
+      model?.reasoning_effort_options?.join(", ") ?? "",
+    );
     setMaxOutputTokens(toInputValue(model?.max_output_tokens));
     setPromptPrice(toInputValue(model?.pricing?.prompt));
     setOutputPrice(toInputValue(model?.pricing?.generated));
@@ -111,7 +124,8 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
       parsedOutputPrice !== undefined &&
       parsedOutputPrice >= 0 &&
       (parsedCacheReadPrice === undefined || parsedCacheReadPrice >= 0) &&
-      (parsedCacheCreationPrice === undefined || parsedCacheCreationPrice >= 0));
+      (parsedCacheCreationPrice === undefined ||
+        parsedCacheCreationPrice >= 0));
 
   const isValid =
     trimmedModelId.length > 0 &&
@@ -133,7 +147,8 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
       supports_thinking_budget: supportsThinkingBudget,
       supports_adaptive_thinking_budget: supportsAdaptiveThinkingBudget,
       supports_cache_control: supportsPromptCache,
-      reasoning_effort_options: parseReasoningEffortOptions(reasoningEffortOptions) ?? null,
+      reasoning_effort_options:
+        parseReasoningEffortOptions(reasoningEffortOptions) ?? null,
       tokenizer: tokenizer.trim() || null,
       max_output_tokens: parsedMaxOutputTokens,
       pricing: pricingRequested
@@ -214,7 +229,14 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
           <FieldStack
             label="Context Length"
             required
-            control={<FieldText type="number" placeholder="4096" value={nCtx} onChange={setNCtx} />}
+            control={
+              <FieldText
+                type="number"
+                placeholder="4096"
+                value={nCtx}
+                onChange={setNCtx}
+              />
+            }
           />
           <FieldStack
             label="Max Output Tokens"
@@ -231,11 +253,31 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
 
           <div className={styles.modalGroup}>
             <div className={styles.modalGroupTitle}>Capabilities</div>
-            <Switch label="Supports Tools (function calling)" checked={supportsTools} onCheckedChange={setSupportsTools} />
-            <Switch label="Supports Images/Vision" checked={supportsMultimodality} onCheckedChange={setSupportsMultimodality} />
-            <Switch label="Supports Thinking Budget" checked={supportsThinkingBudget} onCheckedChange={setSupportsThinkingBudget} />
-            <Switch label="Supports Adaptive Thinking Budget" checked={supportsAdaptiveThinkingBudget} onCheckedChange={setSupportsAdaptiveThinkingBudget} />
-            <Switch label="Supports Prompt Caching" checked={supportsPromptCache} onCheckedChange={setSupportsPromptCache} />
+            <Switch
+              label="Supports Tools (function calling)"
+              checked={supportsTools}
+              onCheckedChange={setSupportsTools}
+            />
+            <Switch
+              label="Supports Images/Vision"
+              checked={supportsMultimodality}
+              onCheckedChange={setSupportsMultimodality}
+            />
+            <Switch
+              label="Supports Thinking Budget"
+              checked={supportsThinkingBudget}
+              onCheckedChange={setSupportsThinkingBudget}
+            />
+            <Switch
+              label="Supports Adaptive Thinking Budget"
+              checked={supportsAdaptiveThinkingBudget}
+              onCheckedChange={setSupportsAdaptiveThinkingBudget}
+            />
+            <Switch
+              label="Supports Prompt Caching"
+              checked={supportsPromptCache}
+              onCheckedChange={setSupportsPromptCache}
+            />
           </div>
 
           <FieldStack
@@ -263,13 +305,34 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
 
           <div className={styles.modalGroup}>
             <div className={styles.modalGroupTitle}>Pricing per 1M Tokens</div>
-            <FieldText type="number" placeholder="Prompt, e.g. 1.25" value={promptPrice} onChange={setPromptPrice} />
-            <FieldText type="number" placeholder="Output, e.g. 10" value={outputPrice} onChange={setOutputPrice} />
-            <FieldText type="number" placeholder="Cache Read optional" value={cacheReadPrice} onChange={setCacheReadPrice} />
-            <FieldText type="number" placeholder="Cache Creation optional" value={cacheCreationPrice} onChange={setCacheCreationPrice} />
+            <FieldText
+              type="number"
+              placeholder="Prompt, e.g. 1.25"
+              value={promptPrice}
+              onChange={setPromptPrice}
+            />
+            <FieldText
+              type="number"
+              placeholder="Output, e.g. 10"
+              value={outputPrice}
+              onChange={setOutputPrice}
+            />
+            <FieldText
+              type="number"
+              placeholder="Cache Read optional"
+              value={cacheReadPrice}
+              onChange={setCacheReadPrice}
+            />
+            <FieldText
+              type="number"
+              placeholder="Cache Creation optional"
+              value={cacheCreationPrice}
+              onChange={setCacheCreationPrice}
+            />
             {pricingRequested && !isPricingValid ? (
               <span className={styles.noticeDanger}>
-                Enter valid non-negative prompt and output prices to save pricing.
+                Enter valid non-negative prompt and output prices to save
+                pricing.
               </span>
             ) : null}
           </div>
@@ -277,10 +340,22 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
 
         <div className={styles.modalActions}>
           <Dialog.Close asChild>
-            <Button variant="soft" disabled={isLoading}>Cancel</Button>
+            <Button variant="soft" disabled={isLoading}>
+              Cancel
+            </Button>
           </Dialog.Close>
-          <Button variant="primary" onClick={() => void handleSubmit()} disabled={!isValid || isLoading}>
-            {isLoading ? (isEditing ? "Saving..." : "Adding...") : isEditing ? "Save Changes" : "Add Model"}
+          <Button
+            variant="primary"
+            onClick={() => void handleSubmit()}
+            disabled={!isValid || isLoading}
+          >
+            {isLoading
+              ? isEditing
+                ? "Saving..."
+                : "Adding..."
+              : isEditing
+                ? "Save Changes"
+                : "Add Model"}
           </Button>
         </div>
       </Dialog.Content>

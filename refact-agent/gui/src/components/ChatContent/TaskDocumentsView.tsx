@@ -211,10 +211,11 @@ export const TaskDocumentsContent: React.FC<Props> = ({
     }
 
     return (
-
       <div className={styles.root}>
         <div className={styles.header}>
-          <span className={styles.headerTitle}>{meta.name ?? meta.slug ?? "Task document"}</span>
+          <span className={styles.headerTitle}>
+            {meta.name ?? meta.slug ?? "Task document"}
+          </span>
           {meta.version && <Badge tone="muted">v{meta.version}</Badge>}
         </div>
         <div className={styles.badges}>
@@ -246,7 +247,6 @@ export const TaskDocumentsContent: React.FC<Props> = ({
       </div>
       <div className={styles.rows}>
         {rows.map((row) => (
-
           <article key={row.slug} className={styles.row}>
             <div className={styles.rowBody}>
               <div className={styles.identity}>

@@ -110,10 +110,7 @@ export const TrajectoryPopoverContent: React.FC<
                   checked={transformOptions.dedup_and_compress_context}
                   disabled={transformOptions.drop_all_context}
                   onCheckedChange={(checked) =>
-                    updateTransformOption(
-                      "dedup_and_compress_context",
-                      checked,
-                    )
+                    updateTransformOption("dedup_and_compress_context", checked)
                   }
                 />
                 Deduplicate context files
@@ -124,10 +121,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={transformOptions.compress_non_agentic_tools}
                   onCheckedChange={(checked) =>
-                    updateTransformOption(
-                      "compress_non_agentic_tools",
-                      checked,
-                    )
+                    updateTransformOption("compress_non_agentic_tools", checked)
                   }
                 />
                 Truncate tool results
@@ -149,10 +143,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={transformOptions.drop_project_information}
                   onCheckedChange={(checked) =>
-                    updateTransformOption(
-                      "drop_project_information",
-                      checked,
-                    )
+                    updateTransformOption("drop_project_information", checked)
                   }
                 />
                 Drop project information
@@ -216,10 +207,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={handoffOptions.include_last_user_plus}
                   onCheckedChange={(checked) =>
-                    updateHandoffOption(
-                      "include_last_user_plus",
-                      checked,
-                    )
+                    updateHandoffOption("include_last_user_plus", checked)
                   }
                 />
                 Include last user message + responses
@@ -230,10 +218,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={handoffOptions.include_all_opened_context}
                   onCheckedChange={(checked) =>
-                    updateHandoffOption(
-                      "include_all_opened_context",
-                      checked,
-                    )
+                    updateHandoffOption("include_all_opened_context", checked)
                   }
                 />
                 Include all opened files
@@ -244,10 +229,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={handoffOptions.include_agentic_tools}
                   onCheckedChange={(checked) =>
-                    updateHandoffOption(
-                      "include_agentic_tools",
-                      checked,
-                    )
+                    updateHandoffOption("include_agentic_tools", checked)
                   }
                 />
                 Include research, subagent & planning results
@@ -258,10 +240,7 @@ export const TrajectoryPopoverContent: React.FC<
                 <Checkbox
                   checked={handoffOptions.llm_summary_for_excluded}
                   onCheckedChange={(checked) =>
-                    updateHandoffOption(
-                      "llm_summary_for_excluded",
-                      checked,
-                    )
+                    updateHandoffOption("llm_summary_for_excluded", checked)
                   }
                 />
                 Generate summary

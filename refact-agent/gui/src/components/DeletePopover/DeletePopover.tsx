@@ -55,7 +55,9 @@ export const DeletePopover: FC<DeletePopoverProps> = ({
               </Button>
             </Popover.Close>
             <Popover.Close asChild>
-              <Button size="md" variant="soft">Cancel</Button>
+              <Button size="md" variant="soft">
+                Cancel
+              </Button>
             </Popover.Close>
           </ButtonGroup>
         </div>

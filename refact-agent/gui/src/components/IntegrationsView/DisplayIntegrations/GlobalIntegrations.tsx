@@ -29,7 +29,8 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
       }`}
     >
       <p className={styles.groupDescription}>
-        Global configurations are shared in your IDE and available for all projects.
+        Global configurations are shared in your IDE and available for all
+        projects.
       </p>
       {globalIntegrations ? (
         <div className={styles.cards}>

@@ -407,7 +407,9 @@ describe("Providers provider instances", () => {
       />,
       { preloadedState },
     );
-    expect(screen.queryByRole("button", { name: /back/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /back/i }),
+    ).not.toBeInTheDocument();
   });
 
   test("ProvidersView shows Back button when not embedded", () => {

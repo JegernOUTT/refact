@@ -408,7 +408,9 @@ describe("ChatForm", () => {
     if (!settingsButton) return;
 
     await user.click(settingsButton);
-    await waitFor(() => expect(app.getByPlaceholderText("Search models")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(app.getByPlaceholderText("Search models")).toBeInTheDocument(),
+    );
     fireEvent.blur(textarea, { relatedTarget: null });
 
     await waitFor(() => {

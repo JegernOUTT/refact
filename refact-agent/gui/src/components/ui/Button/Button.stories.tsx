@@ -105,7 +105,11 @@ function ButtonMatrix() {
                 <Button leftIcon={Plus} variant="primary">
                   Create
                 </Button>
-                <IconButton aria-label="Delete item" icon={Trash2} variant="danger" />
+                <IconButton
+                  aria-label="Delete item"
+                  icon={Trash2}
+                  variant="danger"
+                />
               </ButtonGroup>
               <Button loading size="sm" variant="soft">
                 Saving

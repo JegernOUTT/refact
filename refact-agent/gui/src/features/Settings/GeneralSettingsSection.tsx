@@ -1,7 +1,11 @@
 import React, { useCallback } from "react";
 import { Keyboard } from "lucide-react";
 
-import { useAppDispatch, useAppSelector, useEventsBusForIDE } from "../../hooks";
+import {
+  useAppDispatch,
+  useAppSelector,
+  useEventsBusForIDE,
+} from "../../hooks";
 import { useAppearance } from "../../hooks/useAppearance";
 import {
   changeFeature,
@@ -57,7 +61,10 @@ export const GeneralSettingsSection: React.FC = () => {
           title="Theme"
           description="Choose light, dark, or inherit from the host environment."
           control={
-            <Select value={themeMode ?? appearance} onValueChange={handleAppearanceChange}>
+            <Select
+              value={themeMode ?? appearance}
+              onValueChange={handleAppearanceChange}
+            >
               <Select.Trigger className={styles.select} />
               <Select.Content>
                 <Select.Item value="dark">Dark</Select.Item>
@@ -118,7 +125,11 @@ export const GeneralSettingsSection: React.FC = () => {
                 title="IDE Hotkeys"
                 description="Open the host keyboard shortcuts for Refact commands."
                 control={
-                  <Button variant="soft" leftIcon={Keyboard} onClick={openHotKeys}>
+                  <Button
+                    variant="soft"
+                    leftIcon={Keyboard}
+                    onClick={openHotKeys}
+                  >
                     IDE Hotkeys
                   </Button>
                 }

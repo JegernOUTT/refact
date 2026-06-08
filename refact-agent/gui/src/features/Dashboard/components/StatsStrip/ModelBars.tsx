@@ -1,5 +1,8 @@
 import React from "react";
-import { DashboardText as Text, DashboardTooltip as Tooltip } from "../DashboardPrimitives";
+import {
+  DashboardText as Text,
+  DashboardTooltip as Tooltip,
+} from "../DashboardPrimitives";
 import type { ModelStats } from "../../../StatsDashboard/types";
 import { formatTokenCount } from "../../../StatsDashboard/utils/formatters";
 import styles from "./ModelBars.module.css";

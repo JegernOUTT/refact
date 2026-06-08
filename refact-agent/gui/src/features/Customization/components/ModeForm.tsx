@@ -171,7 +171,10 @@ const ModelTypeSection: React.FC<ModelTypeSectionProps> = ({
           <FieldSwitch
             checked={parallelToolCalls}
             onChange={(checked) =>
-              onPatch([...basePath, "parallel_tool_calls"], checked || undefined)
+              onPatch(
+                [...basePath, "parallel_tool_calls"],
+                checked || undefined,
+              )
             }
           />
         </Field>
@@ -265,10 +268,7 @@ export const ModeForm: React.FC<ModeFormProps> = ({
               />
             </Field>
 
-            <Field
-              label="Internal Only"
-              helper="Hide from mode selector."
-            >
+            <Field label="Internal Only" helper="Hide from mode selector.">
               <FieldSwitch
                 checked={specific}
                 onChange={(checked) => patch(["specific"], checked)}
@@ -294,7 +294,10 @@ export const ModeForm: React.FC<ModeFormProps> = ({
       {activeTab === "tools" && (
         <div className={styles.formTabContent}>
           <div className={styles.switchGrid}>
-            <Field label="Integrations" helper="Automatically include integrations.">
+            <Field
+              label="Integrations"
+              helper="Automatically include integrations."
+            >
               <FieldSwitch
                 checked={allowIntegrations}
                 onChange={(checked) =>
@@ -305,7 +308,9 @@ export const ModeForm: React.FC<ModeFormProps> = ({
             <Field label="MCP" helper="Automatically include MCP tools.">
               <FieldSwitch
                 checked={allowMcp}
-                onChange={(checked) => patch(["allow_mcp"], checked || undefined)}
+                onChange={(checked) =>
+                  patch(["allow_mcp"], checked || undefined)
+                }
               />
             </Field>
             <Field label="Subagents" helper="Automatically include subagents.">

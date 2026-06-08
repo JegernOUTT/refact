@@ -1,5 +1,11 @@
 import React, { useMemo } from "react";
-import { DashboardBadge as Badge, DashboardFlex as Flex, DashboardHoverCard as HoverCard, DashboardSkeleton as Skeleton, DashboardText as Text } from "../DashboardPrimitives";
+import {
+  DashboardBadge as Badge,
+  DashboardFlex as Flex,
+  DashboardHoverCard as HoverCard,
+  DashboardSkeleton as Skeleton,
+  DashboardText as Text,
+} from "../DashboardPrimitives";
 import { useGetStatsSummaryQuery } from "../../../../services/refact/stats";
 import { useGetConfiguredProvidersQuery } from "../../../../hooks";
 import {

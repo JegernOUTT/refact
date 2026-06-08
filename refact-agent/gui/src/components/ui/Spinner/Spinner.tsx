@@ -7,7 +7,10 @@ export interface SpinnerProps {
   label?: string;
 }
 
-export const Spinner: React.FC<SpinnerProps> = ({ size = "md", label = "Loading" }) => (
+export const Spinner: React.FC<SpinnerProps> = ({
+  size = "md",
+  label = "Loading",
+}) => (
   <pre
     role="status"
     aria-label={label}

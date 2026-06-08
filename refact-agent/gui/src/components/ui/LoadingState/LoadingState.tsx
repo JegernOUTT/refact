@@ -7,7 +7,8 @@ import styles from "./LoadingState.module.css";
 export type LoadingStateVariant = "compact" | "full";
 export type LoadingStateKind = "spinner" | "skeleton";
 
-export interface LoadingStateProps extends React.ComponentPropsWithoutRef<"section"> {
+export interface LoadingStateProps
+  extends React.ComponentPropsWithoutRef<"section"> {
   label?: React.ReactNode;
   variant?: LoadingStateVariant;
   kind?: LoadingStateKind;
@@ -28,7 +29,10 @@ export function LoadingState({
     >
       {kind === "skeleton" ? (
         <div className={styles.skeletonStack}>
-          <Skeleton height={variant === "full" ? "88px" : "48px"} radius="card" />
+          <Skeleton
+            height={variant === "full" ? "88px" : "48px"}
+            radius="card"
+          />
           <SkeletonText lines={variant === "full" ? 4 : 2} />
         </div>
       ) : (

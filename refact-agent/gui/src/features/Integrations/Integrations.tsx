@@ -58,7 +58,11 @@ export const Integrations: React.FC<IntegrationsProps> = ({
         <>
           {host === "vscode" && !tabbed ? (
             <div className={styles.backRow}>
-              <Button variant="soft" onClick={backFromIntegrations} leftIcon={ArrowLeft}>
+              <Button
+                variant="soft"
+                onClick={backFromIntegrations}
+                leftIcon={ArrowLeft}
+              >
                 Back
               </Button>
             </div>

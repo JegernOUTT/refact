@@ -25,7 +25,8 @@ function TabsDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
         <section className={storyStyles.panel}>
           <h3 className={storyStyles.title}>Tabs</h3>
           <p className={storyStyles.description}>
-            Radix Tabs with scroll-safe list and transform-only sliding indicator.
+            Radix Tabs with scroll-safe list and transform-only sliding
+            indicator.
           </p>
           <Tabs value={value} onValueChange={setValue}>
             <Tabs.List activeIndex={activeIndex} itemCount={tabValues.length}>
@@ -37,14 +38,19 @@ function TabsDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
               <div className={storyStyles.previewBox}>Overview content</div>
             </Tabs.Content>
             <Tabs.Content value="tools">
-              <div className={storyStyles.previewBox}>Tool settings content</div>
+              <div className={storyStyles.previewBox}>
+                Tool settings content
+              </div>
             </Tabs.Content>
             <Tabs.Content value="settings">
               <div className={storyStyles.previewBox}>Settings content</div>
             </Tabs.Content>
           </Tabs>
         </section>
-        <section className={`${storyStyles.panel} ${storyStyles.narrowPanel}`} data-appearance="light">
+        <section
+          className={`${storyStyles.panel} ${storyStyles.narrowPanel}`}
+          data-appearance="light"
+        >
           <p className={storyStyles.description}>Light + narrow container.</p>
           <Tabs defaultValue="one">
             <Tabs.List activeIndex={0} itemCount={4}>

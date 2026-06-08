@@ -5,10 +5,8 @@ import type { Components } from "react-virtuoso";
 
 import styles from "./VirtualList.module.css";
 
-export interface VirtualListProps<T> extends Omit<
-  React.ComponentProps<"div">,
-  "children" | "itemData"
-> {
+export interface VirtualListProps<T>
+  extends Omit<React.ComponentProps<"div">, "children" | "itemData"> {
   items: T[];
   renderItem: (item: T, index: number) => React.ReactNode;
   getItemKey?: (item: T, index: number) => React.Key;

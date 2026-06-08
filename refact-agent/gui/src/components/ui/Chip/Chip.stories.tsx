@@ -1,5 +1,9 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { FileIcon, MagnifyingGlassIcon, ReaderIcon } from "@radix-ui/react-icons";
+import {
+  FileIcon,
+  MagnifyingGlassIcon,
+  ReaderIcon,
+} from "@radix-ui/react-icons";
 import { Chip } from ".";
 import styles from "./Chip.stories.module.css";
 

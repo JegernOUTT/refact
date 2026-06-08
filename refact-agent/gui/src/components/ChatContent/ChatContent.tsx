@@ -508,7 +508,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return (
       <Flex
         direction="column"
-
         className={`${styles.content} ${styles.chatColumn}`}
         data-element="ChatContent"
         p="2"
@@ -538,7 +537,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         <Box className={styles.floatingLinks}>
           <ScrollArea scrollbars="horizontal">
             <Flex align="start" gap="3" pb="2">
-
               {shouldConfigButtonBeVisible && (
                 <Button
                   title="Return to configuration page"

@@ -108,7 +108,10 @@ export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({
         </Field>
       )}
 
-      <Field label="Insert at Cursor" helper="Insert response at cursor position.">
+      <Field
+        label="Insert at Cursor"
+        helper="Insert response at cursor position."
+      >
         <FieldSwitch
           checked={insertAtCursor}
           onChange={(checked) => patch(["insert_at_cursor"], checked)}

@@ -12,8 +12,8 @@ function ErrorStateGallery() {
       <section className={styles.section}>
         <h2 className={styles.title}>Error state</h2>
         <p className={styles.note}>
-          Danger tone is color-only, with compact inline and full-page layouts for
-          failed provider, marketplace, knowledge, and stats surfaces.
+          Danger tone is color-only, with compact inline and full-page layouts
+          for failed provider, marketplace, knowledge, and stats surfaces.
         </p>
         <div className={styles.grid}>
           <div className={styles.sample}>
@@ -25,7 +25,9 @@ function ErrorStateGallery() {
           </div>
           <div className={styles.sampleFull}>
             <ErrorState
-              error={new Error("The statistics service returned an empty response.")}
+              error={
+                new Error("The statistics service returned an empty response.")
+              }
               retry={<RetryAction />}
               title="Stats unavailable"
               variant="full"

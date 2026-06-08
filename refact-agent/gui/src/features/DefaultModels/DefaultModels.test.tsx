@@ -76,7 +76,10 @@ vi.mock("../../components/Spinner", () => ({
 }));
 
 import { DefaultModels } from "./DefaultModels";
-import { useGetDefaultsQuery, useUpdateDefaultsMutation } from "../../services/refact/providers";
+import {
+  useGetDefaultsQuery,
+  useUpdateDefaultsMutation,
+} from "../../services/refact/providers";
 import { useGetCapsQuery } from "../../services/refact/caps";
 import { useGetDraftQuery } from "../../services/refact/buddy";
 
@@ -99,7 +102,9 @@ const baseCaps = {
 };
 
 function setupMocks(overrides: { draftData?: unknown } = {}) {
-  const updateDefaults = vi.fn().mockReturnValue({ unwrap: vi.fn().mockResolvedValue({}) });
+  const updateDefaults = vi
+    .fn()
+    .mockReturnValue({ unwrap: vi.fn().mockResolvedValue({}) });
   (useGetDefaultsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
     data: baseDefaults,
     isLoading: false,
@@ -145,7 +150,14 @@ describe("DefaultModels — embedded", () => {
   it("renders all 6 role tabs with short labels", () => {
     setupMocks();
     render(<DefaultModels {...defaultProps} embedded />);
-    for (const label of ["Chat", "Chat 2", "Planner", "Light", "Thinking", "Companion"]) {
+    for (const label of [
+      "Chat",
+      "Chat 2",
+      "Planner",
+      "Light",
+      "Thinking",
+      "Companion",
+    ]) {
       expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
     }
   });
@@ -153,15 +165,24 @@ describe("DefaultModels — embedded", () => {
   it("initial Chat tab is active (aria-selected)", () => {
     setupMocks();
     render(<DefaultModels {...defaultProps} embedded />);
-    expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("switches active tab when a different role tab is clicked", () => {
     setupMocks();
     render(<DefaultModels {...defaultProps} embedded />);
     fireEvent.mouseDown(screen.getByRole("tab", { name: "Light" }));
-    expect(screen.getByRole("tab", { name: "Light" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tab", { name: "Light" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
   });
 
   it("Save button is disabled when no changes", () => {
@@ -174,7 +195,9 @@ describe("DefaultModels — embedded", () => {
     setupMocks();
     render(<DefaultModels {...defaultProps} embedded />);
     fireEvent.click(screen.getAllByTestId("model-selector")[0]);
-    expect(screen.getByRole("button", { name: "Save Changes" })).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Save Changes" }),
+    ).not.toBeDisabled();
   });
 
   it("Save button calls updateDefaults mutation", async () => {
@@ -191,7 +214,9 @@ describe("DefaultModels — embedded", () => {
     const samplingBtns = screen.queryAllByTestId("sampling-params");
     if (samplingBtns.length > 0) {
       fireEvent.click(samplingBtns[0]);
-      expect(screen.getByRole("button", { name: "Save Changes" })).not.toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "Save Changes" }),
+      ).not.toBeDisabled();
     }
   });
 
@@ -204,7 +229,9 @@ describe("DefaultModels — embedded", () => {
     });
     render(<DefaultModels {...defaultProps} embedded />);
     expect(screen.getByTestId("buddy-draft-preview")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save Changes" })).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Save Changes" }),
+    ).not.toBeDisabled();
   });
 
   it("does not render SettingsShell sidebar (no double shell)", () => {
@@ -216,7 +243,9 @@ describe("DefaultModels — embedded", () => {
   it("does not render Back button when embedded", () => {
     setupMocks();
     render(<DefaultModels {...defaultProps} embedded />);
-    expect(screen.queryByRole("button", { name: /back/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /back/i }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -240,7 +269,9 @@ describe("DefaultModels — standalone (not embedded)", () => {
   it("Back button calls backFromDefaultModels", () => {
     const onBack = vi.fn();
     setupMocks();
-    renderWithStore(<DefaultModels {...defaultProps} backFromDefaultModels={onBack} />);
+    renderWithStore(
+      <DefaultModels {...defaultProps} backFromDefaultModels={onBack} />,
+    );
     fireEvent.click(screen.getByRole("button", { name: /back/i }));
     expect(onBack).toHaveBeenCalledOnce();
   });
@@ -249,7 +280,9 @@ describe("DefaultModels — standalone (not embedded)", () => {
     setupMocks();
     renderWithStore(<DefaultModels {...defaultProps} />);
     fireEvent.click(screen.getAllByTestId("model-selector")[0]);
-    expect(screen.getByRole("button", { name: "Save Changes" })).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Save Changes" }),
+    ).not.toBeDisabled();
   });
 
   it("Save mutation dispatched in standalone mode", async () => {

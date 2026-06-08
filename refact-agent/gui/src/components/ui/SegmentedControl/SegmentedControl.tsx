@@ -9,7 +9,8 @@ export interface SegmentedControlOption {
   disabled?: boolean;
 }
 
-export interface SegmentedControlProps extends Omit<React.ComponentProps<"div">, "onChange"> {
+export interface SegmentedControlProps
+  extends Omit<React.ComponentProps<"div">, "onChange"> {
   options: SegmentedControlOption[];
   value: string;
   onValueChange: (value: string) => void;

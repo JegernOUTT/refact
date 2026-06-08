@@ -252,11 +252,7 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
                   </Text>
                 )}
               </Flex>
-              <Button
-                type="button"
-                variant="soft"
-                onClick={handleWakeUp}
-              >
+              <Button type="button" variant="soft" onClick={handleWakeUp}>
                 <Timer />
                 Wake up
               </Button>

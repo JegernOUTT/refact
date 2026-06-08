@@ -31,11 +31,17 @@ export const ScrollArea = React.forwardRef<HTMLDivElement, ScrollAreaProps>(
     );
 
     if (asChild && React.isValidElement(children)) {
-      const child = children as React.ReactElement<React.HTMLAttributes<HTMLDivElement>>;
+      const child = children as React.ReactElement<
+        React.HTMLAttributes<HTMLDivElement>
+      >;
       const childProps = child.props;
       return React.cloneElement(child, {
         ...props,
-        className: classNames(rootClassName, styles.viewport, childProps.className),
+        className: classNames(
+          rootClassName,
+          styles.viewport,
+          childProps.className,
+        ),
       });
     }
 

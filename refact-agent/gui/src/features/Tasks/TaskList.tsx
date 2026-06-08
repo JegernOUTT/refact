@@ -11,7 +11,15 @@ import {
   Trash2,
 } from "lucide-react";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
-import { Button, Card, FieldTextarea, FieldText, Icon, IconButton, Badge } from "../../components/ui";
+import {
+  Button,
+  Card,
+  FieldTextarea,
+  FieldText,
+  Icon,
+  IconButton,
+  Badge,
+} from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import { pop, push } from "../Pages/pagesSlice";
 import {
@@ -31,7 +39,10 @@ const statusLabels: Record<TaskMeta["status"], string> = {
   abandoned: "Abandoned",
 };
 
-const statusTones: Record<TaskMeta["status"], React.ComponentProps<typeof Badge>["tone"]> = {
+const statusTones: Record<
+  TaskMeta["status"],
+  React.ComponentProps<typeof Badge>["tone"]
+> = {
   planning: "muted",
   active: "accent",
   paused: "warning",
@@ -45,17 +56,24 @@ interface TaskItemProps {
   onDelete: () => void;
 }
 
-function taskStatusIcon(task: TaskMeta, plannerState: TaskMeta["planner_session_state"]) {
+function taskStatusIcon(
+  task: TaskMeta,
+  plannerState: TaskMeta["planner_session_state"],
+) {
   const isPlannerWorking =
     plannerState === "generating" || plannerState === "executing_tools";
   const isPlannerPaused =
     plannerState === "paused" || plannerState === "waiting_ide";
 
-  if (isPlannerWorking) return { icon: LoaderCircle, tone: "accent" as const, spin: true };
+  if (isPlannerWorking)
+    return { icon: LoaderCircle, tone: "accent" as const, spin: true };
   if (isPlannerPaused) return { icon: Pause, tone: "warning" as const };
-  if (plannerState === "error") return { icon: CircleX, tone: "danger" as const };
-  if (task.status === "completed") return { icon: CheckCircle, tone: "success" as const };
-  if (task.status === "abandoned") return { icon: CircleX, tone: "danger" as const };
+  if (plannerState === "error")
+    return { icon: CircleX, tone: "danger" as const };
+  if (task.status === "completed")
+    return { icon: CheckCircle, tone: "success" as const };
+  if (task.status === "abandoned")
+    return { icon: CircleX, tone: "danger" as const };
   return { icon: Circle, tone: "muted" as const };
 }
 
@@ -81,7 +99,9 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onClick, onDelete }) => {
               <Icon icon={statusIcon.icon} size="md" tone={statusIcon.tone} />
             </span>
             <span className={styles.taskItemTitle}>{task.name}</span>
-            <Badge tone={statusTones[task.status]}>{statusLabels[task.status]}</Badge>
+            <Badge tone={statusTones[task.status]}>
+              {statusLabels[task.status]}
+            </Badge>
           </span>
           <IconButton
             aria-label="delete task"
@@ -102,7 +122,9 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onClick, onDelete }) => {
               <Icon icon={Layers} size="sm" tone="muted" />
               {task.cards_done}/{task.cards_total}
               {task.cards_failed > 0 && (
-                <span className={styles.taskItemDanger}>({task.cards_failed} failed)</span>
+                <span className={styles.taskItemDanger}>
+                  ({task.cards_failed} failed)
+                </span>
               )}
             </span>
             {task.agents_active > 0 && (
@@ -209,7 +231,12 @@ export const TaskList: React.FC<TaskListProps> = ({ backFromTasks }) => {
           <h2 className={styles.taskListTitle}>Tasks</h2>
         </div>
         {!isCreating && (
-          <Button leftIcon={Plus} size="sm" variant="soft" onClick={() => setIsCreating(true)}>
+          <Button
+            leftIcon={Plus}
+            size="sm"
+            variant="soft"
+            onClick={() => setIsCreating(true)}
+          >
             New Task
           </Button>
         )}
@@ -226,7 +253,11 @@ export const TaskList: React.FC<TaskListProps> = ({ backFromTasks }) => {
               onKeyDown={handleKeyDown}
               autoFocus
             />
-            <Button onClick={handleCreateTask} disabled={!newTaskName.trim()} variant="primary">
+            <Button
+              onClick={handleCreateTask}
+              disabled={!newTaskName.trim()}
+              variant="primary"
+            >
               Create
             </Button>
             <Button
@@ -252,7 +283,9 @@ export const TaskList: React.FC<TaskListProps> = ({ backFromTasks }) => {
       <div className={styles.taskListScroller}>
         <div className={styles.taskListItems}>
           {tasks.length === 0 ? (
-            <p className={styles.taskListEmpty}>No tasks yet. Create one to start planning.</p>
+            <p className={styles.taskListEmpty}>
+              No tasks yet. Create one to start planning.
+            </p>
           ) : (
             tasks.map((task) => (
               <TaskItem

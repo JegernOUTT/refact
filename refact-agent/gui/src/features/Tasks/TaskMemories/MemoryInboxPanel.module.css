@@ -86,7 +86,8 @@
 
 .cardPinned {
   border-color: var(--rf-color-warning);
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--rf-color-warning) 42%, transparent);
+  box-shadow: 0 0 0 1px
+    color-mix(in oklab, var(--rf-color-warning) 42%, transparent);
 }
 
 .cardFrame {

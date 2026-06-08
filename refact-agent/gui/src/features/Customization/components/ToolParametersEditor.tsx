@@ -35,7 +35,10 @@ const PARAM_TYPES = [
   "object",
 ];
 
-const PARAM_TYPE_OPTIONS = PARAM_TYPES.map((type) => ({ value: type, label: type }));
+const PARAM_TYPE_OPTIONS = PARAM_TYPES.map((type) => ({
+  value: type,
+  label: type,
+}));
 
 export const ToolParametersEditor: React.FC<ToolParametersEditorProps> = ({
   parameters,

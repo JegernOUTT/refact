@@ -385,9 +385,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
               />
             </Box>
 
-            <Button onClick={handleSubmit}>
-              Submit Answers
-            </Button>
+            <Button onClick={handleSubmit}>Submit Answers</Button>
           </Flex>
         </Box>
       </ToolCard>

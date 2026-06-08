@@ -12,7 +12,9 @@ const App: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     <Provider store={store}>
       <Theme>
         <div style={{ padding: "var(--rf-space-6)" }}>
-          <Surface variant="surface-1" radius="card">{children}</Surface>
+          <Surface variant="surface-1" radius="card">
+            {children}
+          </Surface>
         </div>
       </Theme>
     </Provider>

@@ -37,12 +37,10 @@ export const FormField: FC<FormFieldProps> = ({
             type={type}
             max={max}
             onChange={(nextValue) =>
-              onChange?.(
-                {
-                  target: { value: nextValue },
-                  currentTarget: { value: nextValue },
-                } as React.ChangeEvent<HTMLInputElement>,
-              )
+              onChange?.({
+                target: { value: nextValue },
+                currentTarget: { value: nextValue },
+              } as React.ChangeEvent<HTMLInputElement>)
             }
             disabled={isDisabled}
           />

@@ -5,7 +5,9 @@ import { ParametersTable } from "./ParametersTable";
 
 function inputs(container: HTMLElement, field: string) {
   return Array.from(
-    container.querySelectorAll<HTMLInputElement>(`input[data-field="${field}"]`),
+    container.querySelectorAll<HTMLInputElement>(
+      `input[data-field="${field}"]`,
+    ),
   );
 }
 
@@ -66,7 +68,9 @@ describe("integration table editors", () => {
     fireEvent.blur(nameInput);
 
     expect(
-      await screen.findByText('The value "BadName" must be written in snake case.'),
+      await screen.findByText(
+        'The value "BadName" must be written in snake case.',
+      ),
     ).toBeInTheDocument();
 
     await waitFor(() => {

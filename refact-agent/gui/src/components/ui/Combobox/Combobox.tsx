@@ -64,7 +64,9 @@ export function Combobox({
       return items;
     }
 
-    return items.filter((item) => item.value.toLocaleLowerCase().includes(normalizedValue));
+    return items.filter((item) =>
+      item.value.toLocaleLowerCase().includes(normalizedValue),
+    );
   }, [items, value]);
 
   React.useEffect(() => {
@@ -104,8 +106,12 @@ export function Combobox({
                   store.hide();
                 }}
               >
-                <span className={styles.itemLabel}>{item.label ?? item.value}</span>
-                {item.value === value ? <Icon icon={Check} size="sm" tone="accent" /> : null}
+                <span className={styles.itemLabel}>
+                  {item.label ?? item.value}
+                </span>
+                {item.value === value ? (
+                  <Icon icon={Check} size="sm" tone="accent" />
+                ) : null}
               </ComboboxItem>
             ))
           ) : (

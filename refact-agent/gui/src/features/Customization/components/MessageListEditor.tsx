@@ -97,7 +97,9 @@ export const MessageListEditor: React.FC<MessageListEditorProps> = ({
   return (
     <Field label={label}>
       <div className={styles.messageListStack}>
-        {value.length === 0 && <p className={styles.emptyText}>No messages defined</p>}
+        {value.length === 0 && (
+          <p className={styles.emptyText}>No messages defined</p>
+        )}
         {internal.map((msg, index) => (
           <div key={msg._id} className={styles.messageItem}>
             <div className={styles.messageToolbar}>

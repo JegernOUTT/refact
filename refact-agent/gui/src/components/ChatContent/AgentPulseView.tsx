@@ -71,7 +71,9 @@ function stateClass(state: AgentPulseState): string {
   }
 }
 
-function stateStatus(state: AgentPulseState): React.ComponentProps<typeof StatusDot>["status"] {
+function stateStatus(
+  state: AgentPulseState,
+): React.ComponentProps<typeof StatusDot>["status"] {
   switch (state) {
     case "running":
     case "waiting":
@@ -148,8 +150,16 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
         <div className={styles.headerTop}>
           <span className={styles.title}>Pulse: {report.cardId}</span>
           <Badge className={styles.stateBadge} tone="accent">
-            <StatusDot status={stateStatus(report.stateKind)} pulse={report.stateKind === "running"} />
-            <span className={classNames(styles.stateText, stateClass(report.stateKind))}>
+            <StatusDot
+              status={stateStatus(report.stateKind)}
+              pulse={report.stateKind === "running"}
+            />
+            <span
+              className={classNames(
+                styles.stateText,
+                stateClass(report.stateKind),
+              )}
+            >
               {report.state}
             </span>
           </Badge>
@@ -162,11 +172,15 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
           </div>
           <div className={styles.metaItem}>
             <span className={styles.label}>Last activity</span>
-            <span className={styles.value}>{maybeValue(report.lastActivity)}</span>
+            <span className={styles.value}>
+              {maybeValue(report.lastActivity)}
+            </span>
           </div>
           <div className={styles.metaItem}>
             <span className={styles.label}>Editing</span>
-            <span className={styles.value}>{maybeValue(report.currentlyEditing)}</span>
+            <span className={styles.value}>
+              {maybeValue(report.currentlyEditing)}
+            </span>
           </div>
           <div className={styles.metaItem}>
             <span className={styles.label}>Card</span>
@@ -174,7 +188,9 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
           </div>
         </div>
 
-        {report.sessionNote && <div className={styles.note}>{report.sessionNote}</div>}
+        {report.sessionNote && (
+          <div className={styles.note}>{report.sessionNote}</div>
+        )}
       </header>
 
       <section className={styles.section}>
@@ -205,7 +221,11 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
           onClick={() => {
             void submitCommand(
               `Pause ${report.cardId}`,
-              formatAgentActionCommand("pause", report.cardId, DEFAULT_PAUSE_REASON),
+              formatAgentActionCommand(
+                "pause",
+                report.cardId,
+                DEFAULT_PAUSE_REASON,
+              ),
             );
           }}
         >
@@ -236,12 +256,17 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
         </Button>
       </div>
 
-      <Dialog open={dialog !== null} onOpenChange={(open) => !open && closeDialog()}>
+      <Dialog
+        open={dialog !== null}
+        onOpenChange={(open) => !open && closeDialog()}
+      >
         <Dialog.Content className={styles.dialogContent}>
           {dialog?.kind === "queued" && (
             <>
               <Dialog.Title>{dialog.title}</Dialog.Title>
-              <Dialog.Description>The command was sent through the chat queue.</Dialog.Description>
+              <Dialog.Description>
+                The command was sent through the chat queue.
+              </Dialog.Description>
               <div className={styles.toolCall}>{dialog.command}</div>
             </>
           )}
@@ -249,7 +274,9 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
           {dialog?.kind === "steer" && (
             <>
               <Dialog.Title>Steer {report.cardId}</Dialog.Title>
-              <Dialog.Description>Send a planner steering message to this agent.</Dialog.Description>
+              <Dialog.Description>
+                Send a planner steering message to this agent.
+              </Dialog.Description>
               <FieldTextarea
                 aria-label="Steering message"
                 value={steerMessage}
@@ -263,9 +290,15 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
           {dialog?.kind === "cancel" && (
             <>
               <Dialog.Title>Cancel {report.cardId}</Dialog.Title>
-              <Dialog.Description>Send a cancellation command with the default reason.</Dialog.Description>
+              <Dialog.Description>
+                Send a cancellation command with the default reason.
+              </Dialog.Description>
               <div className={styles.toolCall}>
-                {formatAgentActionCommand("cancel", report.cardId, DEFAULT_CANCEL_REASON)}
+                {formatAgentActionCommand(
+                  "cancel",
+                  report.cardId,
+                  DEFAULT_CANCEL_REASON,
+                )}
               </div>
             </>
           )}
@@ -278,7 +311,11 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
           )}
 
           <div className={styles.dialogActions}>
-            <Button variant="soft" onClick={closeDialog} disabled={isSubmitting}>
+            <Button
+              variant="soft"
+              onClick={closeDialog}
+              disabled={isSubmitting}
+            >
               {dialog?.kind === "queued" ? "Close" : "Back"}
             </Button>
             {dialog?.kind === "steer" && (
@@ -299,7 +336,11 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
                 onClick={() => {
                   void submitCommand(
                     `Cancel ${report.cardId}`,
-                    formatAgentActionCommand("cancel", report.cardId, DEFAULT_CANCEL_REASON),
+                    formatAgentActionCommand(
+                      "cancel",
+                      report.cardId,
+                      DEFAULT_CANCEL_REASON,
+                    ),
                   );
                 }}
               >
@@ -322,9 +363,17 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
 
-  const maybeResult = useAppSelector((state) => selectToolResultById(state, toolCall.id));
-  const content = maybeResult && typeof maybeResult.content === "string" ? maybeResult.content : null;
-  const report = useMemo(() => (content ? parseAgentPulseOutput(content) : null), [content]);
+  const maybeResult = useAppSelector((state) =>
+    selectToolResultById(state, toolCall.id),
+  );
+  const content =
+    maybeResult && typeof maybeResult.content === "string"
+      ? maybeResult.content
+      : null;
+  const report = useMemo(
+    () => (content ? parseAgentPulseOutput(content) : null),
+    [content],
+  );
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult && (isStreaming || isWaiting)) return "running";

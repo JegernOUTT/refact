@@ -1,5 +1,10 @@
 import React from "react";
-import { DashboardFlex as Flex, DashboardHoverCard as HoverCard, DashboardSkeleton as Skeleton, DashboardText as Text } from "../DashboardPrimitives";
+import {
+  DashboardFlex as Flex,
+  DashboardHoverCard as HoverCard,
+  DashboardSkeleton as Skeleton,
+  DashboardText as Text,
+} from "../DashboardPrimitives";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Icon } from "../../../../components/ui";
 import { CollapsePanel } from "../../../../components/shared/CollapsePanel";

@@ -20,7 +20,11 @@ function LoadingStateGallery() {
             <LoadingState kind="skeleton" label="Loading rows" />
           </div>
           <div className={styles.sampleFull}>
-            <LoadingState kind="skeleton" label="Preparing dashboard" variant="full" />
+            <LoadingState
+              kind="skeleton"
+              label="Preparing dashboard"
+              variant="full"
+            />
           </div>
         </div>
       </section>

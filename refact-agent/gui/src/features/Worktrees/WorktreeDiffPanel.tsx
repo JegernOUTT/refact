@@ -150,14 +150,20 @@ export const WorktreeDiffPanel: React.FC<WorktreeDiffPanelProps> = ({
             {isFetching && (
               <div className={styles.loadingRow}>
                 <span className={styles.spinner} aria-hidden="true" />
-                <span className={styles.helpText}>Loading worktree diff...</span>
+                <span className={styles.helpText}>
+                  Loading worktree diff...
+                </span>
               </div>
             )}
 
             {error && (
               <div className={styles.errorBox}>
-                <span className={styles.errorTitle}>Could not load worktree diff.</span>
-                <span className={styles.metaText}>{worktreeErrorText(error)}</span>
+                <span className={styles.errorTitle}>
+                  Could not load worktree diff.
+                </span>
+                <span className={styles.metaText}>
+                  {worktreeErrorText(error)}
+                </span>
                 <Button size="sm" variant="soft" onClick={() => void refetch()}>
                   Retry
                 </Button>
@@ -176,7 +182,9 @@ export const WorktreeDiffPanel: React.FC<WorktreeDiffPanelProps> = ({
 
                 <div className={styles.diffFileList}>
                   {data.files.length === 0 ? (
-                    <span className={styles.emptyText}>No changed files reported.</span>
+                    <span className={styles.emptyText}>
+                      No changed files reported.
+                    </span>
                   ) : (
                     data.files.map((file) => (
                       <div

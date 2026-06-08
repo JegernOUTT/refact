@@ -16,7 +16,9 @@ export const ThinkingButton: React.FC = () => {
     supportsBoostReasoning,
   } = useThinking();
   if (!areCapsInitialized) {
-    return <Skeleton height="var(--rf-control-h-sm)" radius="control" width="76px" />;
+    return (
+      <Skeleton height="var(--rf-control-h-sm)" radius="control" width="76px" />
+    );
   }
 
   if (!supportsBoostReasoning) {

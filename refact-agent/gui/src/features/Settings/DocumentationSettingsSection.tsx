@@ -12,7 +12,10 @@ import {
   DOCUMENTATION_REMOVE,
 } from "../../services/refact/consts";
 import { useConfig } from "../../hooks";
-import { buildApiUrl, type EngineApiConfig } from "../../services/refact/apiUrl";
+import {
+  buildApiUrl,
+  type EngineApiConfig,
+} from "../../services/refact/apiUrl";
 import { SettingsSection } from "./SettingsSection";
 import styles from "./DocumentationSettingsSection.module.css";
 
@@ -47,7 +50,9 @@ function isDocListResponse(arr: unknown): arr is DocListResponse[] {
 }
 
 function responseError(response: Response): Error {
-  return new Error(response.statusText || `Request failed with status ${response.status}`);
+  return new Error(
+    response.statusText || `Request failed with status ${response.status}`,
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -89,7 +94,9 @@ async function fetchDocumentationList(
 
 export const DocumentationSettingsSection: React.FC = () => {
   const config = useConfig();
-  const [documentationSources, setDocumentationSources] = useState<DocumentationSource[]>([]);
+  const [documentationSources, setDocumentationSources] = useState<
+    DocumentationSource[]
+  >([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -125,7 +132,11 @@ export const DocumentationSettingsSection: React.FC = () => {
     };
   }, [config]);
 
-  const addDocumentation = async (url: string, max_depth: number, max_pages: number) => {
+  const addDocumentation = async (
+    url: string,
+    max_depth: number,
+    max_pages: number,
+  ) => {
     setError(null);
     try {
       const docsEndpoint = buildApiUrl(config, DOCUMENTATION_ADD);
@@ -171,11 +182,20 @@ export const DocumentationSettingsSection: React.FC = () => {
     <SettingsSection
       title="Documentation"
       description="Manage external documentation that the chat assistant can use for grounded answers."
-      actions={<AddDocumentationAction addDocumentation={addDocumentation} disabled={isLoading} />}
+      actions={
+        <AddDocumentationAction
+          addDocumentation={addDocumentation}
+          disabled={isLoading}
+        />
+      }
     >
       {error ? <FieldError className={styles.error}>{error}</FieldError> : null}
       {isLoading ? (
-        <LoadingState label="Loading documentation sources" variant="compact" kind="skeleton" />
+        <LoadingState
+          label="Loading documentation sources"
+          variant="compact"
+          kind="skeleton"
+        />
       ) : (
         <DocumentationSettings
           embedded

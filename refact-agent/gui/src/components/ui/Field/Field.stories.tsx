@@ -35,7 +35,9 @@ const sections = [
 ];
 
 function useSaveSimulator() {
-  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
 
   return {
     status,
@@ -58,11 +60,16 @@ function FieldDemo() {
   return (
     <div className={styles.storyShell}>
       {(["light", "dark"] as const).map((appearance) => (
-        <section className={styles.panel} data-appearance={appearance} key={appearance}>
+        <section
+          className={styles.panel}
+          data-appearance={appearance}
+          key={appearance}
+        >
           <div className={styles.sectionStack}>
             <h2 className={styles.title}>{appearance} fields</h2>
             <p className={styles.description}>
-              Controlled controls support blur-save through onCommit and submit-save by letting the parent gather values.
+              Controlled controls support blur-save through onCommit and
+              submit-save by letting the parent gather values.
             </p>
           </div>
           <FieldRow
@@ -92,7 +99,11 @@ function FieldDemo() {
             }
           />
           <FieldRow
-            error={mode === "planner" ? "Planner is unavailable in this mock account." : undefined}
+            error={
+              mode === "planner"
+                ? "Planner is unavailable in this mock account."
+                : undefined
+            }
             label="Default mode"
             control={
               <FieldSelect
@@ -110,7 +121,13 @@ function FieldDemo() {
           <FieldRow
             helper="Switches commit immediately."
             label="Enable tools"
-            control={<FieldSwitch checked={enabled} onChange={setEnabled} onCommit={() => save.commit()} />}
+            control={
+              <FieldSwitch
+                checked={enabled}
+                onChange={setEnabled}
+                onCommit={() => save.commit()}
+              />
+            }
           />
           <FieldStack
             helper="Sliders change continuously and can commit on release."
@@ -134,12 +151,17 @@ function FieldDemo() {
           </div>
         </section>
       ))}
-      <section className={`${styles.panel} ${styles.narrowPanel}`} data-appearance="light">
+      <section
+        className={`${styles.panel} ${styles.narrowPanel}`}
+        data-appearance="light"
+      >
         <h2 className={styles.title}>Narrow field stack</h2>
         <FieldRow
           helper="Rows collapse to one column."
           label="Workspace"
-          control={<FieldText value="/repo/refact" onChange={() => undefined} />}
+          control={
+            <FieldText value="/repo/refact" onChange={() => undefined} />
+          }
         />
       </section>
     </div>
@@ -161,7 +183,13 @@ function SettingsDemo({ narrow = false }: { narrow?: boolean }) {
             description="Blur-save provider name. The control owns local typing, parent owns persistence."
             saveStatus={save.status}
             title="Provider display name"
-            control={<FieldText value={draft} onChange={setDraft} onCommit={() => save.commit()} />}
+            control={
+              <FieldText
+                value={draft}
+                onChange={setDraft}
+                onCommit={() => save.commit()}
+              />
+            }
           />
           <SettingItem
             description="Select commits immediately and can still be collected by a form parent."
@@ -188,7 +216,11 @@ function SettingsDemo({ narrow = false }: { narrow?: boolean }) {
         className={styles.sectionStack}
         onSubmit={(event) => {
           event.preventDefault();
-          setSubmitted(`Submitted: ${draft}, ${model}, auto-save ${autoSave ? "on" : "off"}`);
+          setSubmitted(
+            `Submitted: ${draft}, ${model}, auto-save ${
+              autoSave ? "on" : "off"
+            }`,
+          );
         }}
       >
         <SettingItem
@@ -202,14 +234,18 @@ function SettingsDemo({ narrow = false }: { narrow?: boolean }) {
           title="Workspace label"
         >
           <FieldStack
-            error={draft.length < 3 ? "Use at least three characters." : undefined}
+            error={
+              draft.length < 3 ? "Use at least three characters." : undefined
+            }
             helper="This submit-save example gathers values from parent state."
             label="Label"
             control={<FieldText value={draft} onChange={setDraft} />}
           />
         </SettingItem>
         <div className={styles.actions}>
-          <Button type="submit" variant="primary">Save settings</Button>
+          <Button type="submit" variant="primary">
+            Save settings
+          </Button>
           <p className={styles.statusLine}>{submitted}</p>
         </div>
       </form>
@@ -218,7 +254,10 @@ function SettingsDemo({ narrow = false }: { narrow?: boolean }) {
 
   return (
     <div className={styles.storyShell}>
-      <section className={`${styles.panel} ${narrow ? styles.narrowPanel : ""}`} data-appearance="light">
+      <section
+        className={`${styles.panel} ${narrow ? styles.narrowPanel : ""}`}
+        data-appearance="light"
+      >
         <SettingsShell
           active={active}
           description="Two-pane settings shell with a section selector on narrow viewports."

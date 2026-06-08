@@ -134,7 +134,9 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
     return (
       <span className={styles.fallbackText}>
         {showLabel ? `${label} ` : ""}
-        {allowUnset && !effectiveValue ? unsetLabel : effectiveValue || "No models"}
+        {allowUnset && !effectiveValue
+          ? unsetLabel
+          : effectiveValue || "No models"}
       </span>
     );
   }

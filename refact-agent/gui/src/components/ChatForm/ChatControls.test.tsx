@@ -128,7 +128,9 @@ describe("CapsSelect", () => {
       await screen.findByRole("option", { name: /openai\/gpt-4o-mini/ }),
     );
 
-    const thread = store.getState().chat.threads[store.getState().chat.current_thread_id]?.thread;
+    const thread =
+      store.getState().chat.threads[store.getState().chat.current_thread_id]
+        ?.thread;
     expect(thread?.model).toBe("openai/gpt-4o-mini");
     expect(thread?.modelMaximumContextTokens).toBe(128000);
     expect(thread?.currentMaximumContextTokens).toBe(128000);

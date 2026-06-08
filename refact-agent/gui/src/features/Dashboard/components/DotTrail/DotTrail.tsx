@@ -190,9 +190,7 @@ export const DotTrail: React.FC<DotTrailProps> = ({
                   aria-label={dotNode.title || "Chat"}
                 />
               </HoverCard.Trigger>
-              <HoverCard.Content
-                className={styles.hoverCard}
-              >
+              <HoverCard.Content className={styles.hoverCard}>
                 <DotHoverContent dot={dot} node={dotNode} />
               </HoverCard.Content>
             </HoverCard.Root>

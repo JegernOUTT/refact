@@ -179,7 +179,10 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
 
                   {usage && (
                     <>
-                      <TokenDisplay label="Context size" value={contextTokens} />
+                      <TokenDisplay
+                        label="Context size"
+                        value={contextTokens}
+                      />
                       {cacheReadTokens > 0 && (
                         <TokenDisplay
                           label="Cache read"
@@ -192,10 +195,14 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
                           value={cacheCreationTokens}
                         />
                       )}
-                      <TokenDisplay label="Output tokens" value={outputTokens} />
+                      <TokenDisplay
+                        label="Output tokens"
+                        value={outputTokens}
+                      />
                       {usage.completion_tokens_details?.reasoning_tokens !=
                         null &&
-                        usage.completion_tokens_details.reasoning_tokens > 0 && (
+                        usage.completion_tokens_details.reasoning_tokens >
+                          0 && (
                           <TokenDisplay
                             label="Reasoning tokens"
                             value={
@@ -209,13 +216,21 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
                   {hasUsd && (
                     <>
                       <div className={styles.usageSeparator} />
-                      <Flex align="center" justify="between" width="100%" mb="1">
+                      <Flex
+                        align="center"
+                        justify="between"
+                        width="100%"
+                        mb="1"
+                      >
                         <Text size="2" weight="bold">
                           Cost
                         </Text>
                         <Text size="2">{formatUsd(meteringUsd.total_usd)}</Text>
                       </Flex>
-                      <UsdDisplay label="Prompt" value={meteringUsd.prompt_usd} />
+                      <UsdDisplay
+                        label="Prompt"
+                        value={meteringUsd.prompt_usd}
+                      />
                       <UsdDisplay
                         label="Completion"
                         value={meteringUsd.generated_usd}
@@ -249,5 +264,7 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
 export const MessageWrapper: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
-  return <div className={`${styles.messageWrapper} rf-enter-rise`}>{children}</div>;
+  return (
+    <div className={`${styles.messageWrapper} rf-enter-rise`}>{children}</div>
+  );
 };

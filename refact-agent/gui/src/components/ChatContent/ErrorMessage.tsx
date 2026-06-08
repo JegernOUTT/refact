@@ -227,7 +227,9 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
     : errors.length === 1
       ? "Generation error"
       : `${errors.length} generation errors`;
-  const tone = firstClassified ? CATEGORY_TONES[firstClassified.category] : "danger";
+  const tone = firstClassified
+    ? CATEGORY_TONES[firstClassified.category]
+    : "danger";
   const showPerErrorHeader = parsedErrors.length > 1;
 
   return (
@@ -241,7 +243,9 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
             <Text size="2" weight="medium">
               {title}
             </Text>
-            {firstClassified && <Badge tone={tone}>{firstClassified.category}</Badge>}
+            {firstClassified && (
+              <Badge tone={tone}>{firstClassified.category}</Badge>
+            )}
           </Flex>
           {firstClassified &&
             !showPerErrorHeader &&

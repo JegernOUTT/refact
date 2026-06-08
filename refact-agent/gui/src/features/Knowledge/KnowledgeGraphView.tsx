@@ -6,7 +6,10 @@ import CytoscapeComponent from "react-cytoscapejs";
 import { Search } from "lucide-react";
 
 import { Icon, LoadingState, Surface } from "../../components/ui";
-import type { KnowledgeGraphEdge, KnowledgeGraphNode } from "../../services/refact/types";
+import type {
+  KnowledgeGraphEdge,
+  KnowledgeGraphNode,
+} from "../../services/refact/types";
 import styles from "./KnowledgeGraphView.module.css";
 import { useKnowledgeGraphTheme } from "./useKnowledgeGraphTheme";
 
@@ -60,7 +63,9 @@ export function KnowledgeGraphView({
 
   const filteredEdges = useMemo(() => {
     const nodeIds = new Set(filteredNodes.map((n) => n.id));
-    return edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+    return edges.filter(
+      (edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target),
+    );
   }, [filteredNodes, edges]);
 
   const degreeMap = useMemo(() => {
@@ -267,7 +272,9 @@ export function KnowledgeGraphView({
   }, [cyReady, selectedId]);
 
   if (isLoading) {
-    return <LoadingState className={styles.loadingState} label="Loading graph..." />;
+    return (
+      <LoadingState className={styles.loadingState} label="Loading graph..." />
+    );
   }
 
   if (filteredNodes.length === 0) {

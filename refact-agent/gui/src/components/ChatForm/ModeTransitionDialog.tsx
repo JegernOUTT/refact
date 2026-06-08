@@ -1,12 +1,5 @@
 import React, { useCallback, useState } from "react";
-import {
-  Dialog,
-  Flex,
-  Text,
-  Button,
-  Callout,
-  Badge,
-} from "@radix-ui/themes";
+import { Dialog, Flex, Text, Button, Callout, Badge } from "@radix-ui/themes";
 import { Spinner } from "../ui";
 import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";

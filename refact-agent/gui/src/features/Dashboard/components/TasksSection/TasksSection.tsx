@@ -179,7 +179,12 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
           aria-expanded={!collapsed}
           rightIcon={collapsed ? ChevronDown : ChevronUp}
         >
-          <DashboardText size="1" weight="bold" tone="muted" className={styles.label}>
+          <DashboardText
+            size="1"
+            weight="bold"
+            tone="muted"
+            className={styles.label}
+          >
             TASKS
           </DashboardText>
         </Button>
@@ -303,7 +308,11 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
                       size="small"
                       pulse={dotStatus === "in_progress"}
                     />
-                    <DashboardText size="2" truncate className={styles.taskName}>
+                    <DashboardText
+                      size="2"
+                      truncate
+                      className={styles.taskName}
+                    >
                       {task.name}
                     </DashboardText>
                   </div>
@@ -319,13 +328,15 @@ export const TasksSection: React.FC<TasksSectionProps> = ({
                       </DashboardText>
                     )}
                     {breakpoint !== "narrow" && (
-                      <Badge
-                        tone={dashboardToneFromTaskStatus(task.status)}
-                      >
+                      <Badge tone={dashboardToneFromTaskStatus(task.status)}>
                         {task.status}
                       </Badge>
                     )}
-                    <DashboardText size="1" tone="muted" className={styles.taskTime}>
+                    <DashboardText
+                      size="1"
+                      tone="muted"
+                      className={styles.taskTime}
+                    >
                       {formatTaskTime(task.updated_at)}
                     </DashboardText>
                   </div>

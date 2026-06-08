@@ -174,7 +174,12 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
       <ScrollArea scrollbars="vertical" fullHeight>
         <div className={styles.pageStack}>
           <div className={styles.header}>
-            <Button size="sm" variant="ghost" leftIcon={ArrowLeft} onClick={backFromMarketplace}>
+            <Button
+              size="sm"
+              variant="ghost"
+              leftIcon={ArrowLeft}
+              onClick={backFromMarketplace}
+            >
               Back
             </Button>
             <h2 className={styles.title}>MCP Marketplace</h2>
@@ -233,8 +238,14 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
           {smitheryNeedsKey && (
             <div className={styles.notice}>
               <Icon icon={Info} tone="accent" />
-              <p className={styles.smallText}>Smithery source requires an API key.</p>
-              <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
+              <p className={styles.smallText}>
+                Smithery source requires an API key.
+              </p>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setSettingsOpen(true)}
+              >
                 Configure
               </Button>
             </div>
@@ -284,7 +295,9 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
               >
                 Prev
               </Button>
-              <p className={styles.smallText}>Page {page} of {totalPages}</p>
+              <p className={styles.smallText}>
+                Page {page} of {totalPages}
+              </p>
               <Button
                 size="sm"
                 variant="soft"

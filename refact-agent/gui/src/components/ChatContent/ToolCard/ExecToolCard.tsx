@@ -482,7 +482,9 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
         className={styles.card}
         icon={icon}
         summary={summary}
-        status={isBusy ? "running" : maybeResult?.tool_failed ? "error" : "success"}
+        status={
+          isBusy ? "running" : maybeResult?.tool_failed ? "error" : "success"
+        }
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
@@ -537,10 +539,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
           />
 
           {listedProcesses.length > 0 && (
-            <Box
-              className={styles.processList}
-              data-testid="exec-process-list"
-            >
+            <Box className={styles.processList} data-testid="exec-process-list">
               {listedProcesses.map((item) => (
                 <Flex
                   key={item.process_id}
@@ -554,11 +553,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
                       {processItemLabel(item)}
                     </Text>
                     {item.process_id && (
-                      <Text
-                        size="1"
-                        color="gray"
-                        className={styles.codeValue}
-                      >
+                      <Text size="1" color="gray" className={styles.codeValue}>
                         {item.process_id}
                       </Text>
                     )}
@@ -578,7 +573,8 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
             <Flex align="center" gap="1" mt="2">
               <Timer />
               <Text size="1" color="gray">
-                Plain text result; structured process metadata was not available.
+                Plain text result; structured process metadata was not
+                available.
               </Text>
             </Flex>
           )}

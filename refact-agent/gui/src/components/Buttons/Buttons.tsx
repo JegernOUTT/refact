@@ -14,9 +14,15 @@ type KitIconButtonProps = Omit<
 type KitButtonProps = React.ComponentProps<typeof Button>;
 type PlainButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
 
-type LegacyButtonSize = React.ComponentProps<typeof IconButton>["size"] | "1" | "2" | "3";
+type LegacyButtonSize =
+  | React.ComponentProps<typeof IconButton>["size"]
+  | "1"
+  | "2"
+  | "3";
 
-function normalizeSize(size: LegacyButtonSize | undefined): React.ComponentProps<typeof IconButton>["size"] {
+function normalizeSize(
+  size: LegacyButtonSize | undefined,
+): React.ComponentProps<typeof IconButton>["size"] {
   if (size === "1") return "sm";
   if (size === "2") return "md";
   if (size === "3") return "lg";
@@ -26,7 +32,9 @@ function normalizeSize(size: LegacyButtonSize | undefined): React.ComponentProps
 export const PaperPlaneButton: React.FC<KitIconButtonProps> = ({
   "aria-label": ariaLabel = "Send message",
   ...props
-}) => <IconButton aria-label={ariaLabel} icon={Send} variant="ghost" {...props} />;
+}) => (
+  <IconButton aria-label={ariaLabel} icon={Send} variant="ghost" {...props} />
+);
 
 export const AgentIntegrationsButton = forwardRef<
   HTMLButtonElement,
@@ -56,7 +64,14 @@ AgentIntegrationsButton.displayName = "AgentIntegrationsButton";
 export const ThreadHistoryButton: React.FC<KitIconButtonProps> = ({
   "aria-label": ariaLabel = "Thread history",
   ...props
-}) => <IconButton aria-label={ariaLabel} icon={FileText} variant="ghost" {...props} />;
+}) => (
+  <IconButton
+    aria-label={ariaLabel}
+    icon={FileText}
+    variant="ghost"
+    {...props}
+  />
+);
 
 export function BackToSideBarButton(props: PlainButtonProps) {
   return (
@@ -85,7 +100,12 @@ export const CloseButton: React.FC<
     iconSize?: number | string;
     size?: LegacyButtonSize;
   }
-> = ({ "aria-label": ariaLabel = "Close", iconSize: _iconSize, size, ...props }) => (
+> = ({
+  "aria-label": ariaLabel = "Close",
+  iconSize: _iconSize,
+  size,
+  ...props
+}) => (
   <IconButton
     aria-label={ariaLabel}
     icon={X}

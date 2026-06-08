@@ -40,7 +40,11 @@ export function ErrorState({
       {...props}
     >
       <div className={styles.iconWrap}>
-        <Icon icon={TriangleAlert} size={variant === "full" ? "lg" : "md"} tone="danger" />
+        <Icon
+          icon={TriangleAlert}
+          size={variant === "full" ? "lg" : "md"}
+          tone="danger"
+        />
       </div>
       <div className={styles.copy}>
         <h3 className={styles.title}>{title}</h3>

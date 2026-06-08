@@ -48,7 +48,12 @@ export const OpenSection: React.FC<OpenSectionProps> = ({
         aria-expanded={!collapsed}
         rightIcon={collapsed ? ChevronDown : ChevronUp}
       >
-        <DashboardText size="1" weight="bold" tone="muted" className={styles.label}>
+        <DashboardText
+          size="1"
+          weight="bold"
+          tone="muted"
+          className={styles.label}
+        >
           OPEN
         </DashboardText>
         <DashboardText size="1" tone="muted">

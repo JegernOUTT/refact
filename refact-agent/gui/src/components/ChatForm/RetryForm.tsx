@@ -51,17 +51,18 @@ function getImageFromUserMessage(
 ): (UserImage | ProcessedUserMessageContentWithImages)[] {
   if (typeof messages === "string") return [];
 
-  return messages.reduce<
-    (UserImage | ProcessedUserMessageContentWithImages)[]
-  >((acc, message) => {
-    if ("m_type" in message && message.m_type.startsWith("image/")) {
-      return [...acc, message];
-    }
-    if ("type" in message && message.type === "image_url") {
-      return [...acc, message];
-    }
-    return acc;
-  }, []);
+  return messages.reduce<(UserImage | ProcessedUserMessageContentWithImages)[]>(
+    (acc, message) => {
+      if ("m_type" in message && message.m_type.startsWith("image/")) {
+        return [...acc, message];
+      }
+      if ("type" in message && message.type === "image_url") {
+        return [...acc, message];
+      }
+      return acc;
+    },
+    [],
+  );
 }
 
 function getImageContent(
@@ -105,7 +106,10 @@ export const RetryForm: React.FC<{
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (target instanceof Element && target.closest(`.${styles.modelContent}`)) {
+      if (
+        target instanceof Element &&
+        target.closest(`.${styles.modelContent}`)
+      ) {
         return;
       }
       if (formRef.current && !formRef.current.contains(target)) {
@@ -376,7 +380,9 @@ const RetryModelSelector: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
           capabilities: model.capabilities ? (
             <span className={styles.capabilities}>
               {model.capabilities.supportsTools ? <span>Tools</span> : null}
-              {model.capabilities.supportsMultimodality ? <span>Vision</span> : null}
+              {model.capabilities.supportsMultimodality ? (
+                <span>Vision</span>
+              ) : null}
               {model.capabilities.supportsAgent ? <span>Agent</span> : null}
             </span>
           ) : undefined,

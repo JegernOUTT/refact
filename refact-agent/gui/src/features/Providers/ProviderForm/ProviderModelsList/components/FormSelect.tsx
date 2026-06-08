@@ -39,7 +39,9 @@ export function FormSelect({
           options={
             options?.map((option) => {
               if (option !== null) {
-                const transformed = optionTransformer ? optionTransformer(option) : option;
+                const transformed = optionTransformer
+                  ? optionTransformer(option)
+                  : option;
                 return { value: option, label: transformed };
               }
               return { value: "null", label: "None" };

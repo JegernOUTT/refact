@@ -31,12 +31,18 @@ export function EmptyState({
     >
       {icon ? (
         <div className={styles.iconWrap}>
-          <Icon icon={icon} size={variant === "full" ? "lg" : "md"} tone="muted" />
+          <Icon
+            icon={icon}
+            size={variant === "full" ? "lg" : "md"}
+            tone="muted"
+          />
         </div>
       ) : null}
       <div className={styles.copy}>
         <h3 className={styles.title}>{title}</h3>
-        {description ? <p className={styles.description}>{description}</p> : null}
+        {description ? (
+          <p className={styles.description}>{description}</p>
+        ) : null}
       </div>
       {action ? <div className={styles.action}>{action}</div> : null}
     </section>

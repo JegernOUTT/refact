@@ -35,7 +35,12 @@ export const IntegrationsHeader: FC<IntegrationsHeaderProps> = ({
   return (
     <div className={classNames(styles.header, { [styles.fixed]: !embedded })}>
       <div className={styles.row}>
-        <Button size="sm" variant="soft" leftIcon={ArrowLeft} onClick={handleButtonClick}>
+        <Button
+          size="sm"
+          variant="soft"
+          leftIcon={ArrowLeft}
+          onClick={handleButtonClick}
+        >
           {instantBackReturn ? "Back to chat" : "Configurations"}
         </Button>
         <div className={styles.info}>

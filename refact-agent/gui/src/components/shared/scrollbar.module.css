@@ -20,7 +20,8 @@
 }
 
 .scrollbarThin:hover {
-  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong)) transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong))
+    transparent;
 }
 
 .scrollbarThin:hover::-webkit-scrollbar-thumb {
@@ -41,7 +42,8 @@
 }
 
 .scrollbarHoverOnly:hover {
-  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong)) transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong))
+    transparent;
 }
 
 .scrollbarHoverOnly:hover::-webkit-scrollbar-thumb {

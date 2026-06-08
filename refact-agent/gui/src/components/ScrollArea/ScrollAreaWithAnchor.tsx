@@ -43,61 +43,63 @@ ScrollArea.displayName = "ScrollAreaWithAnchor";
 
 const Provider = forwardRef<HTMLDivElement, ScrollAreaProps>(
   ({ children, ...props }, ref) => {
-  const scrollRef = React.useRef<HTMLDivElement>(null);
-  useImperativeHandle<HTMLDivElement | null, HTMLDivElement | null>(
-    ref,
-    () => scrollRef.current,
-  );
-  const innerRef = React.useRef<HTMLDivElement>(null);
-  const [state, dispatch] = React.useReducer(scrollAreaWithAnchorReducer, {
-    scrollRef: scrollRef,
-    innerRef: innerRef,
-    bottomRef: null,
-    anchorRef: null,
-    anchorProps: null,
-    scrolled: false,
-    mode: "user-message",
-  });
+    const scrollRef = React.useRef<HTMLDivElement>(null);
+    useImperativeHandle<HTMLDivElement | null, HTMLDivElement | null>(
+      ref,
+      () => scrollRef.current,
+    );
+    const innerRef = React.useRef<HTMLDivElement>(null);
+    const [state, dispatch] = React.useReducer(scrollAreaWithAnchorReducer, {
+      scrollRef: scrollRef,
+      innerRef: innerRef,
+      bottomRef: null,
+      anchorRef: null,
+      anchorProps: null,
+      scrolled: false,
+      mode: "user-message",
+    });
 
-  const handleScroll = useCallback(
-    (event: React.UIEvent<HTMLDivElement>) => {
-      props.onScroll?.(event);
-    },
-    [props],
-  );
+    const handleScroll = useCallback(
+      (event: React.UIEvent<HTMLDivElement>) => {
+        props.onScroll?.(event);
+      },
+      [props],
+    );
 
-  const handleWheel = useCallback(
-    (event: React.WheelEvent<HTMLDivElement>) => {
-      if (event.deltaY < 0) {
-        dispatch({ type: "set_mode", payload: "manual" });
-        dispatch({ type: "set_scrolled", payload: true });
-      }
-      props.onWheel?.(event);
-    },
-    [props],
-  );
+    const handleWheel = useCallback(
+      (event: React.WheelEvent<HTMLDivElement>) => {
+        if (event.deltaY < 0) {
+          dispatch({ type: "set_mode", payload: "manual" });
+          dispatch({ type: "set_scrolled", payload: true });
+        }
+        props.onWheel?.(event);
+      },
+      [props],
+    );
 
-  return (
-    <ScrollAreaWithAnchorContext.Provider value={{ state, dispatch }}>
-      <BaseScrollArea
-        ref={scrollRef}
-        {...props}
-        onWheel={handleWheel}
-        onScroll={handleScroll}
-      >
-        <div ref={innerRef}>
-          {children}
-          <BottomSpace />
-        </div>
-        <FollowButton />
-      </BaseScrollArea>
-    </ScrollAreaWithAnchorContext.Provider>
-  );
+    return (
+      <ScrollAreaWithAnchorContext.Provider value={{ state, dispatch }}>
+        <BaseScrollArea
+          ref={scrollRef}
+          {...props}
+          onWheel={handleWheel}
+          onScroll={handleScroll}
+        >
+          <div ref={innerRef}>
+            {children}
+            <BottomSpace />
+          </div>
+          <FollowButton />
+        </BaseScrollArea>
+      </ScrollAreaWithAnchorContext.Provider>
+    );
   },
 );
 Provider.displayName = "ScrollAreaWithAnchor.Provider";
 
-const BottomSpace: React.FC<React.ComponentPropsWithoutRef<"div">> = (props) => {
+const BottomSpace: React.FC<React.ComponentPropsWithoutRef<"div">> = (
+  props,
+) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const { state, dispatch } = useScrollContext();
   const height = useSpaceCalculator(

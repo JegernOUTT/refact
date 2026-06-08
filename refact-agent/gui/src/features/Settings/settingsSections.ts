@@ -1,5 +1,14 @@
 import type { LucideIcon } from "lucide-react";
-import { BookOpen, Bot, Cable, Paintbrush, Plug, Settings, Sparkles, Timer } from "lucide-react";
+import {
+  BookOpen,
+  Bot,
+  Cable,
+  Paintbrush,
+  Plug,
+  Settings,
+  Sparkles,
+  Timer,
+} from "lucide-react";
 
 export type SettingsSectionId =
   | "general"

@@ -17,7 +17,8 @@ export type MenuTriggerProps = DropdownMenuPrimitive.DropdownMenuTriggerProps;
 export type MenuContentProps = AnchoredOverlayContentProps;
 export type MenuItemProps = DropdownMenuPrimitive.DropdownMenuItemProps;
 export type MenuLabelProps = DropdownMenuPrimitive.DropdownMenuLabelProps;
-export type MenuSeparatorProps = DropdownMenuPrimitive.DropdownMenuSeparatorProps;
+export type MenuSeparatorProps =
+  DropdownMenuPrimitive.DropdownMenuSeparatorProps;
 
 const MenuRoot: React.FC<MenuProps> = ({ modal = true, ...props }) => {
   return <DropdownMenuPrimitive.Root modal={modal} {...props} />;
@@ -48,7 +49,11 @@ const MenuContent = React.forwardRef<HTMLDivElement, MenuContentProps>(
             align={align}
             sideOffset={sideOffset}
             collisionPadding={collisionPadding}
-            className={classNames(styles.content, "rf-popover-motion", className)}
+            className={classNames(
+              styles.content,
+              "rf-popover-motion",
+              className,
+            )}
             style={overlayStyle(maxWidth, maxHeight)}
           >
             {children}

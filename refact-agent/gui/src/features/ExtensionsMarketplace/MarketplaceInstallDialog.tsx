@@ -128,7 +128,8 @@ export const MarketplaceInstallDialog: React.FC<
             ) : (
               <Badge tone="accent">
                 <span className={styles.dialogHeader}>
-                  <Icon icon={Globe} size="sm" tone="accent" /> Global only (no project open)
+                  <Icon icon={Globe} size="sm" tone="accent" /> Global only (no
+                  project open)
                 </span>
               </Badge>
             )}
@@ -162,8 +163,9 @@ export const MarketplaceInstallDialog: React.FC<
             <div className={classNames(styles.notice, styles.noticeWarning)}>
               <Icon icon={AlertTriangle} tone="warning" />
               <p className={styles.smallText}>
-                Already installed in this scope. Click <strong>Overwrite</strong> to replace it,
-                or switch the scope above.
+                Already installed in this scope. Click{" "}
+                <strong>Overwrite</strong> to replace it, or switch the scope
+                above.
               </p>
             </div>
           )}
