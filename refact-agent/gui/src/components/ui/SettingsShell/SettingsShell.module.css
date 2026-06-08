@@ -94,7 +94,14 @@
 .content {
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden auto;
+}
+
+.content,
+.content *,
+.content *::before,
+.content *::after {
+  box-sizing: border-box;
 }
 
 .mobileNav {

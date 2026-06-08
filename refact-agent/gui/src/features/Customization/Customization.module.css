@@ -83,6 +83,7 @@
 }
 
 .kindTabs {
+  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
 }
@@ -93,11 +94,19 @@
 
 .listPanel {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
   min-width: 0;
   max-height: min(calc(100dvh - 15 * var(--rf-space-4)), calc(16 * var(--rf-control-h-lg)));
+  overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.listPanel * {
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .editorPanel {
@@ -313,7 +322,7 @@
 
   .listPanel {
     max-height: none;
-    overflow-y: visible;
+    overflow: visible;
   }
 
   .editorHeader,

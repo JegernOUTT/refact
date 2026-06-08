@@ -61,25 +61,28 @@
 }
 
 .messageContent {
-  min-height: 60px;
+  min-height: 112px;
+  resize: vertical;
 }
 
 .promptTextarea {
-  min-height: 100px;
+  min-height: 200px;
+  resize: vertical;
 }
 
 .promptTextareaExpand {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   max-width: 100%;
   min-width: 0;
-  min-height: 100px;
+  min-height: 200px;
   flex: 1;
   resize: none;
   overflow-y: auto;
 }
 
 .extraFieldsEditor {
-  min-height: 80px;
+  min-height: 120px;
+  resize: vertical;
 }
 
 .chipList {

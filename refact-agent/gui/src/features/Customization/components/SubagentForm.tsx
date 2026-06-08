@@ -443,6 +443,7 @@ const MessagesTab: React.FC<{
         }
         placeholder="User message template..."
         rows={3}
+        className={styles.promptTextarea}
       />
     </Field>
 
@@ -475,6 +476,7 @@ const MessagesTab: React.FC<{
             onChange={(value) => patch(["prompts", key], value || undefined)}
             placeholder={`${key} prompt...`}
             rows={2}
+            className={styles.promptTextarea}
           />
         </Field>
       ))}
