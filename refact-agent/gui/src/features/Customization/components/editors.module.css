@@ -72,9 +72,11 @@
 
 .promptTextareaExpand {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   min-height: 200px;
+  height: 100%;
   flex: 1;
   resize: none;
   overflow-y: auto;
@@ -116,10 +118,11 @@
   z-index: var(--rf-z-popover);
   max-height: 150px;
   overflow-y: auto;
-  border: var(--rf-hairline) solid var(--rf-border);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-overlay);
   box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .suggestionItem {
@@ -161,11 +164,31 @@
 
 .expandingField {
   display: flex;
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   min-height: 100px;
   flex: 1;
+  flex-direction: column;
   overflow: hidden;
+}
+
+.expandingField > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.expandingField > :last-child {
+  display: flex;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
+.expandingField > :last-child > * {
+  width: 100%;
+  min-width: 0;
+  flex: 1;
 }
 
 .switchGrid,
