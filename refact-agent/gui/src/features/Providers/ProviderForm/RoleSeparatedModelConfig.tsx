@@ -11,7 +11,6 @@ import {
 
 import type {
   CompletionProviderModelConfig,
-  EmbeddingProviderModelConfig,
   ProviderDetailResponse,
   ProviderFormRoleSettings,
 } from "../../../services/refact";
@@ -89,7 +88,7 @@ function firstCompletionEntry(settings: ProviderFormRoleSettings): {
   if (!entry) return null;
   return {
     name: entry[0],
-    config: entry[1] as CompletionProviderModelConfig,
+    config: entry[1],
   };
 }
 
@@ -149,7 +148,7 @@ function embeddingInitialState(
   settings: ProviderFormRoleSettings,
 ): EmbeddingFormState {
   const config = isRecord(settings.embedding_model)
-    ? (settings.embedding_model as EmbeddingProviderModelConfig)
+    ? settings.embedding_model
     : {};
   return {
     endpoint: stringValue(settings.embedding_endpoint),
@@ -215,12 +214,16 @@ export function RoleSeparatedModelConfig({
       return;
     }
 
-    const models = completionModelsRecord(settings);
+    let models = completionModelsRecord(settings);
     if (completionOriginalName && completionOriginalName !== modelName) {
-      delete models[completionOriginalName];
+      models = Object.fromEntries(
+        Object.entries(models).filter(
+          ([name]) => name !== completionOriginalName,
+        ),
+      );
     }
     models[modelName] = {
-      ...(models[modelName] ?? {}),
+      ...models[modelName],
       n_ctx: nCtx,
       tokenizer: completion.tokenizer.trim(),
       scratchpad: completion.scratchpad.trim(),
@@ -456,7 +459,8 @@ export function RoleSeparatedModelConfig({
           </Select.Root>
           <Text size="1" color="gray">
             OpenAI-compatible embeddings use /v1/embeddings style payloads;
-            Ollama-native embeddings use Ollama's embedding API and model names.
+            Ollama-native embeddings use Ollama&apos;s embedding API and model
+            names.
           </Text>
           <TextField.Root
             aria-label="Embedding model name"

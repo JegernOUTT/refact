@@ -58,7 +58,7 @@ export function pricingForModel(
 function extractCapabilities(
   capsModel: CapsResponse["chat_models"][string] | undefined,
 ): ModelCapabilities | undefined {
-  if (typeof capsModel !== "object" || !capsModel) return undefined;
+  if (capsModel === undefined) return undefined;
 
   return {
     supportsTools: capsModel.supports_tools,
@@ -86,7 +86,7 @@ function getContextWindow(
     | CapsResponse["embedding_model"]
     | undefined,
 ): number | undefined {
-  if (typeof capsModel !== "object" || !capsModel) return undefined;
+  if (capsModel === undefined) return undefined;
   return capsModel.n_ctx;
 }
 
@@ -198,10 +198,12 @@ function sortModelsInGroup(models: EnrichedModel[]): EnrichedModel[] {
 export function groupModelsByProvider(models: EnrichedModel[]): ModelGroup[] {
   const groups = models.reduce<Record<string, EnrichedModel[]>>(
     (acc, model) => {
-      if (!acc[model.provider]) {
-        acc[model.provider] = [];
+      if (Object.prototype.hasOwnProperty.call(acc, model.provider)) {
+        acc[model.provider].push(model);
+      } else {
+        acc[model.provider] = [model];
       }
-      acc[model.provider].push(model);
+
       return acc;
     },
     {},

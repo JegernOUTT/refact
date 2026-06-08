@@ -4,9 +4,9 @@ import { render, screen } from "../../utils/test-utils";
 import { goodCaps, goodPing, server } from "../../utils/mockServer";
 import { ModelSelector } from "./ModelSelector";
 
-Element.prototype.hasPointerCapture ??= () => false;
-Element.prototype.setPointerCapture ??= () => undefined;
-Element.prototype.releasePointerCapture ??= () => undefined;
+Element.prototype.hasPointerCapture = () => false;
+Element.prototype.setPointerCapture = () => undefined;
+Element.prototype.releasePointerCapture = () => undefined;
 
 function renderSelector(
   props: Partial<React.ComponentProps<typeof ModelSelector>> = {},

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeProviderDefaults } from "./ProviderForm";
+import { normalizeProviderDefaults } from "./providerDefaults";
 import type { ProviderDefaults } from "../../../services/refact";
 
 describe("normalizeProviderDefaults", () => {

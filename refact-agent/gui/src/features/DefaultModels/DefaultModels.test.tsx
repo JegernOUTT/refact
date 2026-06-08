@@ -94,7 +94,8 @@ function renderDefaultModels(args?: {
   caps?: CapsResponse;
   onSave?: (body: ProviderDefaults) => void;
 }) {
-  const onSave = args?.onSave ?? vi.fn();
+  const onSave: (body: ProviderDefaults) => void =
+    args?.onSave ?? vi.fn<(body: ProviderDefaults) => void>();
   server.use(
     http.get("*/v1/ping", () => HttpResponse.text("pong")),
     http.get("*/v1/caps", () => HttpResponse.json(args?.caps ?? caps())),
@@ -158,7 +159,7 @@ describe("DefaultModels", () => {
   });
 
   test("save payload includes completion and embedding defaults while preserving unknown fields", async () => {
-    const onSave = vi.fn();
+    const onSave = vi.fn<(body: ProviderDefaults) => void>();
     const { user } = renderDefaultModels({ onSave });
 
     await user.selectOptions(
@@ -172,18 +173,16 @@ describe("DefaultModels", () => {
 
     await user.click(screen.getByRole("button", { name: "Save Changes" }));
 
-    expect(onSave).toHaveBeenCalledWith(
-      expect.objectContaining({
-        completion_model: "openai/qwen2.5/coder/3b/base",
-        embedding_model: "openai/thenlper/gte-base",
-        preserved_field: { nested: true },
-        chat: expect.objectContaining({ model: "openai/gpt-4o" }),
-      }),
-    );
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.completion_model).toBe("openai/qwen2.5/coder/3b/base");
+    expect(saved.embedding_model).toBe("openai/thenlper/gte-base");
+    expect(saved.preserved_field).toEqual({ nested: true });
+    expect(saved.chat.model).toBe("openai/gpt-4o");
   });
 
   test("clears unavailable saved defaults", async () => {
-    const onSave = vi.fn();
+    const onSave = vi.fn<(body: ProviderDefaults) => void>();
     const { user } = renderDefaultModels({
       defaults: {
         ...baseDefaults,
@@ -218,7 +217,7 @@ describe("DefaultModels", () => {
   });
 
   test("chat defaults still save as before", async () => {
-    const onSave = vi.fn();
+    const onSave = vi.fn<(body: ProviderDefaults) => void>();
     const { user } = renderDefaultModels({ onSave });
 
     await user.selectOptions(
@@ -228,15 +227,11 @@ describe("DefaultModels", () => {
 
     await user.click(screen.getByRole("button", { name: "Save Changes" }));
 
-    expect(onSave).toHaveBeenCalledWith(
-      expect.objectContaining({
-        chat: expect.objectContaining({
-          model: "openai/gpt-4o-mini",
-          max_new_tokens: 4096,
-        }),
-        completion_model: "openai/qwen2.5/coder/1.5b/base",
-        embedding_model: "openai/thenlper/gte-base",
-      }),
-    );
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.chat.model).toBe("openai/gpt-4o-mini");
+    expect(saved.chat.max_new_tokens).toBe(4096);
+    expect(saved.completion_model).toBe("openai/qwen2.5/coder/1.5b/base");
+    expect(saved.embedding_model).toBe("openai/thenlper/gte-base");
   });
 });

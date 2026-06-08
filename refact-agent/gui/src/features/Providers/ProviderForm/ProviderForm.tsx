@@ -4,6 +4,7 @@ import { Badge, Button, Card, Flex, Separator, Text } from "@radix-ui/themes";
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
 import { RoleSeparatedModelConfig } from "./RoleSeparatedModelConfig";
+import { normalizeProviderDefaults } from "./providerDefaults";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
@@ -212,22 +213,6 @@ const DEFAULT_MODEL_FIELDS: {
     description: "Default model for semantic embeddings.",
   },
 ];
-
-export function normalizeProviderDefaults(
-  defaults: ProviderDefaults | undefined,
-): ProviderDefaults {
-  return {
-    ...defaults,
-    chat: defaults?.chat ?? {},
-    chat_model_2: defaults?.chat_model_2 ?? {},
-    task_planner_agent_model: defaults?.task_planner_agent_model ?? {},
-    chat_light: defaults?.chat_light ?? {},
-    chat_thinking: defaults?.chat_thinking ?? {},
-    chat_buddy: defaults?.chat_buddy ?? {},
-    completion_model: defaults?.completion_model,
-    embedding_model: defaults?.embedding_model,
-  };
-}
 
 function getModelCapability(key: DefaultModelKey) {
   if (key === "completion_model") return "completion";

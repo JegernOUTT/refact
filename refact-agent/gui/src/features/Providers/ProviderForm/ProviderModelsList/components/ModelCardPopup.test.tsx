@@ -63,8 +63,8 @@ describe("ModelCardPopup", () => {
         isOpen
         isSaving={false}
         setIsOpen={() => undefined}
-        onSave={async () => true}
-        onUpdate={async () => true}
+        onSave={() => Promise.resolve(true)}
+        onUpdate={() => Promise.resolve(true)}
         modelName="coder"
         modelType="completion"
         providerName="custom_work"
@@ -86,8 +86,8 @@ describe("ModelCardPopup", () => {
         isOpen
         isSaving={false}
         setIsOpen={() => undefined}
-        onSave={async () => true}
-        onUpdate={async () => true}
+        onSave={() => Promise.resolve(true)}
+        onUpdate={() => Promise.resolve(true)}
         modelName="embedder"
         modelType="embedding"
         providerName="custom_work"

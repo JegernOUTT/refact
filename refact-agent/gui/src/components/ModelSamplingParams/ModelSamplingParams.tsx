@@ -64,13 +64,19 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
     if (!model || !capsData) return null;
 
     if (capability === "completion") {
-      const completionModel = capsData.completion_models[model];
+      const completionModel = Object.entries(capsData.completion_models).find(
+        ([name]) => name === model,
+      )?.[1];
       return completionDefaults(
         completionModel?.n_ctx ?? capsData.code_completion_n_ctx,
       );
     }
 
-    return capsData.chat_models[model] ?? null;
+    return (
+      Object.entries(capsData.chat_models).find(
+        ([name]) => name === model,
+      )?.[1] ?? null
+    );
   }, [model, capsData, capability]);
 
   if (capability === "embedding") {
