@@ -339,12 +339,24 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 | Controls    | default `30px`, small `26px`, large `36px`                             |
 | Switches    | track `36×20px`, thumb `16px`, inset `2px`, visual travel `18px`       |
 | Icons       | default `15px`, small `13px`, large `18px`, tap target at least `28px` |
-| Spacing     | `4 / 8 / 12 / 16 / 22 / 32px`                                          |
+| Spacing     | scale tokens documented below                                          |
 | Radii       | chip `6px`, control `8px`, card/popover `10px`, pill `999px`           |
 | Lines/rings | hairline `1px`, focus ring `2px`                                       |
 | Type        | `11.5 / 12.5 / 13.5 / 15 / 19px`                                       |
 | Layout      | nav `220px` with `180px` min, content max `640px`                      |
 | Overlays    | popover `210–360px`, dialog `340px`, tooltip max `280px`               |
+
+Canonical spacing rhythm:
+
+- Full spacing scale: `--rf-space-2xs: 2px`, `--rf-space-1: 4px`, `--rf-space-xs: 6px`, `--rf-space-2: 8px`, `--rf-space-3: 12px`, `--rf-space-4: 16px`, `--rf-space-5: 22px`, `--rf-space-6: 32px`.
+
+- Panel/card inner padding uses `--rf-space-3`; compact panels use `--rf-space-2`.
+- Inter-card and section gaps use `--rf-space-3` or `--rf-space-4`.
+- Rows use `--rf-space-2` padding and `--rf-space-1` internal gap.
+- Tight label/value stacks use `--rf-space-2xs`.
+- Chip and badge padding uses `var(--rf-space-2xs) var(--rf-space-xs)`; pill chips use `var(--rf-space-1) var(--rf-space-2)`.
+- Header title-to-subtitle gaps use `--rf-space-2xs` or `--rf-space-1`; header-to-body gaps use `--rf-space-2`.
+- Canvas and sprite pixel coordinates in BuddyWorld/BuddyCanvas, plus BuddyDemo showcase layouts, are exempt from spacing-token normalization.
 
 ### Guardrails and verification
 
