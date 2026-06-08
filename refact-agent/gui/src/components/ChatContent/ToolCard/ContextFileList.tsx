@@ -74,6 +74,8 @@ const ContextFileItem: React.FC<ContextFileItemProps> = ({
       {shouldRender && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
           )}

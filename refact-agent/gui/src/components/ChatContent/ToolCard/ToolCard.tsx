@@ -43,7 +43,12 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   const renderedOpen = animate ? isAnimatingOpen : isOpen;
 
   const title = (
-    <span className={styles.titleRow}>
+    <span
+      className={classNames(
+        styles.titleRow,
+        status === "running" && "rf-active-pulse",
+      )}
+    >
       <span className={styles.iconWrapper}>
         {status === "running" ? <Icon icon={LoaderCircle} /> : icon}
       </span>
@@ -57,7 +62,6 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
       className={classNames(
         "rf-enter",
         styles.card,
-        status === "running" && "rf-status-pulse",
         status === "running" && styles.running,
         status === "success" && styles.completed,
         status === "error" && styles.error,

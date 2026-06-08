@@ -66,7 +66,11 @@ export function ToolCard({
         <button
           aria-controls={bodyId}
           aria-expanded={isOpen}
-          className={styles.toggle}
+          className={classNames(
+            styles.toggle,
+            (status === "running" || status === "streaming") &&
+              "rf-active-pulse",
+          )}
           type="button"
           onClick={toggleOpen}
         >

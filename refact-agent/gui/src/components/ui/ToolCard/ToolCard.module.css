@@ -33,11 +33,13 @@
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   font: inherit;
+  transition: filter 0.15s ease;
 }
 
 .toggle:hover {
   color: var(--rf-color-fg);
   background: transparent;
+  filter: brightness(1.3);
 }
 
 .toggle:focus-visible {
@@ -59,10 +61,6 @@
   overflow-wrap: anywhere;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.toggle:hover .title {
-  color: var(--rf-color-accent);
 }
 
 .spacer {

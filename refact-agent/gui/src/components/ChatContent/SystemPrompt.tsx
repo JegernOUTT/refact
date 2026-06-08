@@ -22,7 +22,7 @@ export const SystemPrompt: React.FC<{
   return (
     <div className={`${styles.card} rf-enter-rise`}>
       <Flex
-        className={`${styles.header} rf-pressable`}
+        className={styles.header}
         align="center"
         gap="2"
         onClick={handleToggle}
@@ -38,6 +38,8 @@ export const SystemPrompt: React.FC<{
       {shouldRender && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
           )}

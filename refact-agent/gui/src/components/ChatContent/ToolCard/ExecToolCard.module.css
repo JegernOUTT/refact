@@ -100,7 +100,7 @@
 }
 
 .statusRunningInBackground {
-  animation: exec-status-pulse 1.5s var(--rf-ease-standard) infinite;
+  filter: brightness(1.08);
 }
 
 .statusExited,
@@ -234,20 +234,8 @@
   }
 }
 
-@keyframes exec-status-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.62;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .spinnerDot,
-  .statusRunningInBackground {
+  .spinnerDot {
     animation: none;
   }
 }

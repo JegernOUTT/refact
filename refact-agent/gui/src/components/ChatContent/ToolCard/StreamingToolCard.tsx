@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { Flex, Text, Box } from "@radix-ui/themes";
-import { Spinner } from "../../ui";
+import { LoaderCircle } from "lucide-react";
+import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useAutoExpandCollapse, ToolStatus } from "./useAutoExpandCollapse";
 import { useAppSelector } from "../../../hooks";
@@ -140,20 +141,26 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
 
   const header = (
     <Flex
-      className={classNames(styles.header, status === "error" && styles.error)}
+      className={classNames(
+        styles.header,
+        status === "running" && "rf-active-pulse",
+        status === "running" && styles.running,
+        status === "error" && styles.error,
+      )}
       align="center"
       gap="2"
       onClick={onToggle}
     >
       <span className={styles.icon}>
-        {status === "running" ? <Spinner size="sm" /> : icon}
+        {status === "running" ? (
+          <Icon icon={LoaderCircle} size="sm" tone="accent" />
+        ) : (
+          icon
+        )}
       </span>
       <Text
         size="1"
-        className={classNames(
-          styles.summary,
-          status === "running" && styles.running,
-        )}
+        className={styles.summary}
       >
         {summary}
       </Text>
@@ -189,6 +196,8 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
       {shouldRender && deferredContent && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
             !animate && styles.noTransition,

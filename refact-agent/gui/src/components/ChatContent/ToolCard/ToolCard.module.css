@@ -54,28 +54,14 @@
   min-width: 0;
 }
 
+.running .titleRow {
+  color: var(--rf-color-muted);
+}
+
 .running .summary {
   color: var(--rf-color-muted);
-  animation: subtlePulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
 }
 
 .error .summary {
   color: var(--rf-color-danger);
-}
-
-@keyframes subtlePulse {
-  0%,
-  100% {
-    opacity: 0.9;
-  }
-
-  50% {
-    opacity: 0.6;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .running .summary {
-    animation: none;
-  }
 }

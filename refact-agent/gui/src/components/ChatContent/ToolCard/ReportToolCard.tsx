@@ -1,4 +1,4 @@
-import { Copy, Check, FileText, BookOpen } from "lucide-react";
+import { Copy, Check, FileText, BookOpen, LoaderCircle } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -7,7 +7,7 @@ import React, {
   useState,
 } from "react";
 import { Flex, Text, Box } from "@radix-ui/themes";
-import { Spinner } from "../../ui";
+import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks";
@@ -265,19 +265,26 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
 
   const header = (
     <Flex
-      className={classNames(styles.header)}
+      className={classNames(
+        styles.header,
+        status === "running" && "rf-active-pulse",
+        status === "running" && styles.running,
+      )}
       align="center"
       gap="2"
       onClick={handleAnimatedToggle}
     >
       <span className={styles.icon}>
-        {status === "running" ? <Spinner size="sm" /> : icon}
+        {status === "running" ? (
+          <Icon icon={LoaderCircle} size="sm" tone="accent" />
+        ) : (
+          icon
+        )}
       </span>
       <Text
         size="1"
         className={classNames(
           styles.summary,
-          status === "running" && styles.running,
           status === "error" && styles.error,
           variant === "taskDone" &&
             status === "success" &&
@@ -341,6 +348,8 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
       {shouldRender && reportData && deferredReportMarkdown && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
             !animateContent && styles.noTransition,

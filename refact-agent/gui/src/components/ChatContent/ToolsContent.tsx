@@ -1,8 +1,15 @@
-import { CircleCheck, CircleX, File, Settings, Rows3 } from "lucide-react";
+import {
+  CircleCheck,
+  CircleX,
+  File,
+  LoaderCircle,
+  Settings,
+  Rows3,
+} from "lucide-react";
 import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import { Container, Flex, Text, Box } from "@radix-ui/themes";
-import { Spinner } from "../ui";
+import { Icon } from "../ui";
 import {
   ChatContextFile,
   DiffChunk,
@@ -1754,7 +1761,11 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
             style={{ cursor: "pointer" }}
           >
             <Flex gap="2" align="center" justify="center">
-              {waiting ? <Spinner /> : <Settings />}
+              {waiting ? (
+                <Icon icon={LoaderCircle} size="sm" tone="accent" />
+              ) : (
+                <Settings />
+              )}
               {toolUsageAmount.map(({ functionName, amountOfCalls }, index) => (
                 <span key={functionName}>
                   <ToolUsageDisplay
@@ -1783,7 +1794,9 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
                   <Flex direction="column" gap="1" ml="4" mt="1">
                     {parsed.step && (
                       <Flex align="center" gap="1">
-                        {waiting && <Spinner size="sm" />}
+                        {waiting && (
+                          <Icon icon={LoaderCircle} size="sm" tone="accent" />
+                        )}
                         <Text weight="light" size="1">
                           {parsed.step}:
                         </Text>

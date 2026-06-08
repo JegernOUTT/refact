@@ -196,6 +196,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
       <div
         className={classNames(
           styles.header,
+          isActivelyThinking && "rf-active-pulse",
           isActivelyThinking && styles.thinking,
         )}
         onClick={handleToggle}
@@ -213,6 +214,8 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
       {shouldRender && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
           )}

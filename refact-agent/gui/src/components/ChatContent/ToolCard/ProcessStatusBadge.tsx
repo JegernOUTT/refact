@@ -37,7 +37,11 @@ export const ProcessStatusBadge: React.FC<ProcessStatusBadgeProps> = ({
 
   return (
     <Badge
-      className={classNames(styles.statusBadge, className)}
+      className={classNames(
+        styles.statusBadge,
+        status === "running_in_background" && "rf-active-pulse",
+        className,
+      )}
       data-testid={`exec-status-${status}`}
     >
       {statusLabel(status)}

@@ -30,20 +30,8 @@
   min-width: 0;
 }
 
-/* Running state - subtle text fade */
-@keyframes subtlePulse {
-  0%,
-  100% {
-    opacity: 0.9;
-  }
-  50% {
-    opacity: 0.6;
-  }
-}
-
 .running {
   color: var(--rf-color-muted);
-  animation: subtlePulse 2s ease-in-out infinite;
 }
 
 .meta {
@@ -102,17 +90,10 @@
 
 .contentWrapper {
   overflow: hidden;
-  /* CSS-based collapse animation using grid */
-  display: grid;
-  grid-template-rows: 0fr;
   opacity: 0;
-  transition:
-    grid-template-rows 0.2s ease-out,
-    opacity 0.15s ease-out;
 }
 
 .contentWrapperOpen {
-  grid-template-rows: 1fr;
   opacity: 1;
 }
 

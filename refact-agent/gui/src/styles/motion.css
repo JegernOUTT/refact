@@ -36,21 +36,11 @@
   transform: translateY(0) scale(1);
 }
 
+.rf-active-pulse,
 .rf-status-pulse {
-  position: relative;
-  isolation: isolate;
-  opacity: 1;
-}
-
-.rf-status-pulse::after {
-  position: absolute;
-  inset: 0;
-  border: var(--rf-hairline) solid var(--rf-color-accent-soft);
-  border-radius: inherit;
-  content: "";
-  opacity: 0;
-  pointer-events: none;
-  transform: scale(1);
+  opacity: 0.98;
+  filter: brightness(1.08);
+  transform: translateZ(0);
 }
 
 .rf-shimmer {
@@ -152,8 +142,11 @@
     transform: translateY(0) scale(0.98);
   }
 
-  .rf-status-pulse::after {
-    animation: rf-pulse var(--rf-dur-slow) var(--rf-ease-standard) infinite;
+  .rf-active-pulse,
+  .rf-status-pulse {
+    animation: rf-active-breathe calc(var(--rf-dur-slow) * 5) var(--rf-ease-standard)
+      infinite alternate;
+    will-change: filter, opacity, transform;
   }
 
   .rf-shimmer::after {
@@ -165,7 +158,8 @@
   .rf-enter,
   .rf-enter-rise,
   .rf-popover-motion,
-  .rf-status-pulse::after,
+  .rf-active-pulse,
+  .rf-status-pulse,
   .rf-shimmer::after,
   .rf-stagger > * {
     animation: none;
@@ -223,15 +217,17 @@
   }
 }
 
-@keyframes rf-pulse {
+@keyframes rf-active-breathe {
   from {
-    opacity: 0.6;
-    transform: scale(1);
+    opacity: 0.92;
+    filter: brightness(1.04);
+    transform: translateZ(0);
   }
 
   to {
-    opacity: 0;
-    transform: scale(2.2);
+    opacity: 1;
+    filter: brightness(1.24);
+    transform: translateZ(0);
   }
 }
 

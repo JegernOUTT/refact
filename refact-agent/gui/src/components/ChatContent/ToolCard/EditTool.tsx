@@ -1,7 +1,7 @@
-import { CircleCheck, RotateCcw } from "lucide-react";
+import { CircleCheck, LoaderCircle, RotateCcw } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
 import { Flex, Box } from "@radix-ui/themes";
-import { Spinner } from "../../ui";
+import { Icon } from "../../ui";
 import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
 import {
   selectManyDiffMessageByIds,
@@ -183,7 +183,7 @@ export const EditTool: React.FC<EditToolProps> = ({
       {
         label: "Apply diff",
         icon: dryRunResult.isLoading ? (
-          <Spinner size="sm" />
+          <Icon icon={LoaderCircle} size="sm" tone="accent" />
         ) : (
           <CircleCheck />
         ),

@@ -43,20 +43,12 @@
 
 .contentWrapper {
   overflow: hidden;
-  /* Force GPU layer for JCEF compatibility */
   transform: translateZ(0);
   will-change: grid-template-rows, opacity;
-  /* CSS-based collapse animation using grid */
-  display: grid;
-  grid-template-rows: 0fr;
   opacity: 0;
-  transition:
-    grid-template-rows 0.2s ease-out,
-    opacity 0.15s ease-out;
 }
 
 .contentWrapperOpen {
-  grid-template-rows: 1fr;
   opacity: 1;
 }
 
@@ -76,25 +68,12 @@
   overflow-y: auto;
 }
 
-/* Thinking state - subtle text fade */
-@keyframes subtlePulse {
-  0%,
-  100% {
-    opacity: 0.9;
-  }
-  50% {
-    opacity: 0.6;
-  }
-}
-
 .thinking .summary {
   color: var(--rf-color-muted);
-  animation: subtlePulse 2s ease-in-out infinite;
 }
 
 .spinner {
   display: inline-flex;
-  animation: spin var(--rf-dur-slow) linear infinite;
 }
 
 .markdown {
@@ -102,15 +81,3 @@
   font-size: var(--rf-text-1);
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* Respect reduced motion preference */
-@media (prefers-reduced-motion: reduce) {
-  .thinking .summary {
-    animation: none;
-  }
-}

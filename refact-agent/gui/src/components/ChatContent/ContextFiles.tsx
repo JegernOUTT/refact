@@ -183,7 +183,7 @@ const FileItem: React.FC<{
   return (
     <div className={styles.fileItem}>
       <Flex
-        className={`${styles.fileHeader} rf-pressable`}
+        className={styles.fileHeader}
         align="center"
         gap="2"
         onClick={handleToggle}
@@ -201,6 +201,8 @@ const FileItem: React.FC<{
       {shouldRender && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
           )}
@@ -430,8 +432,7 @@ const _ContextFiles: React.FC<{
   return (
     <div className={styles.card}>
       <Flex
-
-        className={`${styles.header} rf-pressable`}
+        className={styles.header}
         align="center"
         gap="2"
         onClick={handleToggle}
@@ -445,6 +446,8 @@ const _ContextFiles: React.FC<{
       {shouldRender && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
           )}

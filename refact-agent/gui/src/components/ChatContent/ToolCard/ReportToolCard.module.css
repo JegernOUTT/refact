@@ -63,20 +63,8 @@
   text-overflow: ellipsis;
 }
 
-/* Running state */
-@keyframes subtlePulse {
-  0%,
-  100% {
-    opacity: 0.9;
-  }
-  50% {
-    opacity: 0.6;
-  }
-}
-
 .running {
   color: var(--rf-color-muted);
-  animation: subtlePulse 2s ease-in-out infinite;
 }
 
 .error {
@@ -157,20 +145,12 @@
   overflow-wrap: anywhere;
 }
 
-/* Content wrapper (collapsible animation) */
 .contentWrapper {
   overflow: hidden;
-  /* CSS-based collapse animation using grid */
-  display: grid;
-  grid-template-rows: 0fr;
   opacity: 0;
-  transition:
-    grid-template-rows 0.2s ease-out,
-    opacity 0.15s ease-out;
 }
 
 .contentWrapperOpen {
-  grid-template-rows: 1fr;
   opacity: 1;
 }
 
@@ -206,10 +186,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .running {
-    animation: none;
-  }
-
   .contentWrapper {
     transition: none;
   }
