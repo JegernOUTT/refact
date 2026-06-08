@@ -3,7 +3,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
 import userEvent from "@testing-library/user-event";
 
-import { render, screen, waitFor, within } from "../../utils/test-utils";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { Toolbar, type Tab } from "./Toolbar";
 import {
@@ -95,6 +101,19 @@ function expectTabToContainStatus(title: string, label: string) {
   expect(tab).toContainElement(status);
 }
 
+function createDataTransferStub() {
+  const data = new Map<string, string>();
+  return {
+    data,
+    dataTransfer: {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: (type: string, value: string) => data.set(type, value),
+      getData: (type: string) => data.get(type) ?? "",
+    },
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -106,7 +125,9 @@ describe("Dropdown navigation", () => {
     const { store } = renderToolbar({ type: "dashboard" });
 
     await userEvent.click(screen.getByRole("button", { name: "Menu" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "Settings" }),
+    );
 
     expect(store.getState().pages.at(-1)?.name).toBe("general settings");
   });
@@ -118,7 +139,9 @@ describe("Dropdown navigation", () => {
     renderToolbar({ type: "dashboard" });
 
     await userEvent.click(screen.getByRole("button", { name: "Menu" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Extension Settings" }));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "Extension Settings" }),
+    );
 
     expect(postMessageSpy).toHaveBeenCalledWith(
       expect.objectContaining({ type: "ide/openSettings" }),
@@ -149,9 +172,7 @@ describe("Toolbar tab parity", () => {
     });
 
     await userEvent.click(
-      within(getTabWrap("Chat Beta")).getByTitle(
-        "Close tab",
-      ),
+      within(getTabWrap("Chat Beta")).getByTitle("Close tab"),
     );
 
     expect(view.store.getState().chat.open_thread_ids).toContain("chat-a");
@@ -163,7 +184,6 @@ describe("Toolbar tab parity", () => {
   it("closes the last active chat tab and falls back to the dashboard", async () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "chat", id: "solo-chat" });
-
 
     const initialThreadId = view.store.getState().chat.open_thread_ids[0];
     if (!initialThreadId) throw new Error("missing initial thread");
@@ -178,12 +198,12 @@ describe("Toolbar tab parity", () => {
     });
 
     await userEvent.click(
-      within(getTabWrap("Solo Chat")).getByTitle(
-        "Close tab",
-      ),
+      within(getTabWrap("Solo Chat")).getByTitle("Close tab"),
     );
 
-    expect(view.store.getState().chat.open_thread_ids).not.toContain("solo-chat");
+    expect(view.store.getState().chat.open_thread_ids).not.toContain(
+      "solo-chat",
+    );
     expect(view.store.getState().pages.at(-1)?.name).toBe("history");
   });
 
@@ -195,7 +215,6 @@ describe("Toolbar tab parity", () => {
       taskName: "Task Alpha",
     });
 
-
     dispatchAndRerender(
       view,
       { type: "task", taskId: "task-a", taskName: "Task Alpha" },
@@ -205,9 +224,7 @@ describe("Toolbar tab parity", () => {
     );
 
     await userEvent.click(
-      within(getTabWrap("Task Alpha")).getByTitle(
-        "Close task tab",
-      ),
+      within(getTabWrap("Task Alpha")).getByTitle("Close task tab"),
     );
 
     expect(view.store.getState().tasksUI.openTasks).toEqual([]);
@@ -231,9 +248,15 @@ describe("Toolbar tab parity", () => {
       );
     });
 
-    screen.getByTitle("Middle Chat").dispatchEvent(
-      new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }),
-    );
+    screen
+      .getByTitle("Middle Chat")
+      .dispatchEvent(
+        new MouseEvent("auxclick", {
+          button: 1,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
 
     expect(view.store.getState().chat.open_thread_ids).not.toContain(
       "middle-chat",
@@ -263,13 +286,7 @@ describe("Toolbar tab parity", () => {
 
     const dragged = screen.getByTitle("Chat Beta");
     const target = getTabWrap("Chat Alpha");
-    const data = new Map<string, string>();
-    const dataTransfer = {
-      effectAllowed: "",
-      dropEffect: "",
-      setData: (type: string, value: string) => data.set(type, value),
-      getData: (type: string) => data.get(type) ?? "",
-    };
+    const { dataTransfer } = createDataTransferStub();
 
     const dragStart = new Event("dragstart", { bubbles: true });
     Object.defineProperty(dragStart, "dataTransfer", { value: dataTransfer });
@@ -316,10 +333,72 @@ describe("Toolbar tab parity", () => {
     expect(view.store.getState().pages.at(-1)?.name).toBe(pagesTopBefore);
   });
 
+  it("closes an inactive task tab without switching to it", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({
+      type: "task",
+      taskId: "task-a",
+      taskName: "Task Alpha",
+    });
+
+    dispatchAndRerender(
+      view,
+      { type: "task", taskId: "task-a", taskName: "Task Alpha" },
+      () => {
+        view.store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
+        view.store.dispatch(openTask({ id: "task-b", name: "Task Beta" }));
+      },
+    );
+
+    const pagesLengthBefore = view.store.getState().pages.length;
+    const pagesTopBefore = view.store.getState().pages.at(-1)?.name;
+
+    await userEvent.click(
+      within(getTabWrap("Task Beta")).getByTitle("Close task tab"),
+    );
+
+    expect(
+      view.store.getState().tasksUI.openTasks.map((task) => task.id),
+    ).toEqual(["task-a"]);
+    expect(view.store.getState().pages.length).toBe(pagesLengthBefore);
+    expect(view.store.getState().pages.at(-1)?.name).toBe(pagesTopBefore);
+  });
+
+  it("does not start tab drag from a close button", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "chat", id: "chat-a" });
+
+    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
+    dispatchAndRerender(view, { type: "chat", id: "chat-a" }, () => {
+      if (initialThreadId) {
+        view.store.dispatch({
+          type: "chatThread/closeThread",
+          payload: { id: initialThreadId },
+        });
+      }
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(
+        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
+      );
+    });
+
+    const closeButton = within(getTabWrap("Chat Beta")).getByTitle("Close tab");
+    const { data, dataTransfer } = createDataTransferStub();
+
+    fireEvent.dragStart(closeButton, { dataTransfer });
+
+    expect(data.size).toBe(0);
+    expect(view.store.getState().chat.open_thread_ids).toEqual([
+      "chat-a",
+      "chat-b",
+    ]);
+  });
+
   it("commits and cancels chat title renames from double-click rename mode", async () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "chat", id: "rename-chat" });
-
 
     dispatchAndRerender(view, { type: "chat", id: "rename-chat" }, () => {
       view.store.dispatch(
@@ -327,25 +406,31 @@ describe("Toolbar tab parity", () => {
       );
     });
 
-    await userEvent.dblClick(screen.getByRole("tab", { name: /Original Chat/ }));
+    await userEvent.dblClick(
+      screen.getByRole("tab", { name: /Original Chat/ }),
+    );
     const renameInput = screen.getByDisplayValue("Original Chat");
     await userEvent.clear(renameInput);
     await userEvent.type(renameInput, "Renamed Chat{Enter}");
 
-    expect(view.store.getState().chat.threads["rename-chat"]?.thread.title).toBe(
-      "Renamed Chat",
-    );
-    expect(screen.getByRole("tab", { name: /Renamed Chat/ })).toBeInTheDocument();
+    expect(
+      view.store.getState().chat.threads["rename-chat"]?.thread.title,
+    ).toBe("Renamed Chat");
+    expect(
+      screen.getByRole("tab", { name: /Renamed Chat/ }),
+    ).toBeInTheDocument();
 
     await userEvent.dblClick(screen.getByRole("tab", { name: /Renamed Chat/ }));
     const cancelInput = screen.getByDisplayValue("Renamed Chat");
     await userEvent.clear(cancelInput);
     await userEvent.type(cancelInput, "Cancelled Chat{Escape}");
 
-    expect(view.store.getState().chat.threads["rename-chat"]?.thread.title).toBe(
-      "Renamed Chat",
-    );
-    expect(screen.getByRole("tab", { name: /Renamed Chat/ })).toBeInTheDocument();
+    expect(
+      view.store.getState().chat.threads["rename-chat"]?.thread.title,
+    ).toBe("Renamed Chat");
+    expect(
+      screen.getByRole("tab", { name: /Renamed Chat/ }),
+    ).toBeInTheDocument();
   });
 
   it("commits and cancels task title renames from double-click rename mode", async () => {
@@ -375,7 +460,6 @@ describe("Toolbar tab parity", () => {
       taskName: "Original Task",
     });
 
-
     dispatchAndRerender(
       view,
       {
@@ -390,25 +474,30 @@ describe("Toolbar tab parity", () => {
       },
     );
 
-    await userEvent.dblClick(screen.getByRole("tab", { name: /Original Task/ }));
+    await userEvent.dblClick(
+      screen.getByRole("tab", { name: /Original Task/ }),
+    );
     const renameInput = screen.getByDisplayValue("Original Task");
     await userEvent.clear(renameInput);
     await userEvent.type(renameInput, "Renamed Task{Enter}");
 
     await waitFor(() => expect(patchBody).toEqual({ name: "Renamed Task" }));
 
-    await userEvent.dblClick(screen.getByRole("tab", { name: /Original Task/ }));
+    await userEvent.dblClick(
+      screen.getByRole("tab", { name: /Original Task/ }),
+    );
     const cancelInput = screen.getByDisplayValue("Original Task");
     await userEvent.clear(cancelInput);
     await userEvent.type(cancelInput, "Cancelled Task{Escape}");
 
-    expect(screen.getByRole("tab", { name: /Original Task/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /Original Task/ }),
+    ).toBeInTheDocument();
   });
 
   it("renders unread process notification badges and caps counts above nine", () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
-
 
     dispatchAndRerender(view, { type: "dashboard" }, () => {
       view.store.dispatch(
@@ -416,7 +505,9 @@ describe("Toolbar tab parity", () => {
       );
       for (let i = 1; i <= 10; i += 1) {
         view.store.dispatch(
-          processCompleted(createProcessCompletedEvent("badge-chat", String(i))),
+          processCompleted(
+            createProcessCompletedEvent("badge-chat", String(i)),
+          ),
         );
       }
     });
@@ -514,9 +605,15 @@ describe("Toolbar tab parity", () => {
       );
     });
 
-    expect(screen.getByRole("tab", { name: /Normal Chat/ })).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /buddy-chat/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /Task Owned Chat/ })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /Normal Chat/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /buddy-chat/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Task Owned Chat/ }),
+    ).not.toBeInTheDocument();
   });
   it("wheel-scrolls an overflowing tab container horizontally", () => {
     useToolbarHandlers();

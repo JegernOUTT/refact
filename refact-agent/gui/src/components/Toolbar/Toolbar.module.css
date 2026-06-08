@@ -1,4 +1,5 @@
 .toolbar {
+  container: toolbar / inline-size;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -115,6 +116,7 @@
 
 .tabButton {
   position: relative;
+  z-index: 0;
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
@@ -202,6 +204,7 @@
 
 .tabClose {
   position: absolute;
+  z-index: 2;
   right: var(--rf-space-2);
   top: 50%;
   transform: translateY(-50%);
@@ -217,6 +220,7 @@
   border-radius: var(--rf-radius-chip);
   cursor: pointer;
   opacity: 0;
+  pointer-events: auto;
   transition:
     opacity var(--rf-dur-fast) var(--rf-ease-standard),
     background-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -261,21 +265,27 @@
   }
 }
 
-@media (max-width: 360px) {
-  .toolbar {
-    padding: 0 var(--rf-space-1);
-  }
-
+@container toolbar (max-width: 760px) {
   .engineUrl {
-    max-width: 0;
+    display: none;
   }
+}
 
+@container toolbar (max-width: 640px) {
+  .tabWrap {
+    flex-basis: 148px;
+    max-width: 180px;
+  }
+}
+
+@container toolbar (max-width: 520px) {
   .toolbarDivider {
     margin: 0 var(--rf-space-1);
   }
 
   .tabWrap {
-    flex-basis: 128px;
+    flex-basis: 120px;
+    max-width: 148px;
   }
 
   .tabModeBadge {
@@ -283,14 +293,35 @@
   }
 }
 
-@media (max-width: 240px) {
+@container toolbar (max-width: 440px) {
+  .newTaskAction,
+  .themeToggleAction {
+    display: none;
+  }
+}
+
+@container toolbar (max-width: 320px) {
+  .connectionDivider,
+  .connectionSection {
+    display: none;
+  }
+}
+
+@container toolbar (max-width: 260px) {
   .tabWrap {
     flex-basis: 96px;
+    min-width: 40px;
   }
 
   .tabStatus,
   .tabNotificationBadge {
     display: none;
+  }
+}
+
+@media (max-width: 360px) {
+  .toolbar {
+    padding: 0 var(--rf-space-1);
   }
 }
 

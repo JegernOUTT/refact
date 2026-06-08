@@ -22,6 +22,7 @@ import {
   ComponentProps,
   KeyboardEvent,
   MouseEvent,
+  PointerEvent,
   DragEvent,
   useCallback,
   useEffect,
@@ -131,7 +132,9 @@ function tabDragData(type: "chat" | "task", id: string): string {
   return `${type}:${id}`;
 }
 
-function parseTabDragData(value: string): { type: "chat" | "task"; id: string } | null {
+function parseTabDragData(
+  value: string,
+): { type: "chat" | "task"; id: string } | null {
   const [type, ...idParts] = value.split(":");
   const id = idParts.join(":");
   if ((type === "chat" || type === "task") && id) {
@@ -140,7 +143,9 @@ function parseTabDragData(value: string): { type: "chat" | "task"; id: string } 
   return null;
 }
 
-function taskStatusLabel(status: ComponentProps<typeof StatusDot>["status"]): string {
+function taskStatusLabel(
+  status: ComponentProps<typeof StatusDot>["status"],
+): string {
   if (status === "in_progress" || status === "running") {
     return "In progress...";
   }
@@ -445,6 +450,23 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [handleCloseTab, handleCloseTaskTab],
   );
 
+  const stopClosePointerEvent = useCallback(
+    (
+      event: MouseEvent<HTMLButtonElement> | PointerEvent<HTMLButtonElement>,
+    ) => {
+      event.stopPropagation();
+    },
+    [],
+  );
+
+  const stopCloseDragEvent = useCallback(
+    (event: DragEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [],
+  );
+
   const handleDragStart = useCallback(
     (event: DragEvent, type: "chat" | "task", id: string) => {
       event.dataTransfer.effectAllowed = "move";
@@ -466,7 +488,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const handleDrop = useCallback(
     (event: DragEvent, type: "chat" | "task", id: string) => {
       event.preventDefault();
-      const dragged = parseTabDragData(event.dataTransfer.getData("text/plain"));
+      const dragged = parseTabDragData(
+        event.dataTransfer.getData("text/plain"),
+      );
       if (!dragged || dragged.type !== type || dragged.id === id) return;
       if (type === "chat") {
         dispatch(reorderOpenThreads({ sourceId: dragged.id, targetId: id }));
@@ -534,7 +558,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             }
 
             const taskMeta = tasksList.find((t) => t.id === task.id);
-            const taskStatus = taskMeta ? getTaskStatusDotState(taskMeta) : "idle";
+            const taskStatus = taskMeta
+              ? getTaskStatusDotState(taskMeta)
+              : "idle";
 
             return (
               <div
@@ -568,7 +594,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                       })
                     }
                     onDoubleClick={() => handleTaskRenaming(task.id, taskName)}
-                    onDragStart={(event) => handleDragStart(event, "task", task.id)}
+                    onDragStart={(event) =>
+                      handleDragStart(event, "task", task.id)
+                    }
                     onDragEnd={handleDragEnd}
                     title={taskName}
                   >
@@ -586,6 +614,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   type="button"
                   className={styles.tabClose}
                   title="Close task tab"
+                  draggable={false}
+                  onMouseDown={stopClosePointerEvent}
+                  onPointerDown={stopClosePointerEvent}
+                  onDragStart={stopCloseDragEvent}
                   onClick={(e) => handleCloseTaskTab(e, task.id)}
                 >
                   <Icon icon={X} size="sm" tone="muted" />
@@ -642,12 +674,17 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                     )}
                     onClick={() => goToTab({ type: "chat", id: tab.id })}
                     onAuxClick={(event) =>
-                      handleMiddleClickClose(event, { type: "chat", id: tab.id })
+                      handleMiddleClickClose(event, {
+                        type: "chat",
+                        id: tab.id,
+                      })
                     }
                     onDoubleClick={() =>
                       handleChatThreadRenaming(tab.id, tab.title)
                     }
-                    onDragStart={(event) => handleDragStart(event, "chat", tab.id)}
+                    onDragStart={(event) =>
+                      handleDragStart(event, "chat", tab.id)
+                    }
                     onDragEnd={handleDragEnd}
                     title={tab.title}
                   >
@@ -680,6 +717,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   type="button"
                   className={styles.tabClose}
                   title="Close tab"
+                  draggable={false}
+                  onMouseDown={stopClosePointerEvent}
+                  onPointerDown={stopClosePointerEvent}
+                  onDragStart={stopCloseDragEvent}
                   onClick={(e) => handleCloseTab(e, tab.id)}
                 >
                   <Icon icon={X} size="sm" tone="muted" />
@@ -690,9 +731,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         </KitTabs.List>
       </KitTabs>
 
-      <div className={styles.toolbarDivider} />
+      <div
+        className={classNames(styles.toolbarDivider, styles.connectionDivider)}
+      />
 
-      <div className={styles.toolbarSection}>
+      <div
+        className={classNames(styles.toolbarSection, styles.connectionSection)}
+      >
         <ConnectionStatusIndicator />
         <a
           className={styles.engineUrl}
@@ -710,28 +755,40 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       <div className={styles.toolbarDivider} />
 
-      <div className={styles.toolbarSection}>
-        <ToolbarIconButton label="New Chat" icon={Plus} onClick={onCreateNewChat} />
+      <div className={classNames(styles.toolbarSection, styles.actionSection)}>
+        <ToolbarIconButton
+          label="New Chat"
+          icon={Plus}
+          onClick={onCreateNewChat}
+        />
 
         <ToolbarIconButton
           label="New Task"
           icon={CheckSquare}
+          className={styles.newTaskAction}
           onClick={onCreateNewTask}
         />
       </div>
 
       <div className={styles.toolbarDivider} />
 
-      <div className={styles.toolbarSection}>
+      <div className={classNames(styles.toolbarSection, styles.menuSection)}>
         {host === "web" && (
           <ToolbarIconButton
             label="Toggle Dark Mode"
             icon={isDarkMode ? Moon : Sun}
+            className={styles.themeToggleAction}
             onClick={toggleDarkMode}
           />
         )}
 
-        <Dropdown handleNavigation={handleNavigation} useGhostTrigger />
+        <Dropdown
+          handleNavigation={handleNavigation}
+          isDarkMode={isDarkMode}
+          onCreateNewTask={onCreateNewTask}
+          onToggleDarkMode={host === "web" ? toggleDarkMode : undefined}
+          useGhostTrigger
+        />
       </div>
     </div>
   );
