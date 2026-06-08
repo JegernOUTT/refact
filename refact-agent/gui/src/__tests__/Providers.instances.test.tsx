@@ -7,6 +7,7 @@ import { setUpStore } from "../app/store";
 import { getProviderName } from "../features/Providers/getProviderName";
 import { ProviderCard } from "../features/Providers/ProviderCard";
 import { AddProviderInstanceModal } from "../features/Providers/ProvidersView/AddProviderInstanceModal";
+import { ProvidersView } from "../features/Providers/ProvidersView";
 import {
   nextInstanceId,
   providerBaseOptions,
@@ -395,5 +396,28 @@ describe("Providers provider instances", () => {
     );
 
     store.dispatch(providersApi.util.resetApiState());
+  });
+
+  test("ProvidersView hides Back button when embedded at list level", () => {
+    render(
+      <ProvidersView
+        configuredProviders={[openAiProvider]}
+        backFromProviders={vi.fn()}
+        embedded
+      />,
+      { preloadedState },
+    );
+    expect(screen.queryByRole("button", { name: /back/i })).not.toBeInTheDocument();
+  });
+
+  test("ProvidersView shows Back button when not embedded", () => {
+    render(
+      <ProvidersView
+        configuredProviders={[openAiProvider]}
+        backFromProviders={vi.fn()}
+      />,
+      { preloadedState },
+    );
+    expect(screen.getByRole("button", { name: /back/i })).toBeInTheDocument();
   });
 });

@@ -27,6 +27,7 @@ export const Providers: React.FC<ProvidersProps> = ({ backFromProviders, host, e
         <ProvidersView
           configuredProviders={configuredProvidersData.providers}
           backFromProviders={backFromProviders}
+          embedded={embedded}
         />
       </div>
     </ScrollArea>

@@ -19,11 +19,13 @@ import { selectConfig } from "../../Config/configSlice";
 export type ProvidersViewProps = {
   configuredProviders: ProviderListItem[];
   backFromProviders: () => void;
+  embedded?: boolean;
 };
 
 export const ProvidersView: React.FC<ProvidersViewProps> = ({
   configuredProviders,
   backFromProviders,
+  embedded,
 }) => {
   const dispatch = useAppDispatch();
 
@@ -62,11 +64,13 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
 
   return (
     <div className={styles.view}>
-      <div className={styles.backRow}>
-        <Button variant="ghost" leftIcon={ArrowLeft} onClick={handleBackClick}>
-          Back
-        </Button>
-      </div>
+      {(!embedded || currentProvider) ? (
+        <div className={styles.backRow}>
+          <Button variant="ghost" leftIcon={ArrowLeft} onClick={handleBackClick}>
+            Back
+          </Button>
+        </div>
+      ) : null}
       {!currentProvider ? (
         <ConfiguredProvidersView
           configuredProviders={configuredProviders}
