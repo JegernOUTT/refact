@@ -94,6 +94,10 @@ export interface MarketplaceHubPage {
   name: "marketplace hub";
 }
 
+export interface GeneralSettingsPage {
+  name: "general settings";
+}
+
 export interface BuddyPage {
   name: "buddy";
   draftId?: string;
@@ -130,7 +134,8 @@ export type Page =
   | CommandsMarketplacePage
   | SubagentsMarketplacePage
   | MarketplaceHubPage
-  | BuddyPage;
+  | BuddyPage
+  | GeneralSettingsPage;
 
 export function isIntegrationSetupPage(
   page: Page,
