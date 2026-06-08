@@ -2,9 +2,9 @@
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   position: fixed;
   z-index: 9999;
-  background: var(--color-panel-solid);
-  border: 1px solid var(--rf-border-strong);
-  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-overlay);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-card);
   padding: var(--rf-space-3);
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
@@ -14,7 +14,8 @@
   min-width: 200px;
   max-height: 400px;
   overflow-y: auto;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .toolName {

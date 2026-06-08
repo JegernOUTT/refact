@@ -11,14 +11,74 @@
   font-family: var(--code-font-family);
 }
 
-:where(.radix-themes) :where(.rt-TooltipContent) {
-  background-color: #1a1a1a !important;
-  color: #fcfcfc !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+:where(.radix-themes):where(
+    .rt-BaseMenuContent,
+    .rt-DropdownMenuContent,
+    .rt-HoverCardContent,
+    .rt-PopoverContent,
+    .rt-PopperContent,
+    .rt-SelectContent,
+    .rt-TooltipContent
+  ),
+:where(.radix-themes)
+  :where(
+    .rt-BaseMenuContent,
+    .rt-DropdownMenuContent,
+    .rt-HoverCardContent,
+    .rt-PopoverContent,
+    .rt-PopperContent,
+    .rt-SelectContent,
+    .rt-TooltipContent
+  ) {
+  color: var(--rf-color-fg) !important;
+  background: var(--rf-surface-overlay) !important;
+  border: var(--rf-hairline) solid var(--rf-border-strong) !important;
+  box-shadow: var(--rf-elev-overlay) !important;
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
-:where(.radix-themes[data-appearance="light"]) :where(.rt-TooltipContent) {
-  background-color: #fcfcfc !important;
-  color: #1a1a1a !important;
-  border: 1px solid rgba(0, 0, 0, 0.1) !important;
+:where(.radix-themes[data-host="jetbrains"]):where(
+    .rt-BaseMenuContent,
+    .rt-DropdownMenuContent,
+    .rt-HoverCardContent,
+    .rt-PopoverContent,
+    .rt-PopperContent,
+    .rt-SelectContent,
+    .rt-TooltipContent
+  ),
+:where(.radix-themes[data-host="jetbrains"])
+  :where(
+    .rt-BaseMenuContent,
+    .rt-DropdownMenuContent,
+    .rt-HoverCardContent,
+    .rt-PopoverContent,
+    .rt-PopperContent,
+    .rt-SelectContent,
+    .rt-TooltipContent
+  ) {
+  backdrop-filter: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :where(.radix-themes):where(
+      .rt-BaseMenuContent,
+      .rt-DropdownMenuContent,
+      .rt-HoverCardContent,
+      .rt-PopoverContent,
+      .rt-PopperContent,
+      .rt-SelectContent,
+      .rt-TooltipContent
+    ),
+  :where(.radix-themes)
+    :where(
+      .rt-BaseMenuContent,
+      .rt-DropdownMenuContent,
+      .rt-HoverCardContent,
+      .rt-PopoverContent,
+      .rt-PopperContent,
+      .rt-SelectContent,
+      .rt-TooltipContent
+    ) {
+    backdrop-filter: none;
+  }
 }
