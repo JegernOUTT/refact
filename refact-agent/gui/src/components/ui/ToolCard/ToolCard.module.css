@@ -101,16 +101,6 @@
   background: transparent;
   border: 0;
   border-radius: 0;
-  opacity: 0;
-  transform: translateY(calc(-1 * var(--rf-space-1)));
-  transition:
-    opacity var(--rf-dur-med) var(--rf-ease-standard),
-    transform var(--rf-dur-med) var(--rf-ease-standard);
-}
-
-.root[data-open="true"] .body {
-  opacity: 1;
-  transform: translateY(0);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,0 +1,18 @@
+.toolUsageSummary {
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.toolUsageSummary:hover {
+  filter: brightness(1.3);
+}
+
+.toolUsageSummaryBody {
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolUsageSummary {
+    transition: none;
+  }
+}

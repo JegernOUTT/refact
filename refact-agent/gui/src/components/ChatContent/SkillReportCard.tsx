@@ -95,7 +95,11 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
               onClick={handleCopy}
               title="Copy report"
             >
-              <Icon icon={copied ? Check : Copy} size="sm" tone={copied ? "success" : "muted"} />
+              <Icon
+                icon={copied ? Check : Copy}
+                size="sm"
+                tone={copied ? "success" : "muted"}
+              />
             </button>
             {showSaveButton && (
               <button
@@ -113,6 +117,8 @@ export const SkillReportCard: React.FC<SkillReportCardProps> = ({
       {shouldRender && report && (
         <div
           className={classNames(
+            "rf-expand-grid",
+            isAnimatingOpen && "is-open",
             styles.contentWrapper,
             isAnimatingOpen && styles.contentWrapperOpen,
             !animateContent && styles.noTransition,

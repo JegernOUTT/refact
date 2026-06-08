@@ -90,6 +90,7 @@ import { AgentDiffView } from "./AgentDiffView";
 import { TaskDocumentsView } from "./TaskDocumentsView";
 import { FinalReportView } from "./FinalReportView";
 import { BackgroundAgentCard } from "../BackgroundAgentCard";
+import styles from "./ToolsContent.module.css";
 
 function finalReportSuccess(content: string): boolean | null {
   try {
@@ -1752,13 +1753,19 @@ const ToolUsageSummary = forwardRef<HTMLDivElement, ToolUsageSummaryProps>(
     const currentStep = (subchatLog ?? []).slice(-1)[0];
 
     return (
-      <AnimatedText as="div" weight="light" size="1" animating={waiting}>
+      <AnimatedText
+        as="div"
+        weight="light"
+        size="1"
+        animating={waiting}
+        className={styles.toolUsageSummary}
+      >
         <Flex gap="2" align="end" onClick={onClick} ref={ref} my="2">
           <Flex
             gap="1"
             align="start"
             direction="column"
-            style={{ cursor: "pointer" }}
+            className={styles.toolUsageSummaryBody}
           >
             <Flex gap="2" align="center" justify="center">
               {waiting ? (
