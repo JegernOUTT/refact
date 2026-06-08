@@ -98,10 +98,12 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
             {displayName}
           </span>
           {!isNotConfigured && (
-            <OnOffSwitch
-              isEnabled={integrationAvailability.on_your_laptop}
-              handleClick={handleAvailabilityClick}
-            />
+            <span className={styles.switchWrap}>
+              <OnOffSwitch
+                isEnabled={integrationAvailability.on_your_laptop}
+                handleClick={handleAvailabilityClick}
+              />
+            </span>
           )}
         </span>
       </span>

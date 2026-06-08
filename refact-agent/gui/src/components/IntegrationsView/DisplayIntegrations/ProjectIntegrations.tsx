@@ -1,13 +1,10 @@
-import classNames from "classnames";
-import { Settings } from "lucide-react";
 import { FC } from "react";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
+import { SettingsGroup } from "../../../features/Settings/SettingsSection";
 import { formatPathName } from "../../../utils/formatPathName";
-import { Markdown } from "../../Markdown";
-import { Icon } from "../../ui";
 import { IntegrationCard } from "./IntegrationCard";
 import styles from "./DisplayIntegrations.module.css";
 
@@ -28,24 +25,17 @@ export const ProjectIntegrations: FC<ProjectIntegrationsProps> = ({
 
   return Object.entries(groupedProjectIntegrations).map(
     ([projectPath, integrations], index) => {
-      const formattedProjectName = formatPathName(
-        projectPath,
-        "```.../",
-        "/```",
-      );
+      const formattedProjectName = formatPathName(projectPath, ".../");
 
       return (
-        <section className={styles.section} key={`project-group-${index}`}>
-          <h4 className={classNames(styles.sectionTitle, styles.sectionTitleWrap)}>
-            <Icon icon={Settings} size="md" tone="muted" />
-            In
-            <Markdown>{formattedProjectName}</Markdown>
-            configured {integrations.length}{" "}
-            {integrations.length !== 1 ? "integrations" : "integration"}
-          </h4>
-          <p className={styles.muted}>
-            Folder-specific integrations are local integrations, which are
-            shared only in folder-specific scope.
+        <SettingsGroup
+          title={`In ${formattedProjectName} · ${integrations.length} ${
+            integrations.length !== 1 ? "integrations" : "integration"
+          }`}
+          key={`project-group-${index}`}
+        >
+          <p className={styles.groupDescription}>
+            Folder-specific integrations are shared only in this project scope.
           </p>
           <div className={styles.cards}>
             {integrations.map((integration, subIndex) => (
@@ -56,7 +46,7 @@ export const ProjectIntegrations: FC<ProjectIntegrationsProps> = ({
               />
             ))}
           </div>
-        </section>
+        </SettingsGroup>
       );
     },
   );

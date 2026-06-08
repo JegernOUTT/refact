@@ -10,7 +10,7 @@
   position: fixed;
   top: 0;
   left: 0;
-  z-index: var(--z-fixed, 400);
+  z-index: var(--rf-z-fixed);
 }
 
 .row {
@@ -37,11 +37,10 @@
 
 .name {
   margin: 0;
-  font-size: var(--rf-font-size-md);
-  font-weight: var(--rf-font-weight-semibold);
-  color: var(--rf-text-primary);
   min-width: 0;
   overflow: hidden;
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

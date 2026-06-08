@@ -1,10 +1,9 @@
-import { Settings } from "lucide-react";
 import { FC } from "react";
 import {
   IntegrationWithIconRecord,
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
-import { Icon } from "../../ui";
+import { SettingsGroup } from "../../../features/Settings/SettingsSection";
 import { IntegrationCard } from "./IntegrationCard";
 import styles from "./DisplayIntegrations.module.css";
 
@@ -21,20 +20,18 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
   globalIntegrations,
   handleIntegrationShowUp,
 }) => {
+  const count = globalIntegrations?.length ?? 0;
+
   return (
-    <section className={styles.section}>
-      <h4 className={styles.sectionTitle}>
-        <Icon icon={Settings} size="md" tone="muted" />
-        Globally configured {globalIntegrations?.length ?? 0}{" "}
-        {(globalIntegrations?.length ?? 0) !== 1
-          ? "integrations"
-          : "integration"}
-      </h4>
-      <p className={styles.muted}>
-        Global configurations are shared in your IDE and available for all your
-        projects.
+    <SettingsGroup
+      title={`Globally configured · ${count} ${
+        count !== 1 ? "integrations" : "integration"
+      }`}
+    >
+      <p className={styles.groupDescription}>
+        Global configurations are shared in your IDE and available for all projects.
       </p>
-      {globalIntegrations && (
+      {globalIntegrations ? (
         <div className={styles.cards}>
           {globalIntegrations.map((integration, index) => (
             <IntegrationCard
@@ -44,7 +41,7 @@ export const GlobalIntegrations: FC<GlobalIntegrationsProps> = ({
             />
           ))}
         </div>
-      )}
-    </section>
+      ) : null}
+    </SettingsGroup>
   );
 };

@@ -1,4 +1,6 @@
 .page {
+  width: 100%;
+  min-width: 0;
   padding: 0;
 }
 
@@ -19,10 +21,9 @@
 
 .scrollContent {
   display: flex;
-  width: inherit;
+  width: 100%;
   min-width: 0;
-  height: 100%;
+  min-height: 100%;
   flex-direction: column;
-  justify-content: space-between;
   flex-grow: 1;
 }
