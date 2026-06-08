@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { Badge, Button, Flex, Spinner, Text, TextArea } from "@radix-ui/themes";
 import { integrationsApi } from "../../../services/refact/integrations";
 import { useOpenUrl } from "../../../hooks/useOpenUrl";
+import { Badge, Button, FieldTextarea, Flex, Spinner, Text } from "../../ui";
 import styles from "./MCPOAuth.module.css";
 
 type MCPOAuthProps = {
@@ -127,7 +127,9 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
         <Flex direction="column" gap="2">
           <Flex align="center" justify="between">
             <Flex align="center" gap="2">
-              <Badge aria-label="Authenticated">Authenticated</Badge>
+              <Badge aria-label="Authenticated" tone="success">
+                Authenticated
+              </Badge>
               {expiryDate && (
                 <Text size="1" color="gray">
                   Expires: {expiryDate.toLocaleString()}
@@ -135,8 +137,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
               )}
             </Flex>
             <Button
-              variant="ghost"
-              color="red"
+              variant="danger"
               size="1"
               disabled={isWorking}
               onClick={() => void handleLogout()}
@@ -159,7 +160,7 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
       <div className={styles.container}>
         <Flex direction="column" gap="2">
           <Flex align="center" gap="2">
-            <Spinner size="1" />
+            <Spinner size="sm" />
             <Text size="2" weight="medium">
               Waiting for authorization...
             </Text>
@@ -170,17 +171,17 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
           <Text size="2" weight="medium">
             Or enter the authorization code manually:
           </Text>
-          <TextArea
+          <FieldTextarea
             placeholder="Paste authorization code here..."
             value={code}
-            onChange={(e) => setCode(e.target.value)}
+            onChange={setCode}
             rows={2}
             aria-label="Authorization code"
           />
           <Flex gap="2">
             <Button
               size="2"
-              variant="solid"
+              variant="primary"
               disabled={isWorking || !code.trim()}
               onClick={() => void handleExchangeCode()}
             >
@@ -189,7 +190,6 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
             <Button
               size="2"
               variant="ghost"
-              color="gray"
               onClick={() => void handleCancel()}
             >
               Cancel
@@ -226,14 +226,14 @@ export const MCPOAuth: React.FC<MCPOAuthProps> = ({ configPath }) => {
         <Flex align="center" justify="between">
           <Flex align="center" gap="2">
             {isExpired ? (
-              <Badge>Session expired</Badge>
+              <Badge tone="warning">Session expired</Badge>
             ) : (
-              <Badge>Not authenticated</Badge>
+              <Badge tone="muted">Not authenticated</Badge>
             )}
           </Flex>
           <Button
             size="2"
-            variant="solid"
+            variant="primary"
             disabled={isWorking}
             onClick={() => void handleStartOAuth()}
           >

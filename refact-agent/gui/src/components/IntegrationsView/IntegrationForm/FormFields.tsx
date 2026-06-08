@@ -5,7 +5,6 @@ import {
   IntegrationPrimitive,
 } from "../../../services/refact";
 import { IntegrationFormField } from "../../../features/Integrations";
-import { Grid } from "@radix-ui/themes";
 
 import styles from "./IntegrationForm.module.css";
 import { FC } from "react";
@@ -41,7 +40,7 @@ export const FormFields: FC<FormFieldsProps> = ({
     project_path,
   } = integration;
   return (
-    <Grid gap="2" className={styles.gridContainer}>
+    <div className={styles.gridContainer}>
       {Object.keys(importantFields).map((fieldKey) => (
         <IntegrationFormField
           key={`${fieldKey}-important`}
@@ -67,6 +66,6 @@ export const FormFields: FC<FormFieldsProps> = ({
           onChange={onChange}
         />
       ))}
-    </Grid>
+    </div>
   );
 };

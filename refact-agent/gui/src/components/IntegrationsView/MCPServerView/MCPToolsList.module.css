@@ -10,6 +10,7 @@
 .expandButton {
   background: none;
   border: none;
+  color: var(--rf-color-muted);
   cursor: pointer;
   padding: 0;
   text-align: left;
@@ -20,11 +21,20 @@
 }
 
 .schemaBox {
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--radius-2);
+  box-shadow: var(--rf-elev-panel);
   padding: var(--space-2);
   overflow: auto;
   max-height: 200px;
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .schemaBox {
+    backdrop-filter: none;
+  }
 }
 
 .schemaPre {

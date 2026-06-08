@@ -4,6 +4,7 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-4);
+  padding: var(--rf-space-4);
 }
 
 .text {
@@ -18,6 +19,12 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-2);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .detectedStack {
+    animation: rf-enter-rise var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
 }
 
 .nameRow {
@@ -53,9 +60,19 @@
   cursor: pointer;
 }
 
+.advancedToggle:hover {
+  color: var(--rf-color-fg);
+}
+
 .advancedPanel {
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
   margin-top: var(--rf-space-2);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .advancedPanel {
+    animation: rf-enter-rise var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
 }

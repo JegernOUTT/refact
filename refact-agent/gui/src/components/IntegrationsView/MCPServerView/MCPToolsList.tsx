@@ -1,11 +1,11 @@
 import React, { useState } from "react";
-import { Badge, Box, Flex, Switch, Text } from "@radix-ui/themes";
 import {
   CounterClockwiseClockIcon,
   ExclamationTriangleIcon,
   LockClosedIcon,
 } from "@radix-ui/react-icons";
 import type { MCPToolInfo } from "../../../services/refact/mcpServerInfo";
+import { Badge, Flex, Surface, Switch, Text } from "../../ui";
 import styles from "./MCPToolsList.module.css";
 
 type MCPToolsListProps = {
@@ -19,17 +19,17 @@ const AnnotationBadges: React.FC<{
   return (
     <Flex gap="1" wrap="wrap">
       {annotations.readOnlyHint && (
-        <Badge size="1">
+        <Badge tone="muted">
           <LockClosedIcon /> readOnly
         </Badge>
       )}
       {annotations.destructiveHint && (
-        <Badge size="1">
+        <Badge tone="danger">
           <ExclamationTriangleIcon /> destructive
         </Badge>
       )}
       {annotations.idempotentHint && (
-        <Badge size="1">
+        <Badge tone="muted">
           <CounterClockwiseClockIcon /> idempotent
         </Badge>
       )}
@@ -42,10 +42,9 @@ const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <Box className={styles.toolRow}>
+    <Surface className={styles.toolRow} radius="control" variant="plain">
       <Flex align="start" gap="3">
         <Switch
-          size="1"
           checked={enabled}
           onCheckedChange={setEnabled}
           aria-label={`Toggle ${tool.name}`}
@@ -72,15 +71,15 @@ const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
             </Text>
           </button>
           {expanded && (
-            <Box className={styles.schemaBox}>
+            <div className={styles.schemaBox}>
               <pre className={styles.schemaPre}>
                 {JSON.stringify(tool.input_schema, null, 2)}
               </pre>
-            </Box>
+            </div>
           )}
         </Flex>
       </Flex>
-    </Box>
+    </Surface>
   );
 };
 
@@ -94,7 +93,7 @@ export const MCPToolsList: React.FC<MCPToolsListProps> = ({ tools }) => {
   }
 
   return (
-    <Flex direction="column" gap="1">
+    <Flex className="rf-stagger" direction="column" gap="1">
       {tools.map((tool) => (
         <MCPToolRow key={tool.name} tool={tool} />
       ))}

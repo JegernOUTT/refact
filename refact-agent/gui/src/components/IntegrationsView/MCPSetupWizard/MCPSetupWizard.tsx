@@ -4,7 +4,7 @@ import { useGetAutoNameMutation } from "../../../services/refact/mcpMarketplace"
 import { NotConfiguredIntegrationWithIconRecord } from "../../../services/refact";
 import { validateSnakeCase } from "../../../utils/validateSnakeCase";
 import { createProjectLabelsWithConflictMarkers } from "../../../utils/createProjectLabelsWithConflictMarkers";
-import { FieldText, Switch, Button } from "../../ui";
+import { FieldText, Switch, Button, Surface } from "../../ui";
 import { IntegrationPathField } from "../IntermediateIntegration/IntegrationPathField";
 import styles from "./MCPSetupWizard.module.css";
 
@@ -145,7 +145,12 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   const canSubmit = !!input.trim() && !!suggestedName && !nameError;
 
   return (
-    <div className={styles.root}>
+    <Surface
+      animated="rise"
+      className={styles.root}
+      radius="card"
+      variant="glass"
+    >
       <p className={styles.text}>
         Enter the command or URL for your MCP server:
       </p>
@@ -230,6 +235,6 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
       >
         Continue with setup
       </Button>
-    </div>
+    </Surface>
   );
 };

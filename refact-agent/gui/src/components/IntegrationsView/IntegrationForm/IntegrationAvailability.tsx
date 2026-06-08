@@ -1,7 +1,9 @@
-import { Flex, Switch } from "@radix-ui/themes";
 import type { FC } from "react";
 import { CustomLabel } from "../CustomFieldsAndWidgets";
 import { toPascalCase } from "../../../utils/toPascalCase";
+import { Flex, Switch } from "../../ui";
+
+import styles from "./IntegrationForm.module.css";
 
 type IntegrationAvailabilityProps = {
   fieldName: string;
@@ -26,11 +28,10 @@ export const IntegrationAvailability: FC<IntegrationAvailabilityProps> = ({
   };
 
   return (
-    <Flex style={{ marginBottom: "0.75rem" }}>
+    <Flex className={styles.availabilityToggle}>
       <Flex align="center" justify="between" gap="3">
         <Switch
           id={`switch-${fieldName}`}
-          size="2"
           checked={value}
           onCheckedChange={handleSwitchChange}
         />

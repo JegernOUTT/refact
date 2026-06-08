@@ -48,6 +48,11 @@
 }
 
 .gridContainer {
+  display: grid;
   grid-template-columns: repeat(1, minmax(0, 1fr));
   gap: 10px;
+}
+
+.availabilityToggle {
+  margin-bottom: var(--rf-space-3);
 }
