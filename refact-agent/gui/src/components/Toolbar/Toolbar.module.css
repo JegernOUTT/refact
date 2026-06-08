@@ -8,7 +8,14 @@
   gap: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
-  background: transparent;
+  background: var(--rf-surface-glass);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+:global(.radix-themes[data-host="jetbrains"]).toolbar {
+  backdrop-filter: none;
 }
 
 .toolbarSection {
@@ -87,12 +94,13 @@
   align-items: center;
   width: max-content;
   min-width: min-content;
-  height: 100%;
+  height: calc(100% - var(--rf-space-1));
   padding: 0;
   overflow: visible;
-  background: transparent;
-  border: 0;
-  border-radius: 0;
+  background: color-mix(in oklab, var(--rf-surface-glass), transparent 36%);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: inset 0 var(--rf-hairline) 0 var(--rf-border);
 }
 
 .tabList > span[aria-hidden="true"] {
@@ -128,7 +136,7 @@
   margin: var(--rf-space-1) var(--rf-hairline);
   overflow: hidden;
   color: var(--rf-color-muted);
-  background: var(--rf-surface-1);
+  background: transparent;
   border: 0;
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
@@ -142,7 +150,7 @@
 
 .tabButton:hover {
   color: var(--rf-color-fg);
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-1);
 }
 
 .tabButton:focus-visible {
@@ -153,12 +161,24 @@
 .tabButtonActive,
 .tabButton[data-state="active"] {
   color: var(--rf-color-fg);
-  background: transparent;
+  background: var(--rf-surface-1);
 }
 
 .tabButtonActive:hover,
 .tabButton[data-state="active"]:hover {
-  background: transparent;
+  background: var(--rf-surface-2);
+}
+
+.tabButtonActive::after,
+.tabButton[data-state="active"]::after {
+  content: "";
+  position: absolute;
+  right: var(--rf-space-3);
+  bottom: 0;
+  left: var(--rf-space-3);
+  height: 2px;
+  background: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
 }
 
 .tabStatus {
@@ -263,6 +283,22 @@
   .tabClose {
     opacity: 1;
   }
+}
+
+@supports not (background: color-mix(in oklab, black, transparent)) {
+  .tabList {
+    background: var(--rf-surface-glass);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .toolbar {
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .toolbar {
+  backdrop-filter: none;
 }
 
 @container toolbar (max-width: 760px) {

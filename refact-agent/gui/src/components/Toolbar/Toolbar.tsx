@@ -116,7 +116,7 @@ const ToolbarIconButton = ({
     <Tooltip.Trigger asChild>
       <IconButton
         aria-label={label}
-        className={classNames(styles.iconButton, className)}
+        className={classNames(styles.iconButton, "rf-pressable", className)}
         disabled={disabled}
         icon={icon}
         onClick={onClick}
@@ -581,6 +581,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                     className={classNames(
                       styles.tabButton,
                       "rf-enter",
+                      "rf-pressable",
                       isActive && styles.tabButtonActive,
                     )}
                     onClick={() =>
@@ -670,6 +671,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                     className={classNames(
                       styles.tabButton,
                       "rf-enter",
+                      "rf-pressable",
                       isActive && styles.tabButtonActive,
                     )}
                     onClick={() => goToTab({ type: "chat", id: tab.id })}

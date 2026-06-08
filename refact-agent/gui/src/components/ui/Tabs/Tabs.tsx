@@ -47,7 +47,7 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
     <TabsPrimitive.Trigger
       {...props}
       ref={ref}
-      className={classNames(styles.trigger, className)}
+      className={classNames(styles.trigger, "rf-pressable", className)}
     >
       {children}
     </TabsPrimitive.Trigger>
