@@ -1,17 +1,23 @@
 .configList {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   gap: var(--rf-space-2);
 }
 
 .itemRows {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   gap: var(--rf-space-1);
 }
 
 .configRow {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   min-height: var(--rf-control-h-lg);
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -78,10 +84,17 @@
 
 .kindTabs {
   width: 100%;
+  max-width: 100%;
+}
+
+.kindTabs > * {
+  min-width: 0;
 }
 
 .listPanel {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   max-height: min(calc(100dvh - 15 * var(--rf-space-4)), calc(16 * var(--rf-control-h-lg)));
   overflow-y: auto;
@@ -89,6 +102,8 @@
 
 .editorPanel {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   gap: var(--rf-space-3);
 }
@@ -99,11 +114,14 @@
 
 .configEditor {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   gap: var(--rf-space-3);
 }
 
 .configTitle {
+  flex: 1 1 min(100%, 14rem);
   min-width: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
@@ -114,6 +132,7 @@
 
 .editorHeader {
   display: flex;
+  max-width: 100%;
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
@@ -124,19 +143,32 @@
 .editorActions,
 .scopeRow {
   display: flex;
+  max-width: 100%;
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--rf-space-2);
 }
+.editorActions {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+}
+
 
 .formContainer {
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
+}
+.formContainer,
+.formContainer * {
+  box-sizing: border-box;
 }
 
 .yamlEditor {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   min-height: calc(10 * var(--rf-control-h-lg));
   padding: var(--rf-space-3);
@@ -160,6 +192,7 @@
 }
 
 .errorBanner {
+  max-width: calc(100% - 2 * var(--rf-space-3));
   margin: 0 var(--rf-space-3);
   padding: var(--rf-space-2) var(--rf-space-3);
   background: var(--rf-surface-1);
@@ -179,6 +212,7 @@
 
 .callout {
   display: flex;
+  max-width: 100%;
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
@@ -192,6 +226,8 @@
 
 .dialogBody {
   display: flex;
+  max-width: 100%;
+  min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
   padding: var(--rf-space-2) 0;
@@ -199,6 +235,8 @@
 
 .scopeField {
   display: flex;
+  max-width: 100%;
+  min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-1);
 }
@@ -210,15 +248,45 @@
 
 .scopeOption {
   display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
   align-items: center;
   gap: var(--rf-space-1);
 }
 
 .dialogFooter {
   display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--rf-space-2);
   margin-top: var(--rf-space-4);
+}
+
+.errorBanner,
+.errorText,
+.mutedText,
+.callout > span,
+.scopeLabel,
+.scopeOption,
+.dialogFooter {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (width <= 420px) {
+  .configTitle {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (width <= 720px) {
+  .kindTabs {
+    grid-auto-flow: row;
+  }
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -246,5 +314,12 @@
   .listPanel {
     max-height: none;
     overflow-y: visible;
+  }
+
+  .editorHeader,
+  .editorActions,
+  .scopeRow,
+  .dialogFooter {
+    justify-content: flex-start;
   }
 }

@@ -5,6 +5,8 @@
 .tableEditorStack,
 .extraFieldStack {
   display: flex;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
@@ -17,6 +19,8 @@
 .messageItem,
 .modelDefaultsSection {
   display: flex;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
@@ -30,6 +34,7 @@
 .addRow,
 .iconGroup {
   display: flex;
+  max-width: 100%;
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
@@ -41,6 +46,9 @@
 }
 
 .iconGroup {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   margin-left: auto;
 }
 
@@ -62,8 +70,10 @@
 
 .promptTextareaExpand {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
-  flex: 1;
+  max-width: 100%;
+  min-width: 0;
   min-height: 100px;
+  flex: 1;
   resize: none;
   overflow-y: auto;
 }
@@ -74,6 +84,8 @@
 
 .chipList {
   display: flex;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   flex-wrap: wrap;
   gap: var(--rf-space-2);
@@ -81,10 +93,15 @@
 
 .addRow {
   position: relative;
+  flex-wrap: wrap;
+}
+
+.addRow > * {
+  min-width: 0;
 }
 
 .addRow > :first-child {
-  flex: 1;
+  flex: 1 1 12rem;
 }
 
 .suggestions {
@@ -92,7 +109,7 @@
   position: absolute;
   top: calc(100% + var(--rf-space-1));
   left: 0;
-  right: 5rem;
+  right: 0;
   z-index: var(--rf-z-popover);
   max-height: 150px;
   overflow-y: auto;
@@ -121,8 +138,11 @@
 .formTabContent,
 .formTabContentExpanding {
   display: flex;
-  flex: 1;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 0;
+  flex: 1;
   flex-direction: column;
   gap: var(--rf-space-3);
 }
@@ -138,21 +158,34 @@
 
 .expandingField {
   display: flex;
-  flex: 1;
+  max-width: 100%;
+  min-width: 0;
   min-height: 100px;
+  flex: 1;
   overflow: hidden;
 }
 
 .switchGrid,
 .fieldGrid {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   gap: var(--rf-space-3);
-  grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+}
+
+.switchGrid > *,
+.fieldGrid > * {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .parameterGrid {
+  container-type: inline-size;
   display: flex;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-2);
@@ -160,10 +193,29 @@
 
 .parameterRow {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   align-items: end;
   gap: var(--rf-space-2);
-  grid-template-columns: minmax(8rem, 0.8fr) minmax(7rem, 0.6fr) minmax(10rem, 1fr) minmax(5rem, auto) auto;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, auto) auto;
+}
+
+.parameterRow > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.messageContent,
+.promptTextarea,
+.promptTextareaExpand,
+.extraFieldsEditor,
+.sectionTitle,
+.emptyText,
+.suggestionItem {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .sectionTitle {
@@ -179,9 +231,67 @@
   font-size: var(--rf-text-1);
 }
 
-@media (max-width: 560px) {
+@media (width <= 300px) {
+  .addRow {
+    align-items: stretch;
+  }
+
+  .addRow > :first-child,
+  .addRow > :nth-child(2) {
+    flex: 1 1 100%;
+  }
+}
+
+@media (width <= 520px) {
+  .switchGrid,
+  .fieldGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (width <= 420px) {
+  .messageToolbar {
+    align-items: stretch;
+  }
+
+  .messageToolbar > :first-child,
+  .iconGroup {
+    flex: 1 1 100%;
+  }
+
+  .iconGroup {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+}
+
+@media (width <= 720px) {
+  .formTabContent {
+    overflow-y: visible;
+  }
+}
+
+@container (max-width: 620px) {
+  .parameterRow {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: stretch;
+  }
+
+  .parameterRow > :nth-child(3) {
+    grid-column: 1 / -1;
+  }
+}
+
+@container (max-width: 380px) {
   .parameterRow {
     grid-template-columns: minmax(0, 1fr);
-    align-items: stretch;
+  }
+
+  .parameterRow > :nth-child(3) {
+    grid-column: auto;
+  }
+
+  .parameterRow > :last-child {
+    justify-self: start;
   }
 }
