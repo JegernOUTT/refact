@@ -4,10 +4,39 @@
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  gap: var(--rf-space-2);
   padding: var(--rf-space-2);
   box-sizing: border-box;
   overflow: hidden;
+}
+
+.tabs {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.tabList {
+  flex-shrink: 0;
+}
+
+.tabContent {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  padding-top: var(--rf-space-2);
+  overflow: hidden;
+}
+
+.memoriesPanel {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.1fr);
+  gap: var(--rf-space-2);
 }
 
 .editorSection,
@@ -19,18 +48,93 @@
   border-radius: var(--rf-radius-card);
 }
 
-.editorSection {
-  flex: 1 1 34%;
-}
-
 .listSection {
-  flex: 0 1 30%;
+  display: flex;
+  flex-direction: column;
 }
 
 .graphSection {
   display: flex;
-  flex: 1 1 36%;
+  width: 100%;
+  height: 100%;
   flex-direction: column;
+}
+
+.controls {
+  display: flex;
+  flex-shrink: 0;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.sortControl,
+.tagFilters {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.sortControl {
+  justify-content: space-between;
+}
+
+.controlLabel {
+  flex-shrink: 0;
+  color: var(--rf-color-muted);
+  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sortTrigger {
+  width: min(180px, 100%);
+}
+
+.tagFilters {
+  align-items: flex-start;
+}
+
+.tagList {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+}
+
+.tagButton,
+.clearTagsButton {
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tagButton:focus-visible,
+.clearTagsButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-offset);
+  border-radius: var(--rf-radius-chip);
+}
+
+.clearTagsButton {
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+  border-radius: var(--rf-radius-chip);
+  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.clearTagsButton:hover {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
 }
 
 .error {
@@ -45,4 +149,23 @@
 
 .error p {
   margin: 0;
+}
+
+@media (width <= 820px) {
+  .memoriesPanel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+  }
+}
+
+@media (width <= 520px) {
+  .sortControl,
+  .tagFilters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sortTrigger {
+    width: 100%;
+  }
 }

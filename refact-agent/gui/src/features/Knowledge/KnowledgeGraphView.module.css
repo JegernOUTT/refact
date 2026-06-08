@@ -3,14 +3,18 @@
   min-width: 0;
   width: 100%;
   height: 100%;
-  min-height: 0;
+  min-height: 420px;
+  flex: 1;
   overflow: hidden;
 }
 
 .graphCanvas {
+  display: block;
   min-width: 0;
   width: 100%;
   height: 100%;
+  min-height: 0;
+  flex: 1;
 }
 
 .loadingState,
@@ -19,6 +23,7 @@
   width: 100%;
   height: 100%;
   min-width: 0;
+  min-height: 320px;
   place-items: center;
   align-content: center;
   gap: var(--rf-space-3);

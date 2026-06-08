@@ -33,6 +33,7 @@ interface KnowledgeGraphViewProps {
   selectedId: string | null;
   onSelectId: (id: string | null) => void;
   isLoading?: boolean;
+  isActive?: boolean;
 }
 
 const isDocNode = (node: KnowledgeGraphNode): boolean => {
@@ -49,6 +50,7 @@ export function KnowledgeGraphView({
   selectedId,
   onSelectId,
   isLoading = false,
+  isActive = true,
 }: KnowledgeGraphViewProps) {
   const cyRef = useRef<Cytoscape.Core | null>(null);
   const layoutRef = useRef<Cytoscape.Layouts | null>(null);
@@ -161,6 +163,56 @@ export function KnowledgeGraphView({
     ];
   }, [colors]);
 
+  const runLayout = useCallback(() => {
+    if (!cyRef.current || elements.length === 0) return null;
+
+    if (layoutRef.current) {
+      layoutRef.current.stop();
+    }
+
+    const layout = cyRef.current.layout({
+      name: "fcose",
+      quality: "default",
+      randomize: false,
+      animate: true,
+      animationDuration: 500,
+      fit: true,
+      padding: 50,
+      nodeRepulsion: 4500,
+      idealEdgeLength: 100,
+      edgeElasticity: 0.45,
+      nestingFactor: 0.1,
+      gravity: 0.25,
+      numIter: 2500,
+      tile: true,
+      tilingPaddingVertical: 10,
+      tilingPaddingHorizontal: 10,
+    } as Cytoscape.LayoutOptions);
+
+    layoutRef.current = layout;
+    layout.run();
+    return layout;
+  }, [elements]);
+
+  const resizeAndFit = useCallback(
+    (rerunLayout = false) => {
+      const cy = cyRef.current;
+      const container = containerRef.current;
+      if (!cy || !container) return;
+
+      const { width, height } = container.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return;
+
+      cy.resize();
+      if (rerunLayout) {
+        runLayout();
+      } else if (elements.length > 0) {
+        cy.fit(cy.elements(), 50);
+      }
+    },
+    [elements.length, runLayout],
+  );
+
   const handleNodeClick = useCallback(
     (nodeId: string) => {
       onSelectId(nodeId);
@@ -223,36 +275,48 @@ export function KnowledgeGraphView({
   useEffect(() => {
     if (!cyRef.current || !cyReady || elements.length === 0) return;
 
-    if (layoutRef.current) {
-      layoutRef.current.stop();
-    }
-
-    const layout = cyRef.current.layout({
-      name: "fcose",
-      quality: "default",
-      randomize: false,
-      animate: true,
-      animationDuration: 500,
-      fit: true,
-      padding: 50,
-      nodeRepulsion: 4500,
-      idealEdgeLength: 100,
-      edgeElasticity: 0.45,
-      nestingFactor: 0.1,
-      gravity: 0.25,
-      numIter: 2500,
-      tile: true,
-      tilingPaddingVertical: 10,
-      tilingPaddingHorizontal: 10,
-    } as Cytoscape.LayoutOptions);
-
-    layoutRef.current = layout;
-    layout.run();
+    const layout = runLayout();
 
     return () => {
-      layout.stop();
+      layout?.stop();
     };
-  }, [elements, cyReady]);
+  }, [cyReady, elements.length, runLayout]);
+
+  useEffect(() => {
+    if (!cyReady || !isActive) return;
+
+    const timeoutId = window.setTimeout(() => resizeAndFit(true), 80);
+    return () => window.clearTimeout(timeoutId);
+  }, [cyReady, isActive, resizeAndFit]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !cyReady) return;
+
+    let timeoutId: number | undefined;
+    const scheduleResize = () => {
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+      timeoutId = window.setTimeout(() => resizeAndFit(), 80);
+    };
+
+    if (typeof ResizeObserver === "undefined") {
+      scheduleResize();
+      return () => {
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      };
+    }
+
+    const observer = new ResizeObserver(scheduleResize);
+    observer.observe(container);
+    scheduleResize();
+
+    return () => {
+      observer.disconnect();
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [cyReady, resizeAndFit]);
 
   useEffect(() => {
     if (!cyRef.current || !cyReady) return;
@@ -298,6 +362,7 @@ export function KnowledgeGraphView({
             cyReadyRef.current = true;
             setCyReady(true);
             cy.resize();
+            window.setTimeout(() => resizeAndFit(true), 0);
           }
         }}
       />

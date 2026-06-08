@@ -38,7 +38,7 @@ vi.mock("react-cytoscapejs", () => ({
         off: vi.fn(),
         resize: vi.fn(),
         zoom: vi.fn(() => 1),
-        center: vi.fn(),
+        fit: vi.fn(),
         layout: vi.fn(() => ({
           run: vi.fn(),
           stop: vi.fn(),
