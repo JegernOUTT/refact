@@ -1,23 +1,10 @@
-.page {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  gap: var(--rf-space-3);
-  padding: var(--rf-space-3);
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-2);
-  min-width: 0;
+.tabs {
+  width: min(100%, 520px);
 }
 
 .tabLabel {
   display: inline-flex;
+  min-width: 0;
   align-items: center;
   gap: var(--rf-space-1);
 }
@@ -25,16 +12,12 @@
 .actionsStack {
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-3);
   min-width: 0;
 }
 
 .panelContainer {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  flex: 1;
   min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 .dialogActions {
@@ -42,4 +25,15 @@
   justify-content: flex-end;
   gap: var(--rf-space-2);
   margin-top: var(--rf-space-4);
+}
+
+@media (width <= 520px) {
+  .tabs {
+    width: 100%;
+  }
+
+  .tabLabel {
+    flex-direction: column;
+    gap: 0;
+  }
 }

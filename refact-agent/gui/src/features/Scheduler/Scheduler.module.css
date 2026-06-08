@@ -1,44 +1,9 @@
-.panel {
-  height: 100%;
-  min-width: 0;
-  overflow: auto;
-  padding: var(--rf-space-4);
-  color: var(--rf-color-fg);
-  font-family: var(--rf-font-ui);
-}
-
-.header {
+.sectionStack {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
   gap: var(--rf-space-3);
-  align-items: center;
-  margin-bottom: var(--rf-space-4);
 }
 
-.titleBlock,
-.sectionHeader,
-.sectionStack,
-.scheduleCell {
-  display: grid;
-  min-width: 0;
-  gap: var(--rf-space-1);
-}
-
-.title,
-.sectionTitle {
-  margin: 0;
-  color: var(--rf-color-fg);
-  font-family: var(--rf-font-ui);
-  line-height: var(--rf-line-tight);
-}
-
-.title {
-  font-size: var(--rf-text-5);
-  font-weight: 700;
-  text-align: center;
-}
-
-.subtitle,
 .sectionHint,
 .lastFired,
 .scheduleCron {
@@ -46,20 +11,6 @@
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
   line-height: var(--rf-line);
-}
-
-.subtitle {
-  text-align: center;
-}
-
-.content {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--rf-space-4);
-}
-
-.card {
-  padding: var(--rf-space-4);
 }
 
 .form {
@@ -129,6 +80,12 @@
   text-align: right;
 }
 
+.scheduleCell {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+}
+
 .scheduleTitle {
   overflow: hidden;
   color: var(--rf-color-fg);
@@ -144,19 +101,6 @@
 }
 
 @media (width <= 640px) {
-  .panel {
-    padding: var(--rf-space-3);
-  }
-
-  .header {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .title,
-  .subtitle {
-    text-align: left;
-  }
-
   .inlineFields,
   .toggles {
     grid-template-columns: minmax(0, 1fr);

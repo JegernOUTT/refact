@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import { Button, FieldError, Surface } from "../../components/ui";
+import { Button, FieldError } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   type CreateCronRequest,
@@ -13,6 +13,7 @@ import {
   selectCurrentThreadId,
   selectThreadMode,
 } from "../Chat/Thread/selectors";
+import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
 import { CronCreateForm } from "./CronCreateForm";
 import { selectLastCronFireAt } from "./schedulerSlice";
 import { CronList } from "./CronList";
@@ -70,55 +71,55 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack, embedded
     void handleDelete(id);
   };
 
-  return (
-    <div className={styles.panel}>
-      <div className={styles.header}>
-        {!embedded && (
-          <Button variant="soft" onClick={onBack} leftIcon={ArrowLeft}>
-            Back
-          </Button>
-        )}
-        <div className={styles.titleBlock}>
-          <h1 className={styles.title}>Scheduler</h1>
-          <p className={styles.subtitle}>Create, review, and delete cron prompts.</p>
-        </div>
-        <Button variant="soft" onClick={() => void refetch()} leftIcon={RefreshCw}>
-          Refresh
+  const actions = (
+    <>
+      {!embedded && (
+        <Button variant="soft" onClick={onBack} leftIcon={ArrowLeft}>
+          Back
         </Button>
-      </div>
-      <div className={styles.content}>
-        <CronCreateForm
-          onSubmit={handleCreate}
-          isLoading={createState.isLoading}
-          error={createState.error}
-          taskCount={tasks.length}
-        />
-        <Surface className={styles.card} variant="surface-1">
-          <div className={styles.sectionStack}>
-            <div className={styles.listHeader}>
-              <div className={styles.sectionHeader}>
-                <h2 className={styles.sectionTitle}>Scheduled prompts</h2>
-                <p className={styles.sectionHint}>Human schedule, next fire, scope, and delete actions.</p>
-              </div>
-              {lastCronFireAt ? (
-                <span className={styles.lastFired}>
-                  Last fired {new Date(lastCronFireAt).toLocaleTimeString()}
-                </span>
-              ) : null}
-            </div>
-            {error ? <FieldError>{schedulerErrorMessage(error)}</FieldError> : null}
-            {deleteState.error ? (
-              <FieldError>{schedulerErrorMessage(deleteState.error)}</FieldError>
+      )}
+      <Button variant="soft" onClick={() => void refetch()} leftIcon={RefreshCw}>
+        Refresh
+      </Button>
+    </>
+  );
+
+  return (
+    <SettingsSection
+      title="Scheduler"
+      description="Create, review, and delete cron prompts."
+      actions={actions}
+    >
+      <CronCreateForm
+        onSubmit={handleCreate}
+        isLoading={createState.isLoading}
+        error={createState.error}
+        taskCount={tasks.length}
+      />
+      <SettingsGroup title="Scheduled prompts">
+        <div className={styles.sectionStack}>
+          <div className={styles.listHeader}>
+            <p className={styles.sectionHint}>
+              Human schedule, next fire, scope, and delete actions.
+            </p>
+            {lastCronFireAt ? (
+              <span className={styles.lastFired}>
+                Last fired {new Date(lastCronFireAt).toLocaleTimeString()}
+              </span>
             ) : null}
-            <CronList
-              tasks={sortedTasks}
-              isLoading={isFetching}
-              deletingId={deletingId}
-              onDelete={deleteTask}
-            />
           </div>
-        </Surface>
-      </div>
-    </div>
+          {error ? <FieldError>{schedulerErrorMessage(error)}</FieldError> : null}
+          {deleteState.error ? (
+            <FieldError>{schedulerErrorMessage(deleteState.error)}</FieldError>
+          ) : null}
+          <CronList
+            tasks={sortedTasks}
+            isLoading={isFetching}
+            deletingId={deletingId}
+            onDelete={deleteTask}
+          />
+        </div>
+      </SettingsGroup>
+    </SettingsSection>
   );
 };

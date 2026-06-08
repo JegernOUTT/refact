@@ -2,12 +2,12 @@ import React, { useState, useCallback } from "react";
 import { ArrowLeft } from "lucide-react";
 
 import { PageWrapper } from "../../components/PageWrapper";
-import { Spinner } from "../../components/Spinner";
 import {
   Button,
   Dialog,
   EmptyState,
   FieldError,
+  LoadingState,
   SegmentedControl,
 } from "../../components/ui";
 import type { Config } from "../Config/configSlice";
@@ -26,6 +26,7 @@ import {
 } from "./components";
 import styles from "./Extensions.module.css";
 import { push } from "../Pages/pagesSlice";
+import { SettingsSection } from "../Settings/SettingsSection";
 
 export type ExtensionsTab = "skills" | "commands" | "hooks";
 
@@ -143,15 +144,34 @@ export const Extensions: React.FC<ExtensionsProps> = ({
 
   const hasProjectRoot = registry?.has_project_root ?? false;
 
-  if (isLoading) return <Spinner spinning />;
+  if (isLoading) {
+    const loadingContent = (
+      <SettingsSection
+        title="Extensions"
+        description="Manage reusable skills, slash commands, and automation hooks."
+      >
+        <LoadingState label="Loading extensions registry" />
+      </SettingsSection>
+    );
+    return embedded ? loadingContent : (
+      <PageWrapper host={host} noPadding>
+        {loadingContent}
+      </PageWrapper>
+    );
+  }
 
   if (isError) {
     const errorContent = (
-      <EmptyState
-        action={<Button onClick={() => void refetch()}>Retry</Button>}
-        title="Failed to load extensions registry"
-        variant="full"
-      />
+      <SettingsSection
+        title="Extensions"
+        description="Manage reusable skills, slash commands, and automation hooks."
+      >
+        <EmptyState
+          action={<Button onClick={() => void refetch()}>Retry</Button>}
+          title="Failed to load extensions registry"
+          variant="full"
+        />
+      </SettingsSection>
     );
     return embedded ? errorContent : (
       <PageWrapper host={host} noPadding>
@@ -160,43 +180,50 @@ export const Extensions: React.FC<ExtensionsProps> = ({
     );
   }
 
+  const tabs = (
+    <SegmentedControl
+      className={styles.tabs}
+      value={activeTab}
+      onValueChange={handleTabChange}
+      size="sm"
+      options={[
+        {
+          value: "skills",
+          label: (
+            <span className={styles.tabLabel}>
+              Skills <span>({registry?.skills.length ?? 0})</span>
+            </span>
+          ),
+        },
+        {
+          value: "commands",
+          label: (
+            <span className={styles.tabLabel}>
+              Commands <span>({registry?.slash_commands.length ?? 0})</span>
+            </span>
+          ),
+        },
+        { value: "hooks", label: "Hooks" },
+      ]}
+    />
+  );
+
+  const actions = !embedded ? (
+    <Button variant="soft" onClick={backFromExtensions} leftIcon={ArrowLeft}>
+      Back
+    </Button>
+  ) : null;
+
   const inner = (
-    <div className={`${styles.page} rf-enter`}>
-      {!embedded && (
-        <div className={styles.header}>
-          <Button variant="ghost" onClick={backFromExtensions}>
-            <ArrowLeft size={15} />
-            Back
-          </Button>
-        </div>
-      )}
-
-        <SegmentedControl
-          value={activeTab}
-          onValueChange={handleTabChange}
-          size="sm"
-          options={[
-            {
-              value: "skills",
-              label: (
-                <span className={styles.tabLabel}>
-                  Skills <span>({registry?.skills.length ?? 0})</span>
-                </span>
-              ),
-            },
-            {
-              value: "commands",
-              label: (
-                <span className={styles.tabLabel}>
-                  Commands <span>({registry?.slash_commands.length ?? 0})</span>
-                </span>
-              ),
-            },
-            { value: "hooks", label: "Hooks" },
-          ]}
-        />
-
-        {deleteError && <FieldError>{deleteError}</FieldError>}
+    <>
+      <SettingsSection
+        title="Extensions"
+        description="Manage reusable skills, slash commands, and automation hooks."
+        actions={actions}
+        subNav={tabs}
+        width="wide"
+      >
+        {deleteError ? <FieldError>{deleteError}</FieldError> : null}
 
         <div className={styles.panelContainer}>
           {activeTab === "skills" &&
@@ -253,46 +280,47 @@ export const Extensions: React.FC<ExtensionsProps> = ({
 
           {activeTab === "hooks" && <HooksEditor />}
         </div>
+      </SettingsSection>
 
-        <CreateItemDialog
-          type={createDialogType}
-          open={createDialogOpen}
-          onOpenChange={setCreateDialogOpen}
-          onCreated={(name) => {
-            if (createDialogType === "skill") setSelectedSkill(name);
-            else setSelectedCommand(name);
-            void refetch();
-          }}
-          hasProjectRoot={hasProjectRoot}
-        />
+      <CreateItemDialog
+        type={createDialogType}
+        open={createDialogOpen}
+        onOpenChange={setCreateDialogOpen}
+        onCreated={(name) => {
+          if (createDialogType === "skill") setSelectedSkill(name);
+          else setSelectedCommand(name);
+          void refetch();
+        }}
+        hasProjectRoot={hasProjectRoot}
+      />
 
-        <Dialog
-          open={deleteTarget !== null}
-          onOpenChange={(open) => {
-            if (!open) setDeleteTarget(null);
-          }}
-        >
-          <Dialog.Content maxWidth="400px">
-            <Dialog.Title>Confirm Delete</Dialog.Title>
-            <Dialog.Description>
-              {`Delete ${deleteTarget?.type ?? ""} "${
-                deleteTarget?.name ?? ""
-              }"?`}
-            </Dialog.Description>
-            <div className={styles.dialogActions}>
-              <Dialog.Close asChild>
-                <Button variant="soft">Cancel</Button>
-              </Dialog.Close>
-              <Dialog.Close asChild>
-                <Button variant="danger" onClick={() => void confirmDelete()}>
-                  Delete
-                </Button>
-              </Dialog.Close>
-            </div>
-          </Dialog.Content>
-        </Dialog>
-      </div>
-    );
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <Dialog.Content maxWidth="400px">
+          <Dialog.Title>Confirm Delete</Dialog.Title>
+          <Dialog.Description>
+            {`Delete ${deleteTarget?.type ?? ""} "${
+              deleteTarget?.name ?? ""
+            }"?`}
+          </Dialog.Description>
+          <div className={styles.dialogActions}>
+            <Dialog.Close asChild>
+              <Button variant="soft">Cancel</Button>
+            </Dialog.Close>
+            <Dialog.Close asChild>
+              <Button variant="danger" onClick={() => void confirmDelete()}>
+                Delete
+              </Button>
+            </Dialog.Close>
+          </div>
+        </Dialog.Content>
+      </Dialog>
+    </>
+  );
 
   if (embedded) return inner;
   return <PageWrapper host={host} noPadding>{inner}</PageWrapper>;
