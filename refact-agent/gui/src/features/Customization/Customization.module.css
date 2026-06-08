@@ -1,29 +1,114 @@
 .configList {
-  padding: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1);
 }
 
-.configItem {
+.itemRows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.configRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
   cursor: pointer;
-  transition: background-color 0.15s;
-  padding: var(--space-2);
+  min-width: 0;
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
-.configItem:hover {
-  background-color: var(--gray-a3);
+.configRow:hover {
+  background-color: var(--rf-surface-1);
 }
 
-.configItem.selected {
-  background-color: var(--accent-a4);
-  border-color: var(--accent-8);
+.configRow.selected {
+  background-color: var(--rf-color-accent-soft);
+}
+
+.rowInfo {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.rowTitle {
+  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.rowId {
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deleteBtn {
+  flex-shrink: 0;
+  color: var(--rf-color-danger);
+}
+
+.emptyText {
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-muted);
+  padding: var(--rf-space-1) var(--rf-space-2);
 }
 
 .configEditor {
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  gap: var(--rf-space-2);
+}
+
+.configTitle {
+  font: 600 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-fg);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editorHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.editorActions {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.scopeRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
 }
 
 .formContainer {
@@ -37,29 +122,19 @@
 .yamlEditor {
   flex: 1;
   min-height: 300px;
-  font-family: var(--code-font-family);
-  font-size: var(--font-size-1);
-  padding: var(--space-2);
-  border: 1px solid var(--gray-6);
-  border-radius: var(--radius-2);
-  background-color: var(--gray-2);
-  color: var(--gray-12);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  padding: var(--rf-space-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background-color: var(--rf-surface-1);
+  color: var(--rf-color-fg);
   resize: vertical;
 }
 
 .yamlEditor:focus {
   outline: none;
-  border-color: var(--accent-8);
-}
-
-.editorHeader {
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.scopeRow {
-  flex-wrap: wrap;
-  gap: var(--space-1);
+  border-color: var(--rf-color-accent);
 }
 
 .panelContainer {
@@ -84,26 +159,78 @@
   overflow: hidden;
 }
 
-.backButton {
-  margin-bottom: var(--space-2);
+.backRow {
+  padding-bottom: var(--rf-space-2);
+}
+
+.backToListBtn {
+  margin-bottom: var(--rf-space-2);
   flex-shrink: 0;
 }
 
-.compactConfigItem {
-  cursor: pointer;
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-2);
-  transition: background-color 0.15s;
+.marketplaceRow {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--rf-space-2);
+}
+
+.errorBanner {
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-radius: var(--rf-radius-ctl);
+  border: 1px solid var(--rf-color-danger);
+  background-color: var(--rf-surface-1);
+  margin-bottom: var(--rf-space-2);
+}
+
+.errorText {
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-danger);
+}
+
+.mutedText {
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-muted);
+}
+
+.callout {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-radius: var(--rf-radius-ctl);
+  border: 1px solid var(--rf-color-warning);
+  background-color: var(--rf-surface-1);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-fg);
 }
 
-.compactConfigItem:hover {
-  background-color: var(--gray-a3);
+.dialogBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  padding: var(--rf-space-2) 0;
 }
 
-.compactConfigItem.selected {
-  background-color: var(--accent-a4);
+.scopeField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}
+
+.scopeLabel {
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-muted);
+}
+
+.scopeOption {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.dialogFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
+  margin-top: var(--rf-space-4);
 }
