@@ -285,6 +285,7 @@ describe("BuddyHome", () => {
     render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-home-hero")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
     expect(screen.getByText("Project setup")).toBeInTheDocument();
