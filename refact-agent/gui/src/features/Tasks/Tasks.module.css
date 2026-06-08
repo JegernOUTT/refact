@@ -1,7 +1,7 @@
 .kanbanBoard {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
-  gap: var(--rf-space-4);
+  gap: var(--rf-space-3);
   align-items: stretch;
   padding: var(--rf-space-3);
   overflow-x: auto;
@@ -13,9 +13,9 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-3);
   position: relative;
-  padding: var(--rf-space-2);
+  padding: var(--rf-space-3);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);
@@ -189,10 +189,10 @@
 .taskListRoot {
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-4);
+  gap: var(--rf-space-3);
   height: 100%;
   min-width: 0;
-  padding: var(--rf-space-4);
+  padding: var(--rf-space-3);
   overflow: hidden;
 }
 
@@ -400,7 +400,7 @@
 
 .panelsSection {
   display: flex;
-  gap: var(--rf-space-4);
+  gap: var(--rf-space-3);
   padding: var(--rf-space-2) var(--rf-space-3);
   min-height: 120px;
   max-height: 240px;
@@ -601,8 +601,8 @@
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
-  padding: var(--rf-space-2);
-  margin-top: var(--rf-space-1);
+  padding: var(--rf-space-3);
+  margin-top: var(--rf-space-2);
   max-height: min(240px, calc(100dvh - var(--rf-space-6) * 4));
   overflow-y: auto;
 }
