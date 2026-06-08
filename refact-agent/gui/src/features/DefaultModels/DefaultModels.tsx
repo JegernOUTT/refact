@@ -9,7 +9,7 @@ import {
   ModelSamplingParams,
   type SamplingValues,
 } from "../../components/ModelSamplingParams";
-import { Button, Icon, SettingItem, SettingsShell } from "../../components/ui";
+import { Button, Icon, SettingItem, SettingsShell, Tabs } from "../../components/ui";
 import type { SettingsShellSection } from "../../components/ui";
 
 import {
@@ -44,35 +44,41 @@ type ModelTypeKey =
 
 const MODEL_TYPE_LABELS: Record<
   ModelTypeKey,
-  { title: string; description: string; icon: SettingsShellSection["icon"] }
+  { title: string; shortLabel: string; description: string; icon: SettingsShellSection["icon"] }
 > = {
   chat: {
     title: "Default Chat Model",
+    shortLabel: "Chat",
     description: "The primary model used for chat conversations.",
     icon: MessageCircle,
   },
   chat_model_2: {
     title: "Chat Model 2",
+    shortLabel: "Chat 2",
     description: "Secondary chat model slot for future chat workflows.",
     icon: MessagesSquare,
   },
   task_planner_agent_model: {
     title: "Task Planner Agent Model",
+    shortLabel: "Planner",
     description: "Model used by task management when spawning task agents.",
     icon: Bot,
   },
   chat_light: {
     title: "Light Chat Model",
+    shortLabel: "Light",
     description: "Fast, lightweight model for quick responses and subagents.",
     icon: Zap,
   },
   chat_thinking: {
     title: "Thinking Model",
+    shortLabel: "Thinking",
     description: "Reasoning-focused model for complex analysis tasks.",
     icon: Brain,
   },
   chat_buddy: {
     title: "Companion Model",
+    shortLabel: "Companion",
     description: "Model used by your companion for background tasks and suggestions.",
     icon: Rabbit,
   },
@@ -311,70 +317,111 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     return <PageWrapper host={host}>{errorContent}</PageWrapper>;
   }
 
-
   const activeKey = MODEL_TYPE_KEYS.includes(activeSection) ? activeSection : "chat";
 
-  const mainContent = (
-    <div className={styles.page}>
-      <div className={styles.frame}>
-        <div className={styles.toolbar}>
-          {!embedded && (
-            <Button
-              variant={host === "vscode" && !tabbed ? "soft" : "ghost"}
-              leftIcon={ArrowLeft}
-              onClick={backFromDefaultModels}
-            >
-              Back
-            </Button>
-          )}
-          <div className={styles.actions}>
-            <Button
-              onClick={() => void handleSave()}
-              disabled={!hasChanges || isSaving}
-              loading={isSaving}
-              variant="primary"
-            >
-              Save Changes
-            </Button>
-          </div>
-        </div>
-
-        {draftExpired ? (
-          <div className={`${styles.notice} ${styles.noticeAccent} rf-enter`}>
-            <Icon icon={Info} size="sm" tone="accent" />
-            <span>Draft expired</span>
-          </div>
-        ) : null}
-
-        {draft ? <BuddyDraftPreview draft={draft} /> : null}
-
-        {saveError ? (
-          <div className={`${styles.notice} ${styles.noticeDanger} rf-enter`}>
-            <Icon icon={AlertTriangle} size="sm" tone="danger" />
-            <span>{saveError}</span>
-          </div>
-        ) : null}
-
-        <SettingsShell
-          className={styles.shell}
-          sections={sections}
-          active={activeKey}
-          onSectionChange={(sectionId) => setActiveSection(sectionId as ModelTypeKey)}
-          title="Default Models"
-          description="Configure which models to use by default for different purposes. These settings apply globally across all modes."
+  const toolbar = (
+    <div className={styles.toolbar}>
+      {!embedded && (
+        <Button
+          variant={host === "vscode" && !tabbed ? "soft" : "ghost"}
+          leftIcon={ArrowLeft}
+          onClick={backFromDefaultModels}
         >
-          <ModelTypeSection
-            key={activeKey}
-            typeKey={activeKey}
-            config={localDefaults[activeKey] ?? {}}
-            capsDefault={capsDefaults[activeKey]}
-            onChange={handleModelTypeChange}
-          />
-        </SettingsShell>
+          Back
+        </Button>
+      )}
+      <div className={styles.actions}>
+        <Button
+          onClick={() => void handleSave()}
+          disabled={!hasChanges || isSaving}
+          loading={isSaving}
+          variant="primary"
+        >
+          Save Changes
+        </Button>
       </div>
     </div>
   );
 
-  if (embedded) return mainContent;
-  return <PageWrapper host={host}>{mainContent}</PageWrapper>;
+  const notices = (
+    <>
+      {draftExpired ? (
+        <div className={`${styles.notice} ${styles.noticeAccent} rf-enter`}>
+          <Icon icon={Info} size="sm" tone="accent" />
+          <span>Draft expired</span>
+        </div>
+      ) : null}
+      {draft ? <BuddyDraftPreview draft={draft} /> : null}
+      {saveError ? (
+        <div className={`${styles.notice} ${styles.noticeDanger} rf-enter`}>
+          <Icon icon={AlertTriangle} size="sm" tone="danger" />
+          <span>{saveError}</span>
+        </div>
+      ) : null}
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <div className={styles.page}>
+        <div className={styles.frame}>
+          {toolbar}
+          {notices}
+          <Tabs
+            value={activeKey}
+            onValueChange={(v) => setActiveSection(v as ModelTypeKey)}
+            className={styles.roleTabs}
+          >
+            <Tabs.List
+              activeIndex={MODEL_TYPE_KEYS.indexOf(activeKey)}
+              itemCount={MODEL_TYPE_KEYS.length}
+            >
+              {MODEL_TYPE_KEYS.map((key) => (
+                <Tabs.Trigger key={key} value={key}>
+                  {MODEL_TYPE_LABELS[key].shortLabel}
+                </Tabs.Trigger>
+              ))}
+            </Tabs.List>
+            {MODEL_TYPE_KEYS.map((key) => (
+              <Tabs.Content key={key} value={key} className={styles.roleTabContent}>
+                <ModelTypeSection
+                  typeKey={key}
+                  config={localDefaults[key] ?? {}}
+                  capsDefault={capsDefaults[key]}
+                  onChange={handleModelTypeChange}
+                />
+              </Tabs.Content>
+            ))}
+          </Tabs>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <PageWrapper host={host}>
+      <div className={styles.page}>
+        <div className={styles.frame}>
+          {toolbar}
+          {notices}
+          <SettingsShell
+            className={styles.shell}
+            sections={sections}
+            active={activeKey}
+            onSectionChange={(sectionId) => setActiveSection(sectionId as ModelTypeKey)}
+            title="Default Models"
+            description="Configure which models to use by default for different purposes. These settings apply globally across all modes."
+          >
+            <ModelTypeSection
+              key={activeKey}
+              typeKey={activeKey}
+              config={localDefaults[activeKey] ?? {}}
+              capsDefault={capsDefaults[activeKey]}
+              onChange={handleModelTypeChange}
+            />
+          </SettingsShell>
+        </div>
+      </div>
+    </PageWrapper>
+  );
 };

@@ -99,6 +99,15 @@
   padding-top: var(--rf-space-2);
 }
 
+.roleTabs {
+  min-width: 0;
+}
+
+.roleTabContent {
+  padding-top: var(--rf-space-4);
+  min-width: 0;
+}
+
 @media (width <= 640px) {
   .page {
     padding: var(--rf-space-3);
