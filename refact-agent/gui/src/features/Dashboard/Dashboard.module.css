@@ -58,6 +58,11 @@
 }
 
 .splitContainer {
+  --dashboard-row-padding-block: var(--rf-space-1);
+  --dashboard-row-padding-inline: var(--rf-space-2);
+  --dashboard-row-tree-indent: 16px;
+  --dashboard-header-toggle-width: 74px;
+
   flex: 1;
   display: flex;
   flex-direction: column;

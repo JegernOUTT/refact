@@ -3,7 +3,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  padding: var(--dashboard-row-padding-block) var(--dashboard-row-padding-inline);
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   background: transparent;
@@ -171,7 +171,7 @@
 
 .treeIndent {
   display: inline-block;
-  width: 16px;
+  width: var(--dashboard-row-tree-indent);
   flex-shrink: 0;
 }
 

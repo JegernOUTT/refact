@@ -47,9 +47,9 @@
 
 .headerToggle {
   justify-content: flex-start;
-  flex: 0 1 auto;
+  flex: 0 0 var(--dashboard-header-toggle-width);
   padding-inline: 0;
-  min-width: 0;
+  min-width: var(--dashboard-header-toggle-width);
   color: var(--rf-color-muted);
 }
 
@@ -88,7 +88,7 @@
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--rf-space-2) var(--rf-space-1);
+  padding: var(--rf-space-2) var(--dashboard-row-padding-inline) var(--rf-space-1);
   flex-shrink: 0;
   min-width: 0;
 }
