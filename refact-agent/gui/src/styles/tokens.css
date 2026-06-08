@@ -6,14 +6,14 @@
 [data-appearance="dark"] {
   --rf-bg: #0c0d0f;
   --rf-color-fg: rgba(255, 255, 255, 0.92);
-  --rf-color-muted: rgba(255, 255, 255, 0.54);
-  --rf-color-faint: rgba(255, 255, 255, 0.34);
+  --rf-color-muted: rgba(255, 255, 255, 0.48);
+  --rf-color-faint: rgba(255, 255, 255, 0.28);
   --rf-surface-1: rgba(255, 255, 255, 0.035);
-  --rf-surface-2: rgba(255, 255, 255, 0.06);
-  --rf-surface-3: rgba(255, 255, 255, 0.09);
+  --rf-surface-2: rgba(255, 255, 255, 0.045);
+  --rf-surface-3: rgba(255, 255, 255, 0.07);
   --rf-surface-overlay: rgba(18, 20, 25, 0.82);
-  --rf-border: rgba(255, 255, 255, 0.08);
-  --rf-border-strong: rgba(255, 255, 255, 0.14);
+  --rf-border: rgba(255, 255, 255, 0.06);
+  --rf-border-strong: rgba(255, 255, 255, 0.11);
   --rf-color-accent: var(--accent-9, #6f8bff);
   --rf-color-accent-soft: rgba(111, 139, 255, 0.16);
   --rf-color-success: #5fae8b;
