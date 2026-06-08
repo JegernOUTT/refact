@@ -100,6 +100,33 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Dropdown navigation", () => {
+  it("clicking Settings dispatches push({name:'general settings'})", async () => {
+    useToolbarHandlers();
+    const { store } = renderToolbar({ type: "dashboard" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
+
+    expect(store.getState().pages.at(-1)?.name).toBe("general settings");
+  });
+
+  it("clicking Extension Settings sends openSettings postMessage", async () => {
+    useToolbarHandlers();
+    const postMessageSpy = vi.spyOn(window, "postMessage");
+
+    renderToolbar({ type: "dashboard" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Extension Settings" }));
+
+    expect(postMessageSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "ide/openSettings" }),
+      "*",
+    );
+  });
+});
+
 describe("Toolbar tab parity", () => {
   it("closes the active chat tab and falls back to the first remaining chat tab", async () => {
     useToolbarHandlers();

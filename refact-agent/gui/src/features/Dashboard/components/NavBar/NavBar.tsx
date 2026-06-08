@@ -1,13 +1,5 @@
 import React, { useCallback } from "react";
-import {
-  BarChart3,
-  Box,
-  Gauge,
-  Plug,
-  Rocket,
-  Settings,
-  Timer,
-} from "lucide-react";
+import { BarChart3, Box, Settings } from "lucide-react";
 import { Icon } from "../../../../components/ui";
 import { DashboardText as Text } from "../DashboardPrimitives";
 import { useAppDispatch } from "../../../../hooks";
@@ -27,29 +19,9 @@ const NAV_ITEMS: NavItem[] = [
     page: { name: "stats dashboard" },
   },
   {
-    icon: Plug,
-    label: "Integrations",
-    page: { name: "integrations page" },
-  },
-  {
     icon: Settings,
-    label: "Providers",
-    page: { name: "providers page" },
-  },
-  {
-    icon: Rocket,
-    label: "Modes",
-    page: { name: "customization" },
-  },
-  {
-    icon: Timer,
-    label: "Scheduler",
-    page: { name: "scheduler" },
-  },
-  {
-    icon: Gauge,
-    label: "Extensions",
-    page: { name: "extensions", tab: "skills" },
+    label: "Settings",
+    page: { name: "general settings" },
   },
   {
     icon: Box,

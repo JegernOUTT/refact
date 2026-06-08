@@ -4,14 +4,9 @@ import {
   Bug,
   FileText,
   Gauge,
-  Keyboard,
   Menu as MenuIcon,
-  Puzzle,
-  Rocket,
   Settings,
   SlidersHorizontal,
-  Sparkles,
-  Star,
 } from "lucide-react";
 
 import { selectHost, type Config } from "../../features/Config/configSlice";
@@ -23,13 +18,8 @@ import styles from "./Toolbar.module.css";
 export type DropdownNavigationOptions =
   | "stats"
   | "settings"
-  | "hot keys"
-  | "integrations"
-  | "providers"
   | "knowledge graph"
-  | "customization"
-  | "default models"
-  | "extensions"
+  | "general settings"
   | "";
 
 type DropdownProps = {
@@ -73,29 +63,14 @@ export const Dropdown: React.FC<DropdownProps> = ({
       </Tooltip>
 
       <Menu.Content>
-        <Menu.Item onSelect={() => handleNavigation("integrations")}>
-          <Icon icon={Puzzle} size="sm" /> Set up Agent Integrations
-        </Menu.Item>
-        <Menu.Item onSelect={() => handleNavigation("providers")}>
-          <Icon icon={SlidersHorizontal} size="sm" /> Configure Providers
-        </Menu.Item>
-        <Menu.Item onSelect={() => handleNavigation("default models")}>
-          <Icon icon={Star} size="sm" /> Default Models
+        <Menu.Item onSelect={() => handleNavigation("general settings")}>
+          <Icon icon={Settings} size="sm" /> Settings
         </Menu.Item>
         <Menu.Item onSelect={() => handleNavigation("knowledge graph")}>
           <Icon icon={Gauge} size="sm" /> Manage Knowledge
         </Menu.Item>
         <Menu.Item onSelect={() => handleNavigation("settings")}>
-          <Icon icon={Settings} size="sm" /> {refactProductType} Settings
-        </Menu.Item>
-        <Menu.Item onSelect={() => handleNavigation("hot keys")}>
-          <Icon icon={Keyboard} size="sm" /> IDE Hotkeys
-        </Menu.Item>
-        <Menu.Item onSelect={() => handleNavigation("customization")}>
-          <Icon icon={Rocket} size="sm" /> Customize Modes & Agents
-        </Menu.Item>
-        <Menu.Item onSelect={() => handleNavigation("extensions")}>
-          <Icon icon={Sparkles} size="sm" /> Skills, Commands & Hooks
+          <Icon icon={SlidersHorizontal} size="sm" /> {refactProductType} Settings
         </Menu.Item>
         <Menu.Item onSelect={() => void openPrivacyFile()}>
           <Icon icon={FileText} size="sm" /> Edit privacy.yaml

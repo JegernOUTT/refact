@@ -237,7 +237,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const { data: modesData } = useGetChatModesQuery(undefined);
   const { data: tasksList = [] } = useListTasksQuery(undefined);
 
-  const { openSettings, openHotKeys } = useEventsBusForIDE();
+  const { openSettings } = useEventsBusForIDE();
   const [createTask] = useCreateTaskMutation();
 
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
@@ -252,28 +252,18 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     (to: DropdownNavigationOptions | "chat") => {
       if (to === "settings") {
         openSettings();
-      } else if (to === "hot keys") {
-        openHotKeys();
+      } else if (to === "general settings") {
+        dispatch(push({ name: "general settings" }));
       } else if (to === "stats") {
         dispatch(push({ name: "stats dashboard" }));
-      } else if (to === "integrations") {
-        dispatch(push({ name: "integrations page" }));
-      } else if (to === "providers") {
-        dispatch(push({ name: "providers page" }));
       } else if (to === "knowledge graph") {
         dispatch(push({ name: "knowledge graph" }));
-      } else if (to === "customization") {
-        dispatch(push({ name: "customization" }));
-      } else if (to === "default models") {
-        dispatch(push({ name: "default models" }));
-      } else if (to === "extensions") {
-        dispatch(push({ name: "extensions" }));
       } else if (to === "chat") {
         dispatch(popBackTo({ name: "history" }));
         dispatch(push({ name: "chat" }));
       }
     },
-    [dispatch, openSettings, openHotKeys],
+    [dispatch, openSettings],
   );
 
   const onCreateNewChat = useCallback(() => {
