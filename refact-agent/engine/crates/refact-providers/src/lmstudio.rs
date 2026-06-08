@@ -213,6 +213,8 @@ available:
             chat_endpoint: format!("{}/v1/chat/completions", base_url),
             completion_endpoint: format!("{}/v1/completions", base_url),
             embedding_endpoint: format!("{}/v1/embeddings", base_url),
+            completion_endpoint_style: String::new(),
+            embedding_endpoint_style: String::new(),
             api_key: self.api_key.clone(),
             auth_token: String::new(),
             tokenizer_api_key: String::new(),

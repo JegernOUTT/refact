@@ -5,10 +5,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use refact_core::llm_types::WireFormat;
+use refact_core::llm_types::{
+    CompletionEndpointStyle, EmbeddingEndpointStyle, EmbeddingModelRecord, WireFormat,
+};
 use crate::config::resolve_env_var;
 use crate::traits::{
-    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    CustomModelConfig, ModelPricing, ModelSource, ProviderModel, ProviderRuntime, ProviderTrait,
     extra_headers_mapping_to_hash_map, parse_custom_models, parse_enabled_models,
     parse_extra_headers_value, set_model_enabled_impl,
 };
@@ -19,6 +21,10 @@ pub struct CustomProvider {
     pub chat_endpoint: String,
     pub completion_endpoint: String,
     pub embedding_endpoint: String,
+    #[serde(default)]
+    pub completion_endpoint_style: String,
+    #[serde(default)]
+    pub embedding_endpoint_style: String,
     pub wire_format: Option<WireFormat>,
     pub enabled: bool,
     #[serde(default)]
@@ -29,6 +35,136 @@ pub struct CustomProvider {
     pub enabled_models: Vec<String>,
     #[serde(default)]
     pub custom_models: HashMap<String, CustomModelConfig>,
+    #[serde(default)]
+    pub completion_models: HashMap<String, CustomModelConfig>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+}
+
+impl CustomProvider {
+    fn has_chat_role(&self) -> bool {
+        !self.chat_endpoint.is_empty() && !self.enabled_models.is_empty()
+    }
+
+    fn has_completion_role(&self) -> bool {
+        !self.completion_endpoint.is_empty() && !self.completion_models.is_empty()
+    }
+
+    fn has_embedding_role(&self) -> bool {
+        !self.embedding_endpoint.is_empty() && self.embedding_model.is_some()
+    }
+
+    fn role_count(&self) -> usize {
+        self.enabled_models.len()
+            + self.completion_models.len()
+            + usize::from(self.embedding_model.is_some())
+    }
+
+    fn runtime_completion_models(&self) -> Vec<ProviderModel> {
+        self.completion_models
+            .iter()
+            .map(|(model_id, config)| custom_model_to_provider_model(model_id, config, true))
+            .collect()
+    }
+
+    fn runtime_embedding_model(&self) -> Option<ProviderModel> {
+        self.embedding_model
+            .as_deref()
+            .map(embedding_model_to_provider_model)
+    }
+}
+
+fn parse_custom_models_from_key(
+    yaml: &serde_yaml::Value,
+    key: &str,
+    target: &mut HashMap<String, CustomModelConfig>,
+) -> Result<(), String> {
+    let Some(value) = yaml.get(key) else {
+        return Ok(());
+    };
+
+    target.clear();
+    if value.is_null() {
+        return Ok(());
+    }
+    if let Some(models) = value.as_sequence() {
+        for model in models.iter().filter_map(|v| v.as_str()) {
+            let model = model.trim();
+            if !model.is_empty() {
+                target.insert(model.to_string(), CustomModelConfig::default());
+            }
+        }
+        return Ok(());
+    }
+    if let Some(custom) = value.as_mapping() {
+        for (model_key, value) in custom {
+            if let Some(model_id) = model_key.as_str() {
+                let config: CustomModelConfig = serde_yaml::from_value(value.clone())
+                    .map_err(|e| format!("invalid {key} entry '{model_id}': {e}"))?;
+                target.insert(model_id.to_string(), config);
+            }
+        }
+        return Ok(());
+    }
+
+    Err(format!(
+        "invalid {key}: expected mapping, sequence, or null"
+    ))
+}
+
+fn parse_embedding_model_name(value: &serde_yaml::Value) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(name) = value.as_str() {
+        let name = name.trim();
+        return Ok((!name.is_empty()).then(|| name.to_string()));
+    }
+    let record: EmbeddingModelRecord = serde_yaml::from_value(value.clone())
+        .map_err(|e| format!("invalid embedding_model: {e}"))?;
+    let name = record.base.name.trim();
+    Ok((!name.is_empty()).then(|| name.to_string()))
+}
+
+fn custom_model_to_provider_model(
+    id: &str,
+    config: &CustomModelConfig,
+    enabled: bool,
+) -> ProviderModel {
+    ProviderModel {
+        id: id.to_string(),
+        base_name: id.to_string(),
+        enabled,
+        n_ctx: config.n_ctx.unwrap_or(4096),
+        supports_tools: config.supports_tools.unwrap_or(false),
+        supports_multimodality: config.supports_multimodality.unwrap_or(false),
+        supports_reasoning: config
+            .reasoning_effort_options
+            .as_ref()
+            .map(|options| options.join(",")),
+        supports_agent: config.supports_tools.unwrap_or(false),
+        wire_format_override: None,
+        endpoint_override: None,
+        user_configured: true,
+        removable: true,
+    }
+}
+
+fn embedding_model_to_provider_model(id: &str) -> ProviderModel {
+    ProviderModel {
+        id: id.to_string(),
+        base_name: id.to_string(),
+        enabled: true,
+        n_ctx: 8191,
+        supports_tools: false,
+        supports_multimodality: false,
+        supports_reasoning: None,
+        supports_agent: false,
+        wire_format_override: None,
+        endpoint_override: None,
+        user_configured: true,
+        removable: true,
+    }
 }
 
 #[async_trait]
@@ -88,11 +224,33 @@ fields:
     f_placeholder: "https://your-server.com/v1/completions"
     f_label: "Completion Endpoint"
     f_extra: true
+  completion_endpoint_style:
+    f_type: string
+    f_desc: "Completion API style: openai_completions or openai_chat_completions"
+    f_default: "openai_completions"
+    f_label: "Completion Endpoint Style"
+    f_extra: true
+  completion_models:
+    f_type: string_long
+    f_desc: "Explicit completion model ids for code completion/autocomplete"
+    f_label: "Completion Models"
+    f_extra: true
   embedding_endpoint:
     f_type: string_long
     f_desc: "Embeddings endpoint URL (optional)"
     f_placeholder: "https://your-server.com/v1/embeddings"
     f_label: "Embedding Endpoint"
+    f_extra: true
+  embedding_endpoint_style:
+    f_type: string
+    f_desc: "Embedding API style: openai or ollama_native"
+    f_default: "openai"
+    f_label: "Embedding Endpoint Style"
+    f_extra: true
+  embedding_model:
+    f_type: string
+    f_desc: "Explicit embedding model id for VecDB/RAG"
+    f_label: "Embedding Model"
     f_extra: true
   wire_format:
     f_type: string
@@ -135,6 +293,34 @@ available:
         if let Some(embedding_endpoint) = yaml.get("embedding_endpoint").and_then(|v| v.as_str()) {
             self.embedding_endpoint = embedding_endpoint.to_string();
         }
+        if let Some(style) = yaml
+            .get("completion_endpoint_style")
+            .and_then(|v| v.as_str())
+        {
+            if style.trim().is_empty() {
+                self.completion_endpoint_style.clear();
+            } else {
+                CompletionEndpointStyle::from_config(style, "completion_endpoint_style")?;
+                self.completion_endpoint_style = style.to_string();
+            }
+        }
+        if let Some(style) = yaml
+            .get("embedding_endpoint_style")
+            .and_then(|v| v.as_str())
+        {
+            if style.trim().is_empty() {
+                self.embedding_endpoint_style.clear();
+            } else {
+                EmbeddingEndpointStyle::from_config(style, "embedding_endpoint_style")?;
+                self.embedding_endpoint_style = style.to_string();
+            }
+        }
+        if yaml.get("completion_models").is_some() {
+            parse_custom_models_from_key(&yaml, "completion_models", &mut self.completion_models)?;
+        }
+        if let Some(model) = yaml.get("embedding_model") {
+            self.embedding_model = parse_embedding_model_name(model)?;
+        }
         if let Some(wire_format) = yaml.get("wire_format") {
             match serde_yaml::from_value(wire_format.clone()) {
                 Ok(wf) => self.wire_format = Some(wf),
@@ -172,42 +358,66 @@ available:
             "chat_endpoint": self.chat_endpoint,
             "completion_endpoint": self.completion_endpoint,
             "embedding_endpoint": self.embedding_endpoint,
+            "completion_endpoint_style": self.completion_endpoint_style,
+            "embedding_endpoint_style": self.embedding_endpoint_style,
             "wire_format": self.wire_format,
             "enabled": self.enabled,
             "supports_cache_control": self.supports_cache_control,
             "extra_headers": redacted_headers,
             "enabled_models": self.enabled_models,
-            "custom_models": self.custom_models
+            "custom_models": self.custom_models,
+            "completion_models": self.completion_models,
+            "embedding_model": self.embedding_model
         })
     }
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
         let api_key = resolve_env_var(&self.api_key, "", "custom api_key");
+        if !self.completion_endpoint_style.is_empty() {
+            CompletionEndpointStyle::from_config(
+                &self.completion_endpoint_style,
+                "completion_endpoint_style",
+            )?;
+        }
+        if !self.embedding_endpoint_style.is_empty() {
+            EmbeddingEndpointStyle::from_config(
+                &self.embedding_endpoint_style,
+                "embedding_endpoint_style",
+            )?;
+        }
+        let configured =
+            self.has_chat_role() || self.has_completion_role() || self.has_embedding_role();
 
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
-            enabled: self.enabled
-                && !self.chat_endpoint.is_empty()
-                && !self.enabled_models.is_empty(),
+            enabled: self.enabled && configured,
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: self.chat_endpoint.clone(),
             completion_endpoint: self.completion_endpoint.clone(),
             embedding_endpoint: self.embedding_endpoint.clone(),
+            completion_endpoint_style: self.completion_endpoint_style.clone(),
+            embedding_endpoint_style: self.embedding_endpoint_style.clone(),
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: self.extra_headers.clone(),
             supports_cache_control: self.supports_cache_control,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
+            completion_models: self.runtime_completion_models(),
+            embedding_model: self.runtime_embedding_model(),
         })
     }
 
     fn has_credentials(&self) -> bool {
         !self.chat_endpoint.is_empty()
+            || !self.completion_endpoint.is_empty()
+            || !self.embedding_endpoint.is_empty()
+    }
+
+    fn selected_model_count(&self) -> usize {
+        self.role_count()
     }
 
     fn model_source(&self) -> ModelSource {
@@ -449,5 +659,152 @@ extra_headers: |
         let schema = CustomProvider::default().provider_schema();
         assert!(schema.contains("extra_headers:"));
         assert!(schema.contains("f_label: \"Extra Headers\""));
+    }
+
+    #[test]
+    fn completion_only_custom_provider_runtime_is_enabled() {
+        let provider = CustomProvider {
+            enabled: true,
+            completion_endpoint: "https://example.com/v1/completions".to_string(),
+            completion_endpoint_style: "openai_completions".to_string(),
+            completion_models: HashMap::from([(
+                "qwen-coder".to_string(),
+                CustomModelConfig::default(),
+            )]),
+            ..Default::default()
+        };
+
+        let runtime = provider.build_runtime().unwrap();
+
+        assert!(runtime.enabled);
+        assert!(provider.has_credentials());
+        assert_eq!(provider.selected_model_count(), 1);
+        assert_eq!(runtime.chat_endpoint, "");
+        assert_eq!(
+            runtime.completion_endpoint,
+            "https://example.com/v1/completions"
+        );
+        assert_eq!(runtime.completion_endpoint_style, "openai_completions");
+        assert_eq!(runtime.completion_models.len(), 1);
+        assert_eq!(runtime.completion_models[0].id, "qwen-coder");
+        assert!(runtime.embedding_model.is_none());
+    }
+
+    #[test]
+    fn embedding_only_custom_provider_runtime_is_enabled() {
+        let provider = CustomProvider {
+            enabled: true,
+            embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
+            embedding_endpoint_style: "openai".to_string(),
+            embedding_model: Some("text-embedding-3-small".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = provider.build_runtime().unwrap();
+
+        assert!(runtime.enabled);
+        assert!(provider.has_credentials());
+        assert_eq!(provider.selected_model_count(), 1);
+        assert_eq!(runtime.chat_endpoint, "");
+        assert_eq!(
+            runtime.embedding_endpoint,
+            "https://example.com/v1/embeddings"
+        );
+        assert_eq!(runtime.embedding_endpoint_style, "openai");
+        assert!(runtime.completion_models.is_empty());
+        let embedding_model = runtime.embedding_model.unwrap();
+        assert_eq!(embedding_model.id, "text-embedding-3-small");
+    }
+
+    #[test]
+    fn mixed_role_custom_provider_preserves_all_roles() {
+        let provider = CustomProvider {
+            enabled: true,
+            chat_endpoint: "https://example.com/v1/chat/completions".to_string(),
+            enabled_models: vec!["chat-model".to_string()],
+            completion_endpoint: "https://example.com/v1/completions".to_string(),
+            completion_endpoint_style: "openai_chat_completions".to_string(),
+            completion_models: HashMap::from([(
+                "completion-model".to_string(),
+                CustomModelConfig::default(),
+            )]),
+            embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
+            embedding_endpoint_style: "ollama_native".to_string(),
+            embedding_model: Some("embedding-model".to_string()),
+            ..Default::default()
+        };
+
+        let runtime = provider.build_runtime().unwrap();
+
+        assert!(runtime.enabled);
+        assert_eq!(provider.enabled_models(), &["chat-model".to_string()]);
+        assert_eq!(provider.selected_model_count(), 3);
+        assert_eq!(runtime.completion_models[0].id, "completion-model");
+        assert_eq!(runtime.embedding_model.unwrap().id, "embedding-model");
+        assert_eq!(runtime.completion_endpoint_style, "openai_chat_completions");
+        assert_eq!(runtime.embedding_endpoint_style, "ollama_native");
+    }
+
+    #[test]
+    fn custom_provider_settings_roundtrip_role_sections_and_redacts_secrets() {
+        let mut provider = CustomProvider::default();
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    r#"
+api_key: sk-secret
+enabled: true
+completion_endpoint: https://example.com/v1/completions
+completion_endpoint_style: openai_chat_completions
+completion_models:
+  qwen-coder:
+    n_ctx: 4096
+embedding_endpoint: https://example.com/v1/embeddings
+embedding_endpoint_style: openai
+embedding_model: text-embedding-3-small
+extra_headers:
+  Authorization: bearer-secret
+"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let settings = provider.provider_settings_as_json();
+
+        assert_eq!(settings["api_key"], "***");
+        assert_eq!(
+            settings["completion_endpoint"],
+            "https://example.com/v1/completions"
+        );
+        assert_eq!(
+            settings["completion_endpoint_style"],
+            "openai_chat_completions"
+        );
+        assert_eq!(settings["completion_models"]["qwen-coder"]["n_ctx"], 4096);
+        assert_eq!(
+            settings["embedding_endpoint"],
+            "https://example.com/v1/embeddings"
+        );
+        assert_eq!(settings["embedding_endpoint_style"], "openai");
+        assert_eq!(settings["embedding_model"], "text-embedding-3-small");
+        assert_eq!(settings["extra_headers"]["Authorization"], "***");
+    }
+
+    #[test]
+    fn existing_chat_custom_provider_runtime_behavior_still_enabled_by_chat_role() {
+        let provider = CustomProvider {
+            enabled: true,
+            chat_endpoint: "https://example.com/v1/chat/completions".to_string(),
+            enabled_models: vec!["chat-model".to_string()],
+            ..Default::default()
+        };
+
+        let runtime = provider.build_runtime().unwrap();
+
+        assert!(runtime.enabled);
+        assert!(runtime.completion_models.is_empty());
+        assert!(runtime.embedding_model.is_none());
+        assert_eq!(provider.selected_model_count(), 1);
     }
 }

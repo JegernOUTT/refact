@@ -191,6 +191,8 @@ mod tests {
             use_ast: true,
             use_vecdb: true,
             rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
         };
         assert!(code_completion_post_validate(&post).is_ok());
     }
@@ -221,6 +223,8 @@ mod tests {
             use_ast: true,
             use_vecdb: true,
             rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
         };
         assert!(code_completion_post_validate(&post).is_ok());
     }
@@ -251,6 +255,8 @@ mod tests {
             use_ast: true,
             use_vecdb: true,
             rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
         };
         assert!(code_completion_post_validate(&post).is_err());
     }
@@ -281,6 +287,8 @@ mod tests {
             use_ast: true,
             use_vecdb: true,
             rag_tokens_n: 0,
+            cache_salt: String::new(),
+            cache_generation: 0,
         };
         assert!(code_completion_post_validate(&post).is_err());
     }

@@ -3,6 +3,7 @@ import { Flex, Text, Slider, Switch } from "@radix-ui/themes";
 import { Cross1Icon } from "@radix-ui/react-icons";
 import { useGetCapsQuery } from "../../services/refact/caps";
 import { ReasoningIcon } from "../../features/Providers/ProviderForm/ProviderModelsList/components/CapabilityIcons";
+import type { ModelType } from "../../services/refact";
 import styles from "./ModelSamplingParams.module.css";
 
 export type SamplingValues = {
@@ -22,6 +23,14 @@ type ModelSamplingParamsProps = {
   ) => void;
   disabled?: boolean;
   size?: "1" | "2";
+  capability?: ModelType;
+};
+
+type SamplingModelDetail = {
+  default_max_tokens?: number | null;
+  max_output_tokens?: number | null;
+  reasoning_effort_options?: string[] | null;
+  supports_thinking_budget?: boolean;
 };
 
 function formatTokens(tokens: number): string {
@@ -31,41 +40,67 @@ function formatTokens(tokens: number): string {
   return `${Math.round(tokens / 1000)}K`;
 }
 
+function completionDefaults(nCtx: number | undefined): SamplingModelDetail {
+  const contextWindow = nCtx ?? 16384;
+  const maxTokens = Math.max(1024, Math.min(contextWindow, 16384));
+  return {
+    default_max_tokens: maxTokens,
+    max_output_tokens: maxTokens,
+  };
+}
+
 export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
   model,
   values,
   onChange,
   disabled = false,
   size = "1",
+  capability = "chat",
 }) => {
   const { data: capsData } = useGetCapsQuery(undefined);
 
-  const modelDetail = useMemo(() => {
-    if (!model || !capsData?.chat_models) return null;
-    const m = capsData.chat_models[model] as
-      | {
-          n_ctx?: number;
-          default_max_tokens?: number | null;
-          max_output_tokens?: number | null;
-          reasoning_effort_options?: string[] | null;
-          supports_thinking_budget?: boolean;
-          supports_adaptive_thinking_budget?: boolean;
-        }
-      | undefined;
-    return m ?? null;
-  }, [model, capsData]);
+  const modelDetail = useMemo<SamplingModelDetail | null>(() => {
+    if (capability === "embedding") return null;
+    if (!model || !capsData) return null;
+
+    if (capability === "completion") {
+      const completionModel = Object.entries(capsData.completion_models).find(
+        ([name]) => name === model,
+      )?.[1];
+      return completionDefaults(
+        completionModel?.n_ctx ?? capsData.code_completion_n_ctx,
+      );
+    }
+
+    return (
+      Object.entries(capsData.chat_models).find(
+        ([name]) => name === model,
+      )?.[1] ?? null
+    );
+  }, [model, capsData, capability]);
+
+  if (capability === "embedding") {
+    return null;
+  }
 
   const defaultMaxTokens = modelDetail?.default_max_tokens ?? 4096;
-  const maxOutputTokens = modelDetail?.max_output_tokens ?? 16384;
+  const maxOutputTokens = Math.max(
+    1024,
+    modelDetail?.max_output_tokens ?? defaultMaxTokens,
+  );
+  const sliderValue = Math.min(
+    values.max_new_tokens ?? defaultMaxTokens,
+    maxOutputTokens,
+  );
   const reasoningEffortOptions = modelDetail?.reasoning_effort_options;
   const supportsThinkingBudget = modelDetail?.supports_thinking_budget ?? false;
   const supportsReasoning =
-    (reasoningEffortOptions != null && reasoningEffortOptions.length > 0) ||
-    supportsThinkingBudget;
+    capability === "chat" &&
+    ((reasoningEffortOptions != null && reasoningEffortOptions.length > 0) ||
+      supportsThinkingBudget);
 
   return (
     <div className={styles.container}>
-      {/* Reasoning */}
       {supportsReasoning && (
         <div className={styles.reasoningSection}>
           <Flex align="center" justify="between" gap="3">
@@ -154,7 +189,6 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
         </div>
       )}
 
-      {/* Max Tokens */}
       <div className={styles.sliderRow}>
         <div className={styles.sliderHeader}>
           <Text size={size} color="gray">
@@ -186,7 +220,7 @@ export const ModelSamplingParams: React.FC<ModelSamplingParamsProps> = ({
             min={1024}
             max={maxOutputTokens}
             step={1024}
-            value={[values.max_new_tokens ?? defaultMaxTokens]}
+            value={[sliderValue]}
             onValueChange={(v) => onChange("max_new_tokens", v[0])}
             disabled={disabled}
             className={styles.slider}

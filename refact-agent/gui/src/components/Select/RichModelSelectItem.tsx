@@ -13,6 +13,7 @@ export type RichModelData = {
   pricing?: CapCost;
   nCtx?: number;
   capabilities?: ModelCapabilities;
+  metadata?: string[];
   isDefault?: boolean;
   isChat2?: boolean;
   isTaskPlannerAgent?: boolean;
@@ -28,6 +29,7 @@ export const RichModelSelectItem: React.FC<RichModelSelectItemProps> = ({
   pricing,
   nCtx,
   capabilities,
+  metadata,
   isDefault,
   isChat2,
   isTaskPlannerAgent,
@@ -94,6 +96,11 @@ export const RichModelSelectItem: React.FC<RichModelSelectItemProps> = ({
             {formatContextWindow(nCtx)}
           </Text>
         )}
+        {metadata?.map((item) => (
+          <Text key={item} size="1" color="gray" style={{ fontSize: "11px" }}>
+            {item}
+          </Text>
+        ))}
         {capabilities && <CapabilityIcons capabilities={capabilities} />}
       </Flex>
     </Flex>

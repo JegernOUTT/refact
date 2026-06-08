@@ -43,7 +43,9 @@ type ModelTypeKey =
   | "task_planner_agent_model"
   | "chat_light"
   | "chat_thinking"
-  | "chat_buddy";
+  | "chat_buddy"
+  | "completion_model"
+  | "embedding_model";
 
 const MODEL_TYPE_LABELS: Record<
   ModelTypeKey,
@@ -74,7 +76,41 @@ const MODEL_TYPE_LABELS: Record<
     description:
       "Model used by your companion for background tasks and suggestions",
   },
+  completion_model: {
+    title: "Completion Model",
+    description: "Model used for code completion and fill-in-middle requests",
+  },
+  embedding_model: {
+    title: "Embedding Model",
+    description: "Model used for semantic search and VecDB embeddings",
+  },
 };
+
+function getModelCapability(typeKey: ModelTypeKey) {
+  if (typeKey === "completion_model") return "completion";
+  if (typeKey === "embedding_model") return "embedding";
+  return "chat";
+}
+
+function getDefaultConfig(
+  defaults: ProviderDefaults,
+  key: ModelTypeKey,
+): ModelTypeDefaults {
+  const value = defaults[key];
+  if (typeof value === "string") return { model: value };
+  return value ?? {};
+}
+
+function updateDefaultConfig(
+  defaults: ProviderDefaults,
+  key: ModelTypeKey,
+  config: ModelTypeDefaults,
+): ProviderDefaults {
+  if (key === "completion_model" || key === "embedding_model") {
+    return { ...defaults, [key]: config.model };
+  }
+  return { ...defaults, [key]: config };
+}
 
 const ModelTypeSection: React.FC<{
   typeKey: ModelTypeKey;
@@ -83,6 +119,7 @@ const ModelTypeSection: React.FC<{
   onChange: (key: ModelTypeKey, config: ModelTypeDefaults) => void;
 }> = ({ typeKey, config, capsDefault, onChange }) => {
   const { title, description } = MODEL_TYPE_LABELS[typeKey];
+  const capability = getModelCapability(typeKey);
 
   const handleModelChange = useCallback(
     (model: string) => {
@@ -122,6 +159,7 @@ const ModelTypeSection: React.FC<{
             compact={false}
             allowUnset
             unsetLabel="None"
+            capability={capability}
           />
         </Flex>
 
@@ -131,6 +169,7 @@ const ModelTypeSection: React.FC<{
             values={config}
             onChange={handleSamplingChange}
             size="2"
+            capability={capability}
           />
         ) : (
           <Callout.Root color="gray">
@@ -177,6 +216,9 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
       chat_light: capsData?.chat_light_model ?? "",
       chat_thinking: capsData?.chat_thinking_model ?? "",
       chat_buddy: capsData?.chat_buddy_model ?? "",
+      completion_model: capsData?.completion_default_model ?? "",
+      embedding_model:
+        capsData?.embedding_model?.id ?? capsData?.embedding_model?.name ?? "",
     }),
     [capsData],
   );
@@ -188,6 +230,8 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     chat_light: {},
     chat_thinking: {},
     chat_buddy: {},
+    completion_model: undefined,
+    embedding_model: undefined,
   });
 
   const [hasChanges, setHasChanges] = useState(false);
@@ -203,6 +247,7 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
   useEffect(() => {
     if (defaults) {
       const base: ProviderDefaults = {
+        ...defaults,
         chat: defaults.chat,
         chat_model_2: defaults.chat_model_2,
         task_planner_agent_model: defaults.task_planner_agent_model,
@@ -224,9 +269,13 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
             "chat_light",
             "chat_thinking",
             "chat_buddy",
-          ] as ModelTypeKey[]) {
-            if (patch[key]) {
-              merged[key] = { ...(base[key] ?? {}), ...patch[key] };
+          ] as const) {
+            const patchValue = patch[key];
+            if (patchValue) {
+              merged[key] = {
+                ...getDefaultConfig(base, key),
+                ...patchValue,
+              };
               appliedDraft = true;
             }
           }
@@ -243,10 +292,7 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
 
   const handleModelTypeChange = useCallback(
     (key: ModelTypeKey, config: ModelTypeDefaults) => {
-      setLocalDefaults((prev) => ({
-        ...prev,
-        [key]: config,
-      }));
+      setLocalDefaults((prev) => updateDefaultConfig(prev, key, config));
       setHasChanges(true);
       setSaveError(null);
     },
@@ -259,13 +305,14 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
         ? { ...localDefaults, draft_id: draftId }
         : localDefaults;
       await updateDefaults(payload).unwrap();
+      void refetch();
       void refetchCaps();
       setHasChanges(false);
       setSaveError(null);
     } catch {
       setSaveError("Failed to save defaults. Please try again.");
     }
-  }, [draftId, localDefaults, refetchCaps, updateDefaults]);
+  }, [draftId, localDefaults, refetch, refetchCaps, updateDefaults]);
 
   if (isLoading || draftLoading) {
     return <Spinner spinning />;
@@ -356,7 +403,7 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
               <ModelTypeSection
                 key={key}
                 typeKey={key}
-                config={localDefaults[key] ?? {}}
+                config={getDefaultConfig(localDefaults, key)}
                 capsDefault={capsDefaults[key]}
                 onChange={handleModelTypeChange}
               />

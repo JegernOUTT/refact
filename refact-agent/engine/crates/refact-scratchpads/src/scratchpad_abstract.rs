@@ -12,6 +12,8 @@ pub enum FinishReason {
     None,
     Stop,
     Length,
+    ContentFilter,
+    Unknown,
     ScratchpadStop,
 }
 
@@ -24,10 +26,11 @@ impl FinishReason {
             "stop-lf" => FinishReason::Stop,
             "tool_calls" => FinishReason::Stop,
             "length" => FinishReason::Length,
+            "content_filter" => FinishReason::ContentFilter,
             "scratchpad-stop" => FinishReason::ScratchpadStop,
             _ => {
-                warn!("Unknown finish reason: {}, interpreting it as a stop", s);
-                FinishReason::Stop
+                warn!("Unknown finish reason: {}", s);
+                FinishReason::Unknown
             }
         }
     }
@@ -48,6 +51,8 @@ impl FinishReason {
             FinishReason::None => "".to_string(),
             FinishReason::Stop => "stop".to_string(),
             FinishReason::Length => "length".to_string(),
+            FinishReason::ContentFilter => "content_filter".to_string(),
+            FinishReason::Unknown => "unknown".to_string(),
             FinishReason::ScratchpadStop => "stop".to_string(),
         }
     }

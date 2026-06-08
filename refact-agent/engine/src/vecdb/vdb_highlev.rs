@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AMutex;
 use tracing::{error, info};
 
+use refact_core::llm_types::EmbeddingEndpointStyle;
 use refact_core::vecdb_types::VecdbSearch;
 
 use crate::background_tasks::BackgroundTasksHolder;
@@ -47,8 +48,8 @@ async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<Vec
         }
     }
 
-    if consts.embedding_model.model_name.is_empty() || consts.embedding_model.endpoint.is_empty() {
-        error!("command line says to launch vecdb, but this will not happen: embedding model name or endpoint are empty");
+    if let Err(err) = validate_embedding_model_for_vecdb(&consts.embedding_model) {
+        error!("command line says to launch vecdb, but this will not happen: {err}");
         return (true, None);
     }
 
@@ -84,8 +85,6 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
             background_tasks.abort().await;
         }
         if need_reload && consts.is_some() {
-            background_tasks = BackgroundTasksHolder::new(vec![]);
-
             let init_config = refact_vecdb::vdb_init::VecDbInitConfig {
                 max_attempts: 5,
                 initial_delay_ms: 10,
@@ -111,7 +110,8 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
             match initialize_vecdb_with_context(gcx.clone(), consts.unwrap(), Some(init_config))
                 .await
             {
-                Ok(_) => {
+                Ok(tasks) => {
+                    background_tasks = tasks;
                     *gcx.vec_db_error.lock().unwrap() = "".to_string();
                     info!("vecdb: initialization successful");
                     let ev = crate::buddy::actor::make_runtime_event(
@@ -146,6 +146,29 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
     }
 }
 
+fn validate_embedding_model_for_vecdb(config: &EmbeddingModelConfig) -> Result<(), String> {
+    if config.model_name.trim().is_empty() {
+        return Err("embedding model field 'model_name' is empty".to_string());
+    }
+
+    let style = if config.embedding_endpoint_style.trim().is_empty() {
+        EmbeddingEndpointStyle::from_config(&config.endpoint_style, "embedding_endpoint_style")?
+    } else {
+        EmbeddingEndpointStyle::from_config(
+            &config.embedding_endpoint_style,
+            "embedding_endpoint_style",
+        )?
+    };
+
+    if config.endpoint.trim().is_empty() && style != EmbeddingEndpointStyle::OllamaNative {
+        return Err(format!(
+            "embedding endpoint field 'endpoint' is empty for embedding_endpoint_style '{style}'"
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn get_status(
     vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>,
 ) -> Result<Option<VecDbStatus>, String> {
@@ -160,7 +183,7 @@ async fn initialize_vecdb_with_context(
     gcx: Arc<GlobalContext>,
     constants: VecdbConstants,
     init_config: Option<refact_vecdb::vdb_init::VecDbInitConfig>,
-) -> Result<(), refact_vecdb::vdb_init::VecDbInitError> {
+) -> Result<BackgroundTasksHolder, refact_vecdb::vdb_init::VecDbInitError> {
     let (legacy_cache_dir, cmdline, shutdown_flag) = {
         (
             gcx.cache_dir.clone(),
@@ -203,7 +226,7 @@ async fn initialize_vecdb_with_context(
     let tasks = vec_db
         .vecdb_start_background_tasks(shutdown_flag2, file_reader)
         .await;
-    let _background_tasks = BackgroundTasksHolder::new(tasks);
+    let background_tasks = BackgroundTasksHolder::new(tasks);
 
     let vec_db_arc: Arc<dyn VecdbSearch> = Arc::new(vec_db);
     {
@@ -218,7 +241,7 @@ async fn initialize_vecdb_with_context(
         .await;
 
     info!("VecDb initialization and setup complete");
-    Ok(())
+    Ok(background_tasks)
 }
 
 async fn get_default_vecdb_dir(gcx: Arc<GlobalContext>) -> Option<std::path::PathBuf> {
@@ -226,4 +249,71 @@ async fn get_default_vecdb_dir(gcx: Arc<GlobalContext>) -> Option<std::path::Pat
     project_dirs
         .first()
         .map(|root| root.join(".refact").join("vecdb"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn embedding_config(
+        endpoint: &str,
+        endpoint_style: &str,
+        embedding_endpoint_style: &str,
+    ) -> EmbeddingModelConfig {
+        EmbeddingModelConfig {
+            endpoint: endpoint.to_string(),
+            endpoint_style: endpoint_style.to_string(),
+            embedding_endpoint_style: embedding_endpoint_style.to_string(),
+            api_key: String::new(),
+            auth_token: String::new(),
+            extra_headers: Default::default(),
+            model_name: "embedding-model".to_string(),
+            embedding_size: 768,
+            dimensions: None,
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+            rejection_threshold: 0.63,
+            embedding_batch: 64,
+            n_ctx: 8192,
+        }
+    }
+
+    #[test]
+    fn vecdb_validation_accepts_ollama_native_empty_endpoint() {
+        let config = embedding_config("", "openai", "ollama_native");
+
+        assert_eq!(validate_embedding_model_for_vecdb(&config), Ok(()));
+    }
+
+    #[test]
+    fn vecdb_validation_rejects_openai_empty_endpoint() {
+        let config = embedding_config("", "openai", "openai");
+
+        assert_eq!(
+            validate_embedding_model_for_vecdb(&config).unwrap_err(),
+            "embedding endpoint field 'endpoint' is empty for embedding_endpoint_style 'openai'"
+        );
+    }
+
+    #[test]
+    fn vecdb_validation_keeps_legacy_endpoint_style_fallback() {
+        let config = embedding_config("", "openai", "");
+
+        assert_eq!(
+            validate_embedding_model_for_vecdb(&config).unwrap_err(),
+            "embedding endpoint field 'endpoint' is empty for embedding_endpoint_style 'openai'"
+        );
+    }
+
+    #[test]
+    fn vecdb_validation_rejects_empty_model_name() {
+        let mut config =
+            embedding_config("http://127.0.0.1:11434/v1/embeddings", "openai", "openai");
+        config.model_name = " ".to_string();
+
+        assert_eq!(
+            validate_embedding_model_for_vecdb(&config).unwrap_err(),
+            "embedding model field 'model_name' is empty"
+        );
+    }
 }

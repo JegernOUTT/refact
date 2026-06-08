@@ -333,10 +333,14 @@ const CompletionModelFields: FC<CompletionModelFieldsProps> = ({
       <FormSelect
         label="Model Family"
         placeholder="Desired model family"
-        value={editedModelData.model_family ?? "null"}
-        onValueChange={(value) => updateFieldByKey("model_family", value)}
+        value={editedModelData.model_family ?? ""}
+        onValueChange={(value) => updateFieldByKey("model_family", value ?? "")}
         options={aggregatedModelFamilies}
       />
+      <Text as="p" size="1" color="gray">
+        Endpoint style chooses the completion HTTP API. Model family and
+        scratchpad fields choose FIM prompt formatting.
+      </Text>
     </>
   );
 };
@@ -495,6 +499,10 @@ const EmbeddingModelFields: FC<EmbeddingModelFieldsProps> = ({
         placeholder="Embedding batch"
         type="number"
       />
+      <Text as="p" size="1" color="gray">
+        OpenAI-compatible embeddings use OpenAI-style /embeddings payloads;
+        Ollama-native embeddings use the Ollama embedding API.
+      </Text>
     </>
   );
 };

@@ -1,6 +1,8 @@
 import { Flex, Select, Text } from "@radix-ui/themes";
 import { ReactNode } from "react";
 
+const NULL_SELECT_VALUE = "__none__";
+
 type FormSelectProps<OptionType> = {
   label: string;
   options?: OptionType[];
@@ -9,7 +11,7 @@ type FormSelectProps<OptionType> = {
   placeholder?: string;
   description?: string;
   isDisabled?: boolean;
-  onValueChange?: (value: string) => void;
+  onValueChange?: (value: string | null) => void;
   children?: ReactNode;
 };
 
@@ -42,8 +44,10 @@ export function FormSelect({
         </Text>
       )}
       <Select.Root
-        value={value}
-        onValueChange={onValueChange}
+        value={value === "null" ? NULL_SELECT_VALUE : value}
+        onValueChange={(nextValue) =>
+          onValueChange?.(nextValue === NULL_SELECT_VALUE ? null : nextValue)
+        }
         disabled={isDisabled}
       >
         <Select.Trigger placeholder={placeholder} />
@@ -57,7 +61,7 @@ export function FormSelect({
               );
             }
             return (
-              <Select.Item key={option} value="null">
+              <Select.Item key={NULL_SELECT_VALUE} value={NULL_SELECT_VALUE}>
                 None
               </Select.Item>
             );

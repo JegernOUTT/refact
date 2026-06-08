@@ -1038,4 +1038,8 @@ pub struct CodeCompletionPost {
     pub use_vecdb: bool,
     #[serde(default)]
     pub rag_tokens_n: usize,
+    #[serde(default, skip_deserializing)]
+    pub cache_salt: String,
+    #[serde(default, skip_deserializing)]
+    pub cache_generation: u64,
 }
