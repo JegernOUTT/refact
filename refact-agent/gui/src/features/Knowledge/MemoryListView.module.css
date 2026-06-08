@@ -14,6 +14,8 @@
 
 .cardFrame {
   overflow: hidden;
+  border: var(--rf-hairline) solid transparent;
+  background: transparent;
 }
 
 .card {
@@ -31,12 +33,11 @@
   cursor: pointer;
   transition:
     background var(--rf-dur-fast) var(--rf-ease-standard),
-    transform var(--rf-dur-fast) var(--rf-ease-standard);
+    color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .card:hover {
   background: var(--rf-surface-1);
-  transform: translateY(-1px);
 }
 
 .card:focus-visible {
@@ -46,6 +47,10 @@
 
 .selected {
   border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+
+.card.selected:hover {
   background: var(--rf-color-accent-soft);
 }
 
@@ -79,6 +84,31 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-1);
+  color: var(--rf-color-muted);
+}
+
+.kindIcon {
+  color: var(--rf-color-muted);
+}
+
+.selected .kindBadge {
+  border-color: var(--rf-color-accent);
+}
+
+.selected .kindIcon {
+  color: var(--rf-color-accent);
+}
+
+.linkBadge {
+  color: var(--rf-color-muted);
+}
+
+.linkIcon {
+  color: var(--rf-color-muted);
+}
+
+.selected .linkIcon {
+  color: var(--rf-color-accent);
 }
 
 .title {
@@ -128,6 +158,14 @@
   gap: var(--rf-space-1);
 }
 
+.tagBadge {
+  color: var(--rf-color-muted);
+}
+
+.selected .tagBadge {
+  color: var(--rf-color-accent);
+}
+
 .tagMore {
   color: var(--rf-color-muted);
   font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
@@ -154,9 +192,5 @@
 @media (prefers-reduced-motion: reduce) {
   .card {
     transition: none;
-  }
-
-  .card:hover {
-    transform: none;
   }
 }

@@ -48,6 +48,15 @@
   border-radius: var(--rf-radius-card);
 }
 
+.editorSection.editorSection,
+.listSection.listSection,
+.graphSection.graphSection {
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
 .listSection {
   display: flex;
   flex-direction: column;
@@ -68,6 +77,7 @@
   gap: var(--rf-space-2);
   padding: var(--rf-space-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
+  background: color-mix(in srgb, var(--rf-surface-glass) 70%, transparent);
 }
 
 .sortControl,
@@ -117,6 +127,23 @@
   cursor: pointer;
 }
 
+.tagChip,
+.clearTagsButton {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
+}
+
+.tagButton:hover .tagChip,
+.clearTagsButton:hover {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
+}
+
+.tagButton[aria-pressed="true"] .tagChip {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+
 .tagButton:focus-visible,
 .clearTagsButton:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
@@ -128,13 +155,17 @@
   min-height: var(--rf-control-h-sm);
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-muted);
+  border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
   font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  transition:
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .clearTagsButton:hover {
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
 }
 
 .error {
@@ -149,6 +180,20 @@
 
 .error p {
   margin: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .editorSection.editorSection,
+  .listSection.listSection,
+  .graphSection.graphSection {
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .editorSection,
+:global(.radix-themes[data-host="jetbrains"]) .listSection,
+:global(.radix-themes[data-host="jetbrains"]) .graphSection {
+  backdrop-filter: none;
 }
 
 @media (width <= 820px) {

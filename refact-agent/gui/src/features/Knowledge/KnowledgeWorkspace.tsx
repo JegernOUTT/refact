@@ -247,7 +247,11 @@ export function KnowledgeWorkspace() {
                             onClick={() => handleToggleTag(tag)}
                             aria-pressed={selected}
                           >
-                            <Chip radius="chip" selected={selected}>
+                            <Chip
+                              className={styles.tagChip}
+                              radius="chip"
+                              selected={selected}
+                            >
                               {tag}
                             </Chip>
                           </button>

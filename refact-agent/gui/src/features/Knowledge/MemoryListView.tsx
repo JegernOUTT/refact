@@ -1,5 +1,4 @@
 import { useEffect, useRef } from "react";
-import type React from "react";
 import classNames from "classnames";
 import {
   BookOpen,
@@ -24,17 +23,16 @@ interface MemoryListViewProps {
 }
 
 const KIND_CONFIG = {
-  code: { icon: FileText, tone: "accent" },
-  decision: { icon: Target, tone: "accent" },
-  preference: { icon: Star, tone: "success" },
-  pattern: { icon: Repeat2, tone: "warning" },
-  lesson: { icon: BookOpen, tone: "accent" },
+  code: { icon: FileText },
+  decision: { icon: Target },
+  preference: { icon: Star },
+  pattern: { icon: Repeat2 },
+  lesson: { icon: BookOpen },
 } as const;
 
 type KindKey = keyof typeof KIND_CONFIG;
 type KindConfig = {
   icon: LucideIcon;
-  tone: React.ComponentProps<typeof Icon>["tone"];
 };
 
 function getKindConfig(kind: string | undefined): KindConfig {
@@ -78,7 +76,7 @@ export function MemoryListView({
   return (
     <Surface className={styles.container} radius="none">
       <VirtualList
-        className={styles.list}
+        className={classNames(styles.list, "rf-enter-rise")}
         height="100%"
         items={memories}
         getItemKey={(memory) => memory.memid}
@@ -108,6 +106,7 @@ export function MemoryListView({
                 }}
                 className={classNames(
                   styles.card,
+                  "rf-pressable",
                   isSelected && styles.selected,
                 )}
                 onClick={() => onSelectId(memory.memid)}
@@ -120,7 +119,11 @@ export function MemoryListView({
                       className={styles.kindBadge}
                       aria-label={`Kind: ${kind}`}
                     >
-                      <Icon icon={kindConfig.icon} tone={kindConfig.tone} />
+                      <Icon
+                        className={styles.kindIcon}
+                        icon={kindConfig.icon}
+                        tone="muted"
+                      />
                     </span>
                     <span className={styles.title}>
                       {memory.title ?? "Untitled"}
@@ -131,7 +134,12 @@ export function MemoryListView({
                       className={styles.linkBadge}
                       aria-label="Linked in graph"
                     >
-                      <Icon icon={Link2} size="sm" tone="accent" />
+                      <Icon
+                        className={styles.linkIcon}
+                        icon={Link2}
+                        size="sm"
+                        tone="muted"
+                      />
                     </span>
                   ) : null}
                 </div>
@@ -146,7 +154,12 @@ export function MemoryListView({
                       <span className={styles.metaLabel}>Tags:</span>
                       <div className={styles.tags}>
                         {memory.tags.slice(0, 3).map((tag) => (
-                          <Badge key={tag} tone="accent" title={tag}>
+                          <Badge
+                            key={tag}
+                            className={styles.tagBadge}
+                            tone="muted"
+                            title={tag}
+                          >
                             {tag}
                           </Badge>
                         ))}
