@@ -1,6 +1,7 @@
 .PageWrapper {
   display: flex;
   min-width: 0;
+  min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
   justify-content: space-between;
