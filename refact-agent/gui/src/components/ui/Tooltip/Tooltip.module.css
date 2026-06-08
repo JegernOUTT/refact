@@ -13,12 +13,12 @@
     calc(100dvh - var(--rf-space-5))
   );
   overflow-y: auto;
-  padding: var(--rf-space-2) var(--rf-space-3);
+  padding: var(--rf-space-3);
   color: var(--rf-color-fg);
   overflow-wrap: anywhere;
   background: var(--rf-surface-overlay);
   border: var(--rf-hairline) solid var(--rf-border-strong);
-  border-radius: var(--rf-radius-ctl);
+  border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-overlay);
   backdrop-filter: blur(var(--rf-blur-overlay));
   font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);

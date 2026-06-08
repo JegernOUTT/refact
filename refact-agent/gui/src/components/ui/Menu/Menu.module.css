@@ -16,7 +16,7 @@
     calc(100dvh - var(--rf-space-5))
   );
   overflow-y: auto;
-  padding: var(--rf-space-1);
+  padding: var(--rf-space-3);
   color: var(--rf-color-fg);
   background: var(--rf-surface-overlay);
   border: var(--rf-hairline) solid var(--rf-border-strong);

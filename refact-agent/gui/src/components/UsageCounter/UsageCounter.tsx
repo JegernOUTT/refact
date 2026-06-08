@@ -171,7 +171,7 @@ const UsdHoverContent: React.FC<{
   cacheCreationUsd,
 }) => {
   return (
-    <Flex direction="column" gap="2" p="1">
+    <Flex direction="column" gap="2">
       <Flex align="center" justify="between" width="100%" gap="4">
         <Text size="2" weight="bold">
           Total cost
@@ -215,7 +215,7 @@ const TokensHoverContent: React.FC<{
       : 0;
 
   return (
-    <Flex direction="column" gap="2" p="1">
+    <Flex direction="column" gap="2">
       <Flex align="center" justify="between" width="100%" gap="4">
         <Text size="2" weight="bold">
           Context usage
