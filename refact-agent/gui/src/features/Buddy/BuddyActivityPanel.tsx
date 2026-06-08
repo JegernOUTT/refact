@@ -1,10 +1,14 @@
 import React from "react";
-import { Text, Tooltip } from "../../components/ui";
-import { SegmentedControl, Surface } from "../../components/ui";
-import classNames from "classnames";
+import {
+  Badge,
+  SegmentedControl,
+  Surface,
+  Text,
+  Tooltip,
+} from "../../components/ui";
 import type { BuddyActivityEntry } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
-import styles from "./BuddyHome.module.css";
+import styles from "./BuddyActivityPanel.module.css";
 
 type ActivityFilter = "all" | "refact_" | "buddy_";
 
@@ -28,10 +32,10 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
 
   return (
     <Surface
-      className={classNames(styles.panel, styles.panelScroll)}
+      className={styles.panel}
       data-testid="buddy-activity-panel"
       radius="card"
-      variant="surface-1"
+      variant="glass"
     >
       <div className={styles.panelHeader}>
         <Text
@@ -44,6 +48,9 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
         </Text>
       </div>
       <SegmentedControl
+        aria-label="activity filter"
+        className={styles.filter}
+        name="buddy-activity-filter"
         size="sm"
         value={filter}
         onValueChange={(value) => setFilter(value as ActivityFilter)}
@@ -97,7 +104,7 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
                   <span className={styles.listTitle}>
                     {a.title}
                     {failureLabel && (
-                      <span className={styles.ackBadge}>{failureLabel}</span>
+                      <Badge tone="warning">{failureLabel}</Badge>
                     )}
                   </span>
                   {detail && (

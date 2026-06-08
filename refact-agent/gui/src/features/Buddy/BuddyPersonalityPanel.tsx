@@ -1,7 +1,5 @@
 import React from "react";
-import { Text } from "../../components/ui";
-import { Button, Surface } from "../../components/ui";
-import classNames from "classnames";
+import { Badge, Button, Surface, Text } from "../../components/ui";
 import { SKILLS } from "./constants";
 import type {
   BuddyControl,
@@ -10,7 +8,7 @@ import type {
   BuddyQuest,
   BuddySettings,
 } from "./types";
-import styles from "./BuddyHome.module.css";
+import styles from "./BuddyPersonalityPanel.module.css";
 
 export interface NeedRow {
   key: keyof BuddyNeeds;
@@ -34,6 +32,9 @@ interface BuddyPersonalityPanelProps {
   onPromptChange: (prompt: string | null) => void;
 }
 
+const fillStyle = (fill: number): React.CSSProperties =>
+  ({ "--buddy-fill": `${fill}%` }) as React.CSSProperties;
+
 export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   personality,
   needRows,
@@ -47,15 +48,8 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   onToggleProactive,
   onPromptChange,
 }) => (
-  <div
-    className={classNames(styles.row, styles.rowSingle)}
-    data-testid="buddy-personality-panel"
-  >
-    <Surface
-      className={classNames(styles.panel, styles.personaPanel)}
-      radius="card"
-      variant="surface-1"
-    >
+  <div className={styles.outer} data-testid="buddy-personality-panel">
+    <Surface className={styles.panel} radius="card" variant="glass">
       <div className={styles.panelHeader}>
         <div className={styles.panelTitleGroup}>
           <Text
@@ -95,13 +89,13 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
             {needRows.map((item) => (
               <div key={item.key} className={styles.needRow}>
                 <div className={styles.needHeader}>
-                  <span>{item.label}</span>
-                  <span>{item.value}</span>
+                  <span className={styles.needName}>{item.label}</span>
+                  <span className={styles.needValue}>{item.value}</span>
                 </div>
                 <div className={styles.needBar}>
                   <div
                     className={styles.needFill}
-                    style={{ width: `${item.fill}%` }}
+                    style={fillStyle(item.fill)}
                   />
                 </div>
               </div>
@@ -128,10 +122,7 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
                     <span className={styles.traitValue}>{value}</span>
                   </div>
                   <div className={styles.needBar}>
-                    <div
-                      className={styles.needFill}
-                      style={{ width: `${fill}%` }}
-                    />
+                    <div className={styles.needFill} style={fillStyle(fill)} />
                   </div>
                 </div>
               );
@@ -157,9 +148,9 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
             {unlockedSkills.map((id) => {
               const skill = SKILLS.find((s) => s.id === id);
               return skill ? (
-                <span key={id} className={styles.skillChip}>
+                <Badge key={id} tone="muted" className={styles.skillChip}>
                   {skill.icon} {skill.name}
-                </span>
+                </Badge>
               ) : null;
             })}
           </div>
@@ -169,7 +160,7 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
       {activeQuest && (
         <div className={styles.questCard}>
           <div className={styles.questHeader}>
-            <div>
+            <div className={styles.panelTitleGroup}>
               <Text
                 size="1"
                 weight="bold"
@@ -182,9 +173,7 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
                 {activeQuest.icon} {activeQuest.title}
               </Text>
             </div>
-            <Text size="1" color="gray">
-              +{activeQuest.reward_xp} growth
-            </Text>
+            <Badge tone="accent">+{activeQuest.reward_xp} growth</Badge>
           </div>
 
           <Text size="1" className={styles.questDescription}>
@@ -203,14 +192,14 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
           <div className={styles.questProgressBar}>
             <div
               className={styles.questProgressFill}
-              style={{
-                width: `${Math.min(
+              style={fillStyle(
+                Math.min(
                   100,
                   (Math.max(0, activeQuest.progress) /
                     Math.max(1, activeQuest.goal)) *
                     100,
-                )}%`,
-              }}
+                ),
+              )}
             />
           </div>
 

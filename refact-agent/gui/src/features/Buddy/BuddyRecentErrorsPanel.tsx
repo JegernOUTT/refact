@@ -1,10 +1,9 @@
 import React from "react";
-import { Text, Tooltip } from "../../components/ui";
-import { Button, Surface } from "../../components/ui";
-import classNames from "classnames";
+import { Badge, Button, Surface, Text, Tooltip } from "../../components/ui";
+import type { BadgeTone } from "../../components/ui";
 import type { BuddyRuntimeEvent } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
-import styles from "./BuddyHome.module.css";
+import styles from "./BuddyRecentErrorsPanel.module.css";
 
 export type RecentBuddyError = BuddyRuntimeEvent & {
   occurrences?: number;
@@ -19,16 +18,22 @@ interface BuddyRecentErrorsPanelProps {
   onDismiss: (event: RecentBuddyError) => void | Promise<void>;
 }
 
+const priorityTone = (priority: RecentBuddyError["priority"]): BadgeTone => {
+  if (priority === "critical") return "danger";
+  if (priority === "high") return "warning";
+  return "muted";
+};
+
 export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
   recentErrors,
   onInvestigate,
   onDismiss,
 }) => (
   <Surface
-    className={classNames(styles.panel, styles.panelScroll)}
+    className={styles.panel}
     data-testid="buddy-recent-errors-panel"
     radius="card"
-    variant="surface-1"
+    variant="glass"
   >
     <div className={styles.panelHeader}>
       <Text size="1" weight="bold" color="gray" className={styles.sectionLabel}>
@@ -59,24 +64,21 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
         return (
           <div
             key={e.id}
-            className={classNames(
-              styles.listRow,
-              styles.errorRow,
-              acknowledged && styles.errorRowAcknowledged,
-            )}
+            className={styles.listRow}
+            data-acknowledged={acknowledged ? "true" : undefined}
+            data-priority={e.priority}
           >
             <span className={styles.listIcon}>{icon}</span>
             <div className={styles.listContent}>
               <span className={styles.listTitle}>
                 {e.title}
                 {e.occurrences != null && e.occurrences > 1 && (
-                  <span className={styles.countBadge}>×{e.occurrences}</span>
+                  <Badge tone="accent">×{e.occurrences}</Badge>
                 )}
-                {failureLabel && (
-                  <span className={styles.ackBadge}>{failureLabel}</span>
-                )}
-                {acknowledged && (
-                  <span className={styles.ackBadge}>acknowledged</span>
+                {failureLabel && <Badge tone="warning">{failureLabel}</Badge>}
+                {acknowledged && <Badge tone="success">acknowledged</Badge>}
+                {!acknowledged && (
+                  <Badge tone={priorityTone(e.priority)}>{e.priority}</Badge>
                 )}
               </span>
               {detail && <span className={styles.listSubtitle}>{detail}</span>}

@@ -1,0 +1,153 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-3);
+  overflow: hidden;
+  border-color: var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.sectionLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+}
+
+.filter {
+  width: 100%;
+  max-width: 320px;
+}
+
+.scrollList {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.listRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-control);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.listRow[data-clickable] {
+  cursor: pointer;
+}
+
+.listRow:hover,
+.listRow:focus-visible {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
+  outline: none;
+}
+
+.listRow[data-clickable]:active {
+  transform: translateY(1px);
+}
+
+.listIcon {
+  flex: 0 0 18px;
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.listContent {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.listTitle,
+.listSubtitle,
+.listMeta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-fg);
+  font-size: 12px;
+}
+
+.listSubtitle,
+.listMeta,
+.emptyText {
+  color: var(--rf-color-muted);
+  font-size: 11px;
+}
+
+.listMeta {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.emptyText {
+  padding: var(--rf-space-2) var(--rf-space-1);
+}
+
+@media (max-width: 720px) {
+  .panel {
+    padding: var(--rf-space-2);
+  }
+}
+
+@media (max-width: 520px) {
+  .panel {
+    overflow: visible;
+  }
+
+  .filter {
+    max-width: 100%;
+  }
+
+  .scrollList {
+    flex: 0 0 auto;
+    overflow-y: visible;
+  }
+
+  .listRow {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .listMeta {
+    margin-left: 26px;
+  }
+}

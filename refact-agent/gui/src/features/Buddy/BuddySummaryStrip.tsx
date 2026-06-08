@@ -1,9 +1,8 @@
 import React from "react";
-import { Text } from "../../components/ui";
-import classNames from "classnames";
+import { Button, Surface, Text } from "../../components/ui";
 import { formatCompactNumber } from "./buddyUtils";
 import type { BuddyPetState, Stage } from "./types";
-import styles from "./BuddyHome.module.css";
+import styles from "./BuddySummaryStrip.module.css";
 
 interface StatsSummaryData {
   totals: {
@@ -34,7 +33,12 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
   successRate,
   onViewStats,
 }) => (
-  <div className={styles.summaryStrip} data-testid="buddy-summary-strip">
+  <Surface
+    className={styles.summaryStrip}
+    data-testid="buddy-summary-strip"
+    radius="card"
+    variant="glass"
+  >
     <div className={styles.statItem}>
       <Text size="1" color="gray">
         Stage
@@ -43,7 +47,7 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
         {stage.emoji} {stage.name}
       </Text>
     </div>
-    <div className={classNames(styles.statItem, styles.statItemGrow)}>
+    <div className={`${styles.statItem} ${styles.statItemGrow}`}>
       <Text size="1" color="gray">
         Growth
       </Text>
@@ -56,7 +60,10 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
             : `${xp} · MAX`}
         </Text>
         <div className={styles.xpBar}>
-          <div className={styles.xpFill} style={{ width: `${xpFill}%` }} />
+          <div
+            className={styles.xpFill}
+            style={{ "--buddy-xp-fill": `${xpFill}%` } as React.CSSProperties}
+          />
         </div>
       </div>
     </div>
@@ -111,13 +118,9 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
     )}
     <div className={styles.statSpacer} aria-hidden />
     {statsData && (
-      <button
-        type="button"
-        className={classNames(styles.chip, styles.chipGhost)}
-        onClick={onViewStats}
-      >
+      <Button type="button" size="sm" variant="ghost" onClick={onViewStats}>
         View Full Stats →
-      </button>
+      </Button>
     )}
-  </div>
+  </Surface>
 );
