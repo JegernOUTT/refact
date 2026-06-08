@@ -28,6 +28,7 @@
   border-radius: var(--rf-radius-ctl);
   color: var(--rf-color-fg);
   cursor: pointer;
+  transform: translateY(0) scale(1);
 }
 
 .configRow:hover {
@@ -206,9 +207,15 @@
   max-width: calc(100% - 2 * var(--rf-space-3));
   margin: 0 var(--rf-space-3);
   padding: var(--rf-space-2) var(--rf-space-3);
-  background: var(--rf-surface-1);
   border: var(--rf-hairline) solid var(--rf-color-danger);
   border-radius: var(--rf-radius-ctl);
+  background: color-mix(
+    in srgb,
+    var(--rf-color-danger) 10%,
+    var(--rf-surface-glass)
+  );
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .errorText {
@@ -229,9 +236,11 @@
   gap: var(--rf-space-2);
   padding: var(--rf-space-2) var(--rf-space-3);
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
   border: var(--rf-hairline) solid var(--rf-color-warning);
   border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }
 
@@ -301,10 +310,63 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .editorPanel,
+  .configEditor,
+  .errorBanner,
+  .callout {
+    animation: customization-panel-rise var(--rf-dur-med)
+      var(--rf-ease-entrance) both;
+  }
+
   .configRow {
     transition:
       background-color var(--rf-dur-fast) var(--rf-ease-standard),
-      border-color var(--rf-dur-fast) var(--rf-ease-standard);
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      transform var(--rf-dur-fast) var(--rf-ease-standard);
+    will-change: transform;
+  }
+
+  .configRow:hover {
+    transform: translateY(-1px) scale(1);
+  }
+
+  .configRow:active {
+    transform: translateY(0) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editorPanel,
+  .configEditor,
+  .errorBanner,
+  .callout,
+  .configRow {
+    animation: none;
+    transition: none;
+  }
+
+  .configRow:hover,
+  .configRow:active {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .errorBanner,
+  .callout {
+    backdrop-filter: none;
+  }
+}
+
+@keyframes customization-panel-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

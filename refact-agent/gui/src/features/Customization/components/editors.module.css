@@ -27,7 +27,9 @@
   padding: var(--rf-space-3);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .messageToolbar,
@@ -120,7 +122,7 @@
   overflow-y: auto;
   border: var(--rf-hairline) solid var(--rf-border-strong);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-overlay);
+  background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-overlay);
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
@@ -139,6 +141,11 @@
 
 .suggestionItem:hover {
   background: var(--rf-surface-1);
+}
+
+.suggestionItem:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
 }
 
 .formTabContent,
@@ -267,6 +274,103 @@
   .addRow > :first-child,
   .addRow > :nth-child(2) {
     flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .messageItem,
+  .modelDefaultsSection,
+  .addRow,
+  .suggestions {
+    animation: customization-editor-rise var(--rf-dur-med)
+      var(--rf-ease-entrance) both;
+  }
+
+  .suggestions > * {
+    animation: customization-editor-rise var(--rf-dur-med)
+      var(--rf-ease-entrance) both;
+  }
+
+  .suggestions > :nth-child(2) {
+    animation-delay: var(--rf-stagger);
+  }
+
+  .suggestions > :nth-child(3) {
+    animation-delay: calc(var(--rf-stagger) * 2);
+  }
+
+  .suggestions > :nth-child(4) {
+    animation-delay: calc(var(--rf-stagger) * 3);
+  }
+
+  .suggestions > :nth-child(5) {
+    animation-delay: calc(var(--rf-stagger) * 4);
+  }
+
+  .messageItem,
+  .modelDefaultsSection {
+    transition:
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+      background var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
+  .messageItem:hover,
+  .modelDefaultsSection:hover {
+    border-color: var(--rf-border-strong);
+  }
+
+  .suggestionItem {
+    transform: translateY(0) scale(1);
+    transition:
+      background-color var(--rf-dur-fast) var(--rf-ease-standard),
+      transform var(--rf-dur-fast) var(--rf-ease-standard);
+    will-change: transform;
+  }
+
+  .suggestionItem:hover {
+    transform: translateY(-1px) scale(1);
+  }
+
+  .suggestionItem:active {
+    transform: translateY(0) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .messageItem,
+  .modelDefaultsSection,
+  .addRow,
+  .suggestions,
+  .suggestions > *,
+  .suggestionItem {
+    animation: none;
+    transition: none;
+  }
+
+  .suggestionItem:hover,
+  .suggestionItem:active {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .messageItem,
+  .modelDefaultsSection,
+  .suggestions {
+    backdrop-filter: none;
+  }
+}
+
+@keyframes customization-editor-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

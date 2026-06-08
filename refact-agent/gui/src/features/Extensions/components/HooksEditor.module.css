@@ -19,8 +19,10 @@
   min-width: 0;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background-color: transparent;
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
   padding: var(--rf-space-3);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .hookHeader,
@@ -37,6 +39,15 @@
 .header {
   justify-content: space-between;
   flex-wrap: wrap;
+}
+
+.header {
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .headerActions {
@@ -85,4 +96,52 @@
   border-color: var(--rf-focus-ring);
   box-shadow: 0 0 0 var(--rf-focus-ring-w)
     color-mix(in srgb, var(--rf-focus-ring) 24%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .editor,
+  .header,
+  .hookRow {
+    animation: extensions-hooks-editor-rise var(--rf-dur-med)
+      var(--rf-ease-entrance) both;
+  }
+
+  .hookRow {
+    transition:
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+      background var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
+  .hookRow:hover {
+    border-color: var(--rf-border-strong);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editor,
+  .header,
+  .hookRow {
+    animation: none;
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .header,
+  .hookRow {
+    backdrop-filter: none;
+  }
+}
+
+@keyframes extensions-hooks-editor-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

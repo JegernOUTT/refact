@@ -14,6 +14,12 @@
   flex-direction: column;
   gap: var(--rf-space-3);
   min-width: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  padding: var(--rf-space-3);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .header {
@@ -23,6 +29,12 @@
   flex-wrap: wrap;
   gap: var(--rf-space-2);
   min-width: 0;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .headerActions {
@@ -68,4 +80,67 @@
   border-color: var(--rf-focus-ring);
   box-shadow: 0 0 0 var(--rf-focus-ring-w)
     color-mix(in srgb, var(--rf-focus-ring) 24%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .editor,
+  .formContent,
+  .header {
+    animation: extensions-command-editor-rise var(--rf-dur-med)
+      var(--rf-ease-entrance) both;
+  }
+
+  .formContent > * {
+    animation: extensions-command-editor-rise var(--rf-dur-med)
+      var(--rf-ease-entrance) both;
+  }
+
+  .formContent > :nth-child(2) {
+    animation-delay: var(--rf-stagger);
+  }
+
+  .formContent > :nth-child(3) {
+    animation-delay: calc(var(--rf-stagger) * 2);
+  }
+
+  .formContent > :nth-child(4) {
+    animation-delay: calc(var(--rf-stagger) * 3);
+  }
+
+  .formContent > :nth-child(5) {
+    animation-delay: calc(var(--rf-stagger) * 4);
+  }
+
+  .formContent > :nth-child(6) {
+    animation-delay: calc(var(--rf-stagger) * 5);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editor,
+  .formContent,
+  .header,
+  .formContent > * {
+    animation: none;
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .formContent,
+  .header {
+    backdrop-filter: none;
+  }
+}
+
+@keyframes extensions-command-editor-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
