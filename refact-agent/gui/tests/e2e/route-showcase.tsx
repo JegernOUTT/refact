@@ -8,6 +8,8 @@ import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
 import { Chat } from "../../src/features/Chat";
+import { BuddyHome } from "../../src/features/Buddy";
+import { setBuddySnapshot } from "../../src/features/Buddy/buddySlice";
 import {
   SETTINGS_SECTIONS,
   SettingsHub,
@@ -27,6 +29,15 @@ import type { ChatHistoryItem } from "../../src/features/History/historySlice";
 import type { ChatThreadRuntime } from "../../src/features/Chat/Thread";
 import type { ChatMessages } from "../../src/services/refact";
 import type {
+  BuddyActivityEntry,
+  BuddyConversationEntry,
+  BuddyOpportunity,
+  BuddyPulse,
+  BuddyRuntimeEvent,
+  BuddySettings,
+  BuddySnapshot,
+} from "../../src/features/Buddy/types";
+import type {
   CapsResponse,
   ConfiguredProvidersResponse,
   IntegrationWithIconResponse,
@@ -38,6 +49,249 @@ import "../../src/lib/render/web.css";
 
 const now = "2026-06-07T10:00:00Z";
 const chatId = "showcase-chat";
+
+const buddySettings: BuddySettings = {
+  enabled: true,
+  auto_diagnostics: true,
+  auto_issue_creation: false,
+  personality_prompt: null,
+  autonomous_chats_enabled: true,
+  proactive_enabled: true,
+  message_observation_enabled: true,
+  chat_reactions_enabled: true,
+  housekeeping_enabled: true,
+  humor_enabled: true,
+  humor_level: "light",
+  autonomy_level: "suggest",
+  quiet_mode: false,
+  daily_digest_hour: 18,
+  observers: {
+    task_health: true,
+    trajectory_clutter: true,
+    chat_pattern: true,
+    customization_drift: true,
+    memory_garden: true,
+    mcp_auth: true,
+    git_pressure: true,
+    diagnostic_cluster: true,
+    provider_health: true,
+  },
+};
+
+const buddyPulse: BuddyPulse = {
+  generated_at: now,
+  tasks: { total: 48, stuck: 1, abandoned: 9, by_status: { planning: 12 } },
+  trajectories: { total: 124, untitled: 6, oldest_age_days: 18 },
+  memory: { total: 28156, orphan: 3, stale_conflicts: 1 },
+  providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 1 },
+  mcp: { total: 7, failing: 1, auth_expiring: 1 },
+  customization: { modes: 8, skills: 14, commands: 9, subagents: 6, hooks: 3 },
+  diagnostics: { last_hour: 4, top_error_types: ["frontend", "llm_error"] },
+  git: { uncommitted_files: 5, diff_lines_4h: 180, branches: 4 },
+  worktrees: {
+    total_registered: 5,
+    total_discovered: 2,
+    total: 7,
+    clean: 3,
+    dirty: 2,
+    unknown: 0,
+    stale: 1,
+    conflicted: 0,
+    shared: 1,
+    abandoned_clean: 2,
+    changed_files: 9,
+    additions: 420,
+    deletions: 73,
+    missing_registry_paths: 1,
+    unregistered_cache_dirs: 1,
+    merged_branches: 2,
+  },
+  humor: "Tiny dashboard goblin found one suspicious scrollbar crumb.",
+};
+
+const buddyOpportunity: BuddyOpportunity = {
+  id: "showcase-opportunity",
+  kind: "diagnostic_investigation",
+  summary:
+    "Investigate a long-running diagnostic cluster before it becomes gremlin soup",
+  priority: "high",
+  confidence: 0.92,
+  fact_keys: ["diagnostic:frontend:overflow"],
+  cooldown_key: "showcase-opportunity",
+  cooldown_secs: 1800,
+  status: "new",
+  proposed_actions: [
+    { kind: "open_page", page: { type: "providers" } },
+    { kind: "dismiss" },
+  ],
+  humor_allowed: true,
+  humor: "Scrollbar? I hardly knowbar.",
+  related: {
+    chat_ids: ["showcase-chat"],
+    task_ids: ["task-active"],
+    memory_ids: [],
+    config_paths: ["/workspace/refact/refact-agent/gui/src/features/Buddy"],
+  },
+  created_at: now,
+  expires_at: "2099-12-31T00:00:00Z",
+};
+
+const buddyActivities: BuddyActivityEntry[] = [
+  {
+    icon: "🧭",
+    title: "Buddy reviewed responsive surfaces",
+    description:
+      "Checked hero, grids, activity, settings, and workshop panels.",
+    timestamp: now,
+    activity_type: "buddy_layout_review",
+    chat_id: "showcase-chat",
+  },
+  {
+    icon: "⚙️",
+    title: "Refact e2e gate queued",
+    description: "No horizontal scroll matrix is ready for narrow widths.",
+    timestamp: "2026-06-07T09:40:00Z",
+    activity_type: "refact_e2e_gate",
+    chat_id: null,
+  },
+];
+
+const buddyRuntimeEvent: BuddyRuntimeEvent = {
+  id: "showcase-runtime-error",
+  signal_type: "frontend_error_burst",
+  title: "Possible layout overflow",
+  description: "A narrow viewport almost clipped a Buddy utility panel.",
+  source: "route-showcase",
+  status: "failed",
+  failure_category: "frontend",
+  failure_summary: "responsive layout guard",
+  priority: "high",
+  created_at: now,
+  chat_id: "showcase-chat",
+};
+
+const buddyConversations: BuddyConversationEntry[] = [
+  {
+    id: "showcase-buddy-chat",
+    kind: "chat",
+    title: "Buddy route responsive smoke with a very long title",
+    created_at: now,
+    updated_at: now,
+    status: "completed",
+    message_count: 7,
+    icon: "💬",
+    badge: "Review",
+  },
+  {
+    id: "showcase-buddy-workflow",
+    kind: "workflow",
+    title: "Autonomous layout watcher",
+    created_at: "2026-06-07T08:00:00Z",
+    updated_at: "2026-06-07T08:30:00Z",
+    status: "completed",
+    message_count: 3,
+    icon: "🛠️",
+    badge: "Workflow",
+    workflow_id: "buddy_layout_watcher",
+  },
+];
+
+const buddySnapshot: BuddySnapshot = {
+  state: {
+    identity: {
+      name: "Pixel",
+      created_at: "2026-06-01T00:00:00Z",
+      palette_index: 0,
+    },
+    progression: {
+      stage: 1,
+      stage_name: "Sprout",
+      level: 3,
+      xp: 42,
+      xp_next: 80,
+    },
+    skills: { unlocked: ["review", "nudge"], locked: ["teleport"] },
+    workflow_summaries: [],
+    semantic: {
+      mood: "curious",
+      focus: "responsive polish",
+      headline: "Guarding narrow layouts with tiny claws",
+      last_active: now,
+    },
+    recent_activities: buddyActivities,
+    suggestion_state: [
+      {
+        id: "showcase-suggestion",
+        suggestion_type: "layout_check",
+        title: "Run a narrow Buddy smoke pass",
+        description: "Open settings and filter activity after the route loads.",
+        created_at: now,
+        dismissed: false,
+        controls: [],
+        quest: null,
+      },
+    ],
+    pet: {
+      needs: {
+        hunger: 70,
+        energy: 82,
+        hygiene: 88,
+        boredom: 18,
+        affection: 91,
+      },
+      condition: {
+        sleeping: false,
+        hungry: false,
+        sleepy: false,
+        dirty: false,
+        bored: false,
+        lonely: false,
+      },
+      evolution: {
+        care_score: 12,
+        neglect_score: 1,
+        open_seconds: 320,
+        last_evolved_at: null,
+      },
+    },
+    personality: {
+      archetype_id: "chaos_sprite",
+      archetype_label: "Chaos Sprite",
+      vibe: "Mildly chaotic, cute, and helpful",
+      summary: "A tiny gremlin assistant who celebrates completed checks.",
+      prompt: "Be warm, curious, and gently mischievous.",
+      traits: {
+        playfulness: 82,
+        chaos: 48,
+        sociability: 74,
+        curiosity: 88,
+        resilience: 69,
+      },
+    },
+    active_quest: null,
+    opportunities: [buddyOpportunity],
+  },
+  settings: buddySettings,
+  enabled: true,
+  storage: {
+    project_root: "/workspace/refact",
+    buddy_dir: "/workspace/refact/.refact/buddy",
+    settings_path: "/workspace/refact/.refact/buddy/settings.json",
+  },
+  recent_diagnostics: [],
+  active_speech: null,
+  runtime_queue: [buddyRuntimeEvent],
+  now_playing: null,
+  pulse: buddyPulse,
+  opportunities: [buddyOpportunity],
+  active_drafts: [],
+  chat_reaction_debug: {
+    recent_attempts: [],
+    counts_by_result: { emitted: 2, skipped: 1 },
+    last_skip_reason: null,
+    last_emitted_at: now,
+  },
+};
 
 const showcaseMessages: ChatMessages = [
   {
@@ -559,7 +813,89 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     }
     return Promise.resolve(jsonResponse({ ok: true }));
   }
+  if (path === "/v1/buddy") return Promise.resolve(jsonResponse(buddySnapshot));
+  if (path === "/v1/buddy/settings") {
+    if (init?.method === "POST" && init.body) {
+      const patch = JSON.parse(String(init.body)) as Partial<BuddySettings>;
+      return Promise.resolve(jsonResponse({ ...buddySettings, ...patch }));
+    }
+    return Promise.resolve(jsonResponse(buddySettings));
+  }
+  if (path === "/v1/buddy/opportunities") {
+    return Promise.resolve(jsonResponse({ opportunities: [buddyOpportunity] }));
+  }
+  if (path === "/v1/buddy/conversations") {
+    if (init?.method === "POST") {
+      return Promise.resolve(
+        jsonResponse({
+          chat_id: "showcase-new-buddy-chat",
+          title: "New Buddy showcase chat",
+          created_at: now,
+        }),
+      );
+    }
+    return Promise.resolve(jsonResponse(buddyConversations));
+  }
+  if (path === "/v1/buddy/pulse")
+    return Promise.resolve(jsonResponse(buddyPulse));
+  if (path.startsWith("/v1/buddy/runtime/")) {
+    return Promise.resolve(jsonResponse({ dismissed: true }));
+  }
+  if (path.startsWith("/v1/buddy/opportunities/")) {
+    return Promise.resolve(
+      jsonResponse({
+        snapshot: buddySnapshot,
+        action_result: { kind: "dismiss" },
+      }),
+    );
+  }
+  if (path.startsWith("/v1/buddy/care")) {
+    return Promise.resolve(
+      jsonResponse({ message: "ok", snapshot: buddySnapshot }),
+    );
+  }
   if (path === "/v1/ping") return Promise.resolve(new Response("pong"));
+  if (path === "/v1/setup/status") {
+    return Promise.resolve(
+      jsonResponse({
+        configured: true,
+        reasons: [],
+        detail: {
+          project_root: "/workspace/refact",
+          has_agents_md: true,
+          has_knowledge: true,
+          has_trajectories: true,
+        },
+      }),
+    );
+  }
+  if (path === "/v1/stats/llm/summary") {
+    return Promise.resolve(
+      jsonResponse({
+        date_range: { from: "2026-06-01", to: "2026-06-07" },
+        totals: {
+          total_calls: 42,
+          successful_calls: 39,
+          failed_calls: 3,
+          total_prompt_tokens: 12000,
+          total_completion_tokens: 4000,
+          total_tokens: 16000,
+          total_cache_read_tokens: 0,
+          total_cache_creation_tokens: 0,
+          total_cost_usd: 0.12,
+          total_duration_ms: 42000,
+          avg_duration_ms: 1000,
+          total_conversations: 8,
+          total_messages_sent: 55,
+        },
+        by_model: [],
+        by_provider: [],
+        by_day: [],
+        by_mode: [],
+        top_conversations: [],
+      }),
+    );
+  }
   if (path === "/v1/providers")
     return Promise.resolve(jsonResponse(providerList));
   if (path === "/v1/caps") return Promise.resolve(jsonResponse(caps));
@@ -666,6 +1002,7 @@ store.dispatch(setBackendStatus({ status: "online" }));
 for (const section of ["workspace", "chats", "tasks", "buddy"] as const) {
   store.dispatch(sidebarSectionSnapshotReceived({ section, status: "ready" }));
 }
+store.dispatch(setBuddySnapshot(buddySnapshot));
 store.dispatch(tasksApi.util.upsertQueryData("listTasks", undefined, tasks));
 
 const route =
@@ -708,6 +1045,10 @@ const ShowcaseSurface = () => {
         tabbed={false}
       />
     );
+  }
+
+  if (route === "buddy") {
+    return <BuddyHome />;
   }
 
   return <Dashboard />;

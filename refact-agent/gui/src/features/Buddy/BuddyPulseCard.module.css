@@ -4,6 +4,7 @@
   gap: var(--rf-space-2);
   min-width: 0;
   padding: var(--rf-space-3);
+  overflow: hidden;
 }
 
 .label {
@@ -20,8 +21,10 @@
 }
 
 .humor {
+  min-width: 0;
   color: var(--rf-color-muted);
   font-style: italic;
+  overflow-wrap: anywhere;
 }
 
 .rows {
@@ -65,5 +68,10 @@
 
   .rowLabel {
     min-width: 0;
+  }
+
+  .rowValue {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }

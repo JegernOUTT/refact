@@ -9,6 +9,15 @@ type OverflowReport = {
   innerScrollOffenders: string[];
 };
 
+type BuddyInnerOverflowReport = {
+  selector: string;
+  description: string;
+  missing: boolean;
+  overflowing: boolean;
+  scrollWidth: number;
+  clientWidth: number;
+};
+
 const widths = [240, 360, 768, 1280] as const;
 
 const routes = [
@@ -19,6 +28,10 @@ const routes = [
   {
     name: "chat",
     path: "/tests/e2e/route-showcase.html?route=chat",
+  },
+  {
+    name: "buddy",
+    path: "/tests/e2e/route-showcase.html?route=buddy",
   },
   {
     name: "settings general",
@@ -100,6 +113,10 @@ test.describe("no page-level horizontal scroll", () => {
             await expect(mobileSectionSelect).not.toBeVisible();
           }
         }
+        if (route.path.includes("route=buddy")) {
+          await page.getByTestId("buddy-home-content").waitFor();
+          await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
+        }
 
         const overflow = await page.evaluate<OverflowReport, boolean>(
           (checkInnerScroll) => {
@@ -146,7 +163,8 @@ test.describe("no page-level horizontal scroll", () => {
               : [];
             return { docOverflow, offenders, innerScrollOffenders };
           },
-          route.path.includes("route=settings"),
+          route.path.includes("route=settings") ||
+            route.path.includes("route=buddy"),
         );
 
         expect(
@@ -159,7 +177,141 @@ test.describe("no page-level horizontal scroll", () => {
             " | ",
           )}`,
         ).toEqual([]);
+
+        if (route.path.includes("route=buddy")) {
+          const buddyInnerOverflow = await page.evaluate<
+            BuddyInnerOverflowReport[]
+          >(() => {
+            const targets = [
+              {
+                selector: "[data-testid='buddy-home-content']",
+                description: "Buddy content scroller",
+              },
+              {
+                selector: "[data-testid='buddy-home-hero']",
+                description: "Buddy hero band",
+              },
+              {
+                selector: "[data-testid='buddy-summary-strip']",
+                description: "Buddy summary strip",
+              },
+              {
+                selector: "[data-testid='buddy-opportunities-feed']",
+                description: "Buddy opportunities feed",
+              },
+              {
+                selector: "[data-testid='buddy-pulse-card']",
+                description: "Buddy pulse card",
+              },
+              {
+                selector: "[data-testid='buddy-personality-panel']",
+                description: "Buddy personality panel",
+              },
+              {
+                selector: "[data-testid='buddy-activity-panel']",
+                description: "Buddy activity panel",
+              },
+              {
+                selector: "[data-testid='buddy-recent-errors-panel']",
+                description: "Buddy recent errors panel",
+              },
+              {
+                selector: "[data-testid='buddy-workshop']",
+                description: "Buddy workshop dock",
+              },
+            ];
+            return targets.map(({ selector, description }) => {
+              const el = document.querySelector(selector);
+              if (!el) {
+                return {
+                  selector,
+                  description,
+                  missing: true,
+                  overflowing: false,
+                  scrollWidth: 0,
+                  clientWidth: 0,
+                };
+              }
+              return {
+                selector,
+                description,
+                missing: false,
+                overflowing: el.scrollWidth > el.clientWidth + 2,
+                scrollWidth: el.scrollWidth,
+                clientWidth: el.clientWidth,
+              };
+            });
+          });
+
+          const buddyInnerOffenders = buddyInnerOverflow.filter(
+            (entry) => entry.missing || entry.overflowing,
+          );
+          expect(
+            buddyInnerOffenders,
+            buddyInnerOffenders
+              .map(
+                (entry) =>
+                  `${entry.description} ${entry.selector} ${entry.scrollWidth}x${entry.clientWidth}`,
+              )
+              .join(" | "),
+          ).toEqual([]);
+        }
       });
     }
   }
+});
+
+test.describe("Buddy route smoke", () => {
+  test.beforeEach(async ({ page }) => {
+    page.on("pageerror", (error) => {
+      throw error;
+    });
+  });
+
+  test("renders main regions and toggles activity/settings without clipping", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 360, height: 900 });
+    await page.goto("/tests/e2e/route-showcase.html?route=buddy");
+    await page.getByTestId("buddy-home-content").waitFor();
+
+    await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
+    await expect(page.getByTestId("buddy-world")).toBeVisible();
+    await expect(page.getByTestId("buddy-summary-strip")).toBeVisible();
+    await expect(page.getByTestId("buddy-opportunities-feed")).toBeVisible();
+    await expect(page.getByTestId("buddy-pulse-card")).toBeVisible();
+    await expect(page.getByTestId("buddy-activity-panel")).toBeVisible();
+
+    await page.getByText("buddy_*").click();
+    await expect(
+      page.getByText("Buddy reviewed responsive surfaces"),
+    ).toBeVisible();
+    await expect(page.getByText("Refact e2e gate queued")).not.toBeVisible();
+
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByTestId("buddy-settings-panel")).toBeVisible();
+
+    const clipped = await page.evaluate<string[]>(() => {
+      const viewportWidth = document.documentElement.clientWidth;
+      return [
+        "[data-testid='buddy-settings-panel']",
+        "[data-testid='buddy-activity-panel']",
+      ].flatMap((selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return [`${selector} missing`];
+        const rect = el.getBoundingClientRect();
+        const isClipped = rect.left < -1 || rect.right > viewportWidth + 1;
+        return isClipped
+          ? [
+              `${selector} rect=${rect.left},${rect.top},${rect.right},${rect.bottom}`,
+            ]
+          : [];
+      });
+    });
+
+    expect(
+      clipped,
+      `horizontally clipped Buddy panels: ${clipped.join(" | ")}`,
+    ).toEqual([]);
+  });
 });
