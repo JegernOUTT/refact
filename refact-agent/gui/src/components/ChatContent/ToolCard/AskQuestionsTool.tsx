@@ -153,12 +153,34 @@ const QuestionWidget: React.FC<{
           <Box mb="2">
             <Markdown>{question.text}</Markdown>
           </Box>
-          <SegmentedControl
-            name={question.id}
-            options={(question.options ?? []).map((opt) => ({ value: opt, label: opt }))}
-            value={typeof value === "string" ? value : ""}
-            onValueChange={onChange}
-          />
+          <Flex
+            aria-label={question.text}
+            className={styles.singleSelectGroup}
+            direction="column"
+            gap="2"
+            role="radiogroup"
+          >
+            {question.options?.map((opt) => {
+              const checked = typeof value === "string" && value === opt;
+              const optionClassName = checked
+                ? `${styles.singleSelectOption} ${styles.singleSelectOptionSelected}`
+                : styles.singleSelectOption;
+              return (
+                <label key={opt} className={optionClassName}>
+                  <input
+                    className={styles.singleSelectInput}
+                    type="radio"
+                    name={question.id}
+                    value={opt}
+                    checked={checked}
+                    onChange={() => onChange(opt)}
+                  />
+                  <span className={styles.singleSelectIndicator} />
+                  <span className={styles.singleSelectLabel}>{opt}</span>
+                </label>
+              );
+            })}
+          </Flex>
         </Box>
       );
 
