@@ -1,15 +1,12 @@
-/* Shared scrollbar styles - use via composes: scrollbarThin from '../shared/scrollbar.module.css' */
-
 .scrollbarThin {
-  /* Reserve gutter to avoid layout shift; keep thumb hidden until hover. */
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-idle, transparent) transparent;
 }
 
 .scrollbarThin::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: var(--rf-scrollbar-size, 8px);
+  height: var(--rf-scrollbar-size, 8px);
 }
 
 .scrollbarThin::-webkit-scrollbar-track {
@@ -17,43 +14,36 @@
 }
 
 .scrollbarThin::-webkit-scrollbar-thumb {
-  background-color: transparent;
-  border-radius: 2px;
-  transition: background-color 150ms ease-out;
-  opacity: 0;
+  background-color: var(--rf-scrollbar-thumb-idle, transparent);
+  border-radius: var(--rf-radius-pill);
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .scrollbarThin:hover {
-  scrollbar-color: var(--gray-a5) transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong)) transparent;
 }
 
 .scrollbarThin:hover::-webkit-scrollbar-thumb {
-  background-color: var(--gray-a5);
-  opacity: 1;
+  background-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong));
 }
 
-.scrollbarThin::-webkit-scrollbar-thumb:hover {
-  background-color: var(--gray-a6);
-}
-
+.scrollbarThin::-webkit-scrollbar-thumb:hover,
 .scrollbarThin::-webkit-scrollbar-thumb:active {
-  background-color: var(--gray-a7);
+  background-color: var(--rf-scrollbar-thumb-active, var(--rf-color-faint));
 }
 
-/* Hide thumb by default; reveal on hover (for compact panels). */
 .scrollbarHoverOnly {
-  /* Back-compat alias: scrollbarThin already hover-only now. */
-  scrollbar-color: transparent transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-idle, transparent) transparent;
 }
 
 .scrollbarHoverOnly::-webkit-scrollbar-thumb {
-  background-color: transparent;
+  background-color: var(--rf-scrollbar-thumb-idle, transparent);
 }
 
 .scrollbarHoverOnly:hover {
-  scrollbar-color: var(--gray-a3) transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong)) transparent;
 }
 
 .scrollbarHoverOnly:hover::-webkit-scrollbar-thumb {
-  background-color: var(--gray-a3);
+  background-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong));
 }

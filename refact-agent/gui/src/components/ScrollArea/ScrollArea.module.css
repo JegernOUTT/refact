@@ -1,11 +1,11 @@
 .root {
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-idle, transparent) transparent;
 }
 
 .root:hover {
-  scrollbar-color: var(--rf-border-strong) transparent;
+  scrollbar-color: var(--rf-scrollbar-thumb-hover, var(--rf-border-strong)) transparent;
 }
 
 .viewport {

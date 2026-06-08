@@ -4,6 +4,7 @@ import "@radix-ui/themes/styles.css";
 import "../../styles/tokens.css";
 import "../../styles/motion.css";
 import "../../styles/responsive.css";
+import "../../styles/scrollbar.css";
 import "./theme-config.css";
 import "../shared/tokens.css";
 import { useAppearance, useConfig } from "../../hooks";

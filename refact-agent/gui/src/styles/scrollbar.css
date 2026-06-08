@@ -1,0 +1,48 @@
+:where(.radix-themes, [data-radix-themes]) {
+  --rf-scrollbar-size: 8px;
+  --rf-scrollbar-thumb-idle: transparent;
+  --rf-scrollbar-thumb-hover: var(--rf-border-strong);
+  --rf-scrollbar-thumb-active: var(--rf-color-faint);
+}
+
+:where(.radix-themes, [data-radix-themes]),
+:where(.radix-themes, [data-radix-themes]) * {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rf-scrollbar-thumb-idle) transparent;
+}
+
+:where(.radix-themes, [data-radix-themes]):hover,
+:where(.radix-themes, [data-radix-themes]) *:hover {
+  scrollbar-color: var(--rf-scrollbar-thumb-hover) transparent;
+}
+
+:where(.radix-themes, [data-radix-themes])::-webkit-scrollbar,
+:where(.radix-themes, [data-radix-themes]) *::-webkit-scrollbar {
+  width: var(--rf-scrollbar-size);
+  height: var(--rf-scrollbar-size);
+}
+
+:where(.radix-themes, [data-radix-themes])::-webkit-scrollbar-track,
+:where(.radix-themes, [data-radix-themes]) *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:where(.radix-themes, [data-radix-themes])::-webkit-scrollbar-thumb,
+:where(.radix-themes, [data-radix-themes]) *::-webkit-scrollbar-thumb {
+  background-color: var(--rf-scrollbar-thumb-idle);
+  border-radius: var(--rf-radius-pill);
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+:where(.radix-themes, [data-radix-themes]):hover::-webkit-scrollbar-thumb,
+:where(.radix-themes, [data-radix-themes]) *:hover::-webkit-scrollbar-thumb {
+  background-color: var(--rf-scrollbar-thumb-hover);
+}
+
+:where(.radix-themes, [data-radix-themes])::-webkit-scrollbar-thumb:hover,
+:where(.radix-themes, [data-radix-themes]) *::-webkit-scrollbar-thumb:hover,
+:where(.radix-themes, [data-radix-themes])::-webkit-scrollbar-thumb:active,
+:where(.radix-themes, [data-radix-themes]) *::-webkit-scrollbar-thumb:active {
+  background-color: var(--rf-scrollbar-thumb-active);
+}
