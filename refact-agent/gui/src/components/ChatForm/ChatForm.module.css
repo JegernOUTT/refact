@@ -43,15 +43,16 @@
     transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
-.chatFormCollapsed:hover,
-.chatFormCollapsed:focus-within {
-  border-color: var(--rf-border);
+.chatFormExpanded {
+  border-color: transparent;
+  background: transparent;
 }
 
-.chatFormExpanded,
+.chatFormCollapsed:hover,
+.chatFormCollapsed:focus-within,
+.chatFormExpanded:hover,
 .chatFormExpanded:focus-within {
-  border-color: var(--rf-border-strong);
-  background: color-mix(in srgb, var(--rf-surface-1) 46%, transparent);
+  border-color: var(--rf-border);
 }
 
 .chatFormCompact {
