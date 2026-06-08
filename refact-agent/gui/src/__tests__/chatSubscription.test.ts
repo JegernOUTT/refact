@@ -410,6 +410,71 @@ describe("chatSubscription", () => {
       expect(onEvent).toHaveBeenCalledWith(event);
     });
 
+    it("should treat oversized events as reconnectable errors", async () => {
+      const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
+      const onError = vi.fn();
+      const onDisconnected = vi.fn();
+      const encoder = new TextEncoder();
+      const oversizedEvent = {
+        chat_id: "test",
+        seq: "1",
+        type: "browser_frame",
+        tab_id: "tab-1",
+        mime: "text/html",
+        data: "x".repeat(160),
+      };
+      const followupEvent = {
+        chat_id: "test",
+        seq: "2",
+        type: "pause_cleared",
+      };
+      const chunks: Uint8Array[] = [
+        encoder.encode(`data: ${JSON.stringify(oversizedEvent)}\n\n`),
+        encoder.encode(`data: ${JSON.stringify(followupEvent)}\n\n`),
+      ];
+      let readCount = 0;
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi.fn(async () => {
+              if (readCount >= chunks.length) {
+                return { done: true, value: undefined };
+              }
+              const value = chunks[readCount];
+              readCount += 1;
+              return { done: false, value };
+            }),
+          }),
+        },
+      });
+
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        {
+          onEvent,
+          onError,
+          onDisconnected,
+        },
+        undefined,
+        { maxEventChars: 120 },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(readCount).toBe(1);
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(onDisconnected).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "SSE event exceeded 120 chars; reconnecting",
+        }),
+      );
+    });
+
     it("should call onDisconnected on normal stream close", async () => {
       const onDisconnected = vi.fn();
 
@@ -435,6 +500,44 @@ describe("chatSubscription", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(onDisconnected).toHaveBeenCalled();
+    });
+
+    it("should not call onDisconnected for internal abort errors", async () => {
+      vi.useFakeTimers();
+      const onError = vi.fn();
+      const onDisconnected = vi.fn();
+
+      mockFetch.mockImplementationOnce((_url: string, init?: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+          });
+        });
+      });
+
+      const unsubscribe = subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        {
+          onEvent: vi.fn(),
+          onError,
+          onDisconnected,
+        },
+        undefined,
+        { connectTimeoutMs: 10 },
+      );
+
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(10);
+      await Promise.resolve();
+
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "SSE connect timeout" }),
+      );
+      expect(onDisconnected).not.toHaveBeenCalled();
+      unsubscribe();
+      vi.useRealTimers();
     });
 
     it("should call onError on idle timeout", async () => {

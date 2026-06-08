@@ -352,12 +352,14 @@ export type ChatSubscriptionCallbacks = {
 export type SubscriptionOptions = {
   connectTimeoutMs?: number;
   idleTimeoutMs?: number;
+  maxBufferChars?: number;
+  maxEventChars?: number;
 };
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
-const MAX_SSE_BUFFER_CHARS = 8_000_000;
-const MAX_SSE_EVENT_CHARS = 4_000_000;
+const DEFAULT_MAX_SSE_BUFFER_CHARS = 8_000_000;
+const DEFAULT_MAX_SSE_EVENT_CHARS = DEFAULT_MAX_SSE_BUFFER_CHARS;
 
 export function subscribeToChatEvents(
   chatId: string,
@@ -371,6 +373,8 @@ export function subscribeToChatEvents(
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  const maxBufferChars = options.maxBufferChars ?? DEFAULT_MAX_SSE_BUFFER_CHARS;
+  const maxEventChars = options.maxEventChars ?? DEFAULT_MAX_SSE_EVENT_CHARS;
 
   const abortController = new AbortController();
   const state = { connected: false };
@@ -418,6 +422,12 @@ export function subscribeToChatEvents(
     callbacks.onError(new Error(message));
   };
 
+  const abortWithTerminalError = (message: string): never => {
+    abortReason = message;
+    abortController.abort();
+    throw new Error(message);
+  };
+
   connectTimer = setTimeout(() => {
     if (!state.connected) {
       abortReason = abortReason ?? "SSE connect timeout";
@@ -461,10 +471,10 @@ export function subscribeToChatEvents(
           .replace(/\r/g, "\n");
         buffer += chunk;
 
-        if (buffer.length > MAX_SSE_BUFFER_CHARS) {
-          abortReason = `SSE buffer exceeded ${MAX_SSE_BUFFER_CHARS} chars`;
-          abortController.abort();
-          break;
+        if (buffer.length > maxBufferChars) {
+          abortWithTerminalError(
+            `SSE buffer exceeded ${maxBufferChars} chars; reconnecting`,
+          );
         }
 
         const blocks = buffer.split("\n\n");
@@ -485,14 +495,10 @@ export function subscribeToChatEvents(
 
           const dataStr = dataLines.join("\n");
           if (dataStr === "[DONE]") continue;
-          if (dataStr.length > MAX_SSE_EVENT_CHARS) {
-            if (process.env.NODE_ENV === "development") {
-              // eslint-disable-next-line no-console
-              console.warn(
-                `[SSE] Event too large (${dataStr.length} chars), skipping`,
-              );
-            }
-            continue;
+          if (dataStr.length > maxEventChars) {
+            abortWithTerminalError(
+              `SSE event exceeded ${maxEventChars} chars; reconnecting`,
+            );
           }
 
           try {
@@ -541,9 +547,19 @@ export function subscribeToChatEvents(
       if (error.name === "AbortError") {
         if (abortReason) {
           emitTerminalError(abortReason);
+          abortReason = null;
+          disconnect(false);
+          return;
         }
         abortReason = null;
         disconnect(true);
+        return;
+      }
+
+      if (abortReason) {
+        emitTerminalError(abortReason);
+        abortReason = null;
+        disconnect(false);
         return;
       }
 
