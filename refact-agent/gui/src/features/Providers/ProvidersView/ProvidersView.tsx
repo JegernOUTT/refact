@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Plus } from "lucide-react";
 import classNames from "classnames";
 
 import { Button } from "../../../components/ui";
@@ -8,10 +8,17 @@ import { AddProviderInstanceModal } from "./AddProviderInstanceModal";
 
 import type { ProviderListItem } from "../../../services/refact";
 import { ProviderPreview } from "../ProviderPreview";
-import { ErrorCallout, InformationCallout } from "../../../components/Callout/Callout";
+import {
+  ErrorCallout,
+  InformationCallout,
+} from "../../../components/Callout/Callout";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { clearError, getErrorMessage } from "../../Errors/errorsSlice";
-import { clearInformation, getInformationMessage } from "../../Errors/informationSlice";
+import {
+  clearInformation,
+  getInformationMessage,
+} from "../../Errors/informationSlice";
+import { SettingsSection } from "../../Settings/SettingsSection";
 
 import styles from "./ProvidersView.module.css";
 import { selectConfig } from "../../Config/configSlice";
@@ -33,12 +40,18 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
   const globalError = useAppSelector(getErrorMessage);
   const information = useAppSelector(getInformationMessage);
 
-  const [currentProvider, setCurrentProvider] = useState<ProviderListItem | null>(null);
+  const [currentProvider, setCurrentProvider] =
+    useState<ProviderListItem | null>(null);
   const [instanceModalOpen, setInstanceModalOpen] = useState(false);
-  const [initialBaseProvider, setInitialBaseProvider] = useState<string | null>(null);
-  const handleSetCurrentProvider = useCallback((provider: ProviderListItem | null) => {
-    setCurrentProvider(provider);
-  }, []);
+  const [initialBaseProvider, setInitialBaseProvider] = useState<string | null>(
+    null,
+  );
+  const handleSetCurrentProvider = useCallback(
+    (provider: ProviderListItem | null) => {
+      setCurrentProvider(provider);
+    },
+    [],
+  );
 
   const handleAddInstance = useCallback(() => {
     setInitialBaseProvider(null);
@@ -64,20 +77,40 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
 
   return (
     <div className={styles.view}>
-      {(!embedded || currentProvider) ? (
-        <div className={styles.backRow}>
-          <Button variant="ghost" leftIcon={ArrowLeft} onClick={handleBackClick}>
-            Back
-          </Button>
-        </div>
-      ) : null}
       {!currentProvider ? (
-        <ConfiguredProvidersView
-          configuredProviders={configuredProviders}
-          handleSetCurrentProvider={handleSetCurrentProvider}
-          onAddInstance={handleAddInstance}
-          onDuplicateProvider={handleDuplicateProvider}
-        />
+        <SettingsSection
+          title="Providers"
+          description="Manage model provider instances, credentials, defaults, and available models."
+          width="wide"
+          actions={
+            <Button
+              variant="soft"
+              size="md"
+              leftIcon={Plus}
+              onClick={handleAddInstance}
+            >
+              Add instance
+            </Button>
+          }
+          subNav={
+            !embedded ? (
+              <Button
+                variant="ghost"
+                leftIcon={ArrowLeft}
+                onClick={handleBackClick}
+              >
+                Back
+              </Button>
+            ) : null
+          }
+        >
+          <ConfiguredProvidersView
+            configuredProviders={configuredProviders}
+            handleSetCurrentProvider={handleSetCurrentProvider}
+            onAddInstance={handleAddInstance}
+            onDuplicateProvider={handleDuplicateProvider}
+          />
+        </SettingsSection>
       ) : null}
       {currentProvider ? (
         <ProviderPreview
@@ -85,6 +118,8 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
           configuredProviders={configuredProviders}
           handleSetCurrentProvider={handleSetCurrentProvider}
           onDuplicateProvider={handleDuplicateProvider}
+          onBack={handleBackClick}
+          sectioned
         />
       ) : null}
       <AddProviderInstanceModal

@@ -31,7 +31,9 @@
   display: inline-flex;
   min-width: 0;
   flex-shrink: 0;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--rf-space-2);
 }
 
@@ -43,6 +45,6 @@
 
   .actions {
     width: 100%;
-    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 }

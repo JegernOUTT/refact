@@ -4,53 +4,13 @@
   min-width: 0;
   min-height: 100%;
   flex-direction: column;
-  padding: var(--rf-space-1);
-}
-
-.backRow {
-  display: flex;
-  margin-bottom: var(--rf-space-4);
-}
-
-.configuredView {
-  display: grid;
-  min-width: 0;
-  gap: var(--rf-space-4);
-}
-
-.headerRow {
-  display: flex;
-  min-width: 0;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--rf-space-3);
-}
-
-.headerCopy {
-  display: grid;
-  min-width: 0;
-  gap: var(--rf-space-1);
-}
-
-.title,
-.description {
-  margin: 0;
-}
-
-.title {
-  color: var(--rf-color-fg);
-  font: 700 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
-}
-
-.description {
-  color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  align-items: center;
 }
 
 .providersGrid {
   display: grid;
   min-width: 0;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: var(--rf-space-2);
 }
 
@@ -66,10 +26,4 @@
 
 .popup_ide {
   width: calc(100vw - var(--rf-space-2) * 2);
-}
-
-@media (width <= 640px) {
-  .headerRow {
-    flex-direction: column;
-  }
 }
