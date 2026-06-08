@@ -226,7 +226,7 @@ const TokensHoverContent: React.FC<{
       <TokenDisplay label="Maximum" value={maxContextTokens} />
       {(inputTokens > 0 || outputTokens > 0) && (
         <>
-          <Box my="1" style={{ borderTop: "1px solid var(--gray-a6)" }} />
+          <Box my="1" style={{ borderTop: "1px solid var(--rf-border)" }} />
           <Text size="1" weight="bold" color="gray">
             Total tokens
           </Text>
@@ -285,7 +285,7 @@ const DefaultHoverTriggerContent: React.FC<{
     <Flex align="center" gap="3">
       {showUsd && (
         <HoverCard.Root>
-          <HoverCard.Trigger>
+          <HoverCard.Trigger asChild>
             <Flex align="center" gap="1" style={{ cursor: "default" }}>
               <Text size="1">{formatUsd(totalUsd)}</Text>
             </Flex>
@@ -302,7 +302,7 @@ const DefaultHoverTriggerContent: React.FC<{
         </HoverCard.Root>
       )}
       <Popover.Root>
-        <Popover.Trigger>
+        <Popover.Trigger asChild>
           <Flex align="center" gap="1" style={{ cursor: "pointer" }}>
             <CircularProgress
               value={maxContextTokens > 0 ? currentSessionTokens : 0}
@@ -477,7 +477,7 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
   // For inline usage (chat form), keep the HoverCard with detailed info
   return (
     <HoverCard.Root open={open} onOpenChange={setOpen}>
-      <HoverCard.Trigger>
+      <HoverCard.Trigger asChild>
         <Card
           className={classNames(styles.usageCounterContainer, {
             [styles.usageCounterContainerInline]: isInline,

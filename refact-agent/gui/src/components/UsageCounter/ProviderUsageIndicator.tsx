@@ -61,18 +61,19 @@ const formatResetAt = (resetAt: string | null | undefined): string | null => {
   })}`;
 };
 
+const usageColor = (pct: number): string => {
+  if (pct >= 90) return "var(--rf-color-danger)";
+  if (pct >= 70) return "var(--rf-color-warning)";
+  return "var(--rf-color-success)";
+};
+
 const UsageRow: React.FC<{
   label: string;
   pct: number;
   resetAt?: string | null;
 }> = ({ label, pct, resetAt }) => {
   const clamped = Math.max(0, Math.min(pct, 100));
-  const color =
-    clamped >= 90
-      ? "var(--red-9)"
-      : clamped >= 70
-        ? "var(--orange-9)"
-        : "var(--green-9)";
+  const color = usageColor(clamped);
   const resetText = formatResetAt(resetAt);
   return (
     <Flex direction="column" gap="1">
@@ -89,7 +90,7 @@ const UsageRow: React.FC<{
           height: "3px",
           width: "100%",
           borderRadius: "2px",
-          background: "var(--gray-a4)",
+          background: "var(--rf-surface-2)",
           overflow: "hidden",
         }}
       >
@@ -143,7 +144,7 @@ const CodexWindowRow: React.FC<{
           height: "3px",
           width: "100%",
           borderRadius: "2px",
-          background: "var(--gray-a4)",
+          background: "var(--rf-surface-2)",
           overflow: "hidden",
         }}
       >
@@ -152,12 +153,7 @@ const CodexWindowRow: React.FC<{
             height: "100%",
             width: `${Math.max(0, Math.min(w.used_percent, 100))}%`,
             borderRadius: "2px",
-            background:
-              w.used_percent >= 90
-                ? "var(--red-9)"
-                : w.used_percent >= 70
-                  ? "var(--orange-9)"
-                  : "var(--green-9)",
+            background: usageColor(w.used_percent),
             transition: "width 0.3s ease",
           }}
         />
@@ -191,8 +187,8 @@ const ProviderIndicator: React.FC<{
   children: React.ReactNode;
 }> = ({ label, pct, children }) => (
   <HoverCard.Root openDelay={100}>
-    <HoverCard.Trigger>
-      <Flex align="center" gap="1" style={{ cursor: "default", opacity: 0.7 }}>
+    <HoverCard.Trigger asChild>
+      <Flex align="center" gap="1" className={styles.providerIndicatorTrigger}>
         <CircularUsage pct={pct} />
         <Text size="1" color="gray">
           {label}

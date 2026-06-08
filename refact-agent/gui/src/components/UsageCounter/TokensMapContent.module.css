@@ -7,7 +7,7 @@
   height: 12px;
   border-radius: var(--radius-2);
   overflow: hidden;
-  background-color: var(--gray-4);
+  background-color: var(--rf-surface-2);
 }
 
 .segment {
