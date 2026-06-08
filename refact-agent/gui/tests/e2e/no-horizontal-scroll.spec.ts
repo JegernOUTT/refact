@@ -19,6 +19,38 @@ const routes = [
     name: "chat",
     path: "/tests/e2e/route-showcase.html?route=chat",
   },
+  {
+    name: "settings general",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=general",
+  },
+  {
+    name: "settings providers",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=providers",
+  },
+  {
+    name: "settings models",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=models",
+  },
+  {
+    name: "settings customization",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=customization",
+  },
+  {
+    name: "settings integrations",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=integrations",
+  },
+  {
+    name: "settings scheduler",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=scheduler",
+  },
+  {
+    name: "settings documentation",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=documentation",
+  },
+  {
+    name: "settings extensions",
+    path: "/tests/e2e/route-showcase.html?route=settings&settings=extensions",
+  },
 ] as const;
 
 test.describe("no page-level horizontal scroll", () => {
@@ -36,6 +68,17 @@ test.describe("no page-level horizontal scroll", () => {
         await page.setViewportSize({ width, height: 900 });
         await page.goto(route.path);
         await page.locator("[data-element='app-root']").waitFor();
+        if (route.path.includes("route=settings")) {
+          await page.getByRole("heading", { name: "Settings" }).waitFor();
+          const mobileSectionSelect = page.locator(
+            "button[aria-label='Settings sections']",
+          );
+          if (width <= 720) {
+            await expect(mobileSectionSelect).toBeVisible();
+          } else {
+            await expect(mobileSectionSelect).not.toBeVisible();
+          }
+        }
 
         const overflow = await page.evaluate<OverflowReport>(() => {
           const docOverflow =

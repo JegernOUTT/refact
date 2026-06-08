@@ -19,5 +19,5 @@
 }
 
 .select {
-  min-width: 120px;
+  width: min(100%, var(--rf-input-max, 360px));
 }

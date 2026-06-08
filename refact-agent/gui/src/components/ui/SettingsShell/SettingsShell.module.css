@@ -1,11 +1,14 @@
 .shell {
   display: grid;
-  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  width: 100%;
+  max-width: 100%;
+  grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
   min-width: 0;
-  min-height: 420px;
+  min-height: 0;
   gap: var(--rf-space-5);
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
+  overflow: hidden;
 }
 
 .sidebar {
@@ -90,6 +93,7 @@
 
 .content {
   min-width: 0;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -115,6 +119,7 @@
   .shell {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--rf-space-4);
+    overflow: visible;
   }
 
   .sidebar {

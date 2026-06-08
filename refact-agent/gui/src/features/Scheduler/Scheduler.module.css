@@ -1,5 +1,6 @@
 .panel {
   height: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow: auto;
   padding: var(--rf-space-4);
@@ -59,6 +60,8 @@
 }
 
 .card {
+  max-width: 100%;
+  min-width: 0;
   padding: var(--rf-space-4);
 }
 
@@ -100,6 +103,8 @@
 }
 
 .scrollX {
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow-x: auto;
 }
@@ -145,6 +150,10 @@
 
 @media (width <= 640px) {
   .panel {
+    padding: var(--rf-space-3);
+  }
+
+  .card {
     padding: var(--rf-space-3);
   }
 
