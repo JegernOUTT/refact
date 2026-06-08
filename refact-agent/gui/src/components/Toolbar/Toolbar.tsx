@@ -240,6 +240,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const { openSettings, openHotKeys } = useEventsBusForIDE();
   const [createTask] = useCreateTaskMutation();
 
+  const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [renameState, setRenameState] = useState<{
     kind: "chat" | "task";
     id: string;
@@ -458,9 +459,14 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     (event: DragEvent, type: "chat" | "task", id: string) => {
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", tabDragData(type, id));
+      setDraggingTabId(id);
     },
-    [],
+    [setDraggingTabId],
   );
+
+  const handleDragEnd = useCallback(() => {
+    setDraggingTabId(null);
+  }, [setDraggingTabId]);
 
   const handleDragOver = useCallback((event: DragEvent) => {
     event.preventDefault();
@@ -543,9 +549,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             return (
               <div
                 key={`task-${task.id}`}
-                className={styles.tabWrap}
-                draggable
-                onDragStart={(event) => handleDragStart(event, "task", task.id)}
+                className={classNames(
+                  styles.tabWrap,
+                  draggingTabId === task.id && styles.tabWrapDragging,
+                )}
                 onDragOver={handleDragOver}
                 onDrop={(event) => handleDrop(event, "task", task.id)}
                 ref={isActive ? activeTabRef : undefined}
@@ -554,6 +561,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   <button
                     type="button"
                     aria-selected={isActive}
+                    draggable
                     className={classNames(
                       styles.tabButton,
                       "rf-enter",
@@ -570,6 +578,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                       })
                     }
                     onDoubleClick={() => handleTaskRenaming(task.id, taskName)}
+                    onDragStart={(event) => handleDragStart(event, "task", task.id)}
+                    onDragEnd={handleDragEnd}
                     title={taskName}
                   >
                     <span className={styles.tabStatus}>
@@ -622,9 +632,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             return (
               <div
                 key={tab.id}
-                className={styles.tabWrap}
-                draggable
-                onDragStart={(event) => handleDragStart(event, "chat", tab.id)}
+                className={classNames(
+                  styles.tabWrap,
+                  draggingTabId === tab.id && styles.tabWrapDragging,
+                )}
                 onDragOver={handleDragOver}
                 onDrop={(event) => handleDrop(event, "chat", tab.id)}
                 ref={isActive ? activeTabRef : undefined}
@@ -633,6 +644,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   <button
                     type="button"
                     aria-selected={isActive}
+                    draggable
                     className={classNames(
                       styles.tabButton,
                       "rf-enter",
@@ -645,6 +657,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                     onDoubleClick={() =>
                       handleChatThreadRenaming(tab.id, tab.title)
                     }
+                    onDragStart={(event) => handleDragStart(event, "chat", tab.id)}
+                    onDragEnd={handleDragEnd}
                     title={tab.title}
                   >
                     <span className={styles.tabStatus}>

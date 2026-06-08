@@ -234,7 +234,7 @@ describe("Toolbar tab parity", () => {
       );
     });
 
-    const dragged = getTabWrap("Chat Beta");
+    const dragged = screen.getByTitle("Chat Beta");
     const target = getTabWrap("Chat Alpha");
     const data = new Map<string, string>();
     const dataTransfer = {
@@ -255,6 +255,38 @@ describe("Toolbar tab parity", () => {
       "chat-b",
       "chat-a",
     ]);
+  });
+
+  it("closes an inactive chat tab without switching to it", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "chat", id: "chat-a" });
+
+    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
+    dispatchAndRerender(view, { type: "chat", id: "chat-a" }, () => {
+      if (initialThreadId) {
+        view.store.dispatch({
+          type: "chatThread/closeThread",
+          payload: { id: initialThreadId },
+        });
+      }
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(
+        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
+      );
+    });
+
+    const pagesLengthBefore = view.store.getState().pages.length;
+    const pagesTopBefore = view.store.getState().pages.at(-1)?.name;
+
+    await userEvent.click(
+      within(getTabWrap("Chat Beta")).getByTitle("Close tab"),
+    );
+
+    expect(view.store.getState().chat.open_thread_ids).not.toContain("chat-b");
+    expect(view.store.getState().pages.length).toBe(pagesLengthBefore);
+    expect(view.store.getState().pages.at(-1)?.name).toBe(pagesTopBefore);
   });
 
   it("commits and cancels chat title renames from double-click rename mode", async () => {
