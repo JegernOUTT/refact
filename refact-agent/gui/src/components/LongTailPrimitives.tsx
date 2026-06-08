@@ -10,6 +10,15 @@ import { Tabs as KitTabs } from "./ui/Tabs";
 import { ScrollArea } from "./ScrollArea";
 import styles from "./LongTailPrimitives.module.css";
 
+// Capture the original kit sub-components BEFORE building compat namespaces.
+// IMPORTANT: never mutate the shared kit components (e.g. Object.assign(KitPopover, ...)),
+// and never let a compat Content render the (possibly reassigned) KitPopover.Content —
+// that creates infinite render recursion and corrupts the kit globally.
+const KitPopoverContent = KitPopover.Content;
+const KitPopoverTrigger = KitPopover.Trigger;
+const KitPopoverClose = KitPopover.Close;
+const KitTabsList = KitTabs.List;
+
 type Space = string | number | Record<string, string>;
 
 type CommonProps = React.HTMLAttributes<HTMLElement> & {
@@ -240,7 +249,7 @@ function PopoverContent({
   ...props
 }: PopoverContentCompatProps) {
   return (
-    <KitPopover.Content
+    <KitPopoverContent
       {...props}
       maxWidth={maxWidth ?? width ?? minWidth}
       maxHeight={maxHeight}
@@ -248,9 +257,15 @@ function PopoverContent({
   );
 }
 
-export const Popover = Object.assign(KitPopover, {
+const PopoverRootCompat = (props: React.ComponentProps<typeof KitPopover>) => (
+  <KitPopover {...props} />
+);
+
+export const Popover = Object.assign(PopoverRootCompat, {
   Root: KitPopover,
+  Trigger: KitPopoverTrigger,
   Content: PopoverContent,
+  Close: KitPopoverClose,
 });
 
 type HoverCardProps = React.ComponentProps<typeof KitPopover> & {
@@ -270,12 +285,18 @@ export const HoverCard = Object.assign(HoverCardRoot, {
 });
 
 function TabsList({ size: _size, ...props }: React.ComponentProps<typeof KitTabs.List> & { size?: string }) {
-  return <KitTabs.List {...props} />;
+  return <KitTabsList {...props} />;
 }
 
-export const Tabs = Object.assign(KitTabs, {
+const TabsRootCompat = (props: React.ComponentProps<typeof KitTabs>) => (
+  <KitTabs {...props} />
+);
+
+export const Tabs = Object.assign(TabsRootCompat, {
   Root: KitTabs,
   List: TabsList,
+  Trigger: KitTabs.Trigger,
+  Content: KitTabs.Content,
 });
 
 export function Checkbox({ checked, onCheckedChange, disabled }: {
