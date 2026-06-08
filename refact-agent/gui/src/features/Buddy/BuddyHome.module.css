@@ -812,7 +812,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .detailUtilityGrid,
   .rowFlexBottom {
     grid-auto-rows: auto;
     grid-template-rows: auto;

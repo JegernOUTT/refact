@@ -4,6 +4,8 @@
   gap: var(--rf-space-2);
   min-width: 0;
   min-height: 0;
+  height: 100%;
+  max-height: clamp(220px, 28vh, 360px);
   padding: var(--rf-space-3);
   overflow: hidden;
   border-color: var(--rf-border);
@@ -129,17 +131,8 @@
 }
 
 @media (max-width: 520px) {
-  .panel {
-    overflow: visible;
-  }
-
   .filter {
     max-width: 100%;
-  }
-
-  .scrollList {
-    flex: 0 0 auto;
-    overflow-y: visible;
   }
 
   .listRow {
