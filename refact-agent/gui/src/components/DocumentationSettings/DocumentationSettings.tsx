@@ -12,13 +12,143 @@ export interface DocumentationSource {
   pages: number;
 }
 
+type MaybePromise = Promise<void> | void;
+
 export type DocumentationSettingsProps = {
   sources: DocumentationSource[];
-  addDocumentation: (url: string, maxDepth: number, maxPages: number) => void;
-  deleteDocumentation: (url: string) => void;
-  refetchDocumentation: (url: string) => void;
-  editDocumentation: (url: string, maxDepth: number, maxPages: number) => void;
+  addDocumentation: (url: string, maxDepth: number, maxPages: number) => MaybePromise;
+  deleteDocumentation: (url: string) => MaybePromise;
+  refetchDocumentation: (url: string) => MaybePromise;
+  editDocumentation: (url: string, maxDepth: number, maxPages: number) => MaybePromise;
   embedded?: boolean;
+  hideAddAction?: boolean;
+};
+
+export type AddDocumentationActionProps = {
+  addDocumentation: (url: string, maxDepth: number, maxPages: number) => MaybePromise;
+  disabled?: boolean;
+};
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Something went wrong.";
+}
+
+function parsePositiveInteger(value: string, label: string): number | string {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return `${label} must be a positive integer.`;
+  }
+  return parsed;
+}
+
+export const AddDocumentationAction: React.FC<AddDocumentationActionProps> = ({
+  addDocumentation,
+  disabled = false,
+}: AddDocumentationActionProps) => {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [maxDepth, setMaxDepth] = useState("2");
+  const [maxPages, setMaxPages] = useState("50");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const resetForm = () => {
+    setUrl("");
+    setMaxDepth("2");
+    setMaxPages("50");
+    setFormError(null);
+  };
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      resetForm();
+    }
+  };
+
+  const handleAdd = async () => {
+    const normalizedUrl = url.trim();
+    const parsedDepth = parsePositiveInteger(maxDepth, "Max depth");
+    const parsedPages = parsePositiveInteger(maxPages, "Max pages");
+
+    if (!normalizedUrl) {
+      setFormError("URL is required.");
+      return;
+    }
+
+    if (typeof parsedDepth === "string") {
+      setFormError(parsedDepth);
+      return;
+    }
+
+    if (typeof parsedPages === "string") {
+      setFormError(parsedPages);
+      return;
+    }
+
+    setIsSubmitting(true);
+    setFormError(null);
+    try {
+      await addDocumentation(normalizedUrl, parsedDepth, parsedPages);
+      resetForm();
+      setOpen(false);
+    } catch (error) {
+      setFormError(errorMessage(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <Dialog.Trigger asChild>
+        <Button variant="primary" leftIcon={Plus} disabled={disabled}>
+          Add documentation
+        </Button>
+      </Dialog.Trigger>
+      <Dialog.Content maxWidth="450px">
+        <Dialog.Title>Add documentation</Dialog.Title>
+        <Dialog.Description>
+          Add a documentation source that the chat assistant can use.
+        </Dialog.Description>
+        <div className={styles.dialogBody}>
+          <Field label="URL" helper="The root documentation URL to crawl." error={formError}>
+            <FieldText value={url} onChange={setUrl} placeholder="Enter the documentation URL" />
+          </Field>
+          <Field label="Max depth" helper="How many link levels to follow from the root.">
+            <FieldText
+              value={maxDepth}
+              onChange={setMaxDepth}
+              type="number"
+              min={1}
+              step={1}
+              placeholder="Enter the max depth"
+            />
+          </Field>
+          <Field label="Max pages" helper="The maximum number of pages to index.">
+            <FieldText
+              value={maxPages}
+              onChange={setMaxPages}
+              type="number"
+              min={1}
+              step={1}
+              placeholder="Enter the max pages"
+            />
+          </Field>
+        </div>
+        <div className={styles.dialogActions}>
+          <Button variant="ghost" onClick={() => handleOpenChange(false)} disabled={isSubmitting}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void handleAdd()} loading={isSubmitting}>
+            Add
+          </Button>
+        </div>
+      </Dialog.Content>
+    </Dialog>
+  );
 };
 
 export const DocumentationSettings: React.FC<DocumentationSettingsProps> = ({
@@ -28,29 +158,10 @@ export const DocumentationSettings: React.FC<DocumentationSettingsProps> = ({
   editDocumentation,
   refetchDocumentation,
   embedded = false,
+  hideAddAction = false,
 }: DocumentationSettingsProps) => {
-  const [url, setUrl] = useState("");
-  const [maxDepth, setMaxDepth] = useState("2");
-  const [maxPages, setMaxPages] = useState("50");
-
-  const resetForm = () => {
-    setUrl("");
-    setMaxDepth("2");
-    setMaxPages("50");
-  };
-
-  const handleAdd = () => {
-    addDocumentation(url, Number(maxDepth), Number(maxPages));
-    resetForm();
-  };
-
   const content = (
     <div className={`${styles.content} rf-enter`}>
-      <div className={styles.sectionHeader}>
-        <h2 className={styles.title}>Documentation sources</h2>
-        <p className={styles.description}>Add, refresh, or tune crawl limits for documentation sites.</p>
-      </div>
-
       <SettingItem
         className="rf-enter"
         title="Sources"
@@ -84,54 +195,11 @@ export const DocumentationSettings: React.FC<DocumentationSettingsProps> = ({
         )}
       </SettingItem>
 
-      <div className={styles.actions}>
-        <Dialog>
-          <Dialog.Trigger asChild>
-            <Button variant="primary" leftIcon={Plus}>
-              Add documentation
-            </Button>
-          </Dialog.Trigger>
-          <Dialog.Content maxWidth="450px">
-            <Dialog.Title>Add documentation</Dialog.Title>
-            <Dialog.Description>
-              Add a documentation source that the chat assistant can use.
-            </Dialog.Description>
-            <div className={styles.dialogBody}>
-              <Field label="Url" helper="The root documentation URL to crawl.">
-                <FieldText value={url} onChange={setUrl} placeholder="Enter the documentation url" />
-              </Field>
-              <Field label="Max depth" helper="How many link levels to follow from the root.">
-                <FieldText
-                  value={maxDepth}
-                  onChange={setMaxDepth}
-                  type="number"
-                  placeholder="Enter the max depth"
-                />
-              </Field>
-              <Field label="Max pages" helper="The maximum number of pages to index.">
-                <FieldText
-                  value={maxPages}
-                  onChange={setMaxPages}
-                  type="number"
-                  placeholder="Enter the max pages"
-                />
-              </Field>
-            </div>
-            <div className={styles.dialogActions}>
-              <Dialog.Close asChild>
-                <Button variant="ghost" onClick={resetForm}>
-                  Cancel
-                </Button>
-              </Dialog.Close>
-              <Dialog.Close asChild>
-                <Button variant="primary" onClick={handleAdd}>
-                  Add
-                </Button>
-              </Dialog.Close>
-            </div>
-          </Dialog.Content>
-        </Dialog>
-      </div>
+      {!hideAddAction ? (
+        <div className={styles.actions}>
+          <AddDocumentationAction addDocumentation={addDocumentation} />
+        </div>
+      ) : null}
     </div>
   );
 
@@ -152,3 +220,4 @@ export const DocumentationSettings: React.FC<DocumentationSettingsProps> = ({
     </SettingsShell>
   );
 };
+

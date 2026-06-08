@@ -10,6 +10,23 @@
   gap: var(--rf-space-2);
 }
 
+.iconSpinner {
+  display: inline-flex;
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  align-items: center;
+  justify-content: center;
+}
+
+.spinnerDot {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  border: var(--rf-hairline) solid var(--rf-color-accent-soft);
+  border-top-color: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
+  animation: exec-spinner var(--rf-dur-slow) linear infinite;
+}
+
 .summary {
   flex: 1 1 auto;
   min-width: 0;
@@ -211,6 +228,12 @@
   flex: 1 1 auto;
 }
 
+@keyframes exec-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @keyframes exec-status-pulse {
   0%,
   100% {
@@ -223,6 +246,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .spinnerDot,
   .statusRunningInBackground {
     animation: none;
   }

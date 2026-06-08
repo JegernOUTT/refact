@@ -1,8 +1,8 @@
 import classNames from "classnames";
 import type { LucideIcon } from "lucide-react";
 import React from "react";
+import { LoaderCircle } from "lucide-react";
 import { Icon } from "../Icon";
-import { Spinner } from "../Spinner";
 import styles from "./Button.module.css";
 
 export type ButtonVariant =
@@ -98,7 +98,6 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     const normalizedSize = normalizeSize(size);
     const iconTone = getIconTone(normalizedVariant);
     const iconSize = getIconSize(normalizedSize);
-    const spinnerSize = normalizedSize;
 
     return (
       <button
@@ -116,8 +115,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         type={type}
       >
         {loading ? (
-          <span aria-hidden="true" className={styles.loadingIndicator}>
-            <Spinner size={spinnerSize} />
+          <span aria-hidden="true" className={styles.spinner}>
+            <Icon icon={LoaderCircle} size={iconSize} tone={iconTone} />
           </span>
         ) : leftIcon ? (
           <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
@@ -160,7 +159,6 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
     const normalizedSize = normalizeSize(size);
     const iconTone = getIconTone(normalizedVariant);
     const iconSize = getIconSize(normalizedSize);
-    const spinnerSize = normalizedSize;
 
     return (
       <button
@@ -178,12 +176,8 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
         disabled={isDisabled}
         type={type}
       >
-        <span aria-hidden="true">
-          {loading ? (
-            <Spinner size={spinnerSize} />
-          ) : (
-            <Icon icon={icon} size={iconSize} tone={iconTone} />
-          )}
+        <span aria-hidden="true" className={loading ? styles.spinner : undefined}>
+          <Icon icon={loading ? LoaderCircle : icon} size={iconSize} tone={iconTone} />
         </span>
       </button>
     );

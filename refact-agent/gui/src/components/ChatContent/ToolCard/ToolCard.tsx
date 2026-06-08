@@ -21,7 +21,6 @@ export interface ToolCardProps {
   className?: string;
   animate?: boolean;
   toolCall?: ToolCall;
-  runningIcon?: React.ReactNode;
 }
 
 const ToolCardInner: React.FC<ToolCardProps> = ({
@@ -35,7 +34,6 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   className,
   animate = true,
   toolCall,
-  runningIcon,
 }) => {
   const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
     isOpen,
@@ -47,7 +45,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   const title = (
     <span className={styles.titleRow}>
       <span className={styles.iconWrapper}>
-        {status === "running" ? runningIcon ?? <Icon icon={LoaderCircle} /> : icon}
+        {status === "running" ? <Icon icon={LoaderCircle} /> : icon}
       </span>
       <span className={styles.summary}>{summary}</span>
       {meta && <span className={styles.meta}>{meta}</span>}

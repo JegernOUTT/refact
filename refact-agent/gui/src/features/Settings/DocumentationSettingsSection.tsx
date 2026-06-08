@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+
 import {
+  AddDocumentationAction,
   DocumentationSettings,
   DocumentationSource,
 } from "../../components/DocumentationSettings";
+import { FieldError, LoadingState } from "../../components/ui";
 import {
   DOCUMENTATION_ADD,
   DOCUMENTATION_LIST,
@@ -10,6 +13,8 @@ import {
 } from "../../services/refact/consts";
 import { useConfig } from "../../hooks";
 import { buildApiUrl, type EngineApiConfig } from "../../services/refact/apiUrl";
+import { SettingsSection } from "./SettingsSection";
+import styles from "./DocumentationSettingsSection.module.css";
 
 type DocListResponse = {
   url: string;
@@ -41,6 +46,16 @@ function isDocListResponse(arr: unknown): arr is DocListResponse[] {
   return true;
 }
 
+function responseError(response: Response): Error {
+  return new Error(response.statusText || `Request failed with status ${response.status}`);
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Something went wrong.";
+}
+
 async function fetchDocumentationList(
   config: EngineApiConfig,
 ): Promise<DocumentationSource[]> {
@@ -55,7 +70,7 @@ async function fetchDocumentationList(
   });
 
   if (!response.ok) {
-    throw new Error(response.statusText);
+    throw responseError(response);
   }
 
   const json: unknown = await response.json();
@@ -75,6 +90,8 @@ async function fetchDocumentationList(
 export const DocumentationSettingsSection: React.FC = () => {
   const config = useConfig();
   const [documentationSources, setDocumentationSources] = useState<DocumentationSource[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const refetch = useCallback(async () => {
     const docSources = await fetchDocumentationList(config);
@@ -82,50 +99,94 @@ export const DocumentationSettingsSection: React.FC = () => {
   }, [config]);
 
   useEffect(() => {
-    void refetch();
-  }, [refetch]);
+    let mounted = true;
+    const load = async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const docSources = await fetchDocumentationList(config);
+        if (mounted) {
+          setDocumentationSources(docSources);
+        }
+      } catch (loadError) {
+        if (mounted) {
+          setError(errorMessage(loadError));
+        }
+      } finally {
+        if (mounted) {
+          setIsLoading(false);
+        }
+      }
+    };
 
-  const addDocumentation = (url: string, max_depth: number, max_pages: number) => {
-    const f = async () => {
+    void load();
+    return () => {
+      mounted = false;
+    };
+  }, [config]);
+
+  const addDocumentation = async (url: string, max_depth: number, max_pages: number) => {
+    setError(null);
+    try {
       const docsEndpoint = buildApiUrl(config, DOCUMENTATION_ADD);
       const response = await fetch(docsEndpoint, {
         method: "POST",
         body: JSON.stringify({ source: url, max_depth, max_pages }),
       });
-      if (!response.ok) throw new Error(response.statusText);
+      if (!response.ok) throw responseError(response);
       await refetch();
-    };
-    void f();
-  };
-
-  const refetchDocumentation = (url: string) => {
-    const document = documentationSources.find((value) => value.url === url);
-    if (document !== undefined) {
-      addDocumentation(url, document.maxDepth, document.maxPages);
+    } catch (addError) {
+      setError(errorMessage(addError));
+      throw addError;
     }
   };
 
-  const deleteDocumentation = (url: string) => {
-    const f = async () => {
+  const refetchDocumentation = async (url: string) => {
+    const document = documentationSources.find((value) => value.url === url);
+    if (document === undefined) return;
+
+    try {
+      await addDocumentation(url, document.maxDepth, document.maxPages);
+    } catch {
+      return;
+    }
+  };
+
+  const deleteDocumentation = async (url: string) => {
+    setError(null);
+    try {
       const docsEndpoint = buildApiUrl(config, DOCUMENTATION_REMOVE);
       const response = await fetch(docsEndpoint, {
         method: "POST",
         body: JSON.stringify({ source: url }),
       });
-      if (!response.ok) throw new Error(response.statusText);
+      if (!response.ok) throw responseError(response);
       await refetch();
-    };
-    void f();
+    } catch (deleteError) {
+      setError(errorMessage(deleteError));
+    }
   };
 
   return (
-    <DocumentationSettings
-      embedded
-      sources={documentationSources}
-      addDocumentation={addDocumentation}
-      deleteDocumentation={deleteDocumentation}
-      editDocumentation={addDocumentation}
-      refetchDocumentation={refetchDocumentation}
-    />
+    <SettingsSection
+      title="Documentation"
+      description="Manage external documentation that the chat assistant can use for grounded answers."
+      actions={<AddDocumentationAction addDocumentation={addDocumentation} disabled={isLoading} />}
+    >
+      {error ? <FieldError className={styles.error}>{error}</FieldError> : null}
+      {isLoading ? (
+        <LoadingState label="Loading documentation sources" variant="compact" kind="skeleton" />
+      ) : (
+        <DocumentationSettings
+          embedded
+          hideAddAction
+          sources={documentationSources}
+          addDocumentation={addDocumentation}
+          deleteDocumentation={deleteDocumentation}
+          editDocumentation={addDocumentation}
+          refetchDocumentation={refetchDocumentation}
+        />
+      )}
+    </SettingsSection>
   );
 };

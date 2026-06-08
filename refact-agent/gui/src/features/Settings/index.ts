@@ -5,3 +5,5 @@ export { SettingsHub } from "./SettingsHub";
 export type { SettingsHubProps } from "./SettingsHub";
 export { GeneralSettingsSection } from "./GeneralSettingsSection";
 export { DocumentationSettingsSection } from "./DocumentationSettingsSection";
+export { SettingsGroup, SettingsSection } from "./SettingsSection";
+export type { SettingsGroupProps, SettingsSectionProps } from "./SettingsSection";

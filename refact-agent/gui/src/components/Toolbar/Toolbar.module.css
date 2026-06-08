@@ -204,8 +204,6 @@
   position: absolute;
   right: var(--rf-space-2);
   top: 50%;
-  z-index: 2;
-  pointer-events: auto;
   transform: translateY(-50%);
   display: flex;
   align-items: center;

@@ -20,7 +20,7 @@ import {
 } from "../../../services/refact/types";
 import { ideOpenFile } from "../../../hooks/useEventBusForIDE";
 import { usePostMessage } from "../../../hooks/usePostMessage";
-import { Badge, Button, Spinner } from "../../ui";
+import { Badge, Button } from "../../ui";
 import { ToolCard } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
@@ -430,7 +430,9 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   );
 
   const icon = isBusy ? (
-    <Spinner size="sm" label="Process running" />
+    <span className={styles.iconSpinner}>
+      <span className={styles.spinnerDot} />
+    </span>
   ) : toolName === "process_list" ? (
     <Rows3 />
   ) : (
@@ -479,7 +481,6 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
       <ToolCard
         className={styles.card}
         icon={icon}
-        runningIcon={icon}
         summary={summary}
         status={isBusy ? "running" : maybeResult?.tool_failed ? "error" : "success"}
         isOpen={isOpen}
