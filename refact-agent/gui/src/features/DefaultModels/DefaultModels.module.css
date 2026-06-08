@@ -1,24 +1,19 @@
 .page {
   display: grid;
+  width: 100%;
   min-height: 100%;
   min-width: 0;
-  padding: var(--rf-space-4);
+  align-content: start;
+  justify-items: start;
 }
 
-.frame {
-  display: grid;
-  min-height: 0;
-  min-width: 0;
-  gap: var(--rf-space-4);
-}
-
-.toolbar {
-  display: flex;
+.headerActions {
+  display: inline-flex;
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-3);
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
 }
 
 .actions {
@@ -52,40 +47,34 @@
   border-color: var(--rf-border-strong);
 }
 
-.shell {
-  min-height: 0;
-}
-
 .content {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-4);
+  gap: var(--rf-space-5);
   animation-delay: var(--rf-stagger, 0ms);
 }
 
-.sectionHeader {
+.roleHeader {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-1);
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--rf-space-1) var(--rf-space-2);
 }
 
-.title {
+.roleTitle {
+  min-width: 0;
   margin: 0;
   color: var(--rf-color-fg);
   font: 700 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
 }
 
 .description {
+  grid-column: 2;
   max-width: 64ch;
   margin: 0;
   color: var(--rf-color-muted);
   font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
-}
-
-.settingGroup {
-  display: grid;
-  min-width: 0;
-  gap: var(--rf-space-3);
 }
 
 .selectorWrap {
@@ -96,30 +85,55 @@
   display: grid;
   min-width: 0;
   gap: var(--rf-space-3);
-  padding-top: var(--rf-space-2);
 }
 
 .roleTabs {
+  display: grid;
+  width: 100%;
   min-width: 0;
+}
+
+.roleTabsList {
+  width: 100%;
+}
+
+.roleTabsList.roleTabsList {
+  grid-auto-flow: row;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr));
+  overflow-x: visible;
+}
+
+.roleTabsList > span[aria-hidden="true"] {
+  display: none;
+}
+
+.roleTabsList [data-state="active"] {
+  background: var(--rf-color-accent-soft);
 }
 
 .roleTabContent {
-  padding-top: var(--rf-space-4);
   min-width: 0;
+  padding-top: 0;
 }
 
 @media (width <= 640px) {
-  .page {
-    padding: var(--rf-space-3);
-  }
-
-  .toolbar,
-  .actions {
-    align-items: stretch;
-  }
-
+  .headerActions,
   .actions {
     width: 100%;
+    align-items: stretch;
     justify-content: stretch;
+  }
+
+  .headerActions > *,
+  .actions > * {
+    flex: 1 1 auto;
+  }
+
+  .roleHeader {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .description {
+    grid-column: 1;
   }
 }

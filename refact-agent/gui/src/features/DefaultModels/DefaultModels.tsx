@@ -1,5 +1,16 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
-import { AlertTriangle, ArrowLeft, Bot, Brain, Info, MessageCircle, MessagesSquare, Rabbit, Zap } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Bot,
+  Brain,
+  Info,
+  MessageCircle,
+  MessagesSquare,
+  Rabbit,
+  Zap,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
 
 import { PageWrapper } from "../../components/PageWrapper";
@@ -9,8 +20,7 @@ import {
   ModelSamplingParams,
   type SamplingValues,
 } from "../../components/ModelSamplingParams";
-import { Button, Icon, SettingItem, SettingsShell, Tabs } from "../../components/ui";
-import type { SettingsShellSection } from "../../components/ui";
+import { Button, Icon, SettingItem, Tabs } from "../../components/ui";
 
 import {
   useGetDefaultsQuery,
@@ -23,6 +33,7 @@ import { useGetDraftQuery } from "../../services/refact/buddy";
 
 import type { Config } from "../Config/configSlice";
 import { BuddyDraftPreview } from "../Buddy/BuddyDraftPreview";
+import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
 
 import styles from "./DefaultModels.module.css";
 
@@ -44,7 +55,7 @@ type ModelTypeKey =
 
 const MODEL_TYPE_LABELS: Record<
   ModelTypeKey,
-  { title: string; shortLabel: string; description: string; icon: SettingsShellSection["icon"] }
+  { title: string; shortLabel: string; description: string; icon: LucideIcon }
 > = {
   chat: {
     title: "Default Chat Model",
@@ -112,12 +123,13 @@ const ModelTypeSection: React.FC<{
 
   return (
     <div className={`${styles.content} rf-enter`}>
-      <div className={styles.sectionHeader}>
-        <h2 className={styles.title}>{title}</h2>
+      <div className={styles.roleHeader}>
+        <Icon icon={MODEL_TYPE_LABELS[typeKey].icon} size="lg" tone="accent" />
+        <h2 className={styles.roleTitle}>{title}</h2>
         <p className={styles.description}>{description}</p>
       </div>
 
-      <div className={`${styles.settingGroup} rf-stagger`}>
+      <SettingsGroup title="Model Slot">
         <SettingItem
           className="rf-enter"
           title="Model"
@@ -136,8 +148,10 @@ const ModelTypeSection: React.FC<{
             </div>
           }
         />
+      </SettingsGroup>
 
-        {effectiveModel ? (
+      {effectiveModel ? (
+        <SettingsGroup title="Sampling">
           <SettingItem
             className="rf-enter"
             title="Sampling"
@@ -148,13 +162,13 @@ const ModelTypeSection: React.FC<{
               <ModelSamplingParams model={effectiveModel} values={config} onChange={handleSamplingChange} />
             </div>
           </SettingItem>
-        ) : (
-          <div className={`${styles.notice} rf-enter`}>
-            <Icon icon={Info} size="sm" tone="muted" />
-            <span>No model selected. Features that require this model type will ask you to configure it.</span>
-          </div>
-        )}
-      </div>
+        </SettingsGroup>
+      ) : (
+        <div className={`${styles.notice} rf-enter`}>
+          <Icon icon={Info} size="sm" tone="muted" />
+          <span>No model selected. Features that require this model type will ask you to configure it.</span>
+        </div>
+      )}
     </div>
   );
 };
@@ -191,16 +205,6 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
       chat_buddy: capsData?.chat_buddy_model ?? "",
     }),
     [capsData],
-  );
-
-  const sections = useMemo<SettingsShellSection[]>(
-    () =>
-      MODEL_TYPE_KEYS.map((key) => ({
-        id: key,
-        label: MODEL_TYPE_LABELS[key].title,
-        icon: MODEL_TYPE_LABELS[key].icon,
-      })),
-    [],
   );
 
   const [activeSection, setActiveSection] = useState<ModelTypeKey>("chat");
@@ -319,8 +323,19 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
 
   const activeKey = MODEL_TYPE_KEYS.includes(activeSection) ? activeSection : "chat";
 
-  const toolbar = (
-    <div className={styles.toolbar}>
+  const saveAction = (
+    <Button
+      onClick={() => void handleSave()}
+      disabled={!hasChanges || isSaving}
+      loading={isSaving}
+      variant="primary"
+    >
+      Save Changes
+    </Button>
+  );
+
+  const headerActions = (
+    <div className={styles.headerActions}>
       {!embedded && (
         <Button
           variant={host === "vscode" && !tabbed ? "soft" : "ghost"}
@@ -330,18 +345,34 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
           Back
         </Button>
       )}
-      <div className={styles.actions}>
-        <Button
-          onClick={() => void handleSave()}
-          disabled={!hasChanges || isSaving}
-          loading={isSaving}
-          variant="primary"
-        >
-          Save Changes
-        </Button>
-      </div>
+      {saveAction}
     </div>
   );
+
+  const roleTabsList = (
+    <Tabs.List
+      activeIndex={MODEL_TYPE_KEYS.indexOf(activeKey)}
+      className={styles.roleTabsList}
+      itemCount={MODEL_TYPE_KEYS.length}
+    >
+      {MODEL_TYPE_KEYS.map((key) => (
+        <Tabs.Trigger key={key} value={key}>
+          {MODEL_TYPE_LABELS[key].shortLabel}
+        </Tabs.Trigger>
+      ))}
+    </Tabs.List>
+  );
+
+  const roleTabContents = MODEL_TYPE_KEYS.map((key) => (
+    <Tabs.Content key={key} value={key} className={styles.roleTabContent}>
+      <ModelTypeSection
+        typeKey={key}
+        config={localDefaults[key] ?? {}}
+        capsDefault={capsDefaults[key]}
+        onChange={handleModelTypeChange}
+      />
+    </Tabs.Content>
+  ));
 
   const notices = (
     <>
@@ -364,36 +395,21 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
   if (embedded) {
     return (
       <div className={styles.page}>
-        <div className={styles.frame}>
-          {toolbar}
-          {notices}
-          <Tabs
-            value={activeKey}
-            onValueChange={(v) => setActiveSection(v as ModelTypeKey)}
-            className={styles.roleTabs}
+        <Tabs
+          value={activeKey}
+          onValueChange={(v) => setActiveSection(v as ModelTypeKey)}
+          className={styles.roleTabs}
+        >
+          <SettingsSection
+            title="Models"
+            description="Configure the default model slots used across chat, planning, quick responses, reasoning, and companion workflows."
+            actions={saveAction}
+            subNav={roleTabsList}
           >
-            <Tabs.List
-              activeIndex={MODEL_TYPE_KEYS.indexOf(activeKey)}
-              itemCount={MODEL_TYPE_KEYS.length}
-            >
-              {MODEL_TYPE_KEYS.map((key) => (
-                <Tabs.Trigger key={key} value={key}>
-                  {MODEL_TYPE_LABELS[key].shortLabel}
-                </Tabs.Trigger>
-              ))}
-            </Tabs.List>
-            {MODEL_TYPE_KEYS.map((key) => (
-              <Tabs.Content key={key} value={key} className={styles.roleTabContent}>
-                <ModelTypeSection
-                  typeKey={key}
-                  config={localDefaults[key] ?? {}}
-                  capsDefault={capsDefaults[key]}
-                  onChange={handleModelTypeChange}
-                />
-              </Tabs.Content>
-            ))}
-          </Tabs>
-        </div>
+            {notices}
+            {roleTabContents}
+          </SettingsSection>
+        </Tabs>
       </div>
     );
   }
@@ -401,26 +417,21 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
   return (
     <PageWrapper host={host}>
       <div className={styles.page}>
-        <div className={styles.frame}>
-          {toolbar}
-          {notices}
-          <SettingsShell
-            className={styles.shell}
-            sections={sections}
-            active={activeKey}
-            onSectionChange={(sectionId) => setActiveSection(sectionId as ModelTypeKey)}
-            title="Default Models"
-            description="Configure which models to use by default for different purposes. These settings apply globally across all modes."
+        <Tabs
+          value={activeKey}
+          onValueChange={(v) => setActiveSection(v as ModelTypeKey)}
+          className={styles.roleTabs}
+        >
+          <SettingsSection
+            title="Models"
+            description="Configure the default model slots used across chat, planning, quick responses, reasoning, and companion workflows."
+            actions={headerActions}
+            subNav={roleTabsList}
           >
-            <ModelTypeSection
-              key={activeKey}
-              typeKey={activeKey}
-              config={localDefaults[activeKey] ?? {}}
-              capsDefault={capsDefaults[activeKey]}
-              onChange={handleModelTypeChange}
-            />
-          </SettingsShell>
-        </div>
+            {notices}
+            {roleTabContents}
+          </SettingsSection>
+        </Tabs>
       </div>
     </PageWrapper>
   );
