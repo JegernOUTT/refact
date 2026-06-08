@@ -148,10 +148,18 @@
 .contentWrapper {
   overflow: hidden;
   opacity: 0;
+  pointer-events: none;
+  transform: translateY(calc(-1 * var(--rf-space-1))) translateZ(0);
 }
 
 .contentWrapperOpen {
   opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) translateZ(0);
+}
+
+.contentWrapper:not(.contentWrapperOpen) {
+  will-change: auto;
 }
 
 .noTransition {
@@ -185,8 +193,18 @@
   color: var(--rf-color-accent);
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .contentWrapper {
+    transition:
+      opacity var(--rf-dur-med) var(--rf-ease-standard),
+      transform var(--rf-dur-med) var(--rf-ease-standard);
+    will-change: opacity, transform;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .contentWrapper {
     transition: none;
+    transform: none;
   }
 }

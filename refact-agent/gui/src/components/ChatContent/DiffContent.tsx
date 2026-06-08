@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useRef } from "react";
+import classNames from "classnames";
 import { Text, Container, Box, Flex, Link } from "@radix-ui/themes";
 import { DiffMessage, type DiffChunk } from "../../services/refact";
 import styles from "./ChatContent.module.css";
@@ -9,7 +10,6 @@ import groupBy from "lodash.groupby";
 import { TruncateLeft } from "../Text";
 import { useHideScroll, useEventsBusForIDE } from "../../hooks";
 import { FadedButton } from "../Buttons";
-import classNames from "classnames";
 
 type DiffType = "apply" | "unapply" | "error" | "can not apply";
 
@@ -215,13 +215,21 @@ export const DiffContent: React.FC<{
           <Chevron open={open} />
         </Flex>
       </Collapsible.Trigger>
-      <Collapsible.Content>
-        <Flex direction="column">
-          <DiffForm diffs={diffs} />
-          <FadedButton color="gray" onClick={handleHide} mx="2">
-            Hide Diff
-          </FadedButton>
-        </Flex>
+      <Collapsible.Content forceMount asChild>
+        <div
+          className={classNames("rf-expand-grid", styles.diffContentGrid)}
+          data-open={open}
+          hidden={false}
+        >
+          <div className={styles.diffContentBody}>
+            <Flex direction="column">
+              <DiffForm diffs={diffs} />
+              <FadedButton color="gray" onClick={handleHide} mx="2">
+                Hide Diff
+              </FadedButton>
+            </Flex>
+          </div>
+        </div>
       </Collapsible.Content>
     </Collapsible.Root>
   );

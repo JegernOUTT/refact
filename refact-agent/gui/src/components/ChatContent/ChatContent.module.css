@@ -260,6 +260,44 @@
   color: var(--rf-color-fg);
 }
 
+.diffContentGrid {
+  pointer-events: none;
+}
+
+.diffContentGrid[data-open="true"] {
+  pointer-events: auto;
+}
+
+.diffContentBody {
+  opacity: 0;
+  transform: translateY(calc(-1 * var(--rf-space-1))) translateZ(0);
+}
+
+.diffContentGrid[data-open="true"] .diffContentBody {
+  opacity: 1;
+  transform: translateY(0) translateZ(0);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .diffContentBody {
+    transition:
+      opacity var(--rf-dur-med) var(--rf-ease-standard),
+      transform var(--rf-dur-med) var(--rf-ease-standard);
+    will-change: opacity, transform;
+  }
+
+  .diffContentGrid:not([data-open="true"]) .diffContentBody {
+    will-change: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diffContentBody {
+    transition: none;
+    transform: none;
+  }
+}
+
 .diffTitleNode {
   display: inline-block;
 }

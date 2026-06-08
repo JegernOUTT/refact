@@ -92,7 +92,11 @@ export function ToolCard({
         </button>
         {actions ? <div className={styles.actions}>{actions}</div> : null}
       </div>
-      <div className="rf-expand-grid" data-open={isOpen} id={bodyId}>
+      <div
+        className={classNames("rf-expand-grid", styles.bodyGrid)}
+        data-open={isOpen}
+        id={bodyId}
+      >
         <div className={styles.bodyShell}>
           <div className={styles.body}>{children}</div>
         </div>

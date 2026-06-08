@@ -19,6 +19,7 @@ import { sidebarSectionSnapshotReceived } from "../../src/features/Sidebar/sideb
 import { tasksApi, type TaskMeta } from "../../src/services/refact/tasks";
 import type { ChatHistoryItem } from "../../src/features/History/historySlice";
 import type { ChatThreadRuntime } from "../../src/features/Chat/Thread";
+import type { ChatMessages } from "../../src/services/refact";
 import type {
   CapsResponse,
   ConfiguredProvidersResponse,
@@ -32,6 +33,72 @@ import "../../src/lib/render/web.css";
 const now = "2026-06-07T10:00:00Z";
 const chatId = "showcase-chat";
 
+const showcaseMessages: ChatMessages = [
+  {
+    role: "user",
+    message_id: "showcase-user-1",
+    content:
+      "Check that expandable tool cards and message footer actions stay responsive.",
+  },
+  {
+    role: "assistant",
+    message_id: "showcase-assistant-tools",
+    content:
+      "I checked two representative tool families so this route can verify expand and collapse interactions.",
+    tool_calls: [
+      {
+        id: "showcase-read-tool",
+        index: 0,
+        type: "function",
+        function: {
+          name: "cat",
+          arguments: JSON.stringify({ paths: "src/components/ui/ToolCard.tsx" }),
+        },
+      },
+      {
+        id: "showcase-exec-tool",
+        index: 1,
+        type: "function",
+        function: {
+          name: "process_start",
+          arguments: JSON.stringify({
+            command: "npm run build",
+            description: "Build route showcase",
+            mode: "background",
+          }),
+        },
+      },
+    ],
+    usage: {
+      prompt_tokens: 1200,
+      completion_tokens: 140,
+      total_tokens: 1340,
+    },
+  },
+  {
+    role: "tool",
+    tool_call_id: "showcase-read-tool",
+    content:
+      "File src/components/ui/ToolCard.tsx:1-8\n```tsx\nexport function ToolCard() {\n  return <section />;\n}\n```",
+    tool_failed: false,
+  },
+  {
+    role: "tool",
+    tool_call_id: "showcase-exec-tool",
+    content: "Process started\nstdout:\nroute showcase ready\nstderr:\n<empty>\n",
+    tool_failed: false,
+    extra: {
+      process_id: "exec_route_showcase",
+      status: "running",
+      short_description: "Build route showcase",
+      command: "npm run build",
+      mode: "background",
+      cwd: "/workspace/refact-agent/gui",
+      started_at_ms: Date.now() - 12_000,
+    },
+  },
+];
+
 const chatRuntime: ChatThreadRuntime = {
   thread: {
     id: chatId,
@@ -40,18 +107,7 @@ const chatRuntime: ChatThreadRuntime = {
     updatedAt: now,
     model: "gpt-4o",
     tool_use: "agent",
-    messages: [
-      {
-        role: "user",
-        content:
-          "Check that narrow screens do not create page horizontal scroll.",
-      },
-      {
-        role: "assistant",
-        content:
-          "This harness renders the real chat shell with representative content for the e2e responsiveness gate.",
-      },
-    ],
+    messages: showcaseMessages,
     new_chat_suggested: { wasSuggested: false },
   },
   streaming: false,
@@ -361,6 +417,22 @@ function jsonResponse(data: unknown) {
 }
 
 const nativeFetch = window.fetch.bind(window);
+const showcaseCommandLog: unknown[] = [];
+const showcaseClipboardWrites: string[] = [];
+(window as unknown as { __routeShowcaseCommands: unknown[] }).__routeShowcaseCommands =
+  showcaseCommandLog;
+(
+  window as unknown as { __routeShowcaseClipboardWrites: string[] }
+).__routeShowcaseClipboardWrites = showcaseClipboardWrites;
+Object.defineProperty(window.navigator, "clipboard", {
+  configurable: true,
+  value: {
+    writeText: (text: string) => {
+      showcaseClipboardWrites.push(text);
+      return Promise.resolve();
+    },
+  },
+});
 window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(
     typeof input === "string"
@@ -371,6 +443,16 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     window.location.origin,
   );
   const path = url.pathname;
+  if (path.startsWith("/v1/chats/")) {
+    if (init?.body) {
+      try {
+        showcaseCommandLog.push(JSON.parse(String(init.body)));
+      } catch {
+        showcaseCommandLog.push(init.body);
+      }
+    }
+    return Promise.resolve(jsonResponse({ ok: true }));
+  }
   if (path === "/v1/ping") return Promise.resolve(new Response("pong"));
   if (path === "/v1/providers")
     return Promise.resolve(jsonResponse(providerList));

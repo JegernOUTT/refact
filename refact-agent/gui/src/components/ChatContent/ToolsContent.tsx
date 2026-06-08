@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
+import classNames from "classnames";
 import { Container, Flex, Text, Box } from "@radix-ui/themes";
 import { Icon } from "../ui";
 import {
@@ -408,8 +409,12 @@ const AnimatedCollapsibleContent: React.FC<{
 }> = ({ open, children }) => {
   return (
     <Collapsible.Content forceMount asChild>
-      <div className="rf-expand-grid" data-open={open} hidden={false}>
-        <div>{children}</div>
+      <div
+        className={classNames("rf-expand-grid", styles.toolGroupGrid)}
+        data-open={open}
+        hidden={false}
+      >
+        <div className={styles.toolGroupBody}>{children}</div>
       </div>
     </Collapsible.Content>
   );

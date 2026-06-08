@@ -86,8 +86,23 @@
   gap: var(--rf-space-1);
 }
 
+.bodyGrid {
+  pointer-events: none;
+}
+
+.root[data-open="true"] .bodyGrid {
+  pointer-events: auto;
+}
+
 .bodyShell {
   min-width: 0;
+  opacity: 0;
+  transform: translateY(calc(-1 * var(--rf-space-1))) translateZ(0);
+}
+
+.root[data-open="true"] .bodyShell {
+  opacity: 1;
+  transform: translateY(0) translateZ(0);
 }
 
 .body {
@@ -103,9 +118,27 @@
   border-radius: 0;
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .bodyShell {
+    transition:
+      opacity var(--rf-dur-med) var(--rf-ease-standard),
+      transform var(--rf-dur-med) var(--rf-ease-standard);
+    will-change: opacity, transform;
+  }
+
+  .root:not([data-open="true"]) .bodyShell {
+    will-change: auto;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chevron,
+  .bodyShell,
   .body {
     transition: none;
+  }
+
+  .bodyShell {
+    transform: none;
   }
 }
