@@ -1,7 +1,6 @@
 import React, { useRef, useState } from "react";
 import { Text } from "../../components/ui";
 import { Badge, Button, Surface } from "../../components/ui";
-import classNames from "classnames";
 import type { BuddyOpportunity } from "./types";
 import {
   formatOpportunityActionError,
@@ -49,14 +48,10 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
   };
 
   return (
-    <Surface
-      className={classNames(styles.card, "rf-pressable")}
-      radius="control"
-      variant="plain"
-    >
+    <Surface className={styles.card} radius="control" variant="plain">
       <div className={styles.header}>
         <Badge
-          className={classNames(styles.priorityBadge, priorityClass)}
+          className={`${styles.priorityBadge} ${priorityClass}`}
           aria-label={`Priority: ${opportunity.priority}`}
           tone="muted"
         >
@@ -79,7 +74,7 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
               size="sm"
               type="button"
               variant={action.kind === "dismiss" ? "ghost" : "primary"}
-              className={styles.actionButton}
+              className={`${styles.actionButton} rf-pressable`}
               disabled={!isActive || pendingActionIndex !== null}
               aria-label={actionLabel(action)}
               aria-busy={pendingActionIndex === idx}

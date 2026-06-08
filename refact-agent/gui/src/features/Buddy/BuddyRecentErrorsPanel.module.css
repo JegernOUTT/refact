@@ -45,7 +45,7 @@
   min-width: 0;
   padding: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-color-warning);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-glass);
 }
 

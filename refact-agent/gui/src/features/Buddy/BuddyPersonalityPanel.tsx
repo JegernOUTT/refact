@@ -49,7 +49,12 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
   onPromptChange,
 }) => (
   <div className={styles.outer} data-testid="buddy-personality-panel">
-    <Surface className={styles.panel} radius="card" variant="glass">
+    <Surface
+      className={styles.panel}
+      animated="rise"
+      radius="card"
+      variant="glass"
+    >
       <div className={styles.panelHeader}>
         <div className={styles.panelTitleGroup}>
           <Text
@@ -239,7 +244,9 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
           variant={settings?.personality_prompt ? "primary" : "ghost"}
           onClick={() =>
             onPromptChange(
-              settings?.personality_prompt ? null : personality?.prompt ?? null,
+              settings?.personality_prompt
+                ? null
+                : (personality?.prompt ?? null),
             )
           }
           disabled={isSavingSettings}

@@ -49,7 +49,7 @@
   min-width: 0;
   padding: var(--rf-space-2);
   border: var(--rf-hairline) solid transparent;
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   background: transparent;
   color: inherit;
   text-align: left;

@@ -146,9 +146,8 @@
   animation: buddy-spin var(--rf-dur-slow) linear infinite;
 }
 
-@media (max-width: 520px) {
-  .entriesScroll {
-    flex: 0 0 auto;
-    overflow-y: visible;
+@media (prefers-reduced-motion: reduce) {
+  .buttonSpinner {
+    animation: none;
   }
 }

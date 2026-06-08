@@ -625,7 +625,7 @@ export const BuddyHome: React.FC = () => {
         : event.title;
       const diagnostic =
         event.chat_id != null
-          ? diagnostics.find((d) => d.chat_id === event.chat_id) ?? null
+          ? (diagnostics.find((d) => d.chat_id === event.chat_id) ?? null)
           : null;
       void dispatch(
         startBuddyInvestigation({
@@ -782,7 +782,7 @@ export const BuddyHome: React.FC = () => {
                 {stage.emoji}
               </span>
               <div className={styles.heroIdentityText}>
-                <Text size="4" weight="bold" className={styles.heroName}>
+                <Text size="3" weight="bold" className={styles.heroName}>
                   {name}
                 </Text>
                 <Text size="2" color="gray" className={styles.heroMeta}>

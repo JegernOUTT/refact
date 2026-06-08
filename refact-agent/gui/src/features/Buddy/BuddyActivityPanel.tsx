@@ -34,6 +34,7 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
     <Surface
       className={styles.panel}
       data-testid="buddy-activity-panel"
+      animated="rise"
       radius="card"
       variant="glass"
     >
@@ -60,7 +61,7 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
           { value: "buddy_", label: "buddy_*" },
         ]}
       />
-      <div className={styles.scrollList}>
+      <div className={`${styles.scrollList} rf-stagger`}>
         {filteredActivities.length === 0 && (
           <Text size="1" className={styles.emptyText}>
             No recent activity
@@ -78,7 +79,7 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
               delayDuration={150}
             >
               <div
-                className={styles.listRow}
+                className={`${styles.listRow} rf-enter-rise`}
                 data-clickable={canOpen ? "true" : undefined}
                 {...(canOpen
                   ? {

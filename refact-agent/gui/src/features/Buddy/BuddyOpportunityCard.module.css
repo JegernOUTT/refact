@@ -83,11 +83,3 @@
 .actionButton {
   composes: chip from "./BuddyHome.module.css";
 }
-
-.actionButtonPrimary {
-  composes: chipPrimary from "./BuddyHome.module.css";
-}
-
-.actionButtonGhost {
-  composes: chipGhost from "./BuddyHome.module.css";
-}

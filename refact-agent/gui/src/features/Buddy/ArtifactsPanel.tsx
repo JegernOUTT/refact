@@ -29,7 +29,7 @@ export const ArtifactsPanel: React.FC = () => {
           📥 Memory Ops
         </Text>
       </div>
-      <div className="scrollX">
+      <div className={`scrollX ${styles.tableScroll}`}>
         <table className={styles.table}>
           <thead>
             <tr>

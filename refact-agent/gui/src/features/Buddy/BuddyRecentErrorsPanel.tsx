@@ -32,6 +32,7 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
   <Surface
     className={styles.panel}
     data-testid="buddy-recent-errors-panel"
+    animated="rise"
     radius="card"
     variant="glass"
   >
@@ -40,7 +41,7 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
         RECENT ERRORS
       </Text>
     </div>
-    <div className={styles.scrollList}>
+    <div className={`${styles.scrollList} rf-stagger`}>
       {recentErrors.length === 0 && (
         <Text size="1" className={styles.emptyText}>
           No errors recorded — all clear ✨
@@ -64,7 +65,7 @@ export const BuddyRecentErrorsPanel: React.FC<BuddyRecentErrorsPanelProps> = ({
         return (
           <div
             key={e.id}
-            className={styles.listRow}
+            className={`${styles.listRow} rf-enter-rise`}
             data-acknowledged={acknowledged ? "true" : undefined}
             data-priority={e.priority}
           >
