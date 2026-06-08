@@ -1,3 +1,5 @@
 .select {
-  width: min(100%, var(--rf-input-max, 360px));
+  width: 100%;
+  max-width: var(--rf-input-max, var(--rf-setting-item-control-max, 360px));
+  min-width: 0;
 }

@@ -53,7 +53,8 @@
 
 .input,
 .textarea {
-  width: min(100%, var(--rf-input-max, 360px));
+  width: 100%;
+  max-width: var(--rf-input-max, 100%);
   min-width: 0;
   color: var(--rf-color-fg);
   background: var(--rf-surface-1);
@@ -99,7 +100,9 @@
 
 .selectTrigger,
 .sliderControl {
-  width: min(100%, var(--rf-input-max, 360px));
+  width: 100%;
+  max-width: var(--rf-input-max, 100%);
+  min-width: 0;
 }
 
 .field[data-invalid="true"] .input,

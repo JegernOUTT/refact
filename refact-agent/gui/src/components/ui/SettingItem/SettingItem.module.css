@@ -8,7 +8,7 @@
 }
 
 .row {
-  grid-template-columns: minmax(0, 1fr) minmax(160px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(160px, min(48%, var(--rf-setting-item-control-max, 360px)));
   align-items: center;
   column-gap: var(--rf-space-5);
 }
@@ -25,10 +25,19 @@
 }
 
 .control {
+  --rf-input-max: var(--rf-setting-item-control-max, 360px);
+
+  width: min(100%, var(--rf-setting-item-control-max, 360px));
+  justify-self: end;
   justify-items: end;
 }
 
 .stack .control {
+  --rf-input-max: 100%;
+
+  width: 100%;
+  max-width: none;
+  justify-self: stretch;
   justify-items: stretch;
 }
 
@@ -61,6 +70,11 @@
   }
 
   .control {
+    --rf-input-max: 100%;
+
+    width: 100%;
+    max-width: none;
+    justify-self: stretch;
     justify-items: stretch;
   }
 }
