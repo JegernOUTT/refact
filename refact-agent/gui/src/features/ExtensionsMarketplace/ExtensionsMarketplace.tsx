@@ -233,7 +233,7 @@ export const ExtensionsMarketplace: React.FC<ExtensionsMarketplaceProps> = ({
       )}
 
       {!isLoading && filteredItems.length > 0 && (
-        <div className={styles.grid}>
+        <div className={`${styles.grid} rf-stagger`}>
           {filteredItems.map((item) => (
             <MarketplaceItemCard
               key={`${item.source_id}:${item.id}`}

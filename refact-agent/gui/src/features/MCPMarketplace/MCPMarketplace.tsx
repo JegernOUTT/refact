@@ -245,7 +245,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
 
       {smitheryNeedsKey && (
         <div className={styles.notice}>
-          <Icon icon={Info} tone="accent" />
+          <Icon icon={Info} tone="warning" />
           <p className={styles.smallText}>
             Smithery source requires an API key.
           </p>
@@ -276,7 +276,7 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
       )}
 
       {!isLoading && filteredServers.length > 0 && (
-        <div className={styles.serverGrid}>
+        <div className={`${styles.serverGrid} rf-stagger`}>
           {filteredServers.map((server) => (
             <ServerCard
               key={`${server.source_id}:${server.id}`}

@@ -54,7 +54,9 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
         : null;
 
   return (
-    <article className={`${styles.card} rf-enter`}>
+    <article
+      className={`${styles.card} rf-glass-panel rf-enter-rise rf-pressable`}
+    >
       <div className={styles.body}>
         <div className={styles.header}>
           <div className={styles.info}>

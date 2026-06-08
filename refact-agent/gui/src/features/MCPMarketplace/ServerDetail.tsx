@@ -68,7 +68,9 @@ export const ServerDetail: React.FC<ServerDetailProps> = ({
           <h2 className={styles.title}>{server.name}</h2>
           <p className={styles.mutedText}>by {server.publisher}</p>
           <div className={styles.detailMeta}>
-            <Badge tone="accent">{server.transport}</Badge>
+            <Badge tone="accent" className={styles.neutralBadge}>
+              {server.transport}
+            </Badge>
             {server.homepage && (
               <Button
                 size="sm"

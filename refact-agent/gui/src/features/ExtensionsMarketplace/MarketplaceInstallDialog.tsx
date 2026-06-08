@@ -91,7 +91,7 @@ export const MarketplaceInstallDialog: React.FC<
           </div>
 
           <div className={styles.filterRow}>
-            <Badge tone="accent">{item?.source_label}</Badge>
+            <Badge tone="muted">{item?.source_label}</Badge>
             {item?.tags.map((tag) => (
               <Badge key={tag} tone="muted">
                 {tag}
@@ -126,9 +126,9 @@ export const MarketplaceInstallDialog: React.FC<
                 ]}
               />
             ) : (
-              <Badge tone="accent">
+              <Badge tone="muted">
                 <span className={styles.dialogHeader}>
-                  <Icon icon={Globe} size="sm" tone="accent" /> Global only (no
+                  <Icon icon={Globe} size="sm" tone="muted" /> Global only (no
                   project open)
                 </span>
               </Badge>

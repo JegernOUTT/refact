@@ -30,9 +30,11 @@ export const ServerCard: React.FC<ServerCardProps> = ({
 
   return (
     <KitCard
-      animated
+      animated="rise"
+      interactive
       className={classNames(
         styles.serverCard,
+        "rf-glass-panel",
         isInstalling && styles.serverCardInstalling,
       )}
     >
@@ -58,7 +60,9 @@ export const ServerCard: React.FC<ServerCardProps> = ({
               {server.publisher}
             </p>
           </div>
-          <Badge tone="accent">{server.transport}</Badge>
+          <Badge tone="accent" className={styles.neutralBadge}>
+            {server.transport}
+          </Badge>
         </div>
 
         <p className={styles.serverDescription}>{server.description}</p>

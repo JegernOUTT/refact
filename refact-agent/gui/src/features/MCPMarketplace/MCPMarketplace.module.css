@@ -125,40 +125,27 @@
   display: flex;
   flex-direction: column;
   padding: var(--rf-space-3);
-  background: transparent;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
   transition:
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
     background var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
     transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .serverCard:hover {
-  border-color: var(--rf-color-accent);
-  background: var(--rf-surface-1);
-  transform: translateY(-1px);
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
 }
 
 .serverCardInstalling {
   border-color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-glass);
   animation: marketplace-install-pulse var(--rf-dur-slow)
     var(--rf-ease-standard) infinite;
-}
-
-.serverGrid > *:nth-child(2) {
-  animation-delay: var(--rf-stagger);
-}
-
-.serverGrid > *:nth-child(3) {
-  animation-delay: calc(var(--rf-stagger) * 2);
-}
-
-.serverGrid > *:nth-child(4) {
-  animation-delay: calc(var(--rf-stagger) * 3);
-}
-
-.serverGrid > *:nth-child(n + 5) {
-  animation-delay: calc(var(--rf-stagger) * 4);
 }
 
 .cardColumn,
@@ -222,12 +209,12 @@
 .serverIconPlaceholder,
 .serverIconPlaceholderLarge {
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-2);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--rf-color-accent);
+  color: var(--rf-color-muted);
   font-weight: 600;
 }
 
@@ -276,6 +263,10 @@
   font-size: var(--rf-text-1);
 }
 
+.neutralBadge {
+  color: var(--rf-color-muted);
+}
+
 .verifiedBadge {
   color: var(--rf-color-success);
 }
@@ -301,17 +292,17 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   color: var(--rf-color-muted);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .noticeSuccess {
   color: var(--rf-color-success);
-  background: var(--rf-surface-1);
 }
 
 .noticeDanger {
   color: var(--rf-color-danger);
-  background: var(--rf-surface-1);
 }
 
 .detailRoot {
@@ -346,6 +337,12 @@
   display: inline-flex;
   align-items: center;
   color: currentColor;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .notice {
+    backdrop-filter: none;
+  }
 }
 
 @keyframes marketplace-install-pulse {

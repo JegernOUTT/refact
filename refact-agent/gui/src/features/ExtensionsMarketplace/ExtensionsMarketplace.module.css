@@ -143,40 +143,27 @@
   display: flex;
   flex-direction: column;
   padding: var(--rf-space-3);
-  background: transparent;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
   transition:
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
     background var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
     transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .card:hover {
-  border-color: var(--rf-color-accent);
-  background: var(--rf-surface-1);
-  transform: translateY(-1px);
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
 }
 
 .cardInstalling {
   border-color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-glass);
   animation: marketplace-install-pulse var(--rf-dur-slow)
     var(--rf-ease-standard) infinite;
-}
-
-.grid > *:nth-child(2) {
-  animation-delay: var(--rf-stagger);
-}
-
-.grid > *:nth-child(3) {
-  animation-delay: calc(var(--rf-stagger) * 2);
-}
-
-.grid > *:nth-child(4) {
-  animation-delay: calc(var(--rf-stagger) * 3);
-}
-
-.grid > *:nth-child(n + 5) {
-  animation-delay: calc(var(--rf-stagger) * 4);
 }
 
 .cardColumn {
@@ -248,6 +235,10 @@
   font-size: var(--rf-text-1);
 }
 
+.neutralBadge {
+  color: var(--rf-color-muted);
+}
+
 .installScope {
   padding-top: var(--rf-space-1);
 }
@@ -291,24 +282,30 @@
   padding: var(--rf-space-2) var(--rf-space-3);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   color: var(--rf-color-muted);
 }
 
 .noticeWarning {
   color: var(--rf-color-warning);
-  background: var(--rf-surface-1);
 }
 
 .noticeDanger {
   color: var(--rf-color-danger);
-  background: var(--rf-surface-1);
 }
 
 .iconInline {
   display: inline-flex;
   align-items: center;
   color: currentColor;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .notice {
+    backdrop-filter: none;
+  }
 }
 
 @keyframes marketplace-install-pulse {

@@ -6,8 +6,19 @@
   width: 100%;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: transparent;
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
   padding: var(--rf-space-3);
+  transition:
+    border-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.card:hover {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
 }
 
 .body {

@@ -18,8 +18,13 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
 }) => {
   return (
     <KitCard
-      animated
-      className={classNames(styles.card, isInstalling && styles.cardInstalling)}
+      animated="rise"
+      interactive
+      className={classNames(
+        styles.card,
+        "rf-glass-panel",
+        isInstalling && styles.cardInstalling,
+      )}
     >
       <div className={styles.cardColumn}>
         <div className={styles.cardMeta}>
@@ -31,7 +36,9 @@ export const MarketplaceItemCard: React.FC<MarketplaceItemCardProps> = ({
               {item.publisher}
             </p>
           </div>
-          <Badge tone="accent">{item.kind}</Badge>
+          <Badge tone="accent" className={styles.neutralBadge}>
+            {item.kind}
+          </Badge>
         </div>
 
         <p className={styles.description}>
