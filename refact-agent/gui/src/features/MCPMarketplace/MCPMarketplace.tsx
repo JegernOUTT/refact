@@ -36,11 +36,13 @@ type MCPMarketplaceProps = {
   host: Config["host"];
   tabbed: Config["tabbed"];
   backFromMarketplace: () => void;
+  embedded?: boolean;
 };
 
 export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
   host,
   backFromMarketplace,
+  embedded = false,
 }) => {
   const dispatch = useAppDispatch();
   const [search, setSearch] = useState("");
@@ -157,158 +159,177 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
         : null;
 
   if (selectedServer) {
-    return (
+    const detail = (
+      <ServerDetail
+        server={selectedServer}
+        onBack={() => setSelectedServer(null)}
+      />
+    );
+
+    return embedded ? (
+      detail
+    ) : (
       <PageWrapper host={host}>
         <ScrollArea scrollbars="vertical" fullHeight>
-          <ServerDetail
-            server={selectedServer}
-            onBack={() => setSelectedServer(null)}
-          />
+          {detail}
         </ScrollArea>
       </PageWrapper>
     );
   }
 
-  return (
+  const content = (
+    <div className={styles.pageStack}>
+      {!embedded && (
+        <div className={styles.header}>
+          <Button
+            size="sm"
+            variant="ghost"
+            leftIcon={ArrowLeft}
+            onClick={backFromMarketplace}
+          >
+            Back
+          </Button>
+          <h2 className={styles.title}>MCP Marketplace</h2>
+        </div>
+      )}
+
+      <div className={styles.toolbar}>
+        <div className={styles.searchRow}>
+          <div className={styles.searchWrap}>
+            <FieldText
+              aria-label="Search servers"
+              className={styles.searchInput}
+              placeholder="Search servers…"
+              value={search}
+              onChange={setSearch}
+            />
+          </div>
+          <Icon icon={Search} tone="muted" />
+        </div>
+
+        {sources.length > 0 && (
+          <SourceSelector
+            sources={sources}
+            selectedSource={selectedSource}
+            onSelectSource={handleSelectSource}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        )}
+      </div>
+
+      {allTags.length > 0 && (
+        <div className={styles.filterRow}>
+          <Badge
+            tone={selectedTag === null ? "accent" : "muted"}
+            className={styles.tagFilter}
+            role="button"
+            tabIndex={0}
+            onClick={() => setSelectedTag(null)}
+          >
+            All
+          </Badge>
+          {allTags.map((tag) => (
+            <Badge
+              key={tag}
+              tone={selectedTag === tag ? "accent" : "muted"}
+              className={styles.tagFilter}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
+            >
+              {tag}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {smitheryNeedsKey && (
+        <div className={styles.notice}>
+          <Icon icon={Info} tone="accent" />
+          <p className={styles.smallText}>Smithery source requires an API key.</p>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setSettingsOpen(true)}
+          >
+            Configure
+          </Button>
+        </div>
+      )}
+
+      {errorMessage && (
+        <ErrorState
+          title="Failed to load MCP marketplace"
+          description={errorMessage}
+        />
+      )}
+
+      {isLoading && <LoadingState label="Loading MCP marketplace" />}
+
+      {!isLoading && !errorMessage && filteredServers.length === 0 && (
+        <EmptyState
+          title="No servers found"
+          description="Try another search term, tag, or source."
+        />
+      )}
+
+      {!isLoading && filteredServers.length > 0 && (
+        <div className={styles.serverGrid}>
+          {filteredServers.map((server) => (
+            <ServerCard
+              key={`${server.source_id}:${server.id}`}
+              server={server}
+              isInstalled={installedIds.has(server.id)}
+              installedConfigPath={installedConfigPaths.get(server.id)}
+              isInstalling={installingId === server.id}
+              onInstall={(s) => void handleInstall(s)}
+              onViewDetail={(s) => setSelectedServer(s)}
+              onConfigure={handleConfigure}
+              sourceLabel={sourceMap.get(server.source_id)}
+            />
+          ))}
+        </div>
+      )}
+
+      {totalPages > 1 && (
+        <div className={styles.pagination}>
+          <Button
+            size="sm"
+            variant="soft"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => p - 1)}
+          >
+            Prev
+          </Button>
+          <p className={styles.smallText}>
+            Page {page} of {totalPages}
+          </p>
+          <Button
+            size="sm"
+            variant="soft"
+            disabled={page >= totalPages}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            Next
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+
+  return embedded ? (
+    <>
+      {content}
+      <SourceSettings
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        sources={sources}
+      />
+    </>
+  ) : (
     <PageWrapper host={host}>
       <ScrollArea scrollbars="vertical" fullHeight>
-        <div className={styles.pageStack}>
-          <div className={styles.header}>
-            <Button
-              size="sm"
-              variant="ghost"
-              leftIcon={ArrowLeft}
-              onClick={backFromMarketplace}
-            >
-              Back
-            </Button>
-            <h2 className={styles.title}>MCP Marketplace</h2>
-          </div>
-
-          <div className={styles.searchRow}>
-            <div className={styles.searchWrap}>
-              <FieldText
-                aria-label="Search servers"
-                className={styles.searchInput}
-                placeholder="Search servers…"
-                value={search}
-                onChange={setSearch}
-              />
-            </div>
-            <Icon icon={Search} tone="muted" />
-          </div>
-
-          {sources.length > 0 && (
-            <SourceSelector
-              sources={sources}
-              selectedSource={selectedSource}
-              onSelectSource={handleSelectSource}
-              onOpenSettings={() => setSettingsOpen(true)}
-            />
-          )}
-
-          {allTags.length > 0 && (
-            <div className={styles.filterRow}>
-              <Badge
-                tone={selectedTag === null ? "accent" : "muted"}
-                className={styles.tagFilter}
-                role="button"
-                tabIndex={0}
-                onClick={() => setSelectedTag(null)}
-              >
-                All
-              </Badge>
-              {allTags.map((tag) => (
-                <Badge
-                  key={tag}
-                  tone={selectedTag === tag ? "accent" : "muted"}
-                  className={styles.tagFilter}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() =>
-                    setSelectedTag(selectedTag === tag ? null : tag)
-                  }
-                >
-                  {tag}
-                </Badge>
-              ))}
-            </div>
-          )}
-
-          {smitheryNeedsKey && (
-            <div className={styles.notice}>
-              <Icon icon={Info} tone="accent" />
-              <p className={styles.smallText}>
-                Smithery source requires an API key.
-              </p>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setSettingsOpen(true)}
-              >
-                Configure
-              </Button>
-            </div>
-          )}
-
-          {errorMessage && (
-            <ErrorState
-              title="Failed to load MCP marketplace"
-              description={errorMessage}
-            />
-          )}
-
-          {isLoading && <LoadingState label="Loading MCP marketplace" />}
-
-          {!isLoading && !errorMessage && filteredServers.length === 0 && (
-            <EmptyState
-              title="No servers found"
-              description="Try another search term, tag, or source."
-            />
-          )}
-
-          {!isLoading && filteredServers.length > 0 && (
-            <div className={styles.serverGrid}>
-              {filteredServers.map((server) => (
-                <ServerCard
-                  key={`${server.source_id}:${server.id}`}
-                  server={server}
-                  isInstalled={installedIds.has(server.id)}
-                  installedConfigPath={installedConfigPaths.get(server.id)}
-                  isInstalling={installingId === server.id}
-                  onInstall={(s) => void handleInstall(s)}
-                  onViewDetail={(s) => setSelectedServer(s)}
-                  onConfigure={handleConfigure}
-                  sourceLabel={sourceMap.get(server.source_id)}
-                />
-              ))}
-            </div>
-          )}
-
-          {totalPages > 1 && (
-            <div className={styles.pagination}>
-              <Button
-                size="sm"
-                variant="soft"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-              >
-                Prev
-              </Button>
-              <p className={styles.smallText}>
-                Page {page} of {totalPages}
-              </p>
-              <Button
-                size="sm"
-                variant="soft"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-              >
-                Next
-              </Button>
-            </div>
-          )}
-        </div>
+        {content}
       </ScrollArea>
 
       <SourceSettings

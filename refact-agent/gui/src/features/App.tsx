@@ -51,11 +51,7 @@ import { LoginPage } from "./Login";
 import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
 
-import { MCPMarketplace } from "./MCPMarketplace";
-import { SkillsMarketplace } from "./SkillsMarketplace";
-import { CommandsMarketplace } from "./CommandsMarketplace";
-import { SubagentsMarketplace } from "./SubagentsMarketplace";
-import { MarketplaceHub } from "./MarketplaceHub";
+import { MarketplaceHub, isMarketplacePage } from "./MarketplaceHub";
 import { StatsDashboard } from "./StatsDashboard";
 import { Dashboard } from "./Dashboard";
 import { SettingsHub, isSettingsPage } from "./Settings";
@@ -537,37 +533,9 @@ export const InnerApp: React.FC<AppProps> = ({ style }: AppProps) => {
               />
             )}
 
-            {!pageSwitching && renderedPage.name === "mcp marketplace" && (
-              <MCPMarketplace
-                backFromMarketplace={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "skills marketplace" && (
-              <SkillsMarketplace
-                backFromMarketplace={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "commands marketplace" && (
-              <CommandsMarketplace
-                backFromMarketplace={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-              />
-            )}
-            {!pageSwitching &&
-              renderedPage.name === "subagents marketplace" && (
-                <SubagentsMarketplace
-                  backFromMarketplace={goBack}
-                  tabbed={config.tabbed}
-                  host={config.host}
-                />
-              )}
-            {!pageSwitching && renderedPage.name === "marketplace hub" && (
+            {!pageSwitching && isMarketplacePage(renderedPage) && (
               <MarketplaceHub
+                page={renderedPage}
                 back={goBack}
                 tabbed={config.tabbed}
                 host={config.host}

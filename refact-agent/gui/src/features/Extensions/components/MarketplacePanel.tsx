@@ -206,6 +206,23 @@ export const MarketplacePanel: React.FC = () => {
         </div>
       )}
 
+      <div className={styles.toolbar}>
+        <Button
+          variant="primary"
+          onClick={() => setDialogOpen(true)}
+          leftIcon={Plus}
+        >
+          Add Marketplace
+        </Button>
+        <div className={styles.searchInput}>
+          <FieldText
+            placeholder="Search plugins…"
+            value={search}
+            onChange={handleSearchChange}
+          />
+        </div>
+      </div>
+
       {installed.length > 0 && (
         <section className={styles.installedSection}>
           <button
@@ -253,23 +270,6 @@ export const MarketplacePanel: React.FC = () => {
           installedIds={installedIds}
         />
       ))}
-
-      <div className={styles.toolbar}>
-        <Button
-          variant="primary"
-          onClick={() => setDialogOpen(true)}
-          leftIcon={Plus}
-        >
-          Add Marketplace
-        </Button>
-        <div className={styles.searchInput}>
-          <FieldText
-            placeholder="Search plugins…"
-            value={search}
-            onChange={handleSearchChange}
-          />
-        </div>
-      </div>
 
       <AddMarketplaceDialog
         open={dialogOpen}

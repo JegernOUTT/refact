@@ -52,6 +52,26 @@ const routes = [
     name: "settings extensions",
     path: "/tests/e2e/route-showcase.html?route=settings&settings=extensions",
   },
+  {
+    name: "marketplace skills",
+    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=skills",
+  },
+  {
+    name: "marketplace commands",
+    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=commands",
+  },
+  {
+    name: "marketplace subagents",
+    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=subagents",
+  },
+  {
+    name: "marketplace mcp",
+    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=mcp",
+  },
+  {
+    name: "marketplace extensions",
+    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=extensions",
+  },
 ] as const;
 
 test.describe("no page-level horizontal scroll", () => {

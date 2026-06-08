@@ -1,5 +1,6 @@
 .pageStack,
 .header,
+.toolbar,
 .filterRow,
 .quickAddRow,
 .quickAddSection,
@@ -29,6 +30,14 @@
 
 .pageStack {
   gap: var(--rf-space-4);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-3);
+  min-width: 0;
 }
 
 .quickAddSection,
@@ -75,6 +84,10 @@
 .dialogHeader,
 .sourceRow {
   gap: var(--rf-space-2);
+}
+
+.toolbar > .quickAddRow {
+  flex: 1 1 220px;
 }
 
 .title {

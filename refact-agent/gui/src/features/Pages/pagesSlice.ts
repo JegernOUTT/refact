@@ -92,6 +92,7 @@ export interface SubagentsMarketplacePage {
 
 export interface MarketplaceHubPage {
   name: "marketplace hub";
+  tab?: "skills" | "commands" | "subagents" | "mcp" | "extensions";
 }
 
 export interface GeneralSettingsPage {

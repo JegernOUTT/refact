@@ -135,11 +135,11 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   }, []);
 
   const openSkillsMarketplace = useCallback(() => {
-    dispatch(push({ name: "skills marketplace" }));
+    dispatch(push({ name: "marketplace hub", tab: "skills" }));
   }, [dispatch]);
 
   const openCommandsMarketplace = useCallback(() => {
-    dispatch(push({ name: "commands marketplace" }));
+    dispatch(push({ name: "marketplace hub", tab: "commands" }));
   }, [dispatch]);
 
   const hasProjectRoot = registry?.has_project_root ?? false;

@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { Provider } from "react-redux";
+import { Provider, useSelector } from "react-redux";
 import { Flex } from "@radix-ui/themes";
 
 import { setUpStore, type RootState } from "../../src/app/store";
@@ -14,6 +14,12 @@ import {
   settingsSectionToPage,
   type SettingsSectionId,
 } from "../../src/features/Settings";
+import {
+  MarketplaceHub,
+  isMarketplacePage,
+  marketplaceTabToPage,
+  type MarketplaceTabId,
+} from "../../src/features/MarketplaceHub";
 import { setBackendStatus } from "../../src/features/Connection";
 import { sidebarSectionSnapshotReceived } from "../../src/features/Sidebar/sidebarSlice";
 import { tasksApi, type TaskMeta } from "../../src/services/refact/tasks";
@@ -183,6 +189,21 @@ const settingsSection: SettingsSectionId = settingsSectionIds.has(
 )
   ? (settingsSectionParam as SettingsSectionId)
   : "general";
+const marketplaceTabParam = new URLSearchParams(window.location.search).get(
+  "marketplace",
+);
+const marketplaceTabs = new Set<string>([
+  "skills",
+  "commands",
+  "subagents",
+  "mcp",
+  "extensions",
+]);
+const marketplaceTab: MarketplaceTabId = marketplaceTabs.has(
+  marketplaceTabParam ?? "",
+)
+  ? (marketplaceTabParam as MarketplaceTabId)
+  : "skills";
 
 const providerList: ConfiguredProvidersResponse = {
   providers: [
@@ -394,6 +415,87 @@ const extensions: ExtRegistryResponse = {
   has_project_root: true,
 };
 
+const marketplaceSources = [
+  {
+    id: "refact-starter",
+    label: "Refact Starter Source With Long Name",
+    description: "Bundled marketplace entries for responsive testing.",
+    enabled: true,
+    builtin: true,
+    removable: false,
+    source_kind: "builtin_embedded",
+    supported_kinds: ["skill", "command", "subagent"],
+    parser_mode: "scan",
+    item_count: 3,
+  },
+];
+
+const extensionMarketplaceItem = (kind: "skill" | "command" | "subagent") => ({
+  id: `responsive-${kind}`,
+  name: `Responsive ${kind} marketplace item with long name`,
+  description:
+    "A marketplace item with enough descriptive text to prove the toolbar and cards wrap cleanly on narrow screens.",
+  tags: ["responsive", "layout", "marketplace"],
+  publisher: "Refact",
+  kind,
+  source_id: "refact-starter",
+  source_label: "Refact Starter Source With Long Name",
+  path: `${kind}s/responsive`,
+  installed_scopes: [],
+});
+
+const mcpMarketplace = {
+  servers: [
+    {
+      id: "responsive-mcp-server",
+      source_id: "refact-bundled",
+      name: "Responsive MCP Server With Long Name",
+      description:
+        "A representative MCP server card used by the route showcase responsiveness check.",
+      publisher: "Refact",
+      tags: ["responsive", "tools", "marketplace"],
+      transport: "stdio",
+      install_recipe: { command: "npx responsive-mcp" },
+      confirmation_default: [],
+    },
+  ],
+  sources: [
+    {
+      id: "refact-bundled",
+      label: "Refact Bundled MCP Registry With Long Name",
+      type: "refact_index",
+      enabled: true,
+      removable: false,
+      server_count: 1,
+      status: "ok",
+    },
+  ],
+  pagination: { page: 1, page_size: 20, total: 1 },
+};
+
+const pluginMarketplaces = {
+  marketplaces: [
+    {
+      name: "responsive-plugins",
+      source: "JegernOUTT/refact-plugins-responsive-fixture",
+      added_at: now,
+    },
+  ],
+};
+
+const pluginList = {
+  plugins: [
+    {
+      name: "responsive-plugin-with-a-very-long-name",
+      description:
+        "A plugin marketplace item with long text for the marketplace route showcase.",
+      version: "1.0.0",
+      tags: ["responsive", "plugin"],
+      marketplace: "responsive-plugins",
+    },
+  ],
+};
+
 const cronTasks = [
   {
     id: "responsive-cron-task",
@@ -479,6 +581,40 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (path === "/v1/ext/registry")
     return Promise.resolve(jsonResponse(extensions));
+  if (path === "/v1/skills/marketplace") {
+    return Promise.resolve(
+      jsonResponse({
+        items: [extensionMarketplaceItem("skill")],
+        sources: marketplaceSources,
+      }),
+    );
+  }
+  if (path === "/v1/commands/marketplace") {
+    return Promise.resolve(
+      jsonResponse({
+        items: [extensionMarketplaceItem("command")],
+        sources: marketplaceSources,
+      }),
+    );
+  }
+  if (path === "/v1/subagents/marketplace") {
+    return Promise.resolve(
+      jsonResponse({
+        items: [extensionMarketplaceItem("subagent")],
+        sources: marketplaceSources,
+      }),
+    );
+  }
+  if (path === "/v1/mcp/marketplace")
+    return Promise.resolve(jsonResponse(mcpMarketplace));
+  if (path === "/v1/mcp/marketplace/installed")
+    return Promise.resolve(jsonResponse({ installed: [] }));
+  if (path === "/v1/plugins/marketplaces")
+    return Promise.resolve(jsonResponse(pluginMarketplaces));
+  if (path === "/v1/plugins/installed")
+    return Promise.resolve(jsonResponse({ installed: [] }));
+  if (path === "/v1/plugins/marketplace/responsive-plugins/plugins")
+    return Promise.resolve(jsonResponse(pluginList));
   return nativeFetch(input, init);
 };
 
@@ -536,26 +672,44 @@ if (!root) {
   throw new Error("Missing #refact-chat route showcase root");
 }
 
+const ShowcaseSurface = () => {
+  const currentPage = useSelector((state: RootState) => {
+    const page = state.pages[state.pages.length - 1];
+    return page && isMarketplacePage(page)
+      ? page
+      : marketplaceTabToPage(marketplaceTab);
+  });
+
+  if (route === "chat") {
+    return <Chat host="web" tabbed={false} backFromChat={() => undefined} />;
+  }
+
+  if (route === "settings") {
+    return (
+      <SettingsHub
+        page={settingsSectionToPage(settingsSection)}
+        onBack={() => undefined}
+        host="web"
+        tabbed={false}
+      />
+    );
+  }
+
+  if (route === "marketplace") {
+    return (
+      <MarketplaceHub
+        page={currentPage}
+        back={() => undefined}
+        host="web"
+        tabbed={false}
+      />
+    );
+  }
+
+  return <Dashboard />;
+};
+
 const Showcase = () => {
-  const surface = (() => {
-    if (route === "chat") {
-      return <Chat host="web" tabbed={false} backFromChat={() => undefined} />;
-    }
-
-    if (route === "settings") {
-      return (
-        <SettingsHub
-          page={settingsSectionToPage(settingsSection)}
-          onBack={() => undefined}
-          host="web"
-          tabbed={false}
-        />
-      );
-    }
-
-    return <Dashboard />;
-  })();
-
   return (
     <Provider store={store}>
       <Theme>
@@ -572,7 +726,7 @@ const Showcase = () => {
               overflow: "hidden",
             }}
           >
-            {surface}
+            <ShowcaseSurface />
           </Flex>
         </AbortControllerProvider>
       </Theme>

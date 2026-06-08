@@ -330,7 +330,10 @@ describe("Extensions", () => {
     fireEvent.click(button);
 
     const pages = store.getState().pages;
-    expect(pages[pages.length - 1]).toEqual({ name: "skills marketplace" });
+    expect(pages[pages.length - 1]).toEqual({
+      name: "marketplace hub",
+      tab: "skills",
+    });
   });
 
   it("opens dedicated commands marketplace from commands tab", async () => {
@@ -359,6 +362,9 @@ describe("Extensions", () => {
     fireEvent.click(button);
 
     const pages = store.getState().pages;
-    expect(pages[pages.length - 1]).toEqual({ name: "commands marketplace" });
+    expect(pages[pages.length - 1]).toEqual({
+      name: "marketplace hub",
+      tab: "commands",
+    });
   });
 });

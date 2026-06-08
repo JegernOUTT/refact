@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
 import { server } from "../utils/mockServer";
+import { MarketplaceHub } from "../features/MarketplaceHub";
 import { SkillsMarketplace } from "../features/SkillsMarketplace";
 import { CommandsMarketplace } from "../features/CommandsMarketplace";
 import { SubagentsMarketplace } from "../features/SubagentsMarketplace";
+import { marketplacePageToTab } from "../features/MarketplaceHub";
+import type { Page } from "../features/Pages/pagesSlice";
 
 const PRELOADED_STATE = {
   config: {
@@ -46,6 +49,92 @@ const SOURCES = [
     item_count: 1,
   },
 ];
+
+describe("marketplace routes", () => {
+  it.each<[Page, string]>([
+    [{ name: "marketplace hub" }, "skills"],
+    [{ name: "skills marketplace" }, "skills"],
+    [{ name: "commands marketplace" }, "commands"],
+    [{ name: "subagents marketplace" }, "subagents"],
+    [{ name: "mcp marketplace" }, "mcp"],
+    [{ name: "marketplace hub", tab: "extensions" }, "extensions"],
+  ])("maps %s to the matching marketplace tab", (page, expected) => {
+    expect(marketplacePageToTab(page)).toBe(expected);
+  });
+});
+
+describe("MarketplaceHub", () => {
+  it("renders legacy skills marketplace deep-links inside the tabbed shell", async () => {
+    server.use(
+      http.get("*/v1/ext/registry", () => HttpResponse.json(REGISTRY)),
+      http.get("*/v1/skills/marketplace", () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: "code-review",
+              name: "code-review",
+              description: "Review code",
+              tags: ["review"],
+              publisher: "Refact",
+              kind: "skill",
+              source_id: "refact-starter-skills",
+              source_label: "Refact Starter Skills",
+              path: "skills/code-review",
+              installed_scopes: [],
+            },
+          ],
+          sources: SOURCES,
+        }),
+      ),
+    );
+
+    render(
+      <MarketplaceHub
+        host="vscode"
+        tabbed={false}
+        back={() => undefined}
+        page={{ name: "skills marketplace" }}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    expect(screen.getByRole("tab", { name: "Skills" })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    expect(await screen.findByText("code-review")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Back" })).toBeDefined();
+  });
+
+  it("uses change for tab switches so marketplace history stays in one page", async () => {
+    server.use(
+      http.get("*/v1/ext/registry", () => HttpResponse.json(REGISTRY)),
+      http.get("*/v1/skills/marketplace", () =>
+        HttpResponse.json({ items: [], sources: SOURCES }),
+      ),
+      http.get("*/v1/commands/marketplace", () =>
+        HttpResponse.json({ items: [], sources: [] }),
+      ),
+    );
+
+    const { store, user } = render(
+      <MarketplaceHub
+        host="vscode"
+        tabbed={false}
+        back={() => undefined}
+        page={{ name: "marketplace hub" }}
+      />,
+      { preloadedState: PRELOADED_STATE },
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Commands" }));
+
+    await screen.findByRole("tab", { name: "Commands" });
+    const pages = store.getState().pages;
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toEqual({ name: "commands marketplace" });
+  });
+});
 
 describe("SkillsMarketplace", () => {
   it("renders marketplace items from API", async () => {

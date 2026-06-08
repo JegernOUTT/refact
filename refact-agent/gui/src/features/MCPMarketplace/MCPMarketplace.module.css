@@ -1,5 +1,6 @@
 .pageStack,
 .header,
+.toolbar,
 .searchRow,
 .filterRow,
 .notice,
@@ -27,6 +28,14 @@
   gap: var(--rf-space-4);
 }
 
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
 .header,
 .searchRow,
 .filterRow,
@@ -51,8 +60,13 @@
   gap: var(--rf-space-2);
 }
 
+.searchRow {
+  flex: 1 1 220px;
+}
+
 .filterRow,
-.detailTags {
+.detailTags,
+.sourceSelector {
   gap: var(--rf-space-2);
   flex-wrap: wrap;
 }
