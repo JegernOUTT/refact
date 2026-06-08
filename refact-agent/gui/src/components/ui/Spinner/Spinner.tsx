@@ -11,6 +11,6 @@ export const Spinner: React.FC<SpinnerProps> = ({ size = "md", label = "Loading"
   <pre
     role="status"
     aria-label={label}
-    className={classNames(styles.spinner, styles.spinning, size && styles[size])}
+    className={classNames(styles.spinner, styles.spinning, styles[size])}
   />
 );
