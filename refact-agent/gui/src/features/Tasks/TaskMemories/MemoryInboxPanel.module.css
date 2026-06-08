@@ -1,10 +1,10 @@
 .root {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   height: 100%;
   min-height: 0;
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   overflow: hidden;
 }
 
@@ -14,7 +14,7 @@
 
 .filters {
   flex-shrink: 0;
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);
@@ -44,13 +44,13 @@
   min-width: 0;
   max-height: 200px;
   overflow: hidden auto;
-  padding-right: var(--space-1);
+  padding-right: var(--rf-space-1);
 }
 
 .tagSearchBox {
   flex-basis: 100%;
   min-width: 180px;
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--rf-space-1);
 }
 
 .tagChip {
@@ -71,7 +71,7 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-right: var(--space-1);
+  padding-right: var(--rf-space-1);
 }
 
 .card {
@@ -79,7 +79,7 @@
   background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
-  padding: var(--space-3);
+  padding: var(--rf-space-3);
   min-height: 64px;
   max-height: 96px;
 }
@@ -207,10 +207,10 @@
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--rf-space-3);
   max-height: 420px;
   overflow: auto;
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-glass);
@@ -233,7 +233,7 @@
 
 .frontmatterTable th,
 .frontmatterTable td {
-  padding: var(--space-1) var(--space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
   border-top: 1px solid var(--rf-border);
   vertical-align: top;
 }
@@ -259,7 +259,7 @@
 }
 
 .emptyState {
-  padding: var(--space-6) var(--space-3);
+  padding: var(--rf-space-6) var(--rf-space-3);
   text-align: center;
 }
 

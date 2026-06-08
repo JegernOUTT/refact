@@ -6,7 +6,7 @@
 
 .miniBar {
   display: flex;
-  gap: 1px;
+  gap: var(--rf-space-2xs);
 }
 
 .miniSegment {

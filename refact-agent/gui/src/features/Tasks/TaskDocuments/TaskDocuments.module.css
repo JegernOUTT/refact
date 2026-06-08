@@ -1,10 +1,10 @@
 .root {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--rf-space-2);
   height: 100%;
   min-height: 0;
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   overflow: hidden;
 }
 
@@ -14,7 +14,7 @@
 
 .filters {
   flex-shrink: 0;
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);
@@ -31,7 +31,7 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-right: var(--space-1);
+  padding-right: var(--rf-space-1);
 }
 
 .row {
@@ -39,7 +39,7 @@
   background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
-  padding: var(--space-3);
+  padding: var(--rf-space-3);
   border-radius: var(--rf-radius-card);
   cursor: pointer;
 }
@@ -71,8 +71,8 @@
 
 .content {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
-  margin-top: var(--space-2);
-  padding: var(--space-2);
+  margin-top: var(--rf-space-2);
+  padding: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-glass);
@@ -81,12 +81,12 @@
 }
 
 .emptyState {
-  padding: var(--space-6) var(--space-3);
+  padding: var(--rf-space-6) var(--rf-space-3);
   text-align: center;
 }
 
 .historyDialog {
-  width: min(760px, calc(100vw - var(--space-8)));
+  width: min(760px, calc(100vw - var(--rf-space-6)));
   max-width: 760px;
 }
 
@@ -99,15 +99,15 @@
   flex: 0 0 220px;
   max-height: 420px;
   overflow: auto;
-  padding-right: var(--space-1);
+  padding-right: var(--rf-space-1);
 }
 
 .historyVersionButton {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--rf-space-1);
   width: 100%;
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
   background: transparent;
@@ -132,7 +132,7 @@
   min-width: 0;
   max-height: 420px;
   overflow: auto;
-  padding: var(--space-3);
+  padding: var(--rf-space-3);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);

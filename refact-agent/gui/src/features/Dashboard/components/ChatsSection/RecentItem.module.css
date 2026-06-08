@@ -88,7 +88,7 @@
 .diffStatsBadge {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
   margin-left: var(--rf-space-1);
   flex-shrink: 0;
 }
@@ -104,7 +104,7 @@
 .actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
   flex-shrink: 0;
 }
 

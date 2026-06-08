@@ -1,7 +1,7 @@
 .bars {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--rf-space-1);
   width: 100%;
 }
 
