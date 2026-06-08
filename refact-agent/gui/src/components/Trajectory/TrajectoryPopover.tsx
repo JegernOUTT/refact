@@ -6,11 +6,16 @@ import {
   Flex,
   Popover,
   Spinner,
-  Tabs,
   Text,
 } from "../LongTailPrimitives";
+import { SegmentedControl } from "../ui";
 import { useTrajectoryOps } from "../../hooks/useTrajectoryOps";
 import styles from "./TrajectoryPopover.module.css";
+
+const TAB_OPTIONS = [
+  { value: "compress", label: "Compress in-place" },
+  { value: "handoff", label: "Handoff" },
+];
 
 type TrajectoryPopoverContentProps = {
   onClose: () => void;
@@ -65,17 +70,16 @@ export const TrajectoryPopoverContent: React.FC<
       sideOffset={8}
       className={styles.popoverContent}
     >
-      <Tabs.Root value={activeTab} onValueChange={handleTabChange}>
-        <Tabs.List className={styles.tabsList}>
-          <Tabs.Trigger value="compress" className={styles.tabsTrigger}>
-            Compress in-place
-          </Tabs.Trigger>
-          <Tabs.Trigger value="handoff" className={styles.tabsTrigger}>
-            Handoff
-          </Tabs.Trigger>
-        </Tabs.List>
+      <SegmentedControl
+        className={styles.tabStrip}
+        size="sm"
+        options={TAB_OPTIONS}
+        value={activeTab}
+        onValueChange={handleTabChange}
+      />
 
-        <Tabs.Content value="compress">
+      {activeTab === "compress" && (
+        <>
           <div className={styles.optionsSection}>
             <Text as="label" size="2">
               <Flex gap="2" align="center">
@@ -201,9 +205,11 @@ export const TrajectoryPopoverContent: React.FC<
               {isApplyingTransform ? <Spinner size="1" /> : "Apply"}
             </Button>
           </Flex>
-        </Tabs.Content>
+        </>
+      )}
 
-        <Tabs.Content value="handoff">
+      {activeTab === "handoff" && (
+        <>
           <div className={styles.optionsSection}>
             <Text as="label" size="2">
               <Flex gap="2" align="center">
@@ -322,8 +328,8 @@ export const TrajectoryPopoverContent: React.FC<
               {isApplyingHandoff ? <Spinner size="1" /> : "Create"}
             </Button>
           </Flex>
-        </Tabs.Content>
-      </Tabs.Root>
+        </>
+      )}
     </Popover.Content>
   );
 };

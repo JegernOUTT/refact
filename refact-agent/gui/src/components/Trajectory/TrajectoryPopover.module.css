@@ -1,60 +1,57 @@
 .popoverContent {
   min-width: 320px;
   max-width: 400px;
+
   /* Force GPU compositing to fix JCEF repaint issues in JetBrains IDEs */
   transform: translateZ(0);
   will-change: transform;
 }
 
-.tabsList {
+.tabStrip {
   width: 100%;
-  margin-bottom: 12px;
-}
-
-.tabsTrigger {
-  flex: 1;
+  margin-bottom: var(--rf-space-3);
 }
 
 .optionsSection {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: var(--rf-space-3);
+  margin-bottom: var(--rf-space-4);
 }
 
 .previewSection {
-  background: var(--gray-a2);
-  border-radius: 4px;
-  padding: 12px;
-  margin-bottom: 12px;
+  background: var(--rf-surface-1);
+  border-radius: var(--rf-radius-chip);
+  padding: var(--rf-space-3);
+  margin-bottom: var(--rf-space-3);
 }
 
 .previewStats {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: var(--rf-space-2);
 }
 
 .actionsList {
   margin: 0;
-  padding-left: 16px;
+  padding-left: var(--rf-space-4);
 }
 
 .actionsListItem {
-  font-size: var(--font-size-1);
-  color: var(--gray-11);
+  font-size: var(--rf-text-1);
+  color: var(--rf-color-muted);
 }
 
 .buttonRow {
   display: flex;
-  gap: 8px;
+  gap: var(--rf-space-2);
   justify-content: flex-end;
 }
 
 .errorCallout {
-  background: var(--red-a2);
-  border: 1px solid var(--red-a6);
-  border-radius: 4px;
-  padding: 8px;
-  margin-bottom: 12px;
+  background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
+  border: var(--rf-hairline) solid color-mix(in oklab, var(--rf-color-danger) 40%, transparent);
+  border-radius: var(--rf-radius-chip);
+  padding: var(--rf-space-2);
+  margin-bottom: var(--rf-space-3);
 }
