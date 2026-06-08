@@ -143,7 +143,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  overflow-wrap: anywhere;
   font-size: var(--rf-text-3);
   font-weight: 700;
   line-height: var(--rf-line);
@@ -151,17 +150,19 @@
 
 .badgeGroup {
   display: inline-flex;
-  flex: 0 1 auto;
-  flex-wrap: nowrap;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--rf-space-1);
-  min-width: 0;
+  max-width: min(100%, 60%);
+  min-width: min-content;
 }
 
 .badge {
   flex: 0 0 auto;
   max-width: 100%;
+  white-space: nowrap;
 }
 
 .metaRow {
