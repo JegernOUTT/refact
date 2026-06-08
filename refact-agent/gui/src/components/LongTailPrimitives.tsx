@@ -5,6 +5,7 @@ import { LoaderCircle } from "lucide-react";
 import { Badge as KitBadge } from "./ui/Badge";
 import { Button as KitButton } from "./ui/Button";
 import { Popover as KitPopover } from "./ui/Popover";
+import { Tooltip as KitTooltip } from "./ui/Tooltip";
 import { Surface } from "./ui/Surface";
 import { Tabs as KitTabs } from "./ui/Tabs";
 import { ScrollArea } from "./ScrollArea";
@@ -17,6 +18,8 @@ import styles from "./LongTailPrimitives.module.css";
 const KitPopoverContent = KitPopover.Content;
 const KitPopoverTrigger = KitPopover.Trigger;
 const KitPopoverClose = KitPopover.Close;
+const KitTooltipContent = KitTooltip.Content;
+const KitTooltipTrigger = KitTooltip.Trigger;
 const KitTabsList = KitTabs.List;
 
 type Space = string | number | Record<string, string>;
@@ -268,20 +271,51 @@ export const Popover = Object.assign(PopoverRootCompat, {
   Close: KitPopoverClose,
 });
 
-type HoverCardProps = React.ComponentProps<typeof KitPopover> & {
+type HoverCardProps = React.ComponentProps<typeof KitTooltip> & {
   openDelay?: number;
   closeDelay?: number;
 };
 
-function HoverCardRoot({ openDelay: _openDelay, closeDelay: _closeDelay, ...props }: HoverCardProps) {
-  return <KitPopover {...props} />;
+type HoverCardContentCompatProps = Omit<CommonProps, "align"> &
+  React.ComponentProps<typeof KitTooltip.Content> & {
+    avoidCollisions?: boolean;
+    hideWhenDetached?: boolean;
+  };
+
+function HoverCardRoot({ openDelay, closeDelay, ...props }: HoverCardProps) {
+  return (
+    <KitTooltip
+      {...props}
+      delayDuration={openDelay}
+      skipDelayDuration={closeDelay}
+    />
+  );
+}
+
+function HoverCardContent({
+  width,
+  minWidth,
+  maxWidth,
+  maxHeight,
+  style: _style,
+  size: _size,
+  avoidCollisions: _avoidCollisions,
+  hideWhenDetached: _hideWhenDetached,
+  ...props
+}: HoverCardContentCompatProps) {
+  return (
+    <KitTooltipContent
+      {...props}
+      maxWidth={maxWidth ?? width ?? minWidth}
+      maxHeight={maxHeight}
+    />
+  );
 }
 
 export const HoverCard = Object.assign(HoverCardRoot, {
   Root: HoverCardRoot,
-  Trigger: KitPopover.Trigger,
-  Content: PopoverContent,
-  Close: KitPopover.Close,
+  Trigger: KitTooltipTrigger,
+  Content: HoverCardContent,
 });
 
 function TabsList({ size: _size, ...props }: React.ComponentProps<typeof KitTabs.List> & { size?: string }) {
