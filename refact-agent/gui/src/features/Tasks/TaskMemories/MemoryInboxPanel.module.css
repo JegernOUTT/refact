@@ -15,9 +15,11 @@
 .filters {
   flex-shrink: 0;
   padding: var(--space-2);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--radius-3);
-  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .filterControl {
@@ -73,11 +75,18 @@
 }
 
 .card {
-  border: 1px solid var(--rf-border);
-  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   padding: var(--space-3);
   min-height: 64px;
   max-height: 96px;
+}
+
+.card:hover {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
 }
 
 .card[data-expanded="true"] {
@@ -118,7 +127,7 @@
 }
 
 .cardBodyButton:focus-visible {
-  outline: 2px solid var(--rf-color-accent);
+  outline: 2px solid var(--rf-focus-ring);
   outline-offset: 2px;
   border-radius: var(--radius-2);
 }
@@ -202,8 +211,9 @@
   max-height: 420px;
   overflow: auto;
   padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-glass);
 }
 
 .expandedMarkdown {
@@ -251,4 +261,11 @@
 .emptyState {
   padding: var(--space-6) var(--space-3);
   text-align: center;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .filters,
+  .card {
+    backdrop-filter: none;
+  }
 }

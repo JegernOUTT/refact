@@ -151,15 +151,14 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
       className={classNames(
         styles.kanbanColumn,
         columnToneClass(column.id),
-        "rf-enter",
-        "rf-stagger",
+        "rf-enter-rise",
       )}
     >
       <header className={styles.kanbanColumnHeader}>
         <h3 className={styles.kanbanColumnTitle}>{column.title}</h3>
         <Badge tone="muted">{cards.length}</Badge>
       </header>
-      <div className={styles.kanbanColumnContent}>
+      <div className={classNames(styles.kanbanColumnContent, "rf-stagger")}>
         {cards.map((card) => (
           <KanbanCard
             key={card.id}

@@ -1,7 +1,23 @@
+.commentList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
 .commentItem {
-  background: var(--rf-surface-1);
-  border-radius: var(--radius-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   padding: var(--space-2);
+  min-width: 0;
+}
+
+.commentItem:hover {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
 }
 
 .commentBody {
@@ -12,4 +28,10 @@
 .composer {
   border-top: 1px solid var(--rf-border);
   padding-top: var(--space-2);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .commentItem {
+    backdrop-filter: none;
+  }
 }

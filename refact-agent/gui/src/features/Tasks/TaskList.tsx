@@ -281,7 +281,7 @@ export const TaskList: React.FC<TaskListProps> = ({ backFromTasks }) => {
       )}
 
       <div className={styles.taskListScroller}>
-        <div className={styles.taskListItems}>
+        <div className={`${styles.taskListItems} rf-stagger`}>
           {tasks.length === 0 ? (
             <p className={styles.taskListEmpty}>
               No tasks yet. Create one to start planning.

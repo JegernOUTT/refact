@@ -80,7 +80,12 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
 
   return (
     <Card
-      className={classNames(styles.row, pinned && styles.rowPinned)}
+      className={classNames(
+        styles.row,
+        "rf-enter-rise",
+        "rf-pressable",
+        pinned && styles.rowPinned,
+      )}
       data-testid={`document-row-${document.slug}`}
       onClick={onToggleExpand}
     >
@@ -402,7 +407,7 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
         </Callout.Root>
       )}
 
-      <Flex direction="column" gap="2" className={styles.list}>
+      <Flex direction="column" gap="2" className={`${styles.list} rf-stagger`}>
         {isFetching && !data ? (
           <Flex justify="center" p="4">
             <Spinner />

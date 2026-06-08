@@ -336,8 +336,8 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
                   <Badge
                     key={tag}
                     asChild
-                    color="blue"
-                    variant="solid"
+                    color="gray"
+                    variant="soft"
                     className={classNames(styles.tagChip, styles.tagChipActive)}
                   >
                     <button type="button" onClick={() => handleToggleTag(tag)}>
@@ -393,8 +393,8 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
                     <Badge
                       key={tag}
                       asChild
-                      color={active ? "blue" : "gray"}
-                      variant={active ? "solid" : "outline"}
+                      color="gray"
+                      variant={active ? "soft" : "outline"}
                       className={classNames(
                         styles.tagChip,
                         active && styles.tagChipActive,
@@ -429,7 +429,7 @@ export const MemoryInboxPanel: React.FC<MemoryInboxPanelProps> = ({
         </Callout.Root>
       )}
 
-      <Flex direction="column" gap="2" className={styles.list}>
+      <Flex direction="column" gap="2" className={`${styles.list} rf-stagger`}>
         {isFetching && !data ? (
           <Flex justify="center" p="4">
             <Spinner />

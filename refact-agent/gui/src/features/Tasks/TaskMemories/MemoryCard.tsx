@@ -120,7 +120,12 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
 
   return (
     <Card
-      className={classNames(styles.card, memory.pinned && styles.cardPinned)}
+      className={classNames(
+        styles.card,
+        "rf-enter-rise",
+        "rf-pressable",
+        memory.pinned && styles.cardPinned,
+      )}
       data-expanded={isExpanded ? "true" : "false"}
       data-testid={`memory-card-${memory.filename}`}
     >

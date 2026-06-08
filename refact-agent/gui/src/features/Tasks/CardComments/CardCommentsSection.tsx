@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import classNames from "classnames";
 import {
   Box,
   Flex,
@@ -81,7 +82,7 @@ const CommentItem: React.FC<CommentItemProps> = ({
   return (
     <Box
       style={isReply ? { marginLeft: "var(--space-4)" } : undefined}
-      className={styles.commentItem}
+      className={classNames(styles.commentItem, "rf-enter-rise")}
     >
       <Flex align="center" gap="1" mb="1" wrap="wrap">
         {roleIcon}
@@ -163,7 +164,12 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
         </Text>
       </Flex>
 
-      <Flex direction="column" gap="2" mt="2">
+      <Flex
+        direction="column"
+        gap="2"
+        mt="2"
+        className={classNames(styles.commentList, "rf-stagger")}
+      >
         {threaded.length === 0 ? (
           <Text size="1" color="gray">
             No comments yet.

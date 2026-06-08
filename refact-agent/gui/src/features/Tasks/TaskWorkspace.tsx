@@ -219,7 +219,7 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
 
   return (
     <Box
-      className={`${styles.panelItem} ${
+      className={`${styles.panelItem} rf-pressable ${
         isSelected ? styles.panelItemSelected : ""
       }`}
       role="button"
@@ -304,7 +304,7 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
           </Flex>
         ) : (
           <ScrollArea scrollbars="vertical">
-            <Flex direction="column" gap="1">
+            <Flex direction="column" gap="1" className="rf-stagger">
               {plannerChats.map((planner) => (
                 <PlannerItem
                   key={planner.id}
@@ -355,7 +355,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
     return (
       <Box
         key={card.id}
-        className={`${styles.panelItem} ${
+        className={`${styles.panelItem} rf-pressable ${
           isActive ? styles.panelItemSelected : ""
         }`}
         onClick={() =>
@@ -390,7 +390,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
           </Flex>
         ) : (
           <ScrollArea scrollbars="vertical">
-            <Flex direction="column" gap="1">
+            <Flex direction="column" gap="1" className="rf-stagger">
               {activeAgents.map((card) => renderAgentItem(card, "doing"))}
               {completedAgents.map((card) => renderAgentItem(card, "done"))}
               {failedAgents.map((card) => renderAgentItem(card, "failed"))}

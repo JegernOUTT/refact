@@ -15,9 +15,11 @@
 .filters {
   flex-shrink: 0;
   padding: var(--space-2);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--radius-3);
-  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .filterControl {
@@ -33,11 +35,18 @@
 }
 
 .row {
-  border: 1px solid var(--rf-border);
-  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   padding: var(--space-3);
-  border-radius: var(--radius-3);
+  border-radius: var(--rf-radius-card);
   cursor: pointer;
+}
+
+.row:hover {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
 }
 
 .rowPinned {
@@ -64,8 +73,9 @@
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   margin-top: var(--space-2);
   padding: var(--space-2);
-  border-radius: var(--radius-2);
-  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-glass);
   max-height: 320px;
   overflow: auto;
 }
@@ -98,15 +108,19 @@
   gap: var(--space-1);
   width: 100%;
   padding: var(--space-2);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--radius-2);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
   background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
 }
 
-.historyVersionButton:hover,
+.historyVersionButton:hover {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-1);
+}
+
 .historyVersionButtonActive {
   border-color: var(--rf-color-accent);
   background: var(--rf-color-accent-soft);
@@ -119,7 +133,17 @@
   max-height: 420px;
   overflow: auto;
   padding: var(--space-3);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--radius-3);
-  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .filters,
+  .row,
+  .historyContent {
+    backdrop-filter: none;
+  }
 }
