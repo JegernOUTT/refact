@@ -6,6 +6,13 @@
   will-change: transform;
 }
 
+.ToolConfirmationCard.ToolConfirmationCard {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
 .ToolConfirmationLayout {
   display: flex;
   min-width: 0;
@@ -111,6 +118,12 @@
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
   white-space: pre;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .ToolConfirmationCard.ToolConfirmationCard {
+    backdrop-filter: none;
+  }
 }
 
 @media (max-width: calc(var(--rf-sidebar-w-min) + var(--rf-space-6))) {

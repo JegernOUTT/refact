@@ -11,6 +11,7 @@
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-chip);
   cursor: pointer;
+  background: transparent;
   transition:
     background var(--rf-dur-fast) var(--rf-ease-standard),
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -50,13 +51,21 @@
 .plainTextTile {
   gap: var(--rf-space-1);
   padding: var(--rf-space-1);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .fileTile:hover,
 .plainTextTile:hover {
-  border-color: var(--rf-border);
+  border-color: var(--rf-border-strong);
   background: var(--rf-surface-2);
+  transform: translateY(-1px) scale(1);
+}
+
+.fileTile:active,
+.plainTextTile:active {
+  transform: translateY(0) scale(0.98);
 }
 
 .fileTile[data-color="blue"] {
@@ -130,6 +139,13 @@
 .tile:focus-within .removeButton,
 .tile:focus-within .copyButton {
   opacity: 1;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .fileTile,
+  .plainTextTile {
+    backdrop-filter: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

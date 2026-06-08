@@ -11,11 +11,19 @@
   border: 0;
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
-  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+  transform: translateY(0) scale(1);
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .trigger:hover:not(.disabled) {
   background: var(--rf-surface-1);
+  transform: translateY(-1px) scale(1);
+}
+
+.trigger:active:not(.disabled) {
+  transform: translateY(0) scale(0.98);
 }
 
 .trigger:focus-visible {
@@ -169,16 +177,23 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
   cursor: pointer;
+  transform: translateY(0) scale(1);
   transition:
     background-color var(--rf-dur-fast) var(--rf-ease-standard),
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
-    color var(--rf-dur-fast) var(--rf-ease-standard);
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .effortButton:hover:not(:disabled) {
   color: var(--rf-color-fg);
   background: var(--rf-surface-1);
   border-color: var(--rf-border-strong);
+  transform: translateY(-1px) scale(1);
+}
+
+.effortButton:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
 }
 
 .effortButton:focus-visible {
@@ -194,13 +209,14 @@
 
 .effortButtonActive {
   color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-2);
   border-color: var(--rf-color-accent);
+  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-color-accent);
 }
 
 .effortButtonActive:hover:not(:disabled) {
   color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-3);
   border-color: var(--rf-color-accent);
 }
 
@@ -212,4 +228,18 @@
   border-radius: var(--rf-radius-ctl);
   font-size: var(--rf-text-1);
   line-height: var(--rf-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trigger,
+  .effortButton {
+    transition: none;
+  }
+
+  .trigger:hover:not(.disabled),
+  .trigger:active:not(.disabled),
+  .effortButton:hover:not(:disabled),
+  .effortButton:active:not(:disabled) {
+    transform: translateY(0) scale(1);
+  }
 }

@@ -12,16 +12,23 @@
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  transform: translateY(0) scale(1);
   transition:
     background var(--rf-dur-fast) var(--rf-ease-standard),
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
-    color var(--rf-dur-fast) var(--rf-ease-standard);
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .trigger:hover:not(.disabled) {
   color: var(--rf-color-fg);
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-1);
   border-color: var(--rf-border);
+  transform: translateY(-1px) scale(1);
+}
+
+.trigger:active:not(.disabled) {
+  transform: translateY(0) scale(0.98);
 }
 
 .trigger:focus-visible {
@@ -93,6 +100,7 @@
 
 .item,
 .addModeItem {
+  position: relative;
   display: flex;
   width: 100%;
   min-width: 0;
@@ -126,7 +134,7 @@
 
 .item:hover:not(:disabled):not(.itemDisabled),
 .addModeItem:hover {
-  background: var(--rf-surface-2);
+  background: var(--rf-surface-1);
 }
 
 .item:focus-visible,
@@ -143,12 +151,27 @@
 }
 
 .itemSelected {
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-2);
   color: var(--rf-color-fg);
 }
 
+.itemSelected::before {
+  position: absolute;
+  top: var(--rf-space-2);
+  bottom: var(--rf-space-2);
+  left: 0;
+  width: var(--rf-hairline);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-accent);
+  content: "";
+}
+
 .itemSelected:hover:not(:disabled):not(.itemDisabled) {
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-3);
+}
+
+.itemSelected .itemTitle {
+  color: var(--rf-color-accent);
 }
 
 .itemHeader {
@@ -194,6 +217,10 @@
   font-size: var(--rf-text-1);
 }
 
+.itemSelected .chip {
+  background: var(--rf-surface-3);
+}
+
 .badgeContent {
   display: inline-flex;
   min-width: 0;
@@ -207,5 +234,10 @@
   .item,
   .addModeItem {
     transition: none;
+  }
+
+  .trigger:hover:not(.disabled),
+  .trigger:active:not(.disabled) {
+    transform: translateY(0) scale(1);
   }
 }

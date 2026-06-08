@@ -39,19 +39,26 @@
   box-shadow: none;
   transition:
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
-    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
     transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .chatFormCollapsed:hover,
 .chatFormCollapsed:focus-within {
   border-color: var(--rf-border);
+  background: color-mix(in srgb, var(--rf-surface-1) 34%, transparent);
 }
 
-.chatFormExpanded,
+.chatFormExpanded {
+  border-color: var(--rf-border);
+  background: transparent;
+}
+
 .chatFormExpanded:focus-within {
   border-color: var(--rf-border-strong);
-  background: color-mix(in srgb, var(--rf-surface-1) 46%, transparent);
+  background: color-mix(in srgb, var(--rf-surface-glass) 42%, transparent);
+  box-shadow: var(--rf-elev-panel);
 }
 
 .chatFormCompact {
