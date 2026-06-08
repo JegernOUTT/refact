@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
 
-import { ScrollArea } from "../../components/ScrollArea";
 import { PageWrapper } from "../../components/PageWrapper";
 import {
   Badge,
@@ -25,6 +24,7 @@ import {
   Spinner,
   Tabs,
 } from "../../components/ui";
+import { SettingsSection } from "../Settings/SettingsSection";
 import {
   useGetRegistryQuery,
   useGetConfigQuery,
@@ -83,20 +83,16 @@ const ConfigList: React.FC<{
   selectedId: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string, scope: "global" | "local") => void;
-  onCreate: () => void;
-}> = ({ items, selectedId, onSelect, onDelete, onCreate }) => {
+}> = ({ items, selectedId, onSelect, onDelete }) => {
   return (
     <div className={styles.configList}>
-      <Button variant="soft" onClick={onCreate} size="sm" leftIcon={Plus}>
-        New
-      </Button>
-      <div className={styles.itemRows}>
+      <div className={`${styles.itemRows} rf-stagger`}>
         {items.map((item) => (
           <div
             key={item.id}
             role="button"
             tabIndex={0}
-            className={`${styles.configRow} ${selectedId === item.id ? styles.selected : ""} rf-enter`}
+            className={`${styles.configRow} ${selectedId === item.id ? styles.selected : ""}`}
             onClick={() => onSelect(item.id)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
@@ -107,13 +103,14 @@ const ConfigList: React.FC<{
           >
             <div className={styles.rowInfo}>
               <span className={styles.rowTitle}>{item.title}</span>
-              <div className={styles.rowMeta}>
-                <span className={styles.rowId}>{item.id}</span>
-                <Badge tone={item.scope === "global" ? "accent" : "success"}>
-                  {item.scope === "global" ? "G" : "L"}
-                </Badge>
-              </div>
+              <span className={styles.rowId}>{item.id}</span>
             </div>
+            <Badge
+              className={styles.scopeBadge}
+              tone={item.scope === "global" ? "accent" : "success"}
+            >
+              {item.scope === "global" ? "G" : "L"}
+            </Badge>
             <IconButton
               aria-label={`Delete ${item.id}`}
               icon={Trash2}
@@ -625,6 +622,11 @@ export const Customization: React.FC<CustomizationProps> = ({
   if (isLoading) return <Spinner />;
 
   const activeIndex = KIND_ORDER.indexOf(activeKind);
+  const activeItems = getItemsForKind(activeKind);
+  const selectedItem = selectedConfigId
+    ? activeItems.find((item) => item.id === selectedConfigId)
+    : undefined;
+  const showEditor = Boolean(selectedConfigId && selectedItem);
 
   const backButton = !embedded ? (
     host === "vscode" && !tabbed ? (
@@ -642,6 +644,43 @@ export const Customization: React.FC<CustomizationProps> = ({
     )
   ) : null;
 
+  const actions = (
+    <>
+      {activeKind === "subagents" && (
+        <Button
+          size="sm"
+          variant="ghost"
+          rightIcon={ExternalLink}
+          onClick={() => dispatch(push({ name: "subagents marketplace" }))}
+        >
+          Marketplace
+        </Button>
+      )}
+      <Button
+        size="sm"
+        variant="soft"
+        leftIcon={Plus}
+        onClick={() => setCreateDialogOpen(true)}
+      >
+        New {KIND_LABELS[activeKind]}
+      </Button>
+    </>
+  );
+
+  const subNav = (
+    <Tabs.List
+      activeIndex={activeIndex}
+      className={styles.kindTabs}
+      itemCount={KIND_ORDER.length}
+    >
+      {KIND_ORDER.map((kind) => (
+        <Tabs.Trigger key={kind} value={kind}>
+          {KIND_LABELS[kind]} ({getItemsForKind(kind).length})
+        </Tabs.Trigger>
+      ))}
+    </Tabs.List>
+  );
+
   const inner = (
     <>
       {backButton}
@@ -656,95 +695,43 @@ export const Customization: React.FC<CustomizationProps> = ({
       )}
 
       <Tabs value={activeKind} onValueChange={handleTabChange}>
-        <Tabs.List activeIndex={activeIndex} itemCount={KIND_ORDER.length}>
-          {KIND_ORDER.map((kind) => (
-            <Tabs.Trigger key={kind} value={kind}>
-              {KIND_LABELS[kind]} ({getItemsForKind(kind).length})
-            </Tabs.Trigger>
-          ))}
-        </Tabs.List>
-
-        <div className={styles.panelContainer}>
-          {(() => {
-            if (!selectedConfigId) {
-              return (
-                <ScrollArea scrollbars="vertical" className={styles.listPanel}>
-                  {activeKind === "subagents" && (
-                    <div className={styles.marketplaceRow}>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        rightIcon={ExternalLink}
-                        onClick={() =>
-                          dispatch(push({ name: "subagents marketplace" }))
-                        }
-                      >
-                        Browse Subagents Marketplace
-                      </Button>
-                    </div>
-                  )}
-                  <ConfigList
-                    items={getItemsForKind(activeKind)}
-                    selectedId={selectedConfigId}
-                    onSelect={setSelectedConfigId}
-                    onDelete={(id, scope) => void handleDelete(id, scope)}
-                    onCreate={() => setCreateDialogOpen(true)}
-                  />
-                </ScrollArea>
-              );
-            }
-            const selectedItem = getItemsForKind(activeKind).find(
-              (i) => i.id === selectedConfigId,
-            );
-            if (!selectedItem) {
-              return (
-                <ScrollArea scrollbars="vertical" className={styles.listPanel}>
-                  {activeKind === "subagents" && (
-                    <div className={styles.marketplaceRow}>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        rightIcon={ExternalLink}
-                        onClick={() =>
-                          dispatch(push({ name: "subagents marketplace" }))
-                        }
-                      >
-                        Browse Subagents Marketplace
-                      </Button>
-                    </div>
-                  )}
-                  <ConfigList
-                    items={getItemsForKind(activeKind)}
-                    selectedId={selectedConfigId}
-                    onSelect={setSelectedConfigId}
-                    onDelete={(id, scope) => void handleDelete(id, scope)}
-                    onCreate={() => setCreateDialogOpen(true)}
-                  />
-                </ScrollArea>
-              );
-            }
-            return (
-              <div className={styles.editorPanel}>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  leftIcon={ArrowLeft}
-                  onClick={() => setSelectedConfigId(null)}
-                  className={styles.backToListBtn}
-                >
-                  Back to list
-                </Button>
-                <ConfigEditor
-                  kind={activeKind}
-                  configId={selectedConfigId}
-                  configItem={selectedItem}
-                  onSaved={() => void refetch()}
-                  draftId={draftId}
-                />
-              </div>
-            );
-          })()}
-        </div>
+        <SettingsSection
+          title="Customization"
+          description="Tune modes, subagents, toolbox commands, and code lens actions."
+          actions={actions}
+          subNav={subNav}
+          width={showEditor ? "wide" : "default"}
+        >
+          {selectedConfigId && selectedItem ? (
+            <div className={styles.editorPanel}>
+              <Button
+                variant="ghost"
+                size="sm"
+                leftIcon={ArrowLeft}
+                onClick={() => setSelectedConfigId(null)}
+                className={styles.backToListBtn}
+              >
+                Back to list
+              </Button>
+              <ConfigEditor
+                kind={activeKind}
+                configId={selectedConfigId}
+                configItem={selectedItem}
+                onSaved={() => void refetch()}
+                draftId={draftId}
+              />
+            </div>
+          ) : (
+            <div className={styles.listPanel}>
+              <ConfigList
+                items={activeItems}
+                selectedId={selectedConfigId}
+                onSelect={setSelectedConfigId}
+                onDelete={(id, scope) => void handleDelete(id, scope)}
+              />
+            </div>
+          )}
+        </SettingsSection>
       </Tabs>
 
       <CreateConfigDialog

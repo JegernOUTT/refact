@@ -1,207 +1,193 @@
 .configList {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  min-width: 0;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-1);
 }
 
 .itemRows {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  min-width: 0;
   gap: var(--rf-space-1);
 }
 
 .configRow {
-  display: flex;
+  display: grid;
+  min-width: 0;
+  min-height: var(--rf-control-h-lg);
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-2);
+  border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
+  color: var(--rf-color-fg);
   cursor: pointer;
-  min-width: 0;
-  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .configRow:hover {
-  background-color: var(--rf-surface-1);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border);
+}
+
+.configRow:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .configRow.selected {
-  background-color: var(--rf-color-accent-soft);
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-border-strong);
 }
 
 .rowInfo {
-  display: flex;
-  flex-direction: column;
+  display: grid;
   min-width: 0;
-  flex: 1;
+  gap: var(--rf-space-1);
 }
 
 .rowTitle {
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
-  color: var(--rf-color-fg);
   overflow: hidden;
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.rowMeta {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-1);
-  min-width: 0;
 }
 
 .rowId {
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
-  color: var(--rf-color-muted);
   overflow: hidden;
+  color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.scopeBadge,
 .deleteBtn {
   flex-shrink: 0;
+}
+
+.deleteBtn {
   color: var(--rf-color-danger);
 }
 
 .emptyText {
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  padding: var(--rf-space-4) var(--rf-space-2);
   color: var(--rf-color-muted);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+}
+
+.kindTabs {
+  width: 100%;
+}
+
+.listPanel {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: min(calc(100dvh - 15 * var(--rf-space-4)), calc(16 * var(--rf-control-h-lg)));
+  overflow-y: auto;
+}
+
+.editorPanel {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.backToListBtn {
+  justify-self: start;
 }
 
 .configEditor {
-  padding: var(--rf-space-2);
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  gap: var(--rf-space-2);
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
 }
 
 .configTitle {
-  font: 600 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
-  color: var(--rf-color-fg);
   min-width: 0;
   overflow: hidden;
+  color: var(--rf-color-fg);
+  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .editorHeader {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  min-width: 0;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--rf-space-2);
 }
 
-.editorActions {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-1);
-}
-
+.editorActions,
 .scopeRow {
   display: flex;
-  align-items: center;
+  min-width: 0;
   flex-wrap: wrap;
-  gap: var(--rf-space-1);
+  align-items: center;
+  gap: var(--rf-space-2);
 }
 
 .formContainer {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
+  min-width: 0;
 }
 
 .yamlEditor {
-  flex: 1;
-  min-height: 300px;
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  width: 100%;
+  min-width: 0;
+  min-height: calc(10 * var(--rf-control-h-lg));
+  padding: var(--rf-space-3);
+  overflow: auto;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  padding: var(--rf-space-2);
-  border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background-color: var(--rf-surface-1);
-  color: var(--rf-color-fg);
   resize: vertical;
 }
 
 .yamlEditor:focus {
-  outline: none;
   border-color: var(--rf-color-accent);
-}
-
-.panelContainer {
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 120px);
-  min-height: 300px;
-}
-
-.listPanel {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.editorPanel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
+  outline: none;
 }
 
 .backRow {
-  padding-bottom: var(--rf-space-2);
-}
-
-.backToListBtn {
-  margin-bottom: var(--rf-space-2);
-  flex-shrink: 0;
-}
-
-.marketplaceRow {
-  display: flex;
-  justify-content: flex-end;
-  padding: var(--rf-space-2);
+  padding: var(--rf-space-3) var(--rf-space-3) 0;
 }
 
 .errorBanner {
+  margin: 0 var(--rf-space-3);
   padding: var(--rf-space-2) var(--rf-space-3);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-color-danger);
   border-radius: var(--rf-radius-ctl);
-  border: 1px solid var(--rf-color-danger);
-  background-color: var(--rf-surface-1);
-  margin-bottom: var(--rf-space-2);
 }
 
 .errorText {
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
   color: var(--rf-color-danger);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }
 
 .mutedText {
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
   color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }
 
 .callout {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
   padding: var(--rf-space-2) var(--rf-space-3);
-  border-radius: var(--rf-radius-ctl);
-  border: 1px solid var(--rf-color-warning);
-  background-color: var(--rf-surface-1);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
   color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-color-warning);
+  border-radius: var(--rf-radius-ctl);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }
 
 .dialogBody {
@@ -218,8 +204,8 @@
 }
 
 .scopeLabel {
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
   color: var(--rf-color-muted);
+  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }
 
 .scopeOption {
@@ -233,4 +219,32 @@
   justify-content: flex-end;
   gap: var(--rf-space-2);
   margin-top: var(--rf-space-4);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .configRow {
+    transition:
+      background-color var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
+@media (width <= 640px) {
+  .configRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .scopeBadge {
+    justify-self: start;
+  }
+
+  .deleteBtn {
+    grid-row: 1 / span 2;
+    grid-column: 2;
+  }
+
+  .listPanel {
+    max-height: none;
+    overflow-y: visible;
+  }
 }

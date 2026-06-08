@@ -5,7 +5,6 @@ import {
   FieldSwitch,
   FieldText,
   FieldTextarea,
-  SettingsShell,
 } from "../../../components/ui";
 import { MessageListEditor } from "./MessageListEditor";
 import {
@@ -44,91 +43,83 @@ export const ToolboxCommandForm: React.FC<ToolboxCommandFormProps> = ({
   );
 
   return (
-    <SettingsShell
-      active="toolbox"
-      sections={[{ id: "toolbox", label: "Toolbox" }]}
-      title="Toolbox Command"
-      description="Configure selection rules and command messages."
-      onSectionChange={() => undefined}
-    >
-      <div className={styles.formStack}>
-        <Field label="Description">
-          <FieldTextarea
-            value={description}
-            onChange={(value) => patch(["description"], value)}
-            placeholder="What this command does..."
-            rows={2}
-          />
-        </Field>
+    <div className={styles.formStack}>
+      <Field label="Description">
+        <FieldTextarea
+          value={description}
+          onChange={(value) => patch(["description"], value)}
+          placeholder="What this command does..."
+          rows={2}
+        />
+      </Field>
 
-        <Field label="Require Selection">
-          <FieldSwitch
-            checked={hasSelectionRange}
-            onChange={(checked) => {
-              if (checked) {
-                patch(["selection_needed"], [1, 10000]);
-                patch(["selection_unwanted"], false);
-              } else {
-                patch(["selection_needed"], undefined);
-              }
-            }}
-          />
-        </Field>
+      <Field label="Require Selection">
+        <FieldSwitch
+          checked={hasSelectionRange}
+          onChange={(checked) => {
+            if (checked) {
+              patch(["selection_needed"], [1, 10000]);
+              patch(["selection_unwanted"], false);
+            } else {
+              patch(["selection_needed"], undefined);
+            }
+          }}
+        />
+      </Field>
 
-        {hasSelectionRange && (
-          <div className={styles.switchGrid}>
-            <Field label="Min chars">
-              <FieldText
-                type="number"
-                value={selectionMin.toString()}
-                onChange={(value) => {
-                  const val = value === "" ? undefined : parseInt(value, 10);
-                  if (val !== undefined) {
-                    patch(["selection_needed"], [val, selectionMax]);
-                  }
-                }}
-              />
-            </Field>
-            <Field label="Max chars">
-              <FieldText
-                type="number"
-                value={selectionMax.toString()}
-                onChange={(value) => {
-                  const val = value === "" ? undefined : parseInt(value, 10);
-                  if (val !== undefined) {
-                    patch(["selection_needed"], [selectionMin, val]);
-                  }
-                }}
-              />
-            </Field>
-          </div>
-        )}
-
-        {!hasSelectionRange && (
-          <Field
-            label="Selection Unwanted"
-            helper="Hide command when text is selected."
-          >
-            <FieldSwitch
-              checked={selectionUnwanted}
-              onChange={(checked) => patch(["selection_unwanted"], checked)}
+      {hasSelectionRange && (
+        <div className={styles.switchGrid}>
+          <Field label="Min chars">
+            <FieldText
+              type="number"
+              value={selectionMin.toString()}
+              onChange={(value) => {
+                const val = value === "" ? undefined : parseInt(value, 10);
+                if (val !== undefined) {
+                  patch(["selection_needed"], [val, selectionMax]);
+                }
+              }}
             />
           </Field>
-        )}
+          <Field label="Max chars">
+            <FieldText
+              type="number"
+              value={selectionMax.toString()}
+              onChange={(value) => {
+                const val = value === "" ? undefined : parseInt(value, 10);
+                if (val !== undefined) {
+                  patch(["selection_needed"], [selectionMin, val]);
+                }
+              }}
+            />
+          </Field>
+        </div>
+      )}
 
-        <Field label="Insert at Cursor" helper="Insert response at cursor position.">
+      {!hasSelectionRange && (
+        <Field
+          label="Selection Unwanted"
+          helper="Hide command when text is selected."
+        >
           <FieldSwitch
-            checked={insertAtCursor}
-            onChange={(checked) => patch(["insert_at_cursor"], checked)}
+            checked={selectionUnwanted}
+            onChange={(checked) => patch(["selection_unwanted"], checked)}
           />
         </Field>
+      )}
 
-        <MessageListEditor
-          value={messages}
-          onChange={(msgs) => patch(["messages"], msgs)}
-          label="Messages"
+      <Field label="Insert at Cursor" helper="Insert response at cursor position.">
+        <FieldSwitch
+          checked={insertAtCursor}
+          onChange={(checked) => patch(["insert_at_cursor"], checked)}
         />
-      </div>
-    </SettingsShell>
+      </Field>
+
+      <MessageListEditor
+        value={messages}
+        onChange={(msgs) => patch(["messages"], msgs)}
+        label="Messages"
+      />
+    </div>
   );
 };

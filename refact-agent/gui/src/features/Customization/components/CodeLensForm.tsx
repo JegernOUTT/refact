@@ -1,11 +1,6 @@
 import React, { useCallback } from "react";
 
-import {
-  Field,
-  FieldSwitch,
-  FieldText,
-  SettingsShell,
-} from "../../../components/ui";
+import { Field, FieldSwitch, FieldText } from "../../../components/ui";
 import { MessageListEditor } from "./MessageListEditor";
 import {
   ConfigPatch,
@@ -37,47 +32,39 @@ export const CodeLensForm: React.FC<CodeLensFormProps> = ({
   );
 
   return (
-    <SettingsShell
-      active="code-lens"
-      sections={[{ id: "code-lens", label: "Code Lens" }]}
-      title="Code Lens"
-      description="Configure the editor action, target tab, and generated messages."
-      onSectionChange={() => undefined}
-    >
-      <div className={styles.formStack}>
-        <Field
-          label="Label"
-          helper="Text shown in the code lens above functions/classes."
-        >
-          <FieldText
-            value={label}
-            onChange={(value) => patch(["label"], value)}
-            placeholder="Display label in editor"
+    <div className={styles.formStack}>
+      <Field
+        label="Label"
+        helper="Text shown in the code lens above functions/classes."
+      >
+        <FieldText
+          value={label}
+          onChange={(value) => patch(["label"], value)}
+          placeholder="Display label in editor"
+        />
+      </Field>
+
+      <div className={styles.switchGrid}>
+        <Field label="Auto Submit" helper="Automatically send message when clicked.">
+          <FieldSwitch
+            checked={autoSubmit}
+            onChange={(checked) => patch(["auto_submit"], checked)}
           />
         </Field>
 
-        <div className={styles.switchGrid}>
-          <Field label="Auto Submit" helper="Automatically send message when clicked.">
-            <FieldSwitch
-              checked={autoSubmit}
-              onChange={(checked) => patch(["auto_submit"], checked)}
-            />
-          </Field>
-
-          <Field label="New Tab" helper="Open in a new chat tab.">
-            <FieldSwitch
-              checked={newTab}
-              onChange={(checked) => patch(["new_tab"], checked)}
-            />
-          </Field>
-        </div>
-
-        <MessageListEditor
-          value={messages}
-          onChange={(msgs) => patch(["messages"], msgs)}
-          label="Messages"
-        />
+        <Field label="New Tab" helper="Open in a new chat tab.">
+          <FieldSwitch
+            checked={newTab}
+            onChange={(checked) => patch(["new_tab"], checked)}
+          />
+        </Field>
       </div>
-    </SettingsShell>
+
+      <MessageListEditor
+        value={messages}
+        onChange={(msgs) => patch(["messages"], msgs)}
+        label="Messages"
+      />
+    </div>
   );
 };
