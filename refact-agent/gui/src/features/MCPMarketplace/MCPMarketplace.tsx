@@ -246,7 +246,9 @@ export const MCPMarketplace: React.FC<MCPMarketplaceProps> = ({
       {smitheryNeedsKey && (
         <div className={styles.notice}>
           <Icon icon={Info} tone="accent" />
-          <p className={styles.smallText}>Smithery source requires an API key.</p>
+          <p className={styles.smallText}>
+            Smithery source requires an API key.
+          </p>
           <Button
             size="sm"
             variant="ghost"

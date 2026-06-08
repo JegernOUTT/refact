@@ -88,7 +88,8 @@
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--dashboard-row-padding-inline) var(--rf-space-1);
+  padding: var(--rf-space-2) var(--dashboard-row-padding-inline)
+    var(--rf-space-1);
   flex-shrink: 0;
   min-width: 0;
 }

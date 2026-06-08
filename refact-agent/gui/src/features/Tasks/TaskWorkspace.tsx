@@ -696,6 +696,9 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   const activeChat = useAppSelector((state) =>
     selectTaskActiveChat(state, taskId),
   );
+  const hasActiveChatRuntime = useAppSelector((state) =>
+    activeChat ? Boolean(selectRuntimeById(state, activeChat.chatId)) : false,
+  );
   const activeChatBackgroundAgents = useAppSelector((state) =>
     activeChat
       ? selectBackgroundAgentsByThread(state, activeChat.chatId)
@@ -790,6 +793,14 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   useEffect(() => {
     if (!savedPlanners || !currentTaskUI) return;
 
+    const savedPlannerIds = new Set(savedPlanners.map((planner) => planner.id));
+
+    for (const planner of currentTaskUI.plannerChats) {
+      if (!savedPlannerIds.has(planner.id)) {
+        dispatch(removePlannerChat({ taskId, chatId: planner.id }));
+      }
+    }
+
     for (const traj of savedPlanners) {
       dispatch(
         createChatWithId({
@@ -847,16 +858,28 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       );
     }
 
-    if (savedPlanners.length > 0 && !activeChat) {
-      const mostRecent = savedPlanners.reduce((latest, p) =>
-        p.updated_at > latest.updated_at ? p : latest,
-      );
-      dispatch(
-        setTaskActiveChat({
-          taskId,
-          activeChat: { type: "planner", chatId: mostRecent.id },
-        }),
-      );
+    const mostRecentPlanner =
+      savedPlanners.length > 0
+        ? savedPlanners.reduce((latest, planner) =>
+            planner.updated_at > latest.updated_at ? planner : latest,
+          )
+        : null;
+    const fallbackActiveChat = mostRecentPlanner
+      ? { type: "planner" as const, chatId: mostRecentPlanner.id }
+      : null;
+
+    if (!activeChat) {
+      if (fallbackActiveChat) {
+        dispatch(setTaskActiveChat({ taskId, activeChat: fallbackActiveChat }));
+      }
+      return;
+    }
+
+    if (
+      activeChat.type === "planner" &&
+      !savedPlannerIds.has(activeChat.chatId)
+    ) {
+      dispatch(setTaskActiveChat({ taskId, activeChat: fallbackActiveChat }));
     }
   }, [dispatch, taskId, savedPlanners, currentTaskUI, activeChat]);
 
@@ -905,6 +928,30 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
   }, [activeChat, board, dispatch, taskId, plannerChats]);
 
   useEffect(() => {
+    if (activeChat?.type !== "agent" || !board || hasActiveChatRuntime) return;
+    const card = board.cards.find(
+      (candidate) =>
+        candidate.id === activeChat.cardId &&
+        candidate.agent_chat_id === activeChat.chatId,
+    );
+    if (!card) return;
+
+    dispatch(
+      createChatWithId({
+        id: activeChat.chatId,
+        title: formatAgentChatTitle(card.id, card.title),
+        isTaskChat: true,
+        mode: "TASK_AGENT",
+        taskMeta: {
+          task_id: taskId,
+          role: "agents",
+          card_id: card.id,
+        },
+      }),
+    );
+  }, [activeChat, board, dispatch, hasActiveChatRuntime, taskId]);
+
+  useEffect(() => {
     if (!task) return;
 
     const prevStatus = prevTaskStatusRef.current;
@@ -923,12 +970,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
     }
   }, [task]);
 
-  // Switch chat when activeChat changes
   useEffect(() => {
-    if (!activeChat) return;
+    if (!activeChat || !hasActiveChatRuntime) return;
     const chatId = activeChat.chatId;
     dispatch(switchToThread({ id: chatId, openTab: false }));
-  }, [dispatch, activeChat]);
+  }, [dispatch, activeChat, hasActiveChatRuntime]);
 
   const handleBack = useCallback(() => {
     dispatch(pop());
@@ -1546,13 +1592,23 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
             {workspaceTab === "chat" ? (
               <Box className={styles.workspaceTabContent}>
                 {activeChat ? (
-                  <InternalLinkProvider onInternalLink={handleInternalLink}>
-                    <Chat
-                      host={config.host}
-                      tabbed={false}
-                      backFromChat={handleBack}
-                    />
-                  </InternalLinkProvider>
+                  hasActiveChatRuntime ? (
+                    <InternalLinkProvider onInternalLink={handleInternalLink}>
+                      <Chat
+                        host={config.host}
+                        tabbed={false}
+                        backFromChat={handleBack}
+                      />
+                    </InternalLinkProvider>
+                  ) : (
+                    <Flex
+                      align="center"
+                      justify="center"
+                      className={styles.fullHeightEmptyState}
+                    >
+                      <Text color="gray">Loading chat…</Text>
+                    </Flex>
+                  )
                 ) : (
                   <Flex
                     align="center"

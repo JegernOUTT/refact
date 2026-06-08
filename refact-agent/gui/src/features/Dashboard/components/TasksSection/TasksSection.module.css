@@ -88,7 +88,8 @@
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--dashboard-row-padding-inline) var(--rf-space-1);
+  padding: var(--rf-space-2) var(--dashboard-row-padding-inline)
+    var(--rf-space-1);
   flex-shrink: 0;
   min-width: 0;
 }
@@ -112,7 +113,8 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
-  padding: var(--dashboard-row-padding-block) var(--dashboard-row-padding-inline);
+  padding: var(--dashboard-row-padding-block)
+    var(--dashboard-row-padding-inline);
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   background: transparent;

@@ -58,7 +58,9 @@ const showcaseMessages: ChatMessages = [
         type: "function",
         function: {
           name: "cat",
-          arguments: JSON.stringify({ paths: "src/components/ui/ToolCard.tsx" }),
+          arguments: JSON.stringify({
+            paths: "src/components/ui/ToolCard.tsx",
+          }),
         },
       },
       {
@@ -91,7 +93,8 @@ const showcaseMessages: ChatMessages = [
   {
     role: "tool",
     tool_call_id: "showcase-exec-tool",
-    content: "Process started\nstdout:\nroute showcase ready\nstderr:\n<empty>\n",
+    content:
+      "Process started\nstdout:\nroute showcase ready\nstderr:\n<empty>\n",
     tool_failed: false,
     extra: {
       process_id: "exec_route_showcase",
@@ -521,8 +524,9 @@ function jsonResponse(data: unknown) {
 const nativeFetch = window.fetch.bind(window);
 const showcaseCommandLog: unknown[] = [];
 const showcaseClipboardWrites: string[] = [];
-(window as unknown as { __routeShowcaseCommands: unknown[] }).__routeShowcaseCommands =
-  showcaseCommandLog;
+(
+  window as unknown as { __routeShowcaseCommands: unknown[] }
+).__routeShowcaseCommands = showcaseCommandLog;
 (
   window as unknown as { __routeShowcaseClipboardWrites: string[] }
 ).__routeShowcaseClipboardWrites = showcaseClipboardWrites;

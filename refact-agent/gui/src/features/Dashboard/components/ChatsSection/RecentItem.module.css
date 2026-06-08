@@ -3,7 +3,8 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
-  padding: var(--dashboard-row-padding-block) var(--dashboard-row-padding-inline);
+  padding: var(--dashboard-row-padding-block)
+    var(--dashboard-row-padding-inline);
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   background: transparent;

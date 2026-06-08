@@ -30,4 +30,19 @@ describe("Theme", () => {
     expect(themeRoot?.getAttribute("data-host")).toBe("jetbrains");
     expect(themeRoot?.getAttribute("data-appearance")).toBe("light");
   });
+
+  it("forwards refs to the Radix theme root", () => {
+    const store = setUpStore();
+    const ref = { current: null as HTMLDivElement | null };
+
+    render(
+      <Provider store={store}>
+        <Theme ref={ref} data-testid="theme-root">
+          <div>theme child</div>
+        </Theme>
+      </Provider>,
+    );
+
+    expect(ref.current).toBe(screen.getByTestId("theme-root"));
+  });
 });

@@ -1359,6 +1359,114 @@ describe("TaskWorkspace planner CRUD", () => {
 });
 
 describe("TaskWorkspace planner restore race", () => {
+  it("prunes_stale_persisted_planner_without_switching_to_missing_runtime", async () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    try {
+      const preloaded = workspacePreloadedState("unrelated-chat");
+      const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+        preloadedState: {
+          ...preloaded,
+          tasksUI: {
+            openTasks: [
+              {
+                id: TASK_ID,
+                name: "Task with worktree",
+                plannerChats: [
+                  {
+                    id: "planner-missing-runtime",
+                    title: "Persisted planner",
+                    createdAt: "2026-01-01T00:00:00Z",
+                    updatedAt: "2026-01-02T00:00:00Z",
+                  },
+                ],
+                activeChat: {
+                  type: "planner",
+                  chatId: "planner-missing-runtime",
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      await waitFor(() =>
+        expect(
+          store
+            .getState()
+            .tasksUI.openTasks.find((task) => task.id === TASK_ID),
+        ).toMatchObject({ plannerChats: [], activeChat: null }),
+      );
+      expect(store.getState().chat.current_thread_id).toBe("unrelated-chat");
+      expect(
+        warnSpy.mock.calls.some(([message]) =>
+          String(message).includes("[switchToThread] No runtime"),
+        ),
+      ).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("hydrates_persisted_active_agent_before_switching", async () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const card = makeCard({
+      title: "Persisted active agent",
+      column: "doing",
+      agent_chat_id: "agent-T-1",
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+
+    try {
+      const preloaded = workspacePreloadedState("unrelated-chat");
+      const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+        preloadedState: {
+          ...preloaded,
+          tasksUI: {
+            openTasks: [
+              {
+                id: TASK_ID,
+                name: "Task with worktree",
+                plannerChats: [],
+                activeChat: {
+                  type: "agent",
+                  cardId: CARD_ID,
+                  chatId: "agent-T-1",
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      await waitFor(() =>
+        expect(store.getState().chat.threads["agent-T-1"]).toMatchObject({
+          thread: {
+            id: "agent-T-1",
+            title: "Agent: T-1 Persisted active agent",
+            is_task_chat: true,
+            mode: "task_agent",
+          },
+        }),
+      );
+      await waitFor(() =>
+        expect(store.getState().chat.current_thread_id).toBe("agent-T-1"),
+      );
+      expect(
+        warnSpy.mock.calls.some(([message]) =>
+          String(message).includes("[switchToThread] No runtime"),
+        ),
+      ).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
   it("waits_for_current_task_ui_before_restoring_saved_planner_selection", async () => {
     const card = makeCard();
     const taskPromise = delay(50).then(() =>

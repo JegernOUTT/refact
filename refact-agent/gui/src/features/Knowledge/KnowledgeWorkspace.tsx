@@ -30,7 +30,10 @@ function compareText(left: string | undefined, right: string | undefined) {
   });
 }
 
-function memoryMatchesTags(memory: KnowledgeMemoRecord, selectedTags: Set<string>) {
+function memoryMatchesTags(
+  memory: KnowledgeMemoRecord,
+  selectedTags: Set<string>,
+) {
   if (selectedTags.size === 0) return true;
   return [...selectedTags].every((tag) => memory.tags.includes(tag));
 }
@@ -42,13 +45,15 @@ function sortMemories(memories: KnowledgeMemoRecord[], sortKey: MemorySortKey) {
         return timestampValue(right.created) - timestampValue(left.created);
       case "kind":
         return (
-          compareText(left.kind, right.kind) || compareText(left.title, right.title)
+          compareText(left.kind, right.kind) ||
+          compareText(left.title, right.title)
         );
       case "title":
         return compareText(left.title, right.title);
       case "tagCount":
         return (
-          right.tags.length - left.tags.length || compareText(left.title, right.title)
+          right.tags.length - left.tags.length ||
+          compareText(left.title, right.title)
         );
     }
   });
@@ -63,7 +68,9 @@ export function KnowledgeWorkspace() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<KnowledgeTab>("memories");
   const [sortKey, setSortKey] = useState<MemorySortKey>("date");
-  const [selectedTags, setSelectedTags] = useState<Set<string>>(() => new Set());
+  const [selectedTags, setSelectedTags] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const allDocNodes = useMemo(() => {
     if (!graph) return [];
@@ -93,7 +100,8 @@ export function KnowledgeWorkspace() {
 
   const allTags = useMemo(() => {
     return [...new Set(memoryRecords.flatMap((memory) => memory.tags))].sort(
-      (left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }),
+      (left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" }),
     );
   }, [memoryRecords]);
 
@@ -106,7 +114,9 @@ export function KnowledgeWorkspace() {
 
   const filteredDocNodes = useMemo(() => {
     if (selectedTags.size === 0) return allDocNodes;
-    const filteredIds = new Set(filteredMemoryRecords.map((memory) => memory.memid));
+    const filteredIds = new Set(
+      filteredMemoryRecords.map((memory) => memory.memid),
+    );
     return allDocNodes.filter((node) => filteredIds.has(node.id));
   }, [allDocNodes, filteredMemoryRecords, selectedTags]);
 
@@ -202,7 +212,9 @@ export function KnowledgeWorkspace() {
                   <span className={styles.controlLabel}>Sort</span>
                   <Select
                     value={sortKey}
-                    onValueChange={(value) => setSortKey(value as MemorySortKey)}
+                    onValueChange={(value) =>
+                      setSortKey(value as MemorySortKey)
+                    }
                   >
                     <Select.Trigger
                       aria-label="Sort memories"
@@ -219,7 +231,10 @@ export function KnowledgeWorkspace() {
                 </div>
 
                 {allTags.length > 0 ? (
-                  <div className={styles.tagFilters} aria-label="Filter by tags">
+                  <div
+                    className={styles.tagFilters}
+                    aria-label="Filter by tags"
+                  >
                     <span className={styles.controlLabel}>Tags</span>
                     <div className={styles.tagList}>
                       {allTags.map((tag) => {

@@ -247,7 +247,9 @@ describe("KnowledgeWorkspace", () => {
     await user.click(screen.getByRole("button", { name: /Code Memory 1/i }));
     expect(screen.getByText("Memory: Code Memory 1")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Decision Memory 2/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Decision Memory 2/i }),
+    );
     expect(screen.getByText("Memory: Decision Memory 2")).toBeInTheDocument();
   });
 
@@ -324,8 +326,12 @@ describe("KnowledgeWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "rust" }));
 
     expect(screen.getByText("Memories: 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Code Memory 1/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Decision Memory 2/i })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Code Memory 1/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Decision Memory 2/i }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Graph" }));
 
