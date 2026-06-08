@@ -8,9 +8,9 @@
 
 .text {
   margin: 0;
-  color: var(--rf-text-secondary);
-  font-size: var(--rf-font-size-sm);
-  line-height: var(--rf-line-height-relaxed);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
 }
 
 .formStack {
@@ -18,7 +18,7 @@
   width: 100%;
   min-width: 0;
   flex-direction: column;
-  gap: var(--rf-space-5);
+  gap: var(--rf-space-4);
 }
 
 .pathGroup {
@@ -37,7 +37,7 @@
 .error {
   margin: 0;
   color: var(--rf-color-danger);
-  font-size: var(--rf-font-size-xs);
+  font-size: var(--rf-text-1);
 }
 
 .pathOption {
@@ -45,11 +45,11 @@
   align-items: center;
   gap: var(--rf-space-2);
   min-width: 0;
-  color: var(--rf-text-primary);
-  font-size: var(--rf-font-size-sm);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
 }
 
 .pathHelp {
   display: inline-flex;
-  color: var(--rf-text-secondary);
+  color: var(--rf-color-muted);
 }

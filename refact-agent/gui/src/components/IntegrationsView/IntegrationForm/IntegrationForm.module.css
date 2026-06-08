@@ -1,6 +1,6 @@
 .button {
   cursor: pointer;
-  padding: 0 0.75rem;
+  padding: 0 var(--rf-space-3);
   transition:
     background-color 0.15s ease,
     color 0.15s ease,
@@ -43,14 +43,14 @@
   .switchInline {
     flex-direction: column;
     gap: 0;
-    margin-bottom: 10px;
+    margin-bottom: var(--rf-space-3);
   }
 }
 
 .gridContainer {
   display: grid;
   grid-template-columns: repeat(1, minmax(0, 1fr));
-  gap: 10px;
+  gap: var(--rf-space-3);
 }
 
 .availabilityToggle {

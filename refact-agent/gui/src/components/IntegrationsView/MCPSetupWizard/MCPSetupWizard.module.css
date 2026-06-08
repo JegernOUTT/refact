@@ -9,9 +9,9 @@
 
 .text {
   margin: 0;
-  color: var(--rf-text-secondary);
-  font-size: var(--rf-font-size-sm);
-  line-height: var(--rf-line-height-relaxed);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line);
 }
 
 .detectedStack {
@@ -49,14 +49,14 @@
 .error {
   margin: 0;
   color: var(--rf-color-danger);
-  font-size: var(--rf-font-size-xs);
+  font-size: var(--rf-text-1);
 }
 
 .advancedToggle {
   border: 0;
   padding: 0;
   background: transparent;
-  color: var(--rf-text-secondary);
+  color: var(--rf-color-muted);
   cursor: pointer;
 }
 

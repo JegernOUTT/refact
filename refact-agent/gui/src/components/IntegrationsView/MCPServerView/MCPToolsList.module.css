@@ -1,6 +1,6 @@
 .toolRow {
-  padding: var(--space-2) var(--space-1);
-  border-bottom: 1px solid var(--rf-border);
+  padding: var(--rf-space-2) var(--rf-space-1);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .toolRow:last-child {
@@ -23,9 +23,9 @@
 .schemaBox {
   background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
-  padding: var(--space-2);
+  padding: var(--rf-space-2);
   overflow: auto;
   max-height: 200px;
   backdrop-filter: blur(var(--rf-blur-overlay));
@@ -39,8 +39,8 @@
 
 .schemaPre {
   margin: 0;
-  font-size: var(--font-size-1);
-  font-family: var(--font-mono);
+  font-size: var(--rf-text-1);
+  font-family: var(--rf-font-mono);
   white-space: pre-wrap;
   word-break: break-all;
 }

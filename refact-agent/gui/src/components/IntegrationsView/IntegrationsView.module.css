@@ -53,7 +53,7 @@
   left: 50%;
   transform: translateX(-50%);
   background-color: var(--rf-surface-2);
-  bottom: 65px;
+  bottom: calc(var(--rf-control-h-lg) + var(--rf-space-5));
 }
 
 .popup_ide {

@@ -6,7 +6,7 @@
   background: none;
   border: none;
   cursor: pointer;
-  padding: var(--space-1) 0;
+  padding: var(--rf-space-1) 0;
   text-align: left;
 }
 
@@ -15,5 +15,5 @@
 }
 
 .sectionContent {
-  padding: var(--space-2) 0;
+  padding: var(--rf-space-2) 0;
 }
