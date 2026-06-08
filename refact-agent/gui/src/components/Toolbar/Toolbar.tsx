@@ -16,11 +16,13 @@ import {
   selectOpenTasksFromRoot,
   openTask,
   closeTask,
+  reorderOpenTasks,
 } from "../../features/Tasks";
 import {
   ComponentProps,
   KeyboardEvent,
   MouseEvent,
+  DragEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -34,6 +36,7 @@ import {
   selectTabsDisplayData,
   closeThread,
   switchToThread,
+  reorderOpenThreads,
   selectChatId,
   clearThreadPauseReasons,
   setThreadConfirmationStatus,
@@ -123,6 +126,19 @@ const ToolbarIconButton = ({
     <Tooltip.Content side="bottom">{label}</Tooltip.Content>
   </Tooltip>
 );
+
+function tabDragData(type: "chat" | "task", id: string): string {
+  return `${type}:${id}`;
+}
+
+function parseTabDragData(value: string): { type: "chat" | "task"; id: string } | null {
+  const [type, ...idParts] = value.split(":");
+  const id = idParts.join(":");
+  if ((type === "chat" || type === "task") && id) {
+    return { type, id };
+  }
+  return null;
+}
 
 function taskStatusLabel(status: ComponentProps<typeof StatusDot>["status"]): string {
   if (status === "in_progress" || status === "running") {
@@ -426,6 +442,45 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [dispatch, activeTab, tabs, goToTab],
   );
 
+  const handleMiddleClickClose = useCallback(
+    (event: MouseEvent, tab: ChatTab | TaskTab) => {
+      if (event.button !== 1) return;
+      if (isChatTab(tab)) {
+        handleCloseTab(event, tab.id);
+      } else {
+        handleCloseTaskTab(event, tab.taskId);
+      }
+    },
+    [handleCloseTab, handleCloseTaskTab],
+  );
+
+  const handleDragStart = useCallback(
+    (event: DragEvent, type: "chat" | "task", id: string) => {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", tabDragData(type, id));
+    },
+    [],
+  );
+
+  const handleDragOver = useCallback((event: DragEvent) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const handleDrop = useCallback(
+    (event: DragEvent, type: "chat" | "task", id: string) => {
+      event.preventDefault();
+      const dragged = parseTabDragData(event.dataTransfer.getData("text/plain"));
+      if (!dragged || dragged.type !== type || dragged.id === id) return;
+      if (type === "chat") {
+        dispatch(reorderOpenThreads({ sourceId: dragged.id, targetId: id }));
+      } else {
+        dispatch(reorderOpenTasks({ sourceId: dragged.id, targetId: id }));
+      }
+    },
+    [dispatch],
+  );
+
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarSection}>
@@ -489,6 +544,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
               <div
                 key={`task-${task.id}`}
                 className={styles.tabWrap}
+                draggable
+                onDragStart={(event) => handleDragStart(event, "task", task.id)}
+                onDragOver={handleDragOver}
+                onDrop={(event) => handleDrop(event, "task", task.id)}
                 ref={isActive ? activeTabRef : undefined}
               >
                 <KitTabs.Trigger value={task.id} asChild>
@@ -502,6 +561,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                     )}
                     onClick={() =>
                       goToTab({ type: "task", taskId: task.id, taskName })
+                    }
+                    onAuxClick={(event) =>
+                      handleMiddleClickClose(event, {
+                        type: "task",
+                        taskId: task.id,
+                        taskName,
+                      })
                     }
                     onDoubleClick={() => handleTaskRenaming(task.id, taskName)}
                     title={taskName}
@@ -557,6 +623,10 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
               <div
                 key={tab.id}
                 className={styles.tabWrap}
+                draggable
+                onDragStart={(event) => handleDragStart(event, "chat", tab.id)}
+                onDragOver={handleDragOver}
+                onDrop={(event) => handleDrop(event, "chat", tab.id)}
                 ref={isActive ? activeTabRef : undefined}
               >
                 <KitTabs.Trigger value={tab.id} asChild>
@@ -569,6 +639,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                       isActive && styles.tabButtonActive,
                     )}
                     onClick={() => goToTab({ type: "chat", id: tab.id })}
+                    onAuxClick={(event) =>
+                      handleMiddleClickClose(event, { type: "chat", id: tab.id })
+                    }
                     onDoubleClick={() =>
                       handleChatThreadRenaming(tab.id, tab.title)
                     }

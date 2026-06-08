@@ -121,7 +121,7 @@
   margin: var(--rf-space-1) var(--rf-hairline);
   overflow: hidden;
   color: var(--rf-color-muted);
-  background: transparent;
+  background: var(--rf-surface-1);
   border: 0;
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
@@ -129,12 +129,13 @@
   text-align: left;
   transition:
     color var(--rf-dur-fast) var(--rf-ease-standard),
-    background-color var(--rf-dur-fast) var(--rf-ease-standard);
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .tabButton:hover {
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-2);
 }
 
 .tabButton:focus-visible {
@@ -144,13 +145,25 @@
 
 .tabButtonActive,
 .tabButton[data-state="active"] {
-  color: var(--rf-color-fg);
-  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
+  background: transparent;
+}
+
+.tabButtonActive::after,
+.tabButton[data-state="active"]::after {
+  position: absolute;
+  right: var(--rf-space-2);
+  bottom: 0;
+  left: var(--rf-space-2);
+  height: var(--rf-hairline);
+  content: "";
+  background: var(--rf-color-accent);
+  border-radius: var(--rf-radius-pill);
 }
 
 .tabButtonActive:hover,
 .tabButton[data-state="active"]:hover {
-  background: var(--rf-color-accent-soft);
+  background: transparent;
 }
 
 .tabStatus {

@@ -334,6 +334,11 @@ export const closeThread = createAction<PayloadWithId & { force?: boolean }>(
   "chatThread/closeThread",
 );
 
+export const reorderOpenThreads = createAction<{
+  sourceId: string;
+  targetId: string;
+}>("chatThread/reorderOpenThreads");
+
 export const setThreadPauseReasons = createAction<{
   id: string;
   pauseReasons: ToolConfirmationPauseReason[];

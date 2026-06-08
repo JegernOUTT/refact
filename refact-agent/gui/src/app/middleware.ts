@@ -49,6 +49,7 @@ import {
   buildThreadScopePatch,
   selectCurrentThreadId,
   hydratePersistedChatTabs,
+  reorderOpenThreads,
 } from "../features/Chat/Thread";
 import { saveLastThreadParams } from "../utils/threadStorage";
 import {
@@ -168,6 +169,7 @@ startListening({
     newIntegrationChat,
     closeThread,
     switchToThread,
+    reorderOpenThreads,
     saveTitle,
     createChatWithId,
     updateChatRuntimeFromSessionState,

@@ -187,6 +187,76 @@ describe("Toolbar tab parity", () => {
     expect(view.store.getState().pages.at(-1)?.name).toBe("history");
   });
 
+  it("closes a chat tab with middle click", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "chat", id: "middle-chat" });
+
+    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
+    dispatchAndRerender(view, { type: "chat", id: "middle-chat" }, () => {
+      if (initialThreadId) {
+        view.store.dispatch({
+          type: "chatThread/closeThread",
+          payload: { id: initialThreadId },
+        });
+      }
+      view.store.dispatch(
+        createChatWithId({ id: "middle-chat", title: "Middle Chat" }),
+      );
+    });
+
+    screen.getByTitle("Middle Chat").dispatchEvent(
+      new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }),
+    );
+
+    expect(view.store.getState().chat.open_thread_ids).not.toContain(
+      "middle-chat",
+    );
+    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
+  });
+
+  it("persists reordered chat tabs after drag and drop", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "chat", id: "chat-a" });
+
+    const initialThreadId = view.store.getState().chat.open_thread_ids[0];
+    dispatchAndRerender(view, { type: "chat", id: "chat-a" }, () => {
+      if (initialThreadId) {
+        view.store.dispatch({
+          type: "chatThread/closeThread",
+          payload: { id: initialThreadId },
+        });
+      }
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(
+        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
+      );
+    });
+
+    const dragged = getTabWrap("Chat Beta");
+    const target = getTabWrap("Chat Alpha");
+    const data = new Map<string, string>();
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: (type: string, value: string) => data.set(type, value),
+      getData: (type: string) => data.get(type) ?? "",
+    };
+
+    const dragStart = new Event("dragstart", { bubbles: true });
+    Object.defineProperty(dragStart, "dataTransfer", { value: dataTransfer });
+    dragged.dispatchEvent(dragStart);
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
+    target.dispatchEvent(drop);
+
+    expect(view.store.getState().chat.open_thread_ids).toEqual([
+      "chat-b",
+      "chat-a",
+    ]);
+  });
+
   it("commits and cancels chat title renames from double-click rename mode", async () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "chat", id: "rename-chat" });
