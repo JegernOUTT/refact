@@ -65,6 +65,7 @@ export type CustomizationProps = {
   initialKind?: ConfigKind;
   initialConfigId?: string;
   draftId?: string;
+  embedded?: boolean;
 };
 
 const KIND_LABELS: Record<ConfigKind, string> = {
@@ -618,6 +619,7 @@ export const Customization: React.FC<CustomizationProps> = ({
   initialKind = "modes",
   initialConfigId,
   draftId,
+  embedded,
 }) => {
   const dispatch = useAppDispatch();
   const [activeKind, setActiveKind] = useState<ConfigKind>(initialKind);
@@ -672,25 +674,24 @@ export const Customization: React.FC<CustomizationProps> = ({
 
   if (isLoading) return <Spinner spinning />;
 
-  return (
-    <PageWrapper host={host} noPadding>
-      {host === "vscode" && !tabbed ? (
-        <Flex gap="2" pb="2">
-          <Button variant="surface" onClick={backFromCustomization}>
-            <ArrowLeftIcon width="16" height="16" />
-            Back
-          </Button>
-        </Flex>
-      ) : (
-        <Button
-          mr="auto"
-          variant="outline"
-          onClick={backFromCustomization}
-          mb="2"
-        >
+  const backButton = !embedded ? (
+    host === "vscode" && !tabbed ? (
+      <Flex gap="2" pb="2">
+        <Button variant="surface" onClick={backFromCustomization}>
+          <ArrowLeftIcon width="16" height="16" />
           Back
         </Button>
-      )}
+      </Flex>
+    ) : (
+      <Button mr="auto" variant="outline" onClick={backFromCustomization} mb="2">
+        Back
+      </Button>
+    )
+  ) : null;
+
+  const inner = (
+    <>
+      {backButton}
 
       {registry?.errors && registry.errors.length > 0 && (
         <Card mb="3" style={{ backgroundColor: "var(--red-3)" }}>
@@ -802,6 +803,9 @@ export const Customization: React.FC<CustomizationProps> = ({
           getAllItems().some((i) => i.local_path !== "")
         }
       />
-    </PageWrapper>
+    </>
   );
+
+  if (embedded) return inner;
+  return <PageWrapper host={host} noPadding>{inner}</PageWrapper>;
 };

@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import classNames from "classnames";
 import { ScrollArea } from "../../components/ScrollArea";
@@ -7,6 +7,8 @@ import type { Config } from "../Config/configSlice";
 import { useGetIntegrationsQuery } from "../../hooks/useGetIntegrationsDataQuery";
 import { IntegrationsView } from "../../components/IntegrationsView";
 import { Button } from "../../components/ui";
+import { useAppDispatch } from "../../hooks";
+import { integrationsApi } from "../../services/refact/integrations";
 import styles from "./Integrations.module.css";
 
 export type IntegrationsProps = {
@@ -15,6 +17,7 @@ export type IntegrationsProps = {
   handlePaddingShift: (state: boolean) => void;
   host: Config["host"];
   tabbed: Config["tabbed"];
+  embedded?: boolean;
 };
 
 export type LeftRightPadding =
@@ -41,7 +44,16 @@ export const Integrations: React.FC<IntegrationsProps> = ({
   handlePaddingShift,
   host,
   tabbed,
+  embedded,
 }) => {
+  const dispatch = useAppDispatch();
+
+  useEffect(() => {
+    return () => {
+      dispatch(integrationsApi.util.resetApiState());
+    };
+  }, [dispatch]);
+
   const LeftRightPadding =
     host === "web"
       ? { initial: "5", xl: "9" }
@@ -66,15 +78,13 @@ export const Integrations: React.FC<IntegrationsProps> = ({
     [handlePaddingShift],
   );
 
-  return (
-    <PageWrapper
-      host={host}
+  const content = (
+    <div
       className={classNames(styles.page, {
         [styles.pageInnerSelected]: isInnerIntegrationSelected,
       })}
-      noPadding
     >
-      {!isInnerIntegrationSelected && (
+      {!embedded && !isInnerIntegrationSelected && (
         <>
           {host === "vscode" && !tabbed ? (
             <div className={styles.backRow}>
@@ -104,6 +114,13 @@ export const Integrations: React.FC<IntegrationsProps> = ({
           />
         </div>
       </ScrollArea>
+    </div>
+  );
+
+  if (embedded) return content;
+  return (
+    <PageWrapper host={host} noPadding>
+      {content}
     </PageWrapper>
   );
 };

@@ -20,9 +20,10 @@ import styles from "./Scheduler.module.css";
 
 type SchedulerPanelProps = {
   onBack: () => void;
+  embedded?: boolean;
 };
 
-export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack }) => {
+export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack, embedded }) => {
   const {
     data: tasks = [],
     isFetching,
@@ -72,9 +73,11 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({ onBack }) => {
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
-        <Button variant="soft" onClick={onBack} leftIcon={ArrowLeft}>
-          Back
-        </Button>
+        {!embedded && (
+          <Button variant="soft" onClick={onBack} leftIcon={ArrowLeft}>
+            Back
+          </Button>
+        )}
         <div className={styles.titleBlock}>
           <h1 className={styles.title}>Scheduler</h1>
           <p className={styles.subtitle}>Create, review, and delete cron prompts.</p>
