@@ -8,10 +8,134 @@ import classNames from "classnames";
 import { useAppearance } from "../../hooks/useAppearance";
 import { reportBuddyFrontendError } from "../../features/Buddy/reportBuddyFrontendError";
 
-let mermaidInitialized: "dark" | "light" | null = null;
+type MermaidTheme = "dark" | "light";
+
+let mermaidInitialized: MermaidTheme | null = null;
 const REPORTED_MERMAID_ERRORS = new Map<string, number>();
 const MERMAID_ERROR_REPORT_INTERVAL_MS = 60_000;
 const MAX_REPORTED_MERMAID_ERRORS = 50;
+
+const MERMAID_THEME_TOKENS = {
+  primaryColor: {
+    token: "--rf-surface-2",
+    dark: "#1a1c22",
+    light: "#eef1f5",
+  },
+  primaryTextColor: {
+    token: "--rf-color-fg",
+    dark: "#f5f7fb",
+    light: "#1f2328",
+  },
+  primaryBorderColor: {
+    token: "--rf-border-strong",
+    dark: "#343946",
+    light: "#c8d0dc",
+  },
+  lineColor: {
+    token: "--rf-color-muted",
+    dark: "#8b93a3",
+    light: "#5f6772",
+  },
+  secondaryColor: {
+    token: "--rf-surface-1",
+    dark: "#14161b",
+    light: "#f7f8fa",
+  },
+  tertiaryColor: { token: "--rf-bg", dark: "#0c0d0f", light: "#fcfcfd" },
+  nodeTextColor: {
+    token: "--rf-color-fg",
+    dark: "#f5f7fb",
+    light: "#1f2328",
+  },
+  mainBkg: { token: "--rf-surface-1", dark: "#14161b", light: "#f7f8fa" },
+  nodeBorder: {
+    token: "--rf-border-strong",
+    dark: "#343946",
+    light: "#c8d0dc",
+  },
+  clusterBkg: {
+    token: "--rf-surface-2",
+    dark: "#1a1c22",
+    light: "#eef1f5",
+  },
+  clusterBorder: { token: "--rf-border", dark: "#282d38", light: "#d9dee7" },
+  titleColor: {
+    token: "--rf-color-fg",
+    dark: "#f5f7fb",
+    light: "#1f2328",
+  },
+  edgeLabelBackground: {
+    token: "--rf-bg",
+    dark: "#0c0d0f",
+    light: "#fcfcfd",
+  },
+  noteBkgColor: {
+    token: "--rf-surface-2",
+    dark: "#1a1c22",
+    light: "#eef1f5",
+  },
+  noteTextColor: {
+    token: "--rf-color-fg",
+    dark: "#f5f7fb",
+    light: "#1f2328",
+  },
+  noteBorderColor: {
+    token: "--rf-border-strong",
+    dark: "#343946",
+    light: "#c8d0dc",
+  },
+} as const;
+
+function getThemeRoot(): Element | null {
+  if (typeof document === "undefined") return null;
+
+  return (
+    document.querySelector("[data-radix-themes], .radix-themes") ??
+    document.documentElement
+  );
+}
+
+function isResolvedColor(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized !== "" &&
+    !normalized.includes("var(") &&
+    !normalized.includes("color-mix(")
+  );
+}
+
+function resolveTokenColor(token: string, fallback: string): string {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return fallback;
+  }
+
+  const root = getThemeRoot();
+  if (!root) return fallback;
+
+  const target = root instanceof HTMLElement ? root : document.documentElement;
+  const probe = document.createElement("span");
+  probe.style.color = `var(${token}, ${fallback})`;
+  probe.style.display = "none";
+  target.append(probe);
+  const resolved = window.getComputedStyle(probe).color.trim();
+  probe.remove();
+
+  if (isResolvedColor(resolved)) return resolved;
+
+  const direct = window.getComputedStyle(root).getPropertyValue(token).trim();
+  if (isResolvedColor(direct)) return direct;
+
+  return fallback;
+}
+
+function createMermaidThemeVariables(theme: MermaidTheme) {
+  return Object.fromEntries(
+    Object.entries(MERMAID_THEME_TOKENS).map(([key, config]) => [
+      key,
+      resolveTokenColor(config.token, config[theme]),
+    ]),
+  );
+}
 
 function shouldReportMermaidError(key: string): boolean {
   const now = Date.now();
@@ -26,7 +150,7 @@ function shouldReportMermaidError(key: string): boolean {
   return true;
 }
 
-async function getMermaid(theme: "dark" | "light") {
+async function getMermaid(theme: MermaidTheme) {
   const mermaid = (await import("mermaid")).default;
   if (mermaidInitialized !== theme) {
     mermaid.initialize({
@@ -35,24 +159,7 @@ async function getMermaid(theme: "dark" | "light") {
       securityLevel: "strict",
       fontFamily:
         'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-      themeVariables: {
-        primaryColor: "var(--rf-surface-2)",
-        primaryTextColor: "var(--rf-color-fg)",
-        primaryBorderColor: "var(--rf-border-strong)",
-        lineColor: "var(--rf-color-muted)",
-        secondaryColor: "var(--rf-surface-1)",
-        tertiaryColor: "var(--rf-surface-base)",
-        nodeTextColor: "var(--rf-color-fg)",
-        mainBkg: "var(--rf-surface-1)",
-        nodeBorder: "var(--rf-border-strong)",
-        clusterBkg: "var(--rf-surface-2)",
-        clusterBorder: "var(--rf-border)",
-        titleColor: "var(--rf-color-fg)",
-        edgeLabelBackground: "var(--rf-surface-base)",
-        noteBkgColor: "var(--rf-surface-2)",
-        noteTextColor: "var(--rf-color-fg)",
-        noteBorderColor: "var(--rf-border-strong)",
-      },
+      themeVariables: createMermaidThemeVariables(theme),
       flowchart: { curve: "basis", padding: 16, htmlLabels: false },
     });
     mermaidInitialized = theme;

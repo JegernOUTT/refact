@@ -26,9 +26,14 @@ import { render, screen, waitFor } from "../../utils/test-utils";
 import { AssistantInput } from "./AssistantInput";
 import type { DiffChunk, ToolCall } from "../../services/refact/types";
 
+type MermaidInitializeConfig = {
+  themeVariables?: Record<string, string>;
+};
+
 describe("AssistantInput", () => {
   beforeEach(() => {
     mermaidMock.render.mockClear();
+    mermaidMock.initialize.mockClear();
   });
 
   test("renders streaming message content as markdown immediately", () => {
@@ -74,6 +79,15 @@ describe("AssistantInput", () => {
     );
 
     await waitFor(() => expect(mermaidMock.render).toHaveBeenCalledTimes(1));
+    expect(mermaidMock.initialize).toHaveBeenCalled();
+
+    const initializeConfig = mermaidMock.initialize.mock.calls.at(-1)?.[0] as
+      | MermaidInitializeConfig
+      | undefined;
+    const themeVariables = initializeConfig?.themeVariables;
+
+    expect(themeVariables).toBeDefined();
+    expect(JSON.stringify(themeVariables)).not.toContain("var(");
   });
 
   test("keeps incomplete streaming html fence as raw code until the fence closes", () => {
