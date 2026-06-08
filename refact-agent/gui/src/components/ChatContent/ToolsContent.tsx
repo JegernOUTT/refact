@@ -394,6 +394,19 @@ const ToolUsageDisplay: React.FC<{
   );
 };
 
+const AnimatedCollapsibleContent: React.FC<{
+  open: boolean;
+  children: React.ReactNode;
+}> = ({ open, children }) => {
+  return (
+    <Collapsible.Content forceMount asChild>
+      <div className="rf-expand-grid" data-open={open} hidden={false}>
+        <div>{children}</div>
+      </div>
+    </Collapsible.Content>
+  );
+};
+
 // Use this for a single tool results
 export const SingleModelToolContent: React.FC<{
   toolCalls: ToolCall[];
@@ -503,7 +516,7 @@ export const SingleModelToolContent: React.FC<{
             waiting={busy}
           />
         </Collapsible.Trigger>
-        <Collapsible.Content>
+        <AnimatedCollapsibleContent open={open}>
           {toolCalls.map((toolCall) => {
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
             if (toolCall === null) {
@@ -519,7 +532,7 @@ export const SingleModelToolContent: React.FC<{
               </Box>
             );
           })}
-        </Collapsible.Content>
+        </AnimatedCollapsibleContent>
       </Collapsible.Root>
     </Container>
   );
@@ -1629,7 +1642,7 @@ const MultiModalToolContent: React.FC<{
             waiting={busy}
           />
         </Collapsible.Trigger>
-        <Collapsible.Content>
+        <AnimatedCollapsibleContent open={open}>
           <Box py="2">
             {toolCalls.map((toolCall, i) => {
               const result = toolResults.find(
@@ -1661,7 +1674,7 @@ const MultiModalToolContent: React.FC<{
               );
             })}
           </Box>
-        </Collapsible.Content>
+        </AnimatedCollapsibleContent>
       </Collapsible.Root>
       {hasImages && (
         <Flex py="2" gap="2" wrap="wrap">
