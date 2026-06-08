@@ -6,13 +6,15 @@ import type { Page } from "../Pages/pagesSlice";
 import type { Config } from "../Config/configSlice";
 import { SETTINGS_SECTIONS, settingsPageToSection, settingsSectionToPage } from "./index";
 import type { SettingsSectionId } from "./settingsSections";
-import { Button, SettingsShell, Surface } from "../../components/ui";
+import { Button, SettingsShell } from "../../components/ui";
 import { Providers } from "../Providers";
 import { DefaultModels } from "../DefaultModels";
 import { Customization } from "../Customization";
 import { Integrations } from "../Integrations";
 import { SchedulerPanel } from "../Scheduler";
+import { Extensions } from "../Extensions";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
+import { DocumentationSettingsSection } from "./DocumentationSettingsSection";
 
 import styles from "./SettingsHub.module.css";
 
@@ -85,20 +87,18 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
       case "scheduler":
         return <SchedulerPanel embedded onBack={onBack} />;
       case "documentation":
-        return (
-          <Surface className={styles.placeholder} variant="surface-1">
-            <p className={styles.placeholderText}>
-              Documentation settings — coming up
-            </p>
-          </Surface>
-        );
+        return <DocumentationSettingsSection />;
       case "extensions":
         return (
-          <Surface className={styles.placeholder} variant="surface-1">
-            <p className={styles.placeholderText}>
-              Extensions settings — coming up
-            </p>
-          </Surface>
+          <Extensions
+            embedded
+            host={host}
+            tabbed={tabbed}
+            backFromExtensions={onBack}
+            initialTab={page.name === "extensions" ? page.tab : undefined}
+            initialItemId={page.name === "extensions" ? page.itemId : undefined}
+            draftId={page.name === "extensions" ? page.draftId : undefined}
+          />
         );
     }
   };

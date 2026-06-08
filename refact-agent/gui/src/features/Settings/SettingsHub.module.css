@@ -23,16 +23,3 @@
   overflow: auto;
 }
 
-.placeholder {
-  display: flex;
-  min-height: 160px;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--rf-radius-card);
-}
-
-.placeholderText {
-  margin: 0;
-  color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
-}

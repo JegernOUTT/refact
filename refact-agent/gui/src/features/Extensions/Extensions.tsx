@@ -36,6 +36,7 @@ export type ExtensionsProps = {
   initialTab?: ExtensionsTab;
   initialItemId?: string;
   draftId?: string;
+  embedded?: boolean;
 };
 
 type DeleteTarget = {
@@ -50,6 +51,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   initialTab = "skills",
   initialItemId,
   draftId,
+  embedded = false,
 }) => {
   const dispatch = useAppDispatch();
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(initialTab);
@@ -144,26 +146,30 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   if (isLoading) return <Spinner spinning />;
 
   if (isError) {
-    return (
+    const errorContent = (
+      <EmptyState
+        action={<Button onClick={() => void refetch()}>Retry</Button>}
+        title="Failed to load extensions registry"
+        variant="full"
+      />
+    );
+    return embedded ? errorContent : (
       <PageWrapper host={host} noPadding>
-        <EmptyState
-          action={<Button onClick={() => void refetch()}>Retry</Button>}
-          title="Failed to load extensions registry"
-          variant="full"
-        />
+        {errorContent}
       </PageWrapper>
     );
   }
 
-  return (
-    <PageWrapper host={host} noPadding>
-      <div className={`${styles.page} rf-enter`}>
+  const inner = (
+    <div className={`${styles.page} rf-enter`}>
+      {!embedded && (
         <div className={styles.header}>
           <Button variant="ghost" onClick={backFromExtensions}>
             <ArrowLeft size={15} />
             Back
           </Button>
         </div>
+      )}
 
         <SegmentedControl
           value={activeTab}
@@ -286,6 +292,8 @@ export const Extensions: React.FC<ExtensionsProps> = ({
           </Dialog.Content>
         </Dialog>
       </div>
-    </PageWrapper>
-  );
+    );
+
+  if (embedded) return inner;
+  return <PageWrapper host={host} noPadding>{inner}</PageWrapper>;
 };

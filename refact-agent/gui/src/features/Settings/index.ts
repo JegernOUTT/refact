@@ -4,3 +4,4 @@ export { isSettingsPage, settingsPageToSection, settingsSectionToPage } from "./
 export { SettingsHub } from "./SettingsHub";
 export type { SettingsHubProps } from "./SettingsHub";
 export { GeneralSettingsSection } from "./GeneralSettingsSection";
+export { DocumentationSettingsSection } from "./DocumentationSettingsSection";
