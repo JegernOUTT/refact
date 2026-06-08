@@ -85,7 +85,7 @@
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
   min-width: 0;
 }
 
@@ -148,6 +148,6 @@
   }
 
   .listMeta {
-    margin-left: 26px;
+    margin-left: calc(var(--rf-icon-lg) + var(--rf-space-2));
   }
 }

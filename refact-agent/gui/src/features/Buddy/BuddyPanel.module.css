@@ -21,7 +21,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: var(--rf-space-1);
   padding: var(--rf-space-1) 0;
 }
 
@@ -50,7 +50,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  gap: var(--rf-space-1);
   width: 100%;
 }
 
@@ -71,8 +71,8 @@
 .stageBadge {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  padding: 1px 5px;
+  gap: var(--rf-space-2xs);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 600;
@@ -116,9 +116,9 @@
 .questPill {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--rf-space-1);
   max-width: 100%;
-  padding: 2px 8px;
+  padding: var(--rf-space-2xs) var(--rf-space-2);
   border-radius: 9999px;
   border: 1px solid var(--rf-border-strong);
   background: var(--rf-color-accent-soft);
@@ -140,7 +140,7 @@
 
 .careRow {
   display: flex;
-  gap: 4px;
+  gap: var(--rf-space-1);
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -150,7 +150,7 @@
   background: var(--rf-surface-1);
   color: var(--rf-color-fg);
   border-radius: 9999px;
-  padding: 2px 6px;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   font-size: 10px;
   cursor: pointer;
 }
@@ -158,8 +158,8 @@
 .statusBubble {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   background: var(--rf-surface-2);
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-chip);

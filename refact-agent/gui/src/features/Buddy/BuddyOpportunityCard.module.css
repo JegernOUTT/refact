@@ -25,7 +25,7 @@
 .priorityBadge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 600;

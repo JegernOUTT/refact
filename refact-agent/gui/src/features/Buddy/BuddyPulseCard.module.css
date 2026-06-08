@@ -39,7 +39,7 @@
   align-items: baseline;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding-block: 2px;
+  padding-block: var(--rf-space-2xs);
 }
 
 .rowLabel {

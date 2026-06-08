@@ -5,7 +5,7 @@
 
 .filterTabs {
   display: flex;
-  gap: 4px;
+  gap: var(--rf-space-1);
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -94,7 +94,7 @@
 .badge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 5px;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   border-radius: var(--rf-radius-chip);
   background: var(--rf-surface-2);
   color: var(--rf-color-muted);

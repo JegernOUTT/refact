@@ -41,7 +41,7 @@
 }
 
 .panelTitleGroup {
-  gap: 2px;
+  gap: var(--rf-space-2xs);
 }
 
 .sectionLabel {
@@ -150,7 +150,7 @@
 }
 
 .skillChip {
-  gap: 3px;
+  gap: var(--rf-space-1);
   min-width: 0;
 }
 

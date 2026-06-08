@@ -24,7 +24,7 @@
 }
 
 .count {
-  padding: 1px 6px;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   border-radius: 9999px;
   background: var(--rf-surface-2);
   color: var(--rf-color-muted);
@@ -42,13 +42,13 @@
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 2px;
+  padding-right: var(--rf-space-2xs);
 }
 
 .item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--rf-space-2xs);
   min-width: 0;
   padding: var(--rf-space-2);
   border-radius: var(--rf-radius-chip);
