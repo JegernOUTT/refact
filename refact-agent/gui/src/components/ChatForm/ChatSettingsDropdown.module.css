@@ -1,9 +1,11 @@
 .trigger {
   display: flex;
+  min-height: var(--rf-control-h-sm);
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-1);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  box-sizing: border-box;
+  padding: 0 var(--rf-space-2);
   color: var(--rf-color-fg);
   background: transparent;
   border: 0;
@@ -155,9 +157,14 @@
 }
 
 .effortButton {
+  display: inline-flex;
   min-height: var(--rf-control-h-sm);
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-muted);
+  line-height: var(--rf-line);
   background: transparent;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
