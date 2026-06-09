@@ -51,6 +51,47 @@ type useIntegrationsViewArgs = {
   goBack?: () => void;
 };
 
+type IntegrationPathPair = Pick<
+  IntegrationWithIconRecord,
+  "project_path" | "integr_config_path"
+>;
+
+const getIntegrationErrorMessage = (error: unknown, fallback: string) => {
+  if (error && typeof error === "object" && "data" in error) {
+    const data = (error as FetchBaseQueryError).data;
+    if (isDetailMessage(data)) {
+      return data.detail;
+    }
+  }
+
+  if (error && typeof error === "object" && "error" in error) {
+    const message = (error as { error?: unknown }).error;
+    if (typeof message === "string") {
+      return message;
+    }
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return fallback;
+};
+
+export const sortIntegrationPathPairs = (
+  pairs: IntegrationPathPair[],
+): IntegrationPathPair[] => {
+  return [...pairs].sort((a, b) => {
+    if (a.project_path === "" && b.project_path !== "") return -1;
+    if (a.project_path !== "" && b.project_path === "") return 1;
+    const aConfigIsGlobal = a.integr_config_path.includes(".config");
+    const bConfigIsGlobal = b.integr_config_path.includes(".config");
+    if (aConfigIsGlobal && !bConfigIsGlobal) return -1;
+    if (!aConfigIsGlobal && bConfigIsGlobal) return 1;
+    return 0;
+  });
+};
+
 export const INTEGRATIONS_WITH_TERMINAL_ICON = ["cmdline", "service", "mcp"];
 
 export const useIntegrations = ({
@@ -323,9 +364,16 @@ export const useIntegrations = ({
 
       // Sort paths so that paths containing ".config" are first
       filteredIntegrations.forEach((integration) => {
-        integration.project_path.sort((a, _b) => (a === "" ? -1 : 1));
-        integration.integr_config_path.sort((a, _b) =>
-          a.includes(".config") ? -1 : 1,
+        const pairs = sortIntegrationPathPairs(
+          integration.project_path.map((projectPath, index) => ({
+            project_path: projectPath,
+            integr_config_path: integration.integr_config_path[index] ?? "",
+          })),
+        );
+
+        integration.project_path = pairs.map((pair) => pair.project_path);
+        integration.integr_config_path = pairs.map(
+          (pair) => pair.integr_config_path,
         );
       });
 
@@ -482,24 +530,33 @@ export const useIntegrations = ({
     async (configurationPath: string) => {
       if (!currentIntegration) return;
       setIsDeletingIntegration(true);
-      const response = await deleteIntegrationTrigger(configurationPath);
-      debugIntegrations("[DEBUG]: response: ", response);
-      if (response.error) {
-        debugIntegrations(`[DEBUG]: delete error: `, response.error);
-        return;
-      }
-      dispatch(
-        setInformation(
-          `${toPascalCase(
-            currentIntegration.integr_name,
-          )} integration's configuration was deleted successfully!`,
-        ),
-      );
-      const timeoutId = setTimeout(() => {
-        setIsDeletingIntegration(false);
+      try {
+        const response = await deleteIntegrationTrigger(configurationPath);
+        debugIntegrations("[DEBUG]: response: ", response);
+        if (response.error) {
+          debugIntegrations(`[DEBUG]: delete error: `, response.error);
+          dispatch(
+            setError(
+              getIntegrationErrorMessage(
+                response.error,
+                `Something went wrong while deleting configuration for ${currentIntegration.integr_name} integration`,
+              ),
+            ),
+          );
+          return;
+        }
+        dispatch(
+          setInformation(
+            `${toPascalCase(
+              currentIntegration.integr_name,
+            )} integration's configuration was deleted successfully!`,
+          ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1200));
         handleFormReturn();
-        clearTimeout(timeoutId);
-      }, 1200);
+      } finally {
+        setIsDeletingIntegration(false);
+      }
     },
     [currentIntegration, dispatch, deleteIntegrationTrigger, handleFormReturn],
   );

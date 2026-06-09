@@ -48,10 +48,19 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
   const [getAutoName] = useGetAutoNameMutation();
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const pathOptions = useMemo(() => {
+    return integration.integr_config_path.map((configPath, index) => ({
+      configPath,
+      projectPath: integration.project_path[index] ?? "",
+    }));
+  }, [integration.integr_config_path, integration.project_path]);
+
   const projectLabels = useMemo(() => {
-    const validProjectPaths = integration.project_path.filter((p) => p !== "");
+    const validProjectPaths = pathOptions
+      .map((option) => option.projectPath)
+      .filter((path) => path !== "");
     return createProjectLabelsWithConflictMarkers(validProjectPaths);
-  }, [integration.project_path]);
+  }, [pathOptions]);
 
   const effectiveTransport = useSSE ? "sse" : transport;
   const configPrefix = getConfigPrefix(effectiveTransport);
@@ -186,13 +195,13 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
         value={selectedConfigPath}
         onValueChange={setSelectedConfigPath}
       >
-        {integration.integr_config_path.map((configPath, index) => {
-          const shouldPathBeFormatted = integration.project_path[index] !== "";
+        {pathOptions.map(({ configPath, projectPath }) => {
+          const shouldPathBeFormatted = projectPath !== "";
           return (
             <label key={configPath}>
               <IntegrationPathField
                 configPath={configPath}
-                projectPath={integration.project_path[index] ?? ""}
+                projectPath={projectPath}
                 projectLabels={projectLabels}
                 shouldBeFormatted={shouldPathBeFormatted}
               />
