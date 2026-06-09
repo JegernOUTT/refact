@@ -87,27 +87,24 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
 
         <div className={styles.kanbanCardBadges}>
           {hasAgent && (
-            <Badge tone="accent" title={`Agent: ${card.assignee}`}>
-              {card.agent_chat_id ? (
-                <button
-                  type="button"
-                  className={styles.agentBadgeButton}
-                  onClick={handleAgentClick}
-                >
-                  <Icon icon={User} size="sm" /> Agent
-                </button>
-              ) : (
-                <span className={styles.inlineBadgeContent}>
-                  <Icon icon={User} size="sm" /> Agent
-                </span>
-              )}
-            </Badge>
+            card.agent_chat_id ? (
+              <button
+                type="button"
+                className={styles.agentBadgeAction}
+                title={`Agent: ${card.assignee}`}
+                onClick={handleAgentClick}
+              >
+                <Icon icon={User} size="sm" tone="accent" /> Agent
+              </button>
+            ) : (
+              <Badge tone="accent" title={`Agent: ${card.assignee}`}>
+                <Icon icon={User} size="sm" tone="accent" /> Agent
+              </Badge>
+            )
           )}
           {worktree && (
             <Badge tone="success" title={`Worktree: ${worktree}`}>
-              <span className={styles.inlineBadgeContent}>
-                <BranchIcon /> {worktree}
-              </span>
+              <BranchIcon /> {worktree}
             </Badge>
           )}
           {hasDeps && (
@@ -115,16 +112,14 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
               tone="muted"
               title={`Depends on: ${card.depends_on.join(", ")}`}
             >
-              <span className={styles.inlineBadgeContent}>
-                <Icon icon={Link2} size="sm" /> {card.depends_on.length}
-              </span>
+              <Icon icon={Link2} size="sm" tone="muted" />
+              {card.depends_on.length}
             </Badge>
           )}
           {card.status_updates.length > 0 && (
             <Badge tone="muted">
-              <span className={styles.inlineBadgeContent}>
-                <Icon icon={FileText} size="sm" /> {card.status_updates.length}
-              </span>
+              <Icon icon={FileText} size="sm" tone="muted" />
+              {card.status_updates.length}
             </Badge>
           )}
         </div>
@@ -191,7 +186,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   );
 
   return (
-    <div className={styles.kanbanBoard}>
+    <div className={classNames(styles.kanbanBoard, "rf-enter")}>
       {board.columns.map((column) => (
         <KanbanColumn
           key={column.id}

@@ -117,7 +117,7 @@ describe("CardCommentsSection", () => {
     renderSection([parent, reply]);
 
     const replyText = screen.getByText("This is a reply.");
-    const indented = replyText.closest("[style*='margin-left']");
+    const indented = replyText.closest("[class*='commentReply']");
     expect(indented).toBeTruthy();
   });
 

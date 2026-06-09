@@ -1,17 +1,17 @@
 import React, { useCallback, useState, useEffect, useMemo } from "react";
+import { Flex, Box, Text } from "@radix-ui/themes";
 import {
-  Flex,
-  Box,
-  Text,
   Badge,
+  Button,
   Dialog,
-  Checkbox,
-  Tooltip,
+  Icon,
+  IconButton,
   Tabs,
-} from "@radix-ui/themes";
-import { Button, IconButton } from "../../components/ui";
-import { PlusIcon, ChevronDownIcon, FileTextIcon } from "@radix-ui/react-icons";
-import { X } from "lucide-react";
+  Tooltip,
+} from "../../components/ui";
+import { Checkbox } from "../../components/Checkbox";
+import { PlusIcon, ChevronDownIcon } from "@radix-ui/react-icons";
+import { FileText, GitBranch, ListChecks, Target, X } from "lucide-react";
 import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
@@ -193,6 +193,21 @@ function sameWaitingCards(a?: string[], b?: string[]): boolean {
   return true;
 }
 
+const cardStatusTone = (
+  column: string,
+): React.ComponentProps<typeof Badge>["tone"] => {
+  if (column === "done") return "success";
+  if (column === "failed") return "danger";
+  if (column === "doing") return "accent";
+  return "muted";
+};
+
+const workspaceTabIndex = (tab: string): number => {
+  if (tab === "memories") return 1;
+  if (tab === "documents") return 2;
+  return 0;
+};
+
 export const PlannerItem: React.FC<PlannerItemProps> = ({
   planner,
   isSelected,
@@ -234,8 +249,8 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
       }}
     >
       <Flex align="center" gap="1" className={styles.panelItemLead}>
-        <Badge size="1" color="violet">
-          <FileTextIcon />
+        <Badge tone="accent">
+          <Icon icon={FileText} size="sm" tone="accent" />
         </Badge>
       </Flex>
       <Box className={styles.panelItemContent}>
@@ -252,13 +267,7 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
           data-testid={`planner-waiting-chips-${planner.id}`}
         >
           {visibleCards.map((cardId) => (
-            <Badge
-              key={cardId}
-              size="1"
-              color="amber"
-              variant="soft"
-              title={`Waiting for ${cardId}`}
-            >
+            <Badge key={cardId} tone="warning" title={`Waiting for ${cardId}`}>
               {cardId}
             </Badge>
           ))}
@@ -366,7 +375,7 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
           <AgentStatusDot status={status} size="medium" />
         </div>
         <Flex align="center" gap="1" className={styles.panelItemContent}>
-          <Badge size="1" color="gray" variant="soft">
+          <Badge tone="muted">
             {card.id}
           </Badge>
           <Text size="1" className={styles.panelItemTitle}>
@@ -451,51 +460,61 @@ const CardDetail: React.FC<CardDetailProps> = ({
     );
 
   return (
-    <Dialog.Content maxWidth="600px">
-      <Flex direction="column" gap="3">
-        <Flex justify="between" align="center">
-          <Dialog.Title size="3" className={styles.cardDetailTitle}>
-            <Badge size="1" color="gray" variant="soft" mr="2">
-              {card.id}
-            </Badge>
-            {card.title}
-          </Dialog.Title>
-          <Badge
-            color={
-              card.column === "done"
-                ? "green"
-                : card.column === "failed"
-                  ? "red"
-                  : "blue"
-            }
-          >
+    <Dialog.Content
+      className={styles.cardDetailDialog}
+      maxHeight="min(760px, calc(100dvh - var(--rf-space-5)))"
+      maxWidth="720px"
+    >
+      <div className={styles.cardDetailRoot}>
+        <div className={styles.cardDetailHeader}>
+          <div className={styles.cardDetailTitleGroup}>
+            <Badge tone="muted">{card.id}</Badge>
+            <Dialog.Title className={styles.cardDetailTitle}>
+              {card.title}
+            </Dialog.Title>
+          </div>
+          <Badge tone={cardStatusTone(card.column)}>
+            {card.column === "doing" ||
+            card.column === "done" ||
+            card.column === "failed" ? (
+              <AgentStatusDot status={card.column} size="small" />
+            ) : null}
             {card.column}
           </Badge>
-        </Flex>
+        </div>
 
-        {card.depends_on.length > 0 && (
-          <Box>
-            <Text size="2" weight="medium" color="gray">
-              Dependencies
-            </Text>
-            <Flex gap="1" mt="1">
-              {card.depends_on.map((dep) => (
-                <Badge key={dep} size="1" variant="soft">
-                  {dep}
-                </Badge>
-              ))}
-            </Flex>
-          </Box>
-        )}
-
-        {worktreeLabel && (
-          <Box>
-            <Text size="2" weight="medium" color="gray">
-              Worktree
-            </Text>
-            <Flex direction="column" gap="2" mt="1">
-              <Flex gap="2" align="center" wrap="wrap">
-                <Badge size="1" color="green" variant="soft">
+        <section className={styles.cardDetailMetaGrid}>
+          <div className={styles.cardDetailMetaItem}>
+            <span className={styles.cardDetailMetaLabel}>Priority</span>
+            <Badge
+              tone={
+                card.priority === "P0"
+                  ? "danger"
+                  : card.priority === "P1"
+                    ? "warning"
+                    : "muted"
+              }
+            >
+              {card.priority}
+            </Badge>
+          </div>
+          {card.depends_on.length > 0 && (
+            <div className={styles.cardDetailMetaItem}>
+              <span className={styles.cardDetailMetaLabel}>Dependencies</span>
+              <div className={styles.cardDetailChipRow}>
+                {card.depends_on.map((dep) => (
+                  <Badge key={dep} tone="muted">
+                    {dep}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+          {worktreeLabel && (
+            <div className={styles.cardDetailMetaItem}>
+              <span className={styles.cardDetailMetaLabel}>Worktree</span>
+              <div className={styles.cardDetailChipRow}>
+                <Badge tone="success" title={`Worktree: ${worktreeLabel}`}>
                   <BranchIcon /> {worktreeLabel}
                 </Badge>
                 {worktree?.record ?? worktree?.meta ? (
@@ -505,11 +524,24 @@ const CardDetail: React.FC<CardDetailProps> = ({
                   />
                 ) : null}
                 {worktree?.referenceCount && worktree.referenceCount > 1 ? (
-                  <Badge size="1" color="amber" variant="soft">
+                  <Badge tone="warning">
                     shared by {worktree.referenceCount}
                   </Badge>
                 ) : null}
-              </Flex>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {worktreeLabel && (
+          <section className={styles.cardDetailSectionBlock}>
+            <div className={styles.cardDetailSectionHeader}>
+              <Icon icon={GitBranch} size="sm" tone="muted" />
+              <Text size="2" weight="medium">
+                Worktree actions
+              </Text>
+            </div>
+            <div className={styles.cardDetailWorktreeBody}>
               {isWorktreeLoading && (
                 <Text size="1" color="gray">
                   Loading worktree metadata...
@@ -530,7 +562,7 @@ const CardDetail: React.FC<CardDetailProps> = ({
                   Legacy / unregistered worktree
                 </Text>
               )}
-              <Flex gap="2" wrap="wrap">
+              <div className={styles.cardDetailActions}>
                 {wrapWorktreeAction(
                   <Button
                     type="button"
@@ -579,16 +611,49 @@ const CardDetail: React.FC<CardDetailProps> = ({
                     Discard/Delete
                   </Button>,
                 )}
-              </Flex>
-            </Flex>
-          </Box>
+              </div>
+            </div>
+          </section>
+        )}
+
+        <section className={styles.cardDetailSectionBlock}>
+          <div className={styles.cardDetailSectionHeader}>
+            <Icon icon={Target} size="sm" tone="muted" />
+            <Text size="2" weight="medium">
+              Goal
+            </Text>
+          </div>
+          <Box className={styles.cardDetailSection}>{card.title}</Box>
+        </section>
+
+        {card.target_files.length > 0 && (
+          <section className={styles.cardDetailSectionBlock}>
+            <div className={styles.cardDetailSectionHeader}>
+              <Icon icon={FileText} size="sm" tone="muted" />
+              <Text size="2" weight="medium">
+                Files
+              </Text>
+            </div>
+            <Box className={styles.cardDetailSection}>
+              <div className={styles.cardDetailFileList}>
+                {card.target_files.map((file) => (
+                  <Badge key={file} tone="muted">
+                    {file}
+                  </Badge>
+                ))}
+              </div>
+            </Box>
+          </section>
         )}
 
         {card.instructions && (
-          <Box>
-            <Text size="2" weight="medium" color="gray">
-              Instructions
-            </Text>
+          <section className={styles.cardDetailSectionBlock}>
+            <div className={styles.cardDetailSectionHeader}>
+              <Icon icon={ListChecks} size="sm" tone="muted" />
+              <Text size="2" weight="medium">
+                Instructions
+              </Text>
+            </div>
             <Box className={styles.cardDetailSection}>
               {onInternalLink ? (
                 <InternalLinkProvider
@@ -607,14 +672,17 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 </Markdown>
               )}
             </Box>
-          </Box>
+          </section>
         )}
 
         {card.final_report && (
-          <Box>
-            <Text size="2" weight="medium" color="gray">
-              Final Report
-            </Text>
+          <section className={styles.cardDetailSectionBlock}>
+            <div className={styles.cardDetailSectionHeader}>
+              <Icon icon={FileText} size="sm" tone="success" />
+              <Text size="2" weight="medium">
+                Final Report
+              </Text>
+            </div>
             <Box
               className={`${styles.cardDetailSection} ${styles.finalReportSection}`}
             >
@@ -622,23 +690,31 @@ const CardDetail: React.FC<CardDetailProps> = ({
                 {card.final_report}
               </Markdown>
             </Box>
-          </Box>
+          </section>
         )}
 
         {card.status_updates.length > 0 && (
-          <Box>
-            <Text size="2" weight="medium" color="gray">
-              Updates
-            </Text>
-            <Flex direction="column" gap="1" mt="1">
+          <section className={styles.cardDetailSectionBlock}>
+            <div className={styles.cardDetailSectionHeader}>
+              <Icon icon={ListChecks} size="sm" tone="muted" />
+              <Text size="2" weight="medium">
+                Updates
+              </Text>
+            </div>
+            <div className={`${styles.cardDetailUpdates} rf-stagger`}>
               {card.status_updates.map((update, i) => (
-                <Text key={i} size="1" color="gray">
-                  {new Date(update.timestamp).toLocaleString()}:{" "}
-                  {update.message}
-                </Text>
+                <div
+                  key={i}
+                  className={`${styles.cardDetailUpdate} rf-enter-rise`}
+                >
+                  <Text size="1" color="gray">
+                    {new Date(update.timestamp).toLocaleString()}
+                  </Text>
+                  <Text size="2">{update.message}</Text>
+                </div>
               ))}
-            </Flex>
-          </Box>
+            </div>
+          </section>
         )}
 
         <CardCommentsSection
@@ -647,12 +723,12 @@ const CardDetail: React.FC<CardDetailProps> = ({
           comments={card.comments ?? []}
         />
 
-        <Flex justify="end">
-          <Dialog.Close>
+        <div className={styles.cardDetailFooter}>
+          <Dialog.Close asChild>
             <Button variant="soft">Close</Button>
           </Dialog.Close>
-        </Flex>
-      </Flex>
+        </div>
+      </div>
     </Dialog.Content>
   );
 };
@@ -1506,12 +1582,12 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               </Text>
             </button>
             <Flex align="center" gap="2" className={styles.sectionHeaderMeta}>
-              <Badge size="1" color="gray" variant="soft">
+              <Badge tone="muted">
                 {plannerChats.length} planner
                 {plannerChats.length === 1 ? "" : "s"}
               </Badge>
               {agentChats.length > 0 && (
-                <Badge size="1" color="gray" variant="soft">
+                <Badge tone="muted">
                   {doneAgentChats.length}/{agentChats.length} agents
                 </Badge>
               )}
@@ -1549,7 +1625,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
       </CollapsePanel>
 
       <Box className={styles.chatSection}>
-        <Tabs.Root
+        <Tabs
           value={workspaceTab}
           onValueChange={setWorkspaceTab}
           className={styles.workspaceTabs}
@@ -1582,7 +1658,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
                 </Text>
               )}
             </button>
-            <Tabs.List size="1">
+            <Tabs.List
+              activeIndex={workspaceTabIndex(workspaceTab)}
+              className={styles.workspaceTabList}
+              itemCount={3}
+            >
               <Tabs.Trigger value="chat">Chat</Tabs.Trigger>
               <Tabs.Trigger value="memories">Memories</Tabs.Trigger>
               <Tabs.Trigger value="documents">Documents</Tabs.Trigger>
@@ -1631,10 +1711,10 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               </Box>
             )}
           </Box>
-        </Tabs.Root>
+        </Tabs>
       </Box>
 
-      <Dialog.Root
+      <Dialog
         open={Boolean(selectedCard)}
         onOpenChange={(open) => {
           if (!open) setSelectedCardId(null);
@@ -1655,7 +1735,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
             onDeleteWorktree={handleDeleteCardWorktree}
           />
         )}
-      </Dialog.Root>
+      </Dialog>
 
       <WorktreeDiffPanel
         open={Boolean(diffTarget)}
@@ -1687,7 +1767,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
         }
       />
 
-      <Dialog.Root
+      <Dialog
         open={Boolean(deleteTarget)}
         onOpenChange={(open) => {
           if (!open) {
@@ -1696,58 +1776,56 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           }
         }}
       >
-        <Dialog.Content maxWidth="420px">
-          <Dialog.Title>Delete worktree</Dialog.Title>
-          <Dialog.Description size="2" color="gray">
-            Delete or discard this task agent worktree from disk.
-          </Dialog.Description>
-          <Flex direction="column" gap="3" mt="3">
-            <Text size="2" weight="medium">
-              {deleteTarget?.worktree.label ?? "Worktree"}
-            </Text>
-            {deleteTarget?.worktree.referenceCount !== undefined &&
-              deleteTarget.worktree.referenceCount > 1 && (
-                <Text size="2" color="amber">
-                  This worktree is shared by{" "}
-                  {deleteTarget.worktree.referenceCount} references.
-                </Text>
-              )}
-            <Text as="label" size="2">
-              <Flex align="center" gap="2">
-                <Checkbox
-                  checked={deleteBranch}
-                  onCheckedChange={(checked) =>
-                    setDeleteBranch(checked === true)
-                  }
-                  disabled={deleteWorktreeState.isLoading}
-                />
-                Delete git branch too
-              </Flex>
-            </Text>
-          </Flex>
-          <Flex justify="end" gap="2" mt="4">
-            <Dialog.Close>
-              <Button
-                type="button"
-                variant="soft"
+        <Dialog.Content className={styles.deleteWorktreeDialog} maxWidth="420px">
+          <div className={styles.deleteWorktreeRoot}>
+            <Dialog.Title>Delete worktree</Dialog.Title>
+            <Dialog.Description>
+              Delete or discard this task agent worktree from disk.
+            </Dialog.Description>
+            <div className={styles.deleteWorktreeBody}>
+              <Text size="2" weight="medium">
+                {deleteTarget?.worktree.label ?? "Worktree"}
+              </Text>
+              {deleteTarget?.worktree.referenceCount !== undefined &&
+                deleteTarget.worktree.referenceCount > 1 && (
+                  <Text size="2" color="amber">
+                    This worktree is shared by{" "}
+                    {deleteTarget.worktree.referenceCount} references.
+                  </Text>
+                )}
+              <Checkbox
+                checked={deleteBranch}
+                onCheckedChange={(checked) => setDeleteBranch(checked === true)}
                 disabled={deleteWorktreeState.isLoading}
               >
-                Cancel
+                Delete git branch too
+              </Checkbox>
+            </div>
+            <div className={styles.deleteWorktreeActions}>
+              <Dialog.Close asChild>
+                <Button
+                  type="button"
+                  variant="soft"
+                  disabled={deleteWorktreeState.isLoading}
+                >
+                  Cancel
+                </Button>
+              </Dialog.Close>
+              <Button
+                type="button"
+                variant="danger"
+                disabled={!deleteTarget || deleteWorktreeState.isLoading}
+                loading={deleteWorktreeState.isLoading}
+                onClick={() => void handleConfirmDeleteCardWorktree()}
+              >
+                {deleteWorktreeState.isLoading
+                  ? "Deleting..."
+                  : "Delete worktree"}
               </Button>
-            </Dialog.Close>
-            <Button
-              type="button"
-              variant="danger"
-              disabled={!deleteTarget || deleteWorktreeState.isLoading}
-              onClick={() => void handleConfirmDeleteCardWorktree()}
-            >
-              {deleteWorktreeState.isLoading
-                ? "Deleting..."
-                : "Delete worktree"}
-            </Button>
-          </Flex>
+            </div>
+          </div>
         </Dialog.Content>
-      </Dialog.Root>
+      </Dialog>
 
       {notification && (
         <Box

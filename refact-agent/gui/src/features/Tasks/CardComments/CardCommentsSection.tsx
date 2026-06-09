@@ -1,18 +1,17 @@
 import React, { useState } from "react";
 import classNames from "classnames";
-import {
-  Box,
-  Flex,
-  Text,
-  Badge,
-  Button,
-  TextArea,
-  Tooltip,
-  Spinner,
-} from "@radix-ui/themes";
-import { FileTextIcon, PersonIcon } from "@radix-ui/react-icons";
+import { Box, Flex, Text } from "@radix-ui/themes";
+import { FileText, MessageCircle, User } from "lucide-react";
 import { AgentStatusDot } from "../AgentStatusDot";
 import { Markdown } from "../../../components/Markdown";
+import {
+  Badge,
+  Button,
+  Field,
+  FieldTextarea,
+  Icon,
+  Tooltip,
+} from "../../../components/ui";
 import {
   useAddCardCommentMutation,
   type CardComment,
@@ -64,29 +63,32 @@ const CommentItem: React.FC<CommentItemProps> = ({
 
   const roleIcon =
     comment.author_role === "planner" ? (
-      <Badge size="1" color="violet">
-        <FileTextIcon />
+      <Badge tone="accent">
+        <Icon icon={FileText} size="sm" tone="accent" />
       </Badge>
     ) : comment.author_role === "agents" ? (
       <AgentStatusDot status="doing" size="small" />
     ) : comment.author_role === "user" ? (
-      <Badge size="1" color="green">
-        <PersonIcon />
+      <Badge tone="success">
+        <Icon icon={User} size="sm" tone="success" />
       </Badge>
     ) : (
-      <Badge size="1" color="gray">
+      <Badge tone="muted">
         sys
       </Badge>
     );
 
   return (
     <Box
-      style={isReply ? { marginLeft: "var(--space-4)" } : undefined}
-      className={classNames(styles.commentItem, "rf-enter-rise")}
+      className={classNames(
+        styles.commentItem,
+        isReply && styles.commentReply,
+        "rf-enter-rise",
+      )}
     >
       <Flex align="center" gap="1" mb="1" wrap="wrap">
         {roleIcon}
-        <Badge size="1" variant="soft">
+        <Badge tone="muted">
           {comment.author_role}
         </Badge>
         <Text size="1" color="gray">
@@ -102,7 +104,7 @@ const CommentItem: React.FC<CommentItemProps> = ({
         <Markdown canHaveInteractiveElements={false}>{comment.body}</Markdown>
       </Box>
       <Flex justify="end">
-        <Button size="1" variant="ghost" onClick={onReply}>
+        <Button size="sm" variant="ghost" onClick={onReply}>
           Reply
         </Button>
       </Flex>
@@ -157,12 +159,13 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
   const threaded = threadComments(comments);
 
   return (
-    <Box>
-      <Flex justify="between" align="center">
-        <Text size="2" weight="medium" color="gray">
+    <section className={styles.commentsRoot}>
+      <div className={styles.commentsHeader}>
+        <Icon icon={MessageCircle} size="sm" tone="muted" />
+        <Text size="2" weight="medium">
           Comments ({comments.length})
         </Text>
-      </Flex>
+      </div>
 
       <Flex
         direction="column"
@@ -186,38 +189,40 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
         )}
       </Flex>
 
-      <Box mt="3" className={styles.composer}>
+      <Box className={styles.composer}>
         {replyTo && (
           <Flex align="center" gap="2" mb="1">
-            <Badge size="1" variant="soft">
+            <Badge tone="muted">
               Replying to {replyTo.slice(0, 8)}
             </Badge>
-            <Button size="1" variant="ghost" onClick={() => setReplyTo(null)}>
+            <Button size="sm" variant="ghost" onClick={() => setReplyTo(null)}>
               Cancel reply
             </Button>
           </Flex>
         )}
-        <TextArea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Add a comment..."
-          disabled={isSubmitting}
+        <Field
+          error={error}
+          label="Add a comment"
+          control={
+            <FieldTextarea
+              value={body}
+              onChange={setBody}
+              placeholder="Add a comment..."
+              disabled={isSubmitting}
+            />
+          }
         />
         <Flex justify="end" mt="1">
           <Button
-            size="1"
+            size="sm"
             disabled={body.trim().length === 0 || isSubmitting}
+            loading={isSubmitting}
             onClick={() => void handleSubmit()}
           >
-            {isSubmitting ? <Spinner size="1" /> : "Comment"}
+            Comment
           </Button>
         </Flex>
-        {error && (
-          <Text size="1" color="red" mt="1">
-            {error}
-          </Text>
-        )}
       </Box>
-    </Box>
+    </section>
   );
 };

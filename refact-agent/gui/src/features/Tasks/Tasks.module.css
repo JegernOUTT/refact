@@ -65,7 +65,7 @@
 
 .kanbanCard:hover {
   border-color: var(--rf-border-strong);
-  background: var(--rf-surface-2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 72%, white 4%);
 }
 
 .kanbanCardClickable {
@@ -106,21 +106,32 @@
   min-width: 0;
 }
 
-.agentBadgeButton {
+.agentBadgeAction {
   appearance: none;
   display: inline-flex;
   align-items: center;
   gap: var(--rf-space-1);
-  border: 0;
+  min-height: 18px;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  border: var(--rf-hairline) solid currentColor;
+  border-radius: var(--rf-radius-chip);
   background: transparent;
-  color: inherit;
+  color: var(--rf-color-accent);
   cursor: pointer;
-  font: inherit;
-  padding: 0;
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-1);
+  font-weight: 650;
+  line-height: 1;
 }
 
-.agentBadgeButton:hover {
-  color: var(--rf-color-accent);
+.agentBadgeAction:hover,
+.agentBadgeAction:focus-visible {
+  background: color-mix(in oklab, var(--rf-color-accent) 10%, transparent);
+}
+
+.agentBadgeAction:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-space-2xs);
 }
 
 .kanbanColumnHeader {
@@ -142,13 +153,6 @@
   line-height: var(--rf-line-height-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.inlineBadgeContent {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--rf-space-1);
-  min-width: 0;
 }
 
 @media (max-width: 680px) {
@@ -268,7 +272,7 @@
 
 .taskItem:hover {
   border-color: var(--rf-border-strong);
-  background: var(--rf-surface-2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 72%, white 4%);
 }
 
 .taskItemButton {
@@ -436,7 +440,7 @@
 
 .sectionHeaderActionButton:hover,
 .sectionHeaderActionButton:focus-visible {
-  background: var(--rf-surface-1);
+  background: color-mix(in oklab, var(--rf-surface-glass) 72%, white 4%);
   border-color: var(--rf-border-strong);
 }
 
@@ -465,6 +469,10 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.workspaceTabList {
+  flex: 0 1 min(360px, 46vw);
 }
 
 .workspaceTabContent {
@@ -557,7 +565,7 @@
 
 .panelItem:hover {
   border-color: var(--rf-border);
-  background: var(--rf-surface-1);
+  background: color-mix(in oklab, var(--rf-surface-glass) 68%, white 4%);
 }
 
 .panelItemSelected {
@@ -594,24 +602,133 @@
   white-space: nowrap;
 }
 
-.cardDetailSection {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  background: var(--rf-surface-glass);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-  padding: var(--rf-space-3);
-  margin-top: var(--rf-space-2);
-  max-height: min(240px, calc(100dvh - var(--rf-space-6) * 4));
-  overflow-y: auto;
+.cardDetailDialog {
+  --rf-overlay-max-width: min(720px, calc(100vw - 2 * var(--rf-space-3)));
+}
+
+.cardDetailRoot,
+.deleteWorktreeRoot {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.cardDetailHeader,
+.cardDetailTitleGroup,
+.cardDetailSectionHeader,
+.cardDetailActions,
+.cardDetailChipRow,
+.cardDetailFileList,
+.cardDetailFooter,
+.deleteWorktreeActions {
+  display: flex;
+  min-width: 0;
+}
+
+.cardDetailHeader {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+}
+
+.cardDetailTitleGroup,
+.cardDetailSectionHeader,
+.cardDetailChipRow,
+.cardDetailFileList,
+.cardDetailActions,
+.deleteWorktreeActions {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.cardDetailTitleGroup {
+  flex: 1;
 }
 
 .cardDetailTitle {
+  min-width: 0;
+  font-size: var(--rf-font-size-4);
+  line-height: var(--rf-line-height-tight);
+  overflow-wrap: anywhere;
+}
+
+.cardDetailMetaGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.cardDetailMetaItem,
+.cardDetailSectionBlock,
+.deleteWorktreeBody {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.cardDetailMetaLabel {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-font-size-1);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  line-height: var(--rf-line-height-tight);
+  text-transform: uppercase;
+}
+
+.cardDetailWorktreeBody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.cardDetailSection {
+  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
+  min-width: 0;
+  background: color-mix(in oklab, var(--rf-surface-glass) 58%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  padding: var(--rf-space-3);
+  max-height: min(240px, calc(100dvh - var(--rf-space-6) * 4));
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.cardDetailUpdates {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.cardDetailUpdate {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
   gap: var(--rf-space-1);
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
+}
+
+.cardDetailFooter,
+.deleteWorktreeActions {
+  justify-content: flex-end;
+}
+
+.deleteWorktreeDialog {
+  --rf-overlay-max-width: min(420px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
 @media (max-width: 680px) {
@@ -627,6 +744,18 @@
 
   .sectionHeaderMeta {
     min-width: 0;
+  }
+
+  .workspaceTabList {
+    flex-basis: min(100%, 320px);
+  }
+
+  .cardDetailHeader {
+    flex-direction: column;
+  }
+
+  .cardDetailMetaGrid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -644,7 +773,9 @@
   .kanbanColumn,
   .kanbanCard,
   .taskItem,
-  .cardDetailSection {
+  .cardDetailMetaItem,
+  .cardDetailSectionBlock,
+  .deleteWorktreeBody {
     backdrop-filter: none;
   }
 }
