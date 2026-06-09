@@ -41,12 +41,8 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
 }) => {
   const preserveScrollAnchor = useChatScrollAnchor();
   const prepareScrollAnchor = usePrepareChatScrollAnchor();
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
-    isOpen,
-    200,
-    animate,
-  );
-  const renderedOpen = animate ? isAnimatingOpen : isOpen;
+  const { shouldRender } = useDelayedUnmount(isOpen, 200, animate);
+  const shouldRenderBody = isOpen || shouldRender;
   const handleToggle = React.useCallback(() => {
     preserveScrollAnchor(onToggle);
   }, [onToggle, preserveScrollAnchor]);
@@ -76,7 +72,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
         status === "error" && styles.error,
         className,
       )}
-      open={renderedOpen}
+      open={isOpen}
       onPointerDownCapture={prepareScrollAnchor}
       onMouseDownCapture={prepareScrollAnchor}
       onKeyDownCapture={prepareScrollAnchor}
@@ -84,7 +80,9 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
       status={status}
       title={title}
     >
-      {shouldRender ? <div className={styles.content}>{children}</div> : null}
+      {shouldRenderBody ? (
+        <div className={styles.content}>{children}</div>
+      ) : null}
     </KitToolCard>
   );
 

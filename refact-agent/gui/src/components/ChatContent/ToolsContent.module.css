@@ -17,7 +17,7 @@
 
 .toolGroupBody {
   opacity: 0;
-  transform: translateY(calc(-1 * var(--rf-space-1))) translateZ(0);
+  transform: translateY(-8px) translateZ(0);
 }
 
 .toolGroupGrid[data-open="true"] .toolGroupBody {
@@ -30,10 +30,14 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .toolGroupGrid {
+    transition: grid-template-rows 170ms var(--rf-ease-entrance);
+  }
+
   .toolGroupBody {
     transition:
-      opacity var(--rf-dur-med) var(--rf-ease-standard),
-      transform var(--rf-dur-med) var(--rf-ease-standard);
+      opacity 170ms var(--rf-ease-entrance),
+      transform 170ms var(--rf-ease-entrance);
     will-change: opacity, transform;
   }
 
@@ -43,6 +47,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .toolGroupGrid,
   .toolUsageSummary,
   .toolGroupBody {
     transition: none;

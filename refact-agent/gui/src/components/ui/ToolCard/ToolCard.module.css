@@ -1,5 +1,8 @@
 .root {
-  --rf-toolcard-indent: calc(var(--rf-control-h-sm) + var(--rf-space-2));
+  --rf-toolcard-body-offset: calc(var(--rf-control-h-sm) + var(--rf-space-2));
+  --rf-toolcard-body-padding-block: var(--rf-space-2);
+  --rf-toolcard-body-padding-inline-start: var(--rf-toolcard-body-offset);
+  --rf-toolcard-motion-duration: 170ms;
 
   display: grid;
   gap: var(--rf-space-2);
@@ -97,7 +100,7 @@
 .bodyShell {
   min-width: 0;
   opacity: 0;
-  transform: translateY(calc(-1 * var(--rf-space-1))) translateZ(0);
+  transform: translateY(-8px) translateZ(0);
 }
 
 .root[data-open="true"] .bodyShell {
@@ -105,11 +108,17 @@
   transform: translateY(0) translateZ(0);
 }
 
+/*
+ * Canonical tool body contract: this outer body owns indentation and padding.
+ * Feature tool bodies add local structure, not competing outer padding shells.
+ */
 .body {
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2) 0 var(--rf-space-2) var(--rf-toolcard-indent);
+  padding: var(--rf-toolcard-body-padding-block) 0
+    var(--rf-toolcard-body-padding-block)
+    var(--rf-toolcard-body-padding-inline-start);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
@@ -119,10 +128,15 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .bodyGrid {
+    transition: grid-template-rows var(--rf-toolcard-motion-duration)
+      var(--rf-ease-entrance);
+  }
+
   .bodyShell {
     transition:
-      opacity var(--rf-dur-med) var(--rf-ease-standard),
-      transform var(--rf-dur-med) var(--rf-ease-standard);
+      opacity var(--rf-toolcard-motion-duration) var(--rf-ease-entrance),
+      transform var(--rf-toolcard-motion-duration) var(--rf-ease-entrance);
     will-change: opacity, transform;
   }
 
@@ -133,8 +147,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .chevron,
-  .bodyShell,
-  .body {
+  .bodyGrid,
+  .bodyShell {
     transition: none;
   }
 
