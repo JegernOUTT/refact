@@ -28,9 +28,9 @@
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   min-width: 0;
   max-width: 100%;
-  max-height: 300px;
+  max-height: var(--rf-toolbody-max-h, 300px);
   padding: var(--rf-space-2);
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: auto;
   color: var(--rf-color-muted);
   background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
@@ -41,13 +41,23 @@
   line-height: var(--rf-line);
 }
 
+.resultPanelCompact {
+  --rf-toolbody-max-h: 220px;
+}
+
+.resultPanelTall {
+  --rf-toolbody-max-h: 480px;
+}
+
 .resultList {
+  --rf-toolbody-list-max-h: var(--rf-toolbody-max-h, 300px);
+
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
   max-width: 100%;
-  max-height: 300px;
+  max-height: var(--rf-toolbody-list-max-h);
   overflow-y: auto;
   overflow-x: hidden;
 }
