@@ -34,6 +34,12 @@
   --rf-space-4: 16px;
   --rf-space-5: 22px;
   --rf-space-6: 32px;
+  --rf-panel-pad: var(--rf-space-3);
+  --rf-panel-pad-compact: var(--rf-space-2);
+  --rf-row-pad: var(--rf-space-2);
+  --rf-row-gap: var(--rf-space-1);
+  --rf-section-gap: var(--rf-space-3);
+  --rf-card-pad: var(--rf-panel-pad);
   --rf-text-1: 11.5px;
   --rf-text-2: 12.5px;
   --rf-text-3: 13.5px;

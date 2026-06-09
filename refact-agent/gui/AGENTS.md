@@ -352,9 +352,10 @@ Canonical spacing rhythm:
 
 - Full spacing scale: `--rf-space-2xs: 2px`, `--rf-space-1: 4px`, `--rf-space-xs: 6px`, `--rf-space-2: 8px`, `--rf-space-3: 12px`, `--rf-space-4: 16px`, `--rf-space-5: 22px`, `--rf-space-6: 32px`.
 
-- Panel/card inner padding uses `--rf-space-3`; compact panels use `--rf-space-2`.
-- Inter-card and section gaps use `--rf-space-3` or `--rf-space-4`.
-- Rows use `--rf-space-2` padding and `--rf-space-1` internal gap.
+- Semantic spacing tokens resolve to the `--rf-space-*` scale and are the preferred contract tokens for layout surfaces.
+- Panel/card inner padding uses `--rf-panel-pad`; compact panels use `--rf-panel-pad-compact`; card-specific APIs may use the `--rf-card-pad` alias.
+- Inter-card and section gaps use `--rf-section-gap`.
+- Rows use `--rf-row-pad` padding and `--rf-row-gap` internal gap.
 - Tight label/value stacks use `--rf-space-2xs`.
 - Chip and badge padding uses `var(--rf-space-2xs) var(--rf-space-xs)`; pill chips use `var(--rf-space-1) var(--rf-space-2)`.
 - Header title-to-subtitle gaps use `--rf-space-2xs` or `--rf-space-1`; header-to-body gaps use `--rf-space-2`.
