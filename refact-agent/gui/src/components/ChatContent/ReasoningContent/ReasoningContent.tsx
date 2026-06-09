@@ -5,13 +5,12 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import classNames from "classnames";
 import { LoaderCircle, Zap } from "lucide-react";
 import { Icon } from "../../ui";
 
 import { Markdown } from "../../Markdown";
 import { useStreamingMarkdown } from "../../Markdown/useStreamingMarkdown";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
+import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
 import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
@@ -156,9 +155,9 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
     }
   }, [isStreaming]);
 
-  const handleToggle = useCallback(() => {
+  const handleOpenChange = useCallback((open: boolean) => {
     userToggledRef.current = true;
-    setIsOpen((prev) => !prev);
+    setIsOpen(open);
   }, []);
 
   const summaryText = isActivelyThinking
@@ -187,58 +186,35 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
     setBuddyCrashHotSlot("reasoning", null);
   }, [deferredContent, formattedContent, renderedOpen, isStreaming]);
 
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(renderedOpen);
+  const headerIcon = isActivelyThinking ? (
+    <span className={styles.spinner}>
+      <Icon icon={LoaderCircle} size="sm" tone="accent" />
+    </span>
+  ) : (
+    <Icon icon={Zap} size="sm" tone="accent" />
+  );
 
   return (
-    <div className={styles.card}>
-      <div
-        className={classNames(
-          styles.header,
-          isActivelyThinking && "rf-active-pulse",
-          isActivelyThinking && styles.thinking,
-        )}
-        onClick={handleToggle}
-      >
-        <span className={styles.iconWrapper}>
-          {isActivelyThinking ? (
-            <span className={styles.spinner}>
-              <Icon icon={LoaderCircle} size="sm" tone="accent" />
-            </span>
-          ) : (
-            <Icon icon={Zap} size="sm" tone="accent" />
-          )}
-        </span>
-        <span className={styles.summary}>{summaryText}</span>
-      </div>
-
-      {shouldRender && (
-        <div
-          className={classNames(
-            "rf-expand-grid",
-            renderedOpen && isAnimatingOpen && "is-open",
-            styles.contentWrapper,
-            renderedOpen && isAnimatingOpen && styles.contentWrapperOpen,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <div
-              ref={contentRef}
-              className={styles.content}
-              onScroll={handleScroll}
-            >
-              <div className={styles.markdown}>
-                <Markdown
-                  canHaveInteractiveElements={true}
-                  onCopyClick={onCopyClick}
-                  isStreaming={isStreaming}
-                >
-                  {deferredContent ?? formattedContent}
-                </Markdown>
-              </div>
-            </div>
-          </div>
+    <AnimatedCollapsible
+      className={styles.card}
+      header={<span className={styles.summary}>{summaryText}</span>}
+      icon={headerIcon}
+      open={renderedOpen}
+      onOpenChange={handleOpenChange}
+      status={isActivelyThinking ? "streaming" : "idle"}
+      variant="compact"
+    >
+      <div ref={contentRef} className={styles.content} onScroll={handleScroll}>
+        <div className={styles.markdown}>
+          <Markdown
+            canHaveInteractiveElements={true}
+            onCopyClick={onCopyClick}
+            isStreaming={isStreaming}
+          >
+            {deferredContent ?? formattedContent}
+          </Markdown>
         </div>
-      )}
-    </div>
+      </div>
+    </AnimatedCollapsible>
   );
 };

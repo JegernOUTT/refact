@@ -1,4 +1,7 @@
 .list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
   margin-top: 0;
   padding-top: var(--rf-space-2);
   border-top: 1px solid var(--rf-border);
@@ -8,23 +11,11 @@
   overflow: hidden;
 }
 
-.header {
-  padding: var(--rf-space-1) 0;
-  cursor: pointer;
-  user-select: none;
-  min-height: 24px;
-  transition: filter 0.15s ease;
-}
-
-.header:hover {
-  filter: brightness(1.3);
-}
-
 .icon {
+  flex-shrink: 0;
   width: 12px;
   height: 12px;
   color: var(--rf-color-faint);
-  flex-shrink: 0;
 }
 
 .filename {
@@ -38,22 +29,9 @@
   text-decoration: underline;
 }
 
-.contentWrapper {
-  overflow: hidden;
-  opacity: 0;
-}
-
-.contentWrapperOpen {
-  opacity: 1;
-}
-
-.contentInner {
-  overflow: hidden;
-}
-
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  padding: var(--rf-space-1) 0;
   max-height: 200px;
+  padding: var(--rf-space-1) 0;
   overflow-y: auto;
 }

@@ -59,6 +59,9 @@ describe("ReasoningContent", () => {
       store,
     );
 
+    const trigger = screen.getByRole("button", { name: /thinking/i });
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
     expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
   });
@@ -72,21 +75,26 @@ describe("ReasoningContent", () => {
 
     renderReasoning({ stateKey: "reasoning:2" }, store);
 
+    const trigger = screen.getByRole("button", { name: /thought/i });
+
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("Thought")).toBeInTheDocument();
     expect(
       screen.queryByText("Reasoning details are visible"),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Thought"));
+    fireEvent.click(trigger);
 
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
-    expect(screen.getByText("Reasoning details are visible").closest(".is-open"))
-      .toBeTruthy();
   });
 
   it("shows a header for historical reasoning blocks", () => {
     renderReasoning();
 
+    const trigger = screen.getByRole("button", { name: /thought/i });
+
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("Thought")).toBeInTheDocument();
   });
 
@@ -111,19 +119,24 @@ describe("ReasoningContent", () => {
     act(() => {
       vi.advanceTimersByTime(500);
     });
+
+    const trigger = screen.getByRole("button", { name: /thought for/i });
+
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(/Thought for/u)).toBeInTheDocument();
+    expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
+
     act(() => {
-      vi.advanceTimersByTime(150);
+      vi.advanceTimersByTime(250);
     });
 
-    expect(screen.getByText(/Thought for/u)).toBeInTheDocument();
     expect(
       screen.queryByText("Reasoning details are visible"),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText(/Thought for/u));
+    fireEvent.click(trigger);
 
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Reasoning details are visible")).toBeInTheDocument();
-    expect(screen.getByText("Reasoning details are visible").closest(".is-open"))
-      .toBeTruthy();
   });
 });

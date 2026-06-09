@@ -2,27 +2,11 @@
   overflow: hidden;
 }
 
-.header {
-  min-height: var(--rf-control-h-sm);
-  padding: var(--rf-space-1) 0;
-  cursor: pointer;
-  user-select: none;
-  color: var(--rf-color-muted);
-  transition: filter 0.15s ease;
-}
-
-.header:hover {
-  filter: brightness(1.3);
-}
-
 .icon {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: var(--rf-control-h-sm);
-  min-width: var(--rf-control-h-sm);
-  height: var(--rf-control-h-sm);
 }
 
 .summary {
@@ -30,20 +14,6 @@
   color: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.contentWrapper {
-  overflow: hidden;
-  opacity: 0;
-  transform: translateZ(0);
-}
-
-.contentWrapperOpen {
-  opacity: 1;
-}
-
-.contentInner {
-  overflow: hidden;
 }
 
 .content {
@@ -77,17 +47,6 @@
 
 .fileItem {
   overflow: hidden;
-}
-
-.fileHeader {
-  padding: var(--rf-space-1) 0;
-  cursor: pointer;
-  color: var(--rf-color-muted);
-  transition: color var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.fileHeader:hover {
-  color: var(--rf-color-fg);
 }
 
 .fileName {

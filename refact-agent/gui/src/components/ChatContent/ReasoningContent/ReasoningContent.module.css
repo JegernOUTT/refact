@@ -2,74 +2,20 @@
   overflow: hidden;
 }
 
-.header {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  min-width: 0;
-  min-height: var(--rf-control-h-sm);
-  padding: var(--rf-space-1) 0;
-  cursor: pointer;
-  user-select: none;
-  transition: filter 0.15s ease;
-}
-
-.header:hover {
-  filter: brightness(1.3);
-}
-
-.iconWrapper {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: var(--rf-control-h-sm);
-  height: var(--rf-icon-md);
-}
-
-.iconWrapper svg {
-  width: 14px;
-  height: 14px;
-}
-
 .summary {
-  flex: 1 1 auto;
   min-width: 0;
-  color: inherit;
   overflow: hidden;
+  color: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.contentWrapper {
-  overflow: hidden;
-  transform: translateZ(0);
-  will-change: grid-template-rows, opacity;
-  opacity: 0;
-}
-
-.contentWrapperOpen {
-  opacity: 1;
-}
-
-.contentWrapper:not(.contentWrapperOpen) {
-  will-change: auto;
-}
-
-.contentInner {
-  overflow: hidden;
-}
-
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  max-height: 400px;
   padding: var(--rf-space-2) 0 var(--rf-space-1);
   padding-left: calc(var(--rf-control-h-sm) + var(--rf-space-2));
-  max-height: 400px;
   overflow-y: auto;
-}
-
-.thinking .summary {
-  color: var(--rf-color-muted);
 }
 
 .spinner {
