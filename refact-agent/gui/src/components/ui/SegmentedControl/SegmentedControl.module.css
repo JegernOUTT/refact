@@ -1,24 +1,26 @@
 .root {
   position: relative;
   display: grid;
+  box-sizing: border-box;
   grid-auto-columns: minmax(0, 1fr);
   grid-auto-flow: column;
   min-width: 0;
-  padding: var(--rf-space-1);
+  padding: var(--rf-space-2xs);
   background: var(--rf-surface-1);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
+  border-radius: var(--rf-radius-ctl);
 }
 
 .indicator {
   position: absolute;
-  top: var(--rf-space-1);
-  bottom: var(--rf-space-1);
-  left: var(--rf-space-1);
-  width: calc((100% - 2 * var(--rf-space-1)) / var(--rf-segment-count, 1));
-  background: var(--rf-color-accent-soft);
-  border: var(--rf-hairline) solid var(--rf-border-strong);
+  top: var(--rf-space-2xs);
+  bottom: var(--rf-space-2xs);
+  left: var(--rf-space-2xs);
+  width: calc((100% - 2 * var(--rf-space-2xs)) / var(--rf-segment-count, 1));
+  background: var(--rf-surface-glass);
+  border: 0;
   border-radius: var(--rf-radius-ctl);
+  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-color-accent);
   pointer-events: none;
   transform: translateX(calc(var(--rf-segment-index, 0) * 100%));
 }
@@ -57,13 +59,13 @@
 
 .size-sm .label {
   min-height: var(--rf-control-h-sm);
-  padding: 0 var(--rf-space-2);
+  padding: 0 var(--rf-space-xs);
   font-size: var(--rf-text-1);
 }
 
 .size-md .label {
-  min-height: var(--rf-control-h);
-  padding: 0 var(--rf-space-3);
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
 }
 
 .input:checked + .label {

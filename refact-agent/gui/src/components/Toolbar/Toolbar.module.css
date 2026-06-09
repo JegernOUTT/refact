@@ -169,18 +169,6 @@
   background: var(--rf-surface-2);
 }
 
-.tabButtonActive::after,
-.tabButton[data-state="active"]::after {
-  content: "";
-  position: absolute;
-  right: var(--rf-space-3);
-  bottom: 0;
-  left: var(--rf-space-3);
-  height: 2px;
-  background: var(--rf-color-accent);
-  border-radius: var(--rf-radius-pill);
-}
-
 .tabStatus {
   display: flex;
   align-items: center;
