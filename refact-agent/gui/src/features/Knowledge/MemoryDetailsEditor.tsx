@@ -46,16 +46,17 @@ export function MemoryDetailsEditor({
   });
   const [isDirty, setIsDirty] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
-  const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [tagsInput, setTagsInput] = useState("");
 
   const [updateMemory, { isLoading: isSaving }] = useUpdateMemoryMutation();
-  const [deleteMemory] = useDeleteMemoryMutation();
+  const [deleteMemory, { isLoading: isDeleting }] = useDeleteMemoryMutation();
 
   useEffect(() => {
     if (!memory) {
       setDraft({ title: "", content: "", tags: [], kind: "code" });
       setIsDirty(false);
+      setErrorMessage(null);
       setTagsInput("");
     } else {
       setDraft({
@@ -65,6 +66,7 @@ export function MemoryDetailsEditor({
         kind: memory.kind ?? "code",
       });
       setIsDirty(false);
+      setErrorMessage(null);
       setTagsInput(memory.tags.join(", "));
     }
   }, [memory]);
@@ -75,6 +77,7 @@ export function MemoryDetailsEditor({
   ) => {
     setDraft((prev) => ({ ...prev, [field]: value }));
     setIsDirty(true);
+    setErrorMessage(null);
   };
 
   const parseTags = (input: string): string[] => {
@@ -97,8 +100,17 @@ export function MemoryDetailsEditor({
   };
 
   const handleSave = () => {
-    if (!memory?.file_path || !draft.title || !draft.content) return;
+    if (
+      !memory?.file_path ||
+      !draft.title ||
+      !draft.content ||
+      isSaving ||
+      isDeleting
+    ) {
+      return;
+    }
 
+    setErrorMessage(null);
     void updateMemory({
       file_path: memory.file_path,
       title: draft.title,
@@ -112,12 +124,15 @@ export function MemoryDetailsEditor({
         setIsDirty(false);
         onMemoryUpdated?.();
       })
-      .catch((_error: unknown) => undefined);
+      .catch(() => {
+        setErrorMessage("Failed to save memory");
+      });
   };
 
   const handleDelete = (archive: boolean) => {
-    if (!memory?.file_path) return;
+    if (!memory?.file_path || isDeleting || isSaving) return;
 
+    setErrorMessage(null);
     void deleteMemory({
       file_path: memory.file_path,
       archive,
@@ -127,12 +142,9 @@ export function MemoryDetailsEditor({
         setIsDeleteOpen(false);
         onMemoryDeleted?.();
       })
-      .catch((_error: unknown) => undefined);
-  };
-
-  const handleDiscardChanges = () => {
-    setShowDiscardDialog(false);
-    setIsDirty(false);
+      .catch(() => {
+        setErrorMessage("Failed to delete memory");
+      });
   };
 
   if (!memory) {
@@ -241,11 +253,17 @@ export function MemoryDetailsEditor({
         </FieldStack>
       </div>
 
+      {errorMessage ? (
+        <p className={styles.warning} role="alert">
+          {errorMessage}
+        </p>
+      ) : null}
+
       <div className={styles.actions}>
         <Button
           className={styles.actionButton}
           onClick={handleSave}
-          disabled={!canSave || isSaving}
+          disabled={!canSave || isSaving || isDeleting}
           loading={isSaving}
           variant="primary"
         >
@@ -255,7 +273,8 @@ export function MemoryDetailsEditor({
           className={styles.actionButton}
           variant="danger"
           onClick={() => setIsDeleteOpen(true)}
-          disabled={!canDelete}
+          disabled={!canDelete || isSaving || isDeleting}
+          loading={isDeleting}
         >
           Delete
         </Button>
@@ -268,13 +287,25 @@ export function MemoryDetailsEditor({
             <div className={styles.dialogBody}>
               <p>What would you like to do?</p>
               <ButtonGroup className={styles.dialogActions}>
-                <Button variant="ghost" onClick={() => setIsDeleteOpen(false)}>
+                <Button
+                  variant="ghost"
+                  onClick={() => setIsDeleteOpen(false)}
+                  disabled={isDeleting}
+                >
                   Cancel
                 </Button>
-                <Button variant="soft" onClick={() => handleDelete(true)}>
+                <Button
+                  variant="soft"
+                  onClick={() => handleDelete(true)}
+                  loading={isDeleting}
+                >
                   Archive
                 </Button>
-                <Button variant="danger" onClick={() => handleDelete(false)}>
+                <Button
+                  variant="danger"
+                  onClick={() => handleDelete(false)}
+                  loading={isDeleting}
+                >
                   Permanently Delete
                 </Button>
               </ButtonGroup>
@@ -283,27 +314,6 @@ export function MemoryDetailsEditor({
         </Dialog>
       ) : null}
 
-      {showDiscardDialog ? (
-        <Dialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog}>
-          <Dialog.Content maxWidth="420px">
-            <Dialog.Title>Unsaved Changes</Dialog.Title>
-            <div className={styles.dialogBody}>
-              <p>You have unsaved changes. Discard them?</p>
-              <ButtonGroup className={styles.dialogActions}>
-                <Button
-                  variant="ghost"
-                  onClick={() => setShowDiscardDialog(false)}
-                >
-                  Cancel
-                </Button>
-                <Button variant="danger" onClick={handleDiscardChanges}>
-                  Discard
-                </Button>
-              </ButtonGroup>
-            </div>
-          </Dialog.Content>
-        </Dialog>
-      ) : null}
     </Surface>
   );
 }
