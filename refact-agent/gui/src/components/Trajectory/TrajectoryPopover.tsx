@@ -1,14 +1,7 @@
 import React from "react";
-import {
-  Box,
-  Button,
-  Checkbox,
-  Flex,
-  Popover,
-  Spinner,
-  Text,
-} from "../LongTailPrimitives";
-import { SegmentedControl } from "../ui";
+import { Box, Flex, Popover, Text } from "../LongTailPrimitives";
+import { Checkbox } from "../Checkbox";
+import { Button, Tabs } from "../ui";
 import { useTrajectoryOps } from "../../hooks/useTrajectoryOps";
 import styles from "./TrajectoryPopover.module.css";
 
@@ -49,6 +42,10 @@ export const TrajectoryPopoverContent: React.FC<
     clearPreviews();
   };
 
+  const activeTabIndex = TAB_OPTIONS.findIndex(
+    (tab) => tab.value === activeTab,
+  );
+
   const handleApplyTransformClick = async () => {
     const success = await handleApplyTransform();
     if (success) {
@@ -69,86 +66,80 @@ export const TrajectoryPopoverContent: React.FC<
       align="end"
       sideOffset={8}
       className={styles.popoverContent}
+      maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
+      maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
     >
-      <SegmentedControl
-        className={styles.tabStrip}
-        size="sm"
-        options={TAB_OPTIONS}
-        value={activeTab}
-        onValueChange={handleTabChange}
-      />
+      <Tabs value={activeTab} onValueChange={handleTabChange}>
+        <Tabs.List
+          activeIndex={activeTabIndex < 0 ? 0 : activeTabIndex}
+          itemCount={TAB_OPTIONS.length}
+          className={styles.tabStrip}
+        >
+          {TAB_OPTIONS.map((tab) => (
+            <Tabs.Trigger key={tab.value} value={tab.value}>
+              {tab.label}
+            </Tabs.Trigger>
+          ))}
+        </Tabs.List>
 
-      {activeTab === "compress" && (
-        <>
+        <Tabs.Content value="compress">
           <div className={styles.optionsSection}>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={transformOptions.drop_all_context}
-                  onCheckedChange={(checked) => {
-                    const enabled = checked;
-                    updateTransformOption("drop_all_context", enabled);
-                    if (enabled) {
-                      updateTransformOption(
-                        "dedup_and_compress_context",
-                        false,
-                      );
-                    }
-                  }}
-                />
-                Drop all context files
-              </Flex>
-            </Text>
-            <Text
-              as="label"
-              size="2"
-              color={transformOptions.drop_all_context ? "gray" : undefined}
-              style={{ marginLeft: "24px" }}
+            <Checkbox
+              checked={transformOptions.drop_all_context}
+              onCheckedChange={(checked) => {
+                const enabled = checked === true;
+                updateTransformOption("drop_all_context", enabled);
+                if (enabled) {
+                  updateTransformOption("dedup_and_compress_context", false);
+                }
+              }}
             >
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={transformOptions.dedup_and_compress_context}
-                  disabled={transformOptions.drop_all_context}
-                  onCheckedChange={(checked) =>
-                    updateTransformOption("dedup_and_compress_context", checked)
-                  }
-                />
+              Drop all context files
+            </Checkbox>
+            <div className={styles.nestedOption}>
+              <Checkbox
+                checked={transformOptions.dedup_and_compress_context}
+                disabled={transformOptions.drop_all_context}
+                onCheckedChange={(checked) =>
+                  updateTransformOption(
+                    "dedup_and_compress_context",
+                    checked === true,
+                  )
+                }
+              >
                 Deduplicate context files
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={transformOptions.compress_non_agentic_tools}
-                  onCheckedChange={(checked) =>
-                    updateTransformOption("compress_non_agentic_tools", checked)
-                  }
-                />
-                Truncate tool results
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={transformOptions.drop_all_memories}
-                  onCheckedChange={(checked) =>
-                    updateTransformOption("drop_all_memories", checked)
-                  }
-                />
-                Drop all memories
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={transformOptions.drop_project_information}
-                  onCheckedChange={(checked) =>
-                    updateTransformOption("drop_project_information", checked)
-                  }
-                />
-                Drop project information
-              </Flex>
-            </Text>
+              </Checkbox>
+            </div>
+            <Checkbox
+              checked={transformOptions.compress_non_agentic_tools}
+              onCheckedChange={(checked) =>
+                updateTransformOption(
+                  "compress_non_agentic_tools",
+                  checked === true,
+                )
+              }
+            >
+              Truncate tool results
+            </Checkbox>
+            <Checkbox
+              checked={transformOptions.drop_all_memories}
+              onCheckedChange={(checked) =>
+                updateTransformOption("drop_all_memories", checked === true)
+              }
+            >
+              Drop all memories
+            </Checkbox>
+            <Checkbox
+              checked={transformOptions.drop_project_information}
+              onCheckedChange={(checked) =>
+                updateTransformOption(
+                  "drop_project_information",
+                  checked === true,
+                )
+              }
+            >
+              Drop project information
+            </Checkbox>
           </div>
 
           {transformPreview && (
@@ -180,86 +171,78 @@ export const TrajectoryPopoverContent: React.FC<
           <Flex className={styles.buttonRow}>
             <Button
               variant="soft"
+              size="sm"
+              loading={isPreviewingTransform}
               onClick={() => {
                 void handlePreviewTransform();
               }}
-              disabled={isPreviewingTransform}
             >
-              {isPreviewingTransform ? <Spinner size="1" /> : "Preview"}
+              Preview
             </Button>
             <Button
+              size="sm"
+              loading={isApplyingTransform}
               onClick={() => {
                 void handleApplyTransformClick();
               }}
-              disabled={!transformPreview || isApplyingTransform}
+              disabled={!transformPreview}
             >
-              {isApplyingTransform ? <Spinner size="1" /> : "Apply"}
+              Apply
             </Button>
           </Flex>
-        </>
-      )}
+        </Tabs.Content>
 
-      {activeTab === "handoff" && (
-        <>
+        <Tabs.Content value="handoff">
           <div className={styles.optionsSection}>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={handoffOptions.include_last_user_plus}
-                  onCheckedChange={(checked) =>
-                    updateHandoffOption("include_last_user_plus", checked)
-                  }
-                />
-                Include last user message + responses
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={handoffOptions.include_all_opened_context}
-                  onCheckedChange={(checked) =>
-                    updateHandoffOption("include_all_opened_context", checked)
-                  }
-                />
-                Include all opened files
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={handoffOptions.include_agentic_tools}
-                  onCheckedChange={(checked) =>
-                    updateHandoffOption("include_agentic_tools", checked)
-                  }
-                />
-                Include research, subagent & planning results
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={handoffOptions.llm_summary_for_excluded}
-                  onCheckedChange={(checked) =>
-                    updateHandoffOption("llm_summary_for_excluded", checked)
-                  }
-                />
-                Generate summary
-              </Flex>
-            </Text>
-            <Text as="label" size="2">
-              <Flex gap="2" align="center">
-                <Checkbox
-                  checked={handoffOptions.include_all_user_assistant_only}
-                  onCheckedChange={(checked) =>
-                    updateHandoffOption(
-                      "include_all_user_assistant_only",
-                      checked,
-                    )
-                  }
-                />
-                Include all user messages + responses
-              </Flex>
-            </Text>
+            <Checkbox
+              checked={handoffOptions.include_last_user_plus}
+              onCheckedChange={(checked) =>
+                updateHandoffOption("include_last_user_plus", checked === true)
+              }
+            >
+              Include last user message + responses
+            </Checkbox>
+            <Checkbox
+              checked={handoffOptions.include_all_opened_context}
+              onCheckedChange={(checked) =>
+                updateHandoffOption(
+                  "include_all_opened_context",
+                  checked === true,
+                )
+              }
+            >
+              Include all opened files
+            </Checkbox>
+            <Checkbox
+              checked={handoffOptions.include_agentic_tools}
+              onCheckedChange={(checked) =>
+                updateHandoffOption("include_agentic_tools", checked === true)
+              }
+            >
+              Include research, subagent & planning results
+            </Checkbox>
+            <Checkbox
+              checked={handoffOptions.llm_summary_for_excluded}
+              onCheckedChange={(checked) =>
+                updateHandoffOption(
+                  "llm_summary_for_excluded",
+                  checked === true,
+                )
+              }
+            >
+              Generate summary
+            </Checkbox>
+            <Checkbox
+              checked={handoffOptions.include_all_user_assistant_only}
+              onCheckedChange={(checked) =>
+                updateHandoffOption(
+                  "include_all_user_assistant_only",
+                  checked === true,
+                )
+              }
+            >
+              Include all user messages + responses
+            </Checkbox>
           </div>
 
           {handoffPreview && (
@@ -291,24 +274,27 @@ export const TrajectoryPopoverContent: React.FC<
           <Flex className={styles.buttonRow}>
             <Button
               variant="soft"
+              size="sm"
+              loading={isPreviewingHandoff}
               onClick={() => {
                 void handlePreviewHandoff();
               }}
-              disabled={isPreviewingHandoff}
             >
-              {isPreviewingHandoff ? <Spinner size="1" /> : "Preview"}
+              Preview
             </Button>
             <Button
+              size="sm"
+              loading={isApplyingHandoff}
               onClick={() => {
                 void handleApplyHandoffClick();
               }}
-              disabled={!handoffPreview || isApplyingHandoff}
+              disabled={!handoffPreview}
             >
-              {isApplyingHandoff ? <Spinner size="1" /> : "Create"}
+              Create
             </Button>
           </Flex>
-        </>
-      )}
+        </Tabs.Content>
+      </Tabs>
     </Popover.Content>
   );
 };

@@ -19,7 +19,11 @@
 }
 
 .tokenDetailsPopover {
-  --rf-overlay-popover-min: 280px;
+  --rf-overlay-popover-min: 0;
+
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .tokenDetailsTabsList {

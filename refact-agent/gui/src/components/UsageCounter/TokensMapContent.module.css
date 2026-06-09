@@ -1,16 +1,20 @@
 .container {
-  min-width: 280px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .segmentBar {
   width: 100%;
+  min-width: 0;
   height: 12px;
-  border-radius: var(--radius-2);
   overflow: hidden;
   background-color: var(--rf-surface-2);
+  border-radius: var(--radius-2);
 }
 
 .segment {
+  min-width: 0;
   height: 100%;
   transition: width 0.2s ease;
 }
@@ -27,27 +31,66 @@
   border-radius: var(--radius-2);
 }
 
-.categoryRow {
-  padding: 2px 0;
+.categoryRow,
+.itemRow,
+.headerRow,
+.footerRow {
+  min-width: 0;
+}
+
+.categoryLabelGroup {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.categoryValueGroup {
+  min-width: 0;
+  max-width: 60%;
+  flex: 0 1 auto;
+  justify-content: flex-end;
 }
 
 .colorDot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
   flex-shrink: 0;
+  border-radius: 50%;
 }
 
-.percentage {
-  min-width: 50px;
+.categoryLabel,
+.itemLabel,
+.footerLabel,
+.footerValue,
+.percentage,
+.tokenValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.categoryLabel,
+.itemLabel,
+.footerLabel {
+  flex: 1 1 auto;
+}
+
+.percentage,
+.tokenValue,
+.footerValue {
+  flex: 0 1 auto;
+  max-width: 100%;
+  font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
 .itemLabel {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 180px;
   direction: rtl;
   text-align: left;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .segment {
+    transition: none;
+  }
 }

@@ -1,58 +1,79 @@
 .popoverContent {
-  min-width: 320px;
-  max-width: 400px;
+  --rf-overlay-popover-min: 0;
 
-  /* Force GPU compositing to fix JCEF repaint issues in JetBrains IDEs */
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+
   transform: translateZ(0);
   will-change: transform;
 }
 
 .tabStrip {
+  --rf-control-h: var(--rf-control-h-sm);
+
   width: 100%;
-  margin-bottom: var(--rf-space-3);
+}
+
+.tabStrip [role="tab"] {
+  padding-inline: var(--rf-space-2);
 }
 
 .optionsSection {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
   margin-bottom: var(--rf-space-4);
 }
 
+.nestedOption {
+  min-width: 0;
+  padding-left: var(--rf-space-5);
+}
+
 .previewSection {
-  background: var(--rf-surface-1);
-  border-radius: var(--rf-radius-chip);
+  min-width: 0;
   padding: var(--rf-space-3);
   margin-bottom: var(--rf-space-3);
+  overflow-wrap: anywhere;
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
 }
 
 .previewStats {
   display: flex;
+  min-width: 0;
   justify-content: space-between;
   margin-bottom: var(--rf-space-2);
 }
 
 .actionsList {
-  margin: 0;
+  min-width: 0;
   padding-left: var(--rf-space-4);
+  margin: var(--rf-space-2) 0 0;
 }
 
 .actionsListItem {
-  font-size: var(--rf-text-1);
+  min-width: 0;
   color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
 }
 
 .buttonRow {
   display: flex;
-  gap: var(--rf-space-2);
+  min-width: 0;
   justify-content: flex-end;
+  gap: var(--rf-space-2);
 }
 
 .errorCallout {
+  padding: var(--rf-space-2);
+  margin-bottom: var(--rf-space-3);
   background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
   border: var(--rf-hairline) solid
     color-mix(in oklab, var(--rf-color-danger) 40%, transparent);
   border-radius: var(--rf-radius-chip);
-  padding: var(--rf-space-2);
-  margin-bottom: var(--rf-space-3);
 }

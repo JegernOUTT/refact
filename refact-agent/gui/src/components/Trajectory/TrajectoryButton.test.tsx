@@ -26,10 +26,10 @@ describe("TrajectoryButton", () => {
 
     const popover = screen.getByRole("dialog");
     expect(
-      within(popover).getByRole("radio", { name: "Compress in-place" }),
+      within(popover).getByRole("tab", { name: "Compress in-place" }),
     ).toBeInTheDocument();
     expect(
-      within(popover).getByRole("radio", { name: "Handoff" }),
+      within(popover).getByRole("tab", { name: "Handoff" }),
     ).toBeInTheDocument();
     expect(
       within(popover).getByRole("checkbox", { name: "Drop all context files" }),

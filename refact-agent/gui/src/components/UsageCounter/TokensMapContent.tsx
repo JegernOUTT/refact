@@ -59,7 +59,7 @@ const CategoryRow: React.FC<CategoryRowProps> = ({ segment }) => {
       gap="2"
       className={styles.categoryRow}
     >
-      <Flex align="center" gap="2">
+      <Flex align="center" gap="2" className={styles.categoryLabelGroup}>
         <Box
           className={styles.colorDot}
           style={{
@@ -67,10 +67,12 @@ const CategoryRow: React.FC<CategoryRowProps> = ({ segment }) => {
               CATEGORY_COLORS[segment.category] || "var(--rf-color-muted)",
           }}
         />
-        <Text size="1">{segment.label}</Text>
+        <Text size="1" className={styles.categoryLabel}>
+          {segment.label}
+        </Text>
       </Flex>
-      <Flex align="center" gap="2">
-        <Text size="1" color="gray">
+      <Flex align="center" gap="2" className={styles.categoryValueGroup}>
+        <Text size="1" color="gray" className={styles.tokenValue}>
           {formatNumberToFixed(segment.tokens)}
         </Text>
         <Text size="1" color="gray" className={styles.percentage}>
@@ -128,16 +130,22 @@ export const TokensMapContent: React.FC<TokensMapContentProps> = ({
 
   return (
     <Flex direction="column" gap="2" p="1" className={styles.container}>
-      <Flex align="center" justify="between" width="100%">
-        <Flex align="center" gap="1">
-          <Text size="2" weight="bold">
+      <Flex
+        align="center"
+        justify="between"
+        width="100%"
+        gap="2"
+        className={styles.headerRow}
+      >
+        <Flex align="center" gap="1" className={styles.categoryLabelGroup}>
+          <Text size="2" weight="bold" className={styles.categoryLabel}>
             Token breakdown
           </Text>
           <HoverCard.Root>
             <HoverCard.Trigger asChild>
               <InfoCircledIcon
                 color="var(--rf-color-muted)"
-                style={{ cursor: "help" }}
+                style={{ cursor: "help", flexShrink: 0 }}
               />
             </HoverCard.Trigger>
             <HoverCard.Content size="1" side="top" style={{ maxWidth: 280 }}>
@@ -152,7 +160,7 @@ export const TokensMapContent: React.FC<TokensMapContentProps> = ({
             </HoverCard.Content>
           </HoverCard.Root>
         </Flex>
-        <Text size="1" color="gray">
+        <Text size="1" color="gray" className={styles.percentage}>
           {usedPercentage}% used
         </Text>
       </Flex>
@@ -182,11 +190,17 @@ export const TokensMapContent: React.FC<TokensMapContentProps> = ({
             </Text>
             <Flex direction="column" gap="1">
               {topItems.map((item, index) => (
-                <Flex key={index} align="center" justify="between" gap="2">
+                <Flex
+                  key={index}
+                  align="center"
+                  justify="between"
+                  gap="2"
+                  className={styles.itemRow}
+                >
                   <Text size="1" color="gray" className={styles.itemLabel}>
                     {item.label}
                   </Text>
-                  <Text size="1" color="gray">
+                  <Text size="1" color="gray" className={styles.tokenValue}>
                     {formatNumberToFixed(item.tokens)}
                   </Text>
                 </Flex>
@@ -200,12 +214,14 @@ export const TokensMapContent: React.FC<TokensMapContentProps> = ({
         align="center"
         justify="between"
         pt="1"
+        gap="2"
+        className={styles.footerRow}
         style={{ borderTop: "1px solid var(--rf-border)" }}
       >
-        <Text size="1" color="gray">
+        <Text size="1" color="gray" className={styles.footerLabel}>
           Total / Max
         </Text>
-        <Text size="1">
+        <Text size="1" className={styles.footerValue}>
           {formatNumberToFixed(tokenMap.total_prompt_tokens)} /{" "}
           {formatNumberToFixed(tokenMap.max_context_tokens)}
         </Text>

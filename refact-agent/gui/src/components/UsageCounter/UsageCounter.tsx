@@ -321,7 +321,8 @@ const DefaultHoverTriggerContent: React.FC<{
           size="1"
           side="top"
           align="center"
-          minWidth="280px"
+          maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
+          maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
           className={styles.tokenDetailsPopover}
         >
           <Tabs value={tokenDetailsTab} onValueChange={setTokenDetailsTab}>
