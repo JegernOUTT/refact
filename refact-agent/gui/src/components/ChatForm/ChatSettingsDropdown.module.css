@@ -63,8 +63,8 @@
 }
 
 .content {
-  width: min(440px, calc(100vw - 2 * var(--rf-space-3)));
-  max-width: min(440px, calc(100vw - 2 * var(--rf-space-3)));
+  width: min(440px, calc(100vw - var(--rf-space-4)));
+  max-width: min(440px, calc(100vw - var(--rf-space-4)));
 }
 
 .settingsLayout {
@@ -73,7 +73,7 @@
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: var(--rf-space-3);
+  gap: var(--rf-space-2);
   overflow: hidden;
 }
 
@@ -92,8 +92,10 @@
 }
 
 .section {
+  display: grid;
   min-width: 0;
-  padding: var(--rf-space-3) 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
 }
 
 .section:first-child {
@@ -113,6 +115,47 @@
   text-transform: uppercase;
 }
 
+.settingsRow,
+.sliderTrack,
+.effortRow,
+.effortOptions,
+.reasoningLabel {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.settingsRow,
+.effortRow {
+  justify-content: space-between;
+}
+
+.reasoningLabel {
+  flex: 1 1 auto;
+}
+
+.sliderTrack {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.sliderTrackWithReset {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
+.effortOptions {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.budgetSection {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
 .capabilityIcons {
   display: inline-flex;
   min-width: 0;
@@ -122,7 +165,7 @@
 
 .sliderContainer {
   min-width: 0;
-  padding: 0 var(--rf-space-1);
+  padding: 0;
 }
 
 .slider {

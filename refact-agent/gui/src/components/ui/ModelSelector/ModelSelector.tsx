@@ -368,7 +368,7 @@ export function ModelSelector({
       <Popover.Content
         align="start"
         maxHeight="min(520px, calc(100dvh - var(--rf-space-6)))"
-        maxWidth="420px"
+        maxWidth="min(420px, calc(100vw - var(--rf-space-4)))"
         scrollable={false}
       >
         <ModelSelectorList

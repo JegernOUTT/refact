@@ -225,7 +225,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
           side="top"
           align="start"
           sideOffset={8}
-          maxWidth="360px"
+          maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
           maxHeight="min(420px, calc(100dvh - var(--rf-space-5)))"
         >
           <div className={styles.modeList} ref={modeListRef}>

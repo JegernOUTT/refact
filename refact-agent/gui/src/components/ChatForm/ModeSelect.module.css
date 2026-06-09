@@ -79,6 +79,8 @@
 
 .content {
   padding: 0;
+  width: min(360px, calc(100vw - var(--rf-space-4)));
+  max-width: min(360px, calc(100vw - var(--rf-space-4)));
 }
 
 .modeList {
@@ -88,7 +90,7 @@
   flex-direction: column;
   max-height: min(360px, calc(100dvh - var(--rf-space-6)));
   overflow-y: auto;
-  padding: var(--rf-space-1);
+  padding: 0;
 }
 
 .separator {
@@ -107,7 +109,7 @@
   color: var(--rf-color-fg);
   background: transparent;
   border: 0;
-  border-radius: var(--rf-radius-ctl);
+  border-radius: 0;
   cursor: pointer;
   font-family: var(--rf-font-ui);
   text-align: left;
@@ -118,7 +120,7 @@
 
 .item {
   flex-direction: column;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-2);
   padding: var(--rf-space-2);
 }
 
@@ -208,7 +210,7 @@
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-2);
 }
 
 .chip {

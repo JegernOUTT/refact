@@ -397,7 +397,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
         align="end"
         className={styles.content}
         maxHeight="min(640px, calc(100dvh - 2 * var(--rf-space-5)))"
-        maxWidth="440px"
+        maxWidth="min(440px, calc(100vw - var(--rf-space-4)))"
         scrollable={false}
         side="top"
         sideOffset={8}
@@ -420,7 +420,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
             {selectedModelDetail && (
               <>
                 <div className={styles.section}>
-                  <Flex justify="between" align="center" mb="2">
+                  <div className={styles.settingsRow}>
                     <Text
                       size="1"
                       color="gray"
@@ -432,11 +432,13 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                     <Text size="1" weight="medium">
                       {displayMaxTokens ?? `${defaultMaxTokens} (default)`}
                     </Text>
-                  </Flex>
-                  <Flex
-                    align="center"
-                    gap="2"
-                    className={styles.sliderContainer}
+                  </div>
+                  <div
+                    className={classNames(
+                      styles.sliderContainer,
+                      styles.sliderTrack,
+                      threadMaxTokens != null && styles.sliderTrackWithReset,
+                    )}
                   >
                     <Text size="1" color="gray">
                       1K
@@ -468,7 +470,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                         <Cross1Icon />
                       </button>
                     )}
-                  </Flex>
+                  </div>
                 </div>
                 {supportsBoostReasoning && <Separator size="4" />}
               </>
@@ -476,22 +478,22 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
 
             {supportsBoostReasoning && (
               <div className={styles.section}>
-                <Flex align="center" justify="between" gap="3">
-                  <Flex align="center" gap="1">
+                <div className={styles.settingsRow}>
+                  <div className={styles.reasoningLabel}>
                     <Text size="1">
                       <ReasoningIcon />
                     </Text>
                     <Text size="1" weight="medium">
                       Reasoning
                     </Text>
-                  </Flex>
+                  </div>
                   <Switch
                     checked={isBoostReasoningEnabled}
                     onCheckedChange={handleThinkingToggle}
                     disabled={thinkingDisabled}
                     className="rf-pressable"
                   />
-                </Flex>
+                </div>
 
                 {isStartedChat && (
                   <div className={styles.reasoningWarning}>
@@ -504,11 +506,11 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                   <>
                     {selectedModelDetail.reasoningEffortOptions &&
                       selectedModelDetail.reasoningEffortOptions.length > 0 && (
-                        <Flex align="center" justify="between" gap="2" mt="2">
+                        <div className={styles.effortRow}>
                           <Text size="1" color="gray">
                             Effort
                           </Text>
-                          <Flex gap="1">
+                          <div className={styles.effortOptions}>
                             {selectedModelDetail.reasoningEffortOptions.map(
                               (level) => (
                                 <button
@@ -534,20 +536,20 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                                 </button>
                               ),
                             )}
-                          </Flex>
-                        </Flex>
+                          </div>
+                        </div>
                       )}
                     {selectedModelDetail.supportsThinkingBudget && (
-                      <Flex direction="column" gap="1" mt="2">
-                        <Flex align="center" justify="between">
+                      <div className={styles.budgetSection}>
+                        <div className={styles.settingsRow}>
                           <Text size="1" color="gray">
                             Thinking tokens
                           </Text>
                           <Text size="1" weight="medium">
                             {displayThinkingBudget ?? 16384}
                           </Text>
-                        </Flex>
-                        <Flex align="center" gap="2">
+                        </div>
+                        <div className={styles.sliderTrack}>
                           <Text size="1" color="gray">
                             1K
                           </Text>
@@ -570,8 +572,8 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                           <Text size="1" color="gray">
                             32K
                           </Text>
-                        </Flex>
-                      </Flex>
+                        </div>
+                      </div>
                     )}
                   </>
                 )}

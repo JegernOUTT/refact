@@ -1,7 +1,7 @@
 .container {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-3);
+  gap: var(--rf-space-2);
 }
 
 .sliderRow,
@@ -67,6 +67,13 @@
 
 .segmented {
   width: min(100%, 360px);
+}
+
+.reasoningHeader,
+.effortRow,
+.sliderHeader,
+.sliderTrack {
+  padding: 0;
 }
 
 @media (width <= 640px) {
