@@ -35,14 +35,25 @@ const getDefaultValue = ({
   f_type_raw: string;
 }): string | number | boolean | Record<string, string> | undefined => {
   if (values && fieldKey in values) {
-    return values[fieldKey]?.toString();
+    const value = values[fieldKey];
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      return value;
+    }
+    if (isDictionary(value)) {
+      return value;
+    }
+    return undefined;
   }
 
   switch (f_type_raw) {
     case "int":
       return Number(field.f_default);
     case "bool":
-      return Boolean(field.f_default);
+      return toBooleanFieldValue(field.f_default);
     case "tool_parameters":
     case "output_filter":
       return JSON.stringify(field.f_default);
@@ -73,6 +84,12 @@ type CommonFieldProps = {
   placeholder?: string;
 };
 
+const toBooleanFieldValue = (value: unknown): boolean => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value.toLowerCase() === "true";
+  return false;
+};
+
 const FieldContent: FC<{
   f_type: string;
   commonProps: CommonFieldProps;
@@ -82,10 +99,12 @@ const FieldContent: FC<{
 }> = ({ f_type, commonProps, values, fieldKey, onChange }) => {
   switch (f_type) {
     case "bool": {
+      const value = toBooleanFieldValue(commonProps.value);
       return (
         <CustomBoolField
           {...commonProps}
-          value={Boolean(commonProps.value ?? values?.[fieldKey] ?? false)}
+          key={`${fieldKey}-${value}`}
+          value={value}
           onChange={(value) => onChange(fieldKey, value)}
         />
       );

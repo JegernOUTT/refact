@@ -192,10 +192,9 @@ describe("MCPToolsList", () => {
     expect(screen.getByText("No tools available")).toBeInTheDocument();
   });
 
-  test("shows toggle switch for each tool", () => {
+  test("does not render non-functional tool toggles", () => {
     render(<MCPToolsList tools={tools} />);
-    const switches = screen.getAllByRole("switch");
-    expect(switches).toHaveLength(2);
+    expect(screen.queryByRole("switch")).toBeNull();
   });
 
   test("expands schema when show schema clicked", async () => {

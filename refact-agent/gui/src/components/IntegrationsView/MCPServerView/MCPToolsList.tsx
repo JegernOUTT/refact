@@ -1,12 +1,8 @@
 import React, { useState } from "react";
 import classNames from "classnames";
-import {
-  Lock,
-  RotateCcw,
-  TriangleAlert,
-} from "lucide-react";
+import { Lock, RotateCcw, TriangleAlert } from "lucide-react";
 import type { MCPToolInfo } from "../../../services/refact/mcpServerInfo";
-import { Badge, Flex, Icon, Surface, Switch, Text } from "../../ui";
+import { Badge, Flex, Icon, Surface, Text } from "../../ui";
 import styles from "./MCPToolsList.module.css";
 
 type MCPToolsListProps = {
@@ -39,7 +35,6 @@ const AnnotationBadges: React.FC<{
 };
 
 const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
-  const [enabled, setEnabled] = useState(true);
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -50,11 +45,6 @@ const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
       variant="plain"
     >
       <Flex align="start" gap="3">
-        <Switch
-          checked={enabled}
-          onCheckedChange={setEnabled}
-          aria-label={`Toggle ${tool.name}`}
-        />
         <Flex className={styles.toolBody} direction="column" gap="1">
           <Flex align="center" gap="2" wrap="wrap">
             <Text size="2" weight="medium">
