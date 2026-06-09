@@ -1,16 +1,11 @@
 .badge {
   display: inline-flex;
   max-width: 100%;
-  min-height: 18px;
   align-items: center;
-  gap: var(--rf-space-1);
-  padding: var(--rf-space-2xs) var(--rf-space-xs);
-  border: var(--rf-hairline) solid currentColor;
+  border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-chip);
-  background: transparent;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
-  font-size: var(--rf-text-1);
   font-weight: 650;
   line-height: 1;
   vertical-align: middle;
@@ -19,20 +14,85 @@
 .badge > svg {
   display: block;
   flex: 0 0 auto;
-  width: var(--rf-icon-sm);
-  height: var(--rf-icon-sm);
   line-height: 0;
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .badge {
     transition:
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      background var(--rf-dur-fast) var(--rf-ease-standard),
       color var(--rf-dur-fast) var(--rf-ease-standard),
       transform var(--rf-dur-fast) var(--rf-ease-standard);
   }
 
-  .badge:hover {
+  .interactive:hover {
     transform: translateY(-1px);
+  }
+}
+
+.size-xs {
+  min-height: 16px;
+  gap: var(--rf-space-2xs);
+  padding: 0 var(--rf-space-1);
+  font-size: var(--rf-text-1);
+}
+
+.size-xs > svg {
+  width: var(--rf-icon-xs, 12px);
+  height: var(--rf-icon-xs, 12px);
+}
+
+.size-sm {
+  min-height: 18px;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  font-size: var(--rf-text-1);
+}
+
+.size-sm > svg {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+}
+
+.size-md {
+  min-height: 22px;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  font-size: var(--rf-text-2);
+}
+
+.size-md > svg {
+  width: var(--rf-icon-md, var(--rf-icon-sm));
+  height: var(--rf-icon-md, var(--rf-icon-sm));
+}
+
+.variant-soft {
+  border-color: transparent;
+  background: var(--rf-surface-1);
+}
+
+@supports (background: color-mix(in oklab, #000 12%, transparent)) {
+  .variant-soft {
+    background: color-mix(in oklab, currentColor 12%, transparent);
+  }
+}
+
+.variant-outline {
+  border-color: currentColor;
+  background: transparent;
+}
+
+.variant-glass {
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .variant-glass {
+    backdrop-filter: none;
   }
 }
 
