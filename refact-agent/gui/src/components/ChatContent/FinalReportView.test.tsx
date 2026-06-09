@@ -184,24 +184,39 @@ describe("FinalReportView", () => {
   });
 
   it("keeps verification output tails expandable", () => {
-    const { container } = render(
-      <FinalReportView content={structuredPayload} />,
-    );
-    const details = screen
-      .getByText("npm run test -- FinalReportView --run")
-      .closest("details");
+    const { container } = render(<FinalReportView content={structuredPayload} />);
+    const toggle = screen.getByRole("button", {
+      name: /npm run test -- FinalReportView --run/u,
+    });
 
-    expect(details).not.toBeNull();
-    expect(details).not.toHaveAttribute("open");
-    const summary = details?.querySelector("summary");
-    expect(summary).not.toBeNull();
-    if (!summary) throw new Error("missing verification summary");
-    fireEvent.click(summary);
-    expect(details).toHaveAttribute("open");
+    expect(container.querySelector("details")).not.toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("test passed")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("test passed")).toBeInTheDocument();
-    fireEvent.click(summary);
-    expect(details).not.toHaveAttribute("open");
-    expect(container.querySelector("details")).toBe(details);
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("renders risks and assumptions as animated disclosure buttons", () => {
+    render(<FinalReportView content={structuredPayload} />);
+
+    const risks = screen.getByRole("button", { name: /Risks \(1\)/u });
+    const assumptions = screen.getByRole("button", {
+      name: /Assumptions \(1\)/u,
+    });
+
+    expect(risks).toHaveAttribute("aria-expanded", "false");
+    expect(assumptions).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(risks);
+    expect(risks).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByText("Renderer only handles the current structured schema."),
+    ).toBeInTheDocument();
   });
 
   it("renders agent_finish reports inside a ToolCard wrapper", () => {

@@ -68,7 +68,7 @@
 
 .agentCard {
   min-width: 0;
-  padding: var(--rf-space-3);
+  padding: var(--rf-space-2) 0;
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
@@ -86,6 +86,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--rf-space-2);
+  padding-inline: var(--rf-space-2);
 }
 
 .cardTitleRow,
@@ -158,6 +159,7 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--rf-space-2);
   margin-top: var(--rf-space-2);
+  padding-inline: var(--rf-space-2);
 }
 
 .cellValue {
@@ -169,13 +171,32 @@
 .actions {
   justify-content: flex-end;
   margin-top: var(--rf-space-2);
+  padding-inline: var(--rf-space-2);
+}
+
+.detailsGrid {
+  margin-top: var(--rf-space-2);
+  pointer-events: none;
+}
+
+.detailsGrid[data-open="true"] {
+  pointer-events: auto;
+}
+
+.detailsShell {
+  opacity: 0;
+  transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
+}
+
+.detailsGrid[data-open="true"] .detailsShell {
+  opacity: 1;
+  transform: translateY(0) translateZ(0);
 }
 
 .details {
   display: grid;
   gap: var(--rf-space-2);
-  margin-top: var(--rf-space-2);
-  padding: var(--rf-space-2) 0 0;
+  padding: var(--rf-space-2) var(--rf-space-2) 0;
   border-top: var(--rf-hairline) solid var(--rf-border);
   white-space: pre-wrap;
   word-break: break-word;
@@ -220,6 +241,26 @@
 .dialogActions {
   justify-content: flex-end;
   margin-top: var(--rf-space-3);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .detailsShell {
+    transition:
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
+    will-change: opacity, transform;
+  }
+
+  .detailsGrid:not([data-open="true"]) .detailsShell {
+    will-change: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detailsShell {
+    transition: none;
+    transform: none;
+  }
 }
 
 @media (max-width: 360px) {

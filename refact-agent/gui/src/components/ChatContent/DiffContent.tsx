@@ -212,7 +212,7 @@ export const DiffContent: React.FC<{
           <Text weight="light" size="1">
             <DiffTitle diffs={diffs} />
           </Text>
-          <Chevron open={open} />
+          <Chevron open={open} className={styles.diffChevron} />
         </Flex>
       </Collapsible.Trigger>
       <Collapsible.Content forceMount asChild>

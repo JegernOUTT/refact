@@ -36,6 +36,10 @@ import {
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "./useStoredOpen";
 import {
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../shared/useDelayedUnmount";
+import {
   DEFAULT_CANCEL_REASON,
   STATUS_TABS,
   countAgentAlerts,
@@ -177,9 +181,15 @@ function AgentRowCard({
   onCancel: (row: AgentStatusRow) => void;
 }) {
   const disabled = actionsDisabled || isSubmitting;
+  const detailsId = React.useId();
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
+    isExpanded,
+    COLLAPSE_ANIMATION_MS,
+  );
+  const shouldRenderDetails = isExpanded || shouldRender;
 
   return (
-    <article className={classNames(styles.agentCard, "rf-enter")}>
+    <article className={classNames(styles.agentCard, "rf-enter-rise")}>
       <div className={styles.agentCardHeader}>
         <div className={styles.agentCardMain}>
           <div className={styles.cardTitleRow}>
@@ -195,13 +205,19 @@ function AgentRowCard({
               pulse={row.state === "running"}
             />
             <span
-              className={classNames(styles.stateText, stateClass(row.state))}
+              className={classNames(
+                styles.stateText,
+                stateClass(row.state),
+                row.state === "running" && "rf-status-pulse",
+              )}
             >
               {row.stateText}
             </span>
           </div>
         </div>
         <IconButton
+          aria-controls={detailsId}
+          aria-expanded={isExpanded}
           aria-label={`Toggle details ${row.cardId}`}
           icon={ClipboardList}
           size="sm"
@@ -260,24 +276,32 @@ function AgentRowCard({
         />
       </div>
 
-      {isExpanded && (
-        <div className={classNames(styles.details, "rf-expand-grid")}>
-          <div className={styles.detailBlock}>
-            <span className={styles.detailLabel}>Last status update</span>
-            <div className={styles.detailValue}>
-              {renderDetailValue(
-                row.lastStatusUpdate,
-                "Not included in compact output.",
-              )}
-            </div>
-          </div>
-          <div className={styles.detailBlock}>
-            <span className={styles.detailLabel}>Final report excerpt</span>
-            <div className={styles.detailValue}>
-              {renderDetailValue(
-                row.finalReport ? truncateText(row.finalReport, 300) : null,
-                "No final report in this output.",
-              )}
+      {shouldRenderDetails && (
+        <div
+          className={classNames("rf-expand-grid", styles.detailsGrid)}
+          data-open={isAnimatingOpen}
+          id={detailsId}
+        >
+          <div className={styles.detailsShell}>
+            <div className={styles.details}>
+              <div className={styles.detailBlock}>
+                <span className={styles.detailLabel}>Last status update</span>
+                <div className={styles.detailValue}>
+                  {renderDetailValue(
+                    row.lastStatusUpdate,
+                    "Not included in compact output.",
+                  )}
+                </div>
+              </div>
+              <div className={styles.detailBlock}>
+                <span className={styles.detailLabel}>Final report excerpt</span>
+                <div className={styles.detailValue}>
+                  {renderDetailValue(
+                    row.finalReport ? truncateText(row.finalReport, 300) : null,
+                    "No final report in this output.",
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </div>

@@ -296,6 +296,10 @@
   color: var(--rf-color-fg);
 }
 
+.diffChevron {
+  transition: transform var(--rf-collapse-duration) var(--rf-ease-entrance);
+}
+
 .diffContentGrid {
   pointer-events: none;
 }
@@ -306,7 +310,7 @@
 
 .diffContentBody {
   opacity: 0;
-  transform: translateY(calc(-1 * var(--rf-space-1))) translateZ(0);
+  transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
 }
 
 .diffContentGrid[data-open="true"] .diffContentBody {
@@ -317,8 +321,8 @@
 @media (prefers-reduced-motion: no-preference) {
   .diffContentBody {
     transition:
-      opacity var(--rf-dur-med) var(--rf-ease-standard),
-      transform var(--rf-dur-med) var(--rf-ease-standard);
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
     will-change: opacity, transform;
   }
 

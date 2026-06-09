@@ -3,6 +3,7 @@ import classNames from "classnames";
 import { CheckCircle2, CircleX } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
 import { Badge, Icon } from "../ui";
+import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import styles from "./FinalReportView.module.css";
 
 type VerificationResult = {
@@ -148,21 +149,56 @@ const TextDetails: React.FC<{ title: string; items: string[] }> = ({
   items,
 }) =>
   items.length > 0 ? (
-    <details className={styles.details}>
-      <summary>
-        {title} ({items.length})
-      </summary>
+    <AnimatedCollapsible
+      className={styles.details}
+      defaultOpen={false}
+      header={
+        <span className={styles.collapsibleTitle}>
+          {title} ({items.length})
+        </span>
+      }
+      variant="compact"
+    >
       <ul className={styles.list}>
         {items.map((item) => (
           <li key={item}>{item}</li>
         ))}
       </ul>
-    </details>
+    </AnimatedCollapsible>
   ) : (
     <Section title={title}>
       <span className={styles.none}>None</span>
     </Section>
   );
+
+const VerificationDetails: React.FC<{ item: VerificationResult }> = ({
+  item,
+}) => (
+  <AnimatedCollapsible
+    className={styles.verificationItem}
+    defaultOpen={false}
+    header={
+      <span className={styles.verificationHeader}>
+        <Icon
+          icon={item.passed ? CheckCircle2 : CircleX}
+          size="sm"
+          tone={item.passed ? "success" : "danger"}
+        />
+        <code>{item.command}</code>
+        {item.exit_code !== undefined && item.exit_code !== null && (
+          <span className={styles.exitCode}>({item.exit_code})</span>
+        )}
+      </span>
+    }
+    variant="compact"
+  >
+    {item.output_tail && (
+      <ShikiCodeBlock showLineNumbers={false}>
+        {item.output_tail}
+      </ShikiCodeBlock>
+    )}
+  </AnimatedCollapsible>
+);
 
 export const FinalReportView: React.FC<FinalReportViewProps> = ({
   content,
@@ -223,27 +259,10 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
         {report.verification.length > 0 ? (
           <div>
             {report.verification.map((item) => (
-              <details
+              <VerificationDetails
                 key={`${item.command}:${item.exit_code ?? ""}`}
-                className={styles.verificationItem}
-              >
-                <summary className={styles.verificationHeader}>
-                  <Icon
-                    icon={item.passed ? CheckCircle2 : CircleX}
-                    size="sm"
-                    tone={item.passed ? "success" : "danger"}
-                  />
-                  <code>{item.command}</code>
-                  {item.exit_code !== undefined && item.exit_code !== null && (
-                    <span className={styles.exitCode}>({item.exit_code})</span>
-                  )}
-                </summary>
-                {item.output_tail && (
-                  <ShikiCodeBlock showLineNumbers={false}>
-                    {item.output_tail}
-                  </ShikiCodeBlock>
-                )}
-              </details>
+                item={item}
+              />
             ))}
           </div>
         ) : (

@@ -12,8 +12,14 @@
 }
 
 .header,
-.verificationHeader,
 .followupHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.verificationHeader {
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
@@ -49,11 +55,14 @@
 }
 
 .sectionTitle,
-.details summary {
-  margin-bottom: var(--rf-space-1);
+.collapsibleTitle {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   font-weight: 650;
+}
+
+.sectionTitle {
+  margin-bottom: var(--rf-space-1);
 }
 
 .markdown,
