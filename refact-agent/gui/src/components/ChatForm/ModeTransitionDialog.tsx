@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from "react";
-import { Dialog, Flex, Text, Button, Callout, Badge } from "@radix-ui/themes";
-import { Spinner } from "../ui";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
+import { Flex, Text, Button, Badge } from "@radix-ui/themes";
+import { Dialog, Spinner } from "../ui";
+import { Callout } from "../Callout";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
 import { trajectoriesApi } from "../../services/refact/trajectories";
 import {
@@ -207,91 +207,94 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   const phaseInfo = phase ? TRANSITION_PHASES[phase] : null;
 
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Content
-        maxWidth="500px"
-        className={styles.dialogContent}
-        {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
-      >
-        <Dialog.Title>
-          <Flex align="center" gap="2">
-            <Text>{isSelf ? "Restart Mode" : "Switch Mode"}</Text>
-            {isSelf ? (
-              <Badge color="green">
-                {displayTargetModeTitle || displayTargetMode}
-              </Badge>
-            ) : (
-              <>
-                <Badge color="gray">{displayCurrentMode}</Badge>
-                <Text color="gray">→</Text>
-                <Badge color="blue">
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <Dialog.Content maxWidth="500px" className={styles.dialogContent}>
+        <Flex
+          direction="column"
+          gap="3"
+          {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
+        >
+          <Dialog.Title>
+            <Flex align="center" gap="2">
+              <Text>{isSelf ? "Restart Mode" : "Switch Mode"}</Text>
+              {isSelf ? (
+                <Badge color="green">
                   {displayTargetModeTitle || displayTargetMode}
                 </Badge>
-              </>
-            )}
-          </Flex>
-        </Dialog.Title>
-
-        <Dialog.Description size="2" color="gray">
-          {isSelf
-            ? "The assistant will analyze your conversation and create a fresh start with preserved context."
-            : "The assistant will analyze your conversation and preserve relevant context for the new mode."}
-        </Dialog.Description>
-
-        {error && (
-          <Callout.Root color="red" className={styles.callout}>
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>{error}</Callout.Text>
-          </Callout.Root>
-        )}
-
-        {phaseInfo && (
-          <Flex direction="column" gap="3" className={styles.loadingContainer}>
-            <Flex align="center" justify="center" gap="2">
-              <Spinner label="Processing" />
-              <Text color="gray" role="status" aria-live="polite">
-                {phaseInfo.label}
-              </Text>
+              ) : (
+                <>
+                  <Badge color="gray">{displayCurrentMode}</Badge>
+                  <Text color="gray">→</Text>
+                  <Badge color="blue">
+                    {displayTargetModeTitle || displayTargetMode}
+                  </Badge>
+                </>
+              )}
             </Flex>
-            <div
-              className={styles.progressTrack}
-              role="progressbar"
-              aria-label={isSelf ? "Restart progress" : "Switch progress"}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={phaseInfo.progress}
-            >
-              <div
-                className={styles.progressFill}
-                style={{ width: `${phaseInfo.progress}%` }}
-              />
-            </div>
-          </Flex>
-        )}
+          </Dialog.Title>
 
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray" disabled={isBusy}>
-              Cancel
+          <Dialog.Description>
+            {isSelf
+              ? "The assistant will analyze your conversation and create a fresh start with preserved context."
+              : "The assistant will analyze your conversation and preserve relevant context for the new mode."}
+          </Dialog.Description>
+
+          {error && (
+            <Callout type="error" preventClose className={styles.callout}>
+              {error}
+            </Callout>
+          )}
+
+          {phaseInfo && (
+            <Flex
+              direction="column"
+              gap="3"
+              className={styles.loadingContainer}
+            >
+              <Flex align="center" justify="center" gap="2">
+                <Spinner label="Processing" />
+                <Text color="gray" role="status" aria-live="polite">
+                  {phaseInfo.label}
+                </Text>
+              </Flex>
+              <div
+                className={styles.progressTrack}
+                role="progressbar"
+                aria-label={isSelf ? "Restart progress" : "Switch progress"}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={phaseInfo.progress}
+              >
+                <div
+                  className={styles.progressFill}
+                  style={{ width: `${phaseInfo.progress}%` }}
+                />
+              </div>
+            </Flex>
+          )}
+
+          <Flex gap="3" mt="4" justify="end">
+            <Dialog.Close asChild>
+              <Button variant="soft" color="gray" disabled={isBusy}>
+                Cancel
+              </Button>
+            </Dialog.Close>
+            <Button onClick={() => void handleApply()} disabled={isBusy}>
+              {isBusy ? (
+                <>
+                  <Spinner size="sm" />
+                  {isSelf ? "Restarting..." : "Switching..."}
+                </>
+              ) : isSelf ? (
+                "Restart Mode"
+              ) : (
+                "Switch Mode"
+              )}
             </Button>
-          </Dialog.Close>
-          <Button onClick={() => void handleApply()} disabled={isBusy}>
-            {isBusy ? (
-              <>
-                <Spinner size="sm" />
-                {isSelf ? "Restarting..." : "Switching..."}
-              </>
-            ) : isSelf ? (
-              "Restart Mode"
-            ) : (
-              "Switch Mode"
-            )}
-          </Button>
+          </Flex>
         </Flex>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 

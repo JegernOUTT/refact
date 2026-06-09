@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from "react";
-import { Dialog, Flex, Text, Button, Callout, Badge } from "@radix-ui/themes";
-import { Spinner } from "../ui";
-import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
+import { Flex, Text, Button, Badge } from "@radix-ui/themes";
+import { Dialog, Spinner } from "../ui";
+import { Callout } from "../Callout";
 import {
   createChatWithId,
   requestSseRefresh,
@@ -218,63 +218,60 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
       : "Creating planner...";
 
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-      <Dialog.Content
-        maxWidth="500px"
-        className={styles.dialogContent}
-        {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
-      >
-        <Dialog.Title>
-          <Flex align="center" gap="2">
-            <Text>{title}</Text>
-            <Badge color="blue">task_planner</Badge>
-          </Flex>
-        </Dialog.Title>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <Dialog.Content maxWidth="500px" className={styles.dialogContent}>
+        <Flex
+          direction="column"
+          gap="3"
+          {...dialogNonInteractiveCloseHandlers(() => handleOpenChange(false))}
+        >
+          <Dialog.Title>
+            <Flex align="center" gap="2">
+              <Text>{title}</Text>
+              <Badge color="blue">task_planner</Badge>
+            </Flex>
+          </Dialog.Title>
 
-        <Dialog.Description size="2" color="gray">
-          {description}
-        </Dialog.Description>
+          <Dialog.Description>{description}</Dialog.Description>
 
-        {error && (
-          <Callout.Root color="red" className={styles.callout}>
-            <Callout.Icon>
-              <ExclamationTriangleIcon />
-            </Callout.Icon>
-            <Callout.Text>{error}</Callout.Text>
-          </Callout.Root>
-        )}
+          {error && (
+            <Callout type="error" preventClose className={styles.callout}>
+              {error}
+            </Callout>
+          )}
 
-        {isLoading && (
-          <Flex
-            align="center"
-            justify="center"
-            gap="2"
-            className={styles.loadingContainer}
-          >
-            <Spinner label="Processing" />
-            <Text color="gray">{loadingLabel}</Text>
-          </Flex>
-        )}
+          {isLoading && (
+            <Flex
+              align="center"
+              justify="center"
+              gap="2"
+              className={styles.loadingContainer}
+            >
+              <Spinner label="Processing" />
+              <Text color="gray">{loadingLabel}</Text>
+            </Flex>
+          )}
 
-        <Flex gap="3" mt="4" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" color="gray" disabled={isLoading}>
-              Cancel
+          <Flex gap="3" mt="4" justify="end">
+            <Dialog.Close asChild>
+              <Button variant="soft" color="gray" disabled={isLoading}>
+                Cancel
+              </Button>
+            </Dialog.Close>
+            <Button onClick={() => void handleApply()} disabled={isLoading}>
+              {isLoading ? (
+                <>
+                  <Spinner size="sm" />
+                  {loadingLabel}
+                </>
+              ) : (
+                buttonLabel
+              )}
             </Button>
-          </Dialog.Close>
-          <Button onClick={() => void handleApply()} disabled={isLoading}>
-            {isLoading ? (
-              <>
-                <Spinner size="sm" />
-                {loadingLabel}
-              </>
-            ) : (
-              buttonLabel
-            )}
-          </Button>
+          </Flex>
         </Flex>
       </Dialog.Content>
-    </Dialog.Root>
+    </Dialog>
   );
 };
 
