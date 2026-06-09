@@ -137,7 +137,7 @@ export function MemoryDetailsEditor({
 
   if (!memory) {
     return (
-      <Surface className={styles.container} radius="none">
+      <Surface className={styles.container} radius="none" animated>
         <p className={styles.emptyState}>No memory selected</p>
       </Surface>
     );
@@ -149,7 +149,7 @@ export function MemoryDetailsEditor({
   const canDelete = Boolean(memory.file_path);
 
   return (
-    <Surface className={styles.container} radius="none">
+    <Surface className={styles.container} radius="none" animated>
       <div className={styles.scrollArea}>
         <FieldStack
           label={
@@ -173,7 +173,7 @@ export function MemoryDetailsEditor({
           <Surface
             className={styles.readOnlyValue}
             radius="control"
-            variant="surface-1"
+            variant="glass"
           >
             {draft.kind}
           </Surface>
@@ -183,7 +183,7 @@ export function MemoryDetailsEditor({
           <Surface
             className={styles.readOnlyValue}
             radius="control"
-            variant="surface-1"
+            variant="glass"
           >
             {memory.created ?? "—"}
           </Surface>
@@ -220,7 +220,7 @@ export function MemoryDetailsEditor({
           <Surface
             className={styles.readOnlyValue}
             radius="control"
-            variant="surface-1"
+            variant="glass"
           >
             {memory.file_path ?? (
               <span className={styles.warning}>

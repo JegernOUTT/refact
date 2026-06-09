@@ -337,13 +337,21 @@ export function KnowledgeGraphView({
 
   if (isLoading) {
     return (
-      <LoadingState className={styles.loadingState} label="Loading graph..." />
+      <LoadingState
+        className={`${styles.loadingState} rf-enter`}
+        label="Loading graph..."
+      />
     );
   }
 
   if (filteredNodes.length === 0) {
     return (
-      <Surface className={styles.emptyState} radius="none">
+      <Surface
+        className={styles.emptyState}
+        radius="none"
+        variant="plain"
+        animated
+      >
         <Icon icon={Search} size="lg" tone="faint" />
         <p className={styles.emptyStateText}>No linked memories</p>
       </Surface>
@@ -351,7 +359,7 @@ export function KnowledgeGraphView({
   }
 
   return (
-    <div ref={containerRef} className={styles.graphContainer}>
+    <div ref={containerRef} className={`${styles.graphContainer} rf-enter`}>
       <CytoscapeComponent
         className={styles.graphCanvas}
         elements={elements}

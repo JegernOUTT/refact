@@ -14,8 +14,12 @@
 
 .cardFrame {
   overflow: hidden;
-  border: var(--rf-hairline) solid transparent;
-  background: transparent;
+}
+
+.cardFrame.cardFrame {
+  border: var(--rf-hairline) solid var(--rf-border);
+  background: color-mix(in srgb, var(--rf-surface-glass) 72%, transparent);
+  box-shadow: none;
 }
 
 .card {
@@ -37,7 +41,7 @@
 }
 
 .card:hover {
-  background: var(--rf-surface-1);
+  background: color-mix(in srgb, var(--rf-surface-glass) 82%, transparent);
 }
 
 .card:focus-visible {
@@ -45,7 +49,7 @@
   outline-offset: var(--rf-hairline);
 }
 
-.selected {
+.selected.selected {
   border-color: var(--rf-color-accent);
   background: var(--rf-color-accent-soft);
 }
@@ -83,7 +87,7 @@
   height: var(--rf-control-h-sm);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-1);
+  background: color-mix(in srgb, var(--rf-surface-glass) 70%, transparent);
   color: var(--rf-color-muted);
 }
 
@@ -187,6 +191,18 @@
   margin: 0;
   color: var(--rf-color-muted);
   font: 500 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .cardFrame.cardFrame,
+  .kindBadge {
+    background: var(--rf-surface-glass);
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .cardFrame,
+:global(.radix-themes[data-host="jetbrains"]) .kindBadge {
+  background: var(--rf-surface-glass);
 }
 
 @media (prefers-reduced-motion: reduce) {
