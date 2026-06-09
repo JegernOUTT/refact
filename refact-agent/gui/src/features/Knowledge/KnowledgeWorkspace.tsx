@@ -4,6 +4,7 @@ import { Chip, Select, Surface, Tabs } from "../../components/ui";
 import { useGetKnowledgeGraphQuery } from "../../services/refact/knowledgeGraphApi";
 import type { KnowledgeMemoRecord } from "../../services/refact/types";
 import { KnowledgeGraphView } from "./KnowledgeGraphView";
+import { isActiveKnowledgeDocNode } from "./knowledgeGraphFilters";
 import { MemoryDetailsEditor } from "./MemoryDetailsEditor";
 import { MemoryListView } from "./MemoryListView";
 import styles from "./KnowledgeWorkspace.module.css";
@@ -74,16 +75,7 @@ export function KnowledgeWorkspace() {
 
   const allDocNodes = useMemo(() => {
     if (!graph) return [];
-    return graph.nodes.filter((node) => {
-      const isDocNode =
-        node.node_type === "doc" || node.node_type.startsWith("doc_");
-      if (!isDocNode) return false;
-
-      const kind = node.node_type.replace("doc_", "").toLowerCase();
-      return (
-        kind !== "deprecated" && kind !== "archived" && kind !== "trajectory"
-      );
-    });
+    return graph.nodes.filter(isActiveKnowledgeDocNode);
   }, [graph]);
 
   const memoryRecords = useMemo((): KnowledgeMemoRecord[] => {

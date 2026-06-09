@@ -1,22 +1,33 @@
 import { useTokens } from "../../components/ui";
 
-export function useKnowledgeGraphTheme() {
-  const tokens = useTokens([
-    "--rf-surface-1",
-    "--rf-surface-2",
-    "--rf-color-accent",
-    "--rf-color-accent-soft",
-    "--rf-color-fg",
-    "--rf-color-muted",
-    "--rf-color-faint",
-    "--rf-color-success",
-    "--rf-color-warning",
-    "--rf-color-info",
-    "--rf-color-danger",
-    "--rf-border-strong",
-  ]);
+const FALLBACK_COLORS: Record<string, string> = {
+  "--rf-surface-1": "rgba(255, 255, 255, 0.72)",
+  "--rf-surface-2": "rgba(255, 255, 255, 0.88)",
+  "--rf-color-accent": "#2563eb",
+  "--rf-color-accent-soft": "rgba(37, 99, 235, 0.18)",
+  "--rf-color-fg": "#111827",
+  "--rf-color-muted": "#6b7280",
+  "--rf-color-faint": "#9ca3af",
+  "--rf-color-success": "#16a34a",
+  "--rf-color-warning": "#d97706",
+  "--rf-color-info": "#0ea5e9",
+  "--rf-color-danger": "#dc2626",
+  "--rf-border-strong": "#9ca3af",
+};
 
-  const color = (name: string) => tokens[name] || `var()`;
+function isConcreteColor(value: string): boolean {
+  const color = value.trim();
+  return Boolean(color) && !color.includes("var(");
+}
+
+export function useKnowledgeGraphTheme() {
+  const tokens = useTokens(Object.keys(FALLBACK_COLORS));
+
+  const color = (name: string) => {
+    const token = tokens[name];
+    if (token && isConcreteColor(token)) return token;
+    return FALLBACK_COLORS[name];
+  };
 
   const colors = {
     surface: color("--rf-surface-1"),
