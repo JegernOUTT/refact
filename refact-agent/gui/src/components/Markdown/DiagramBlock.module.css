@@ -1,11 +1,23 @@
 .diagram_container {
   position: relative;
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .diagram_container {
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .diagram_container {
+  backdrop-filter: none;
 }
 
 .diagram_toolbar {
