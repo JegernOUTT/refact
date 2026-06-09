@@ -67,13 +67,19 @@ describe("ToolCard", () => {
     expect(chevron).toHaveClass(styles.chevron);
   });
 
-  it("mounts content immediately when opened", async () => {
+  it("updates collapsed body state when opened", async () => {
     const { user } = renderToolCard();
+    const toggle = screen.getByRole("button", { name: /run command/i });
+    const bodyId = toggle.getAttribute("aria-controls");
+    const body = bodyId ? document.getElementById(bodyId) : null;
 
-    expect(screen.queryByText("Command output")).toBeInTheDocument();
+    expect(body).toHaveAttribute("data-open", "false");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
 
-    await user.click(screen.getByRole("button", { name: /run command/i }));
+    await user.click(toggle);
 
+    expect(body).toHaveAttribute("data-open", "true");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Command output")).toBeInTheDocument();
   });
 

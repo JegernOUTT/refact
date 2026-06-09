@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { screen } from "@testing-library/react";
+import { Circle } from "lucide-react";
 
 import { render } from "../../../utils/test-utils";
+import { Icon } from "../Icon";
 import { SegmentedControl } from "./SegmentedControl";
 
 const options = [
@@ -18,6 +20,10 @@ function GlobeIcon() {
       <circle cx="8" cy="8" r="6" />
     </svg>
   );
+}
+
+function CustomLabel() {
+  return <span>Custom component label</span>;
 }
 
 describe("SegmentedControl", () => {
@@ -40,6 +46,67 @@ describe("SegmentedControl", () => {
 
     expect(screen.getByRole("radio", { name: "Global scope" })).toBeChecked();
     expect(screen.getByTestId("globe-icon")).toBeInTheDocument();
+  });
+
+  it("auto-detects intrinsic svg and shared Icon labels as icon-only", () => {
+    render(
+      <SegmentedControl
+        options={[
+          {
+            value: "svg",
+            label: (
+              <svg aria-hidden="true" viewBox="0 0 16 16">
+                <circle cx="8" cy="8" r="6" />
+              </svg>
+            ),
+          },
+          { value: "icon", label: <Icon icon={Circle} size="sm" /> },
+        ]}
+        value="icon"
+        onValueChange={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("radio", { name: "svg" })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: "icon" })).toBeChecked();
+  });
+
+  it("does not infer icon-only layout for custom component labels", () => {
+    render(
+      <SegmentedControl
+        options={[
+          { value: "custom", label: <CustomLabel /> },
+          { value: "text", label: "Text label" },
+        ]}
+        value="custom"
+        onValueChange={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByRole("radio", { name: "Custom component label" }),
+    ).toBeChecked();
+    expect(screen.queryByRole("radio", { name: "custom" })).toBeNull();
+  });
+
+  it("renders an empty disabled root without an indicator", () => {
+    const { container } = render(
+      <SegmentedControl
+        aria-label="Empty segments"
+        options={[]}
+        value="missing"
+        onValueChange={() => undefined}
+      />,
+    );
+
+    const root = screen.getByRole("radiogroup", { name: "Empty segments" });
+
+    expect(root).toHaveAttribute("aria-disabled", "true");
+    expect(root).toHaveStyle({
+      "--rf-segment-count": "1",
+      "--rf-segment-index": "0",
+    });
+    expect(container.querySelector("span[aria-hidden='true']")).toBeNull();
   });
 
   it("positions the selected indicator from segment variables", () => {

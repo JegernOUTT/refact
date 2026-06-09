@@ -1,6 +1,7 @@
 import React from "react";
 import classNames from "classnames";
 
+import { Icon } from "../Icon";
 import styles from "./SegmentedControl.module.css";
 
 export interface SegmentedControlOption {
@@ -29,9 +30,7 @@ function isIconOnlyLabel(label: React.ReactNode): boolean {
 
   if (!React.isValidElement(child)) return false;
 
-  const childProps = child.props as { children?: React.ReactNode };
-
-  return React.Children.count(childProps.children) === 0;
+  return child.type === "svg" || child.type === Icon;
 }
 
 export function SegmentedControl({
@@ -44,32 +43,40 @@ export function SegmentedControl({
   value,
   ...props
 }: SegmentedControlProps) {
-  const activeIndex = Math.max(
-    0,
-    options.findIndex((option) => option.value === value),
-  );
+  const hasOptions = options.length > 0;
+  const activeIndex = hasOptions
+    ? Math.max(
+        0,
+        options.findIndex((option) => option.value === value),
+      )
+    : 0;
 
   return (
     <div
       {...props}
+      aria-disabled={hasOptions ? props["aria-disabled"] : true}
       className={classNames(styles.root, styles[`size-${size}`], className)}
       role="radiogroup"
       style={
         {
           ...style,
-          "--rf-segment-count": options.length,
+          "--rf-segment-count": hasOptions ? options.length : 1,
           "--rf-segment-index": activeIndex,
         } as React.CSSProperties
       }
     >
-      <span aria-hidden="true" className={styles.indicator} />
+      {hasOptions ? (
+        <span aria-hidden="true" className={styles.indicator} />
+      ) : null}
       {options.map((option) => {
         const iconOnly = option.iconOnly ?? isIconOnlyLabel(option.label);
 
         return (
           <label key={option.value} className={styles.segment}>
             <input
-              aria-label={option.ariaLabel ?? (iconOnly ? option.value : undefined)}
+              aria-label={
+                option.ariaLabel ?? (iconOnly ? option.value : undefined)
+              }
               checked={option.value === value}
               className={styles.input}
               disabled={option.disabled}

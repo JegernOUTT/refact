@@ -90,6 +90,35 @@ describe("ChatContent ToolCard", () => {
     expect(screen.getByText("Shell output")).toBeInTheDocument();
   });
 
+  it("restores open visual state when reopened before delayed unmount", () => {
+    vi.useFakeTimers();
+    const { container } = render(<Harness />);
+    const card = container.querySelector("section");
+    const toggle = screen.getByRole("button", { name: /shell/i });
+
+    expect(card).toHaveAttribute("data-open", "false");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Shell output")).toBeNull();
+
+    fireEvent.click(toggle);
+
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Shell output")).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(card).toHaveAttribute("data-open", "false");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("Shell output")).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Shell output")).toBeInTheDocument();
+  });
+
   it("keeps reduced-motion and no-animation path instant", async () => {
     const user = userEvent.setup();
     const { container } = render(<Harness animate={false} />);
