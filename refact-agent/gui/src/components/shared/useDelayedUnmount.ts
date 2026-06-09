@@ -20,32 +20,12 @@ export function useDelayedUnmount(
 
     if (isOpen) {
       setShouldRender(true);
-      if (!shouldRender) {
-        setIsAnimatingOpen(true);
-      }
+      setIsAnimatingOpen(true);
       return;
     }
 
     setIsAnimatingOpen(false);
-  }, [isOpen, shouldRender, shouldAnimate]);
-
-  useLayoutEffect(() => {
-    if (!isOpen || !shouldRender || !shouldAnimate || isAnimatingOpen) return;
-
-    const open = () => setIsAnimatingOpen(true);
-    const raf =
-      typeof requestAnimationFrame === "function"
-        ? requestAnimationFrame(open)
-        : null;
-    const timer = setTimeout(open, 0);
-
-    return () => {
-      if (raf !== null && typeof cancelAnimationFrame === "function") {
-        cancelAnimationFrame(raf);
-      }
-      clearTimeout(timer);
-    };
-  }, [isOpen, shouldRender, shouldAnimate, isAnimatingOpen]);
+  }, [isOpen, shouldAnimate]);
 
   useEffect(() => {
     if (isOpen || !shouldRender) return;

@@ -108,6 +108,31 @@ describe("useDelayedUnmount", () => {
     expect(result.current.shouldRender).toBe(false);
   });
 
+  it("applies the open visual immediately when reopening before the close delay elapses", () => {
+    vi.useFakeTimers();
+    const { result, rerender } = renderHook(
+      ({ isOpen }) => useDelayedUnmount(isOpen),
+      { initialProps: { isOpen: true } },
+    );
+
+    rerender({ isOpen: false });
+    act(() => {
+      vi.advanceTimersByTime(149);
+    });
+
+    expect(result.current).toEqual({
+      shouldRender: true,
+      isAnimatingOpen: false,
+    });
+
+    rerender({ isOpen: true });
+
+    expect(result.current).toEqual({
+      shouldRender: true,
+      isAnimatingOpen: true,
+    });
+  });
+
   it("reopens after unmount with the open visual applied", () => {
     vi.useFakeTimers();
     const { result, rerender } = renderHook(
