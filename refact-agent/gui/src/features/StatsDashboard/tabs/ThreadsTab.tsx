@@ -1,6 +1,11 @@
-import React, { useState, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Surface } from "../../../components/ui";
-import { useListTrajectoriesPaginatedQuery } from "../../../services/refact/trajectories";
+import { useAppDispatch } from "../../../hooks";
+import {
+  trajectoriesApi,
+  useListTrajectoriesPaginatedQuery,
+} from "../../../services/refact/trajectories";
+import type { TrajectoryMeta } from "../../../services/refact/trajectories";
 import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
 import {
@@ -20,7 +25,25 @@ type SortKey =
   | "total_cost_usd"
   | "updated_at";
 
+type PagingState = {
+  items: TrajectoryMeta[];
+  isLoading: boolean;
+  error: string | null;
+};
+
+function rangeCovered(
+  rows: TrajectoryMeta[],
+  from: string | undefined,
+  hasMore: boolean,
+) {
+  if (!hasMore) return true;
+  if (!from) return false;
+  return rows.some((row) => row.updated_at < from);
+}
+
 export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
+  const dispatch = useAppDispatch();
+  const dateArgs = useMemo(() => dateRangeToApiArgs(dateRange), [dateRange]);
   const {
     data: trajData,
     isLoading,
@@ -31,12 +54,88 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
     key: "total_tokens",
     asc: false,
   });
+  const [paging, setPaging] = useState<PagingState>({
+    items: [],
+    isLoading: false,
+    error: null,
+  });
 
-  const dateArgs = dateRangeToApiArgs(dateRange);
+  useEffect(() => {
+    if (!trajData) return;
+
+    const firstPage = trajData;
+    let cancelled = false;
+    const isCancelled = () => cancelled;
+    let activeRequest: { unsubscribe: () => void } | null = null;
+
+    async function loadCoveredRange() {
+      let rows = [...firstPage.items];
+      let cursor = firstPage.next_cursor;
+      let hasMore = firstPage.has_more;
+      setPaging({
+        items: [],
+        isLoading: !rangeCovered(rows, dateArgs.from, hasMore),
+        error: null,
+      });
+
+      while (
+        !isCancelled() &&
+        cursor &&
+        hasMore &&
+        !rangeCovered(rows, dateArgs.from, hasMore)
+      ) {
+        const request = dispatch(
+          trajectoriesApi.endpoints.listTrajectoriesPaginated.initiate(
+            { limit: 200, cursor },
+            { forceRefetch: true, subscribe: false },
+          ),
+        );
+        activeRequest = request;
+
+        try {
+          const result = await request.unwrap();
+          request.unsubscribe();
+          activeRequest = null;
+          if (isCancelled()) return;
+
+          rows = [...rows, ...result.items];
+          cursor = result.next_cursor;
+          hasMore = result.has_more;
+          setPaging({
+            items: rows.slice(firstPage.items.length),
+            isLoading: !rangeCovered(rows, dateArgs.from, hasMore),
+            error: null,
+          });
+        } catch (err) {
+          request.unsubscribe();
+          activeRequest = null;
+          if (!isCancelled()) {
+            setPaging({
+              items: rows.slice(firstPage.items.length),
+              isLoading: false,
+              error: err instanceof Error ? err.message : "Failed to load threads",
+            });
+          }
+          return;
+        }
+      }
+    }
+
+    void loadCoveredRange();
+
+    return () => {
+      cancelled = true;
+      activeRequest?.unsubscribe();
+    };
+  }, [dispatch, trajData, dateArgs.from]);
+
+  const rawItems = useMemo(() => {
+    if (!trajData) return [];
+    return [...trajData.items, ...paging.items];
+  }, [trajData, paging.items]);
 
   const items = useMemo(() => {
-    if (!trajData) return [];
-    let rows = trajData.items.filter((item) => {
+    let rows = rawItems.filter((item) => {
       if (dateArgs.from) {
         if (item.updated_at < dateArgs.from) return false;
       }
@@ -45,8 +144,8 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
       }
       return true;
     });
-    if (search.trim()) {
-      const q = search.toLowerCase();
+    const q = search.trim().toLowerCase();
+    if (q) {
       rows = rows.filter(
         (r) =>
           r.title.toLowerCase().includes(q) ||
@@ -72,12 +171,14 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
       return 0;
     });
     return rows;
-  }, [trajData, search, sort, dateArgs]);
+  }, [rawItems, search, sort, dateArgs.from, dateArgs.to]);
 
   if (isLoading) return <Spinner spinning />;
-  if (isError) return <ErrorCallout>Failed to load threads</ErrorCallout>;
+  if (isError || paging.error) {
+    return <ErrorCallout>Failed to load threads</ErrorCallout>;
+  }
 
-  if (!trajData || items.length === 0) {
+  if (!trajData || trajData.total_count === 0) {
     return (
       <p className={styles.emptyText}>
         No threads yet. Start chatting to see stats!
@@ -106,7 +207,9 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
       />
 
       {items.length === 0 ? (
-        <p className={styles.emptyText}>No matching threads.</p>
+        <p className={styles.emptyText}>
+          {paging.isLoading ? "Loading more threads…" : "No matching threads."}
+        </p>
       ) : (
         <Surface
           animated="rise"
