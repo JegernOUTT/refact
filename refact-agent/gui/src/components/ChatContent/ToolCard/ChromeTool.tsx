@@ -349,9 +349,11 @@ export const ChromeTool: React.FC<ChromeToolProps> = ({ toolCall }) => {
       {typedStepsBlock && (
         <Box className={styles.section}>
           <Box className={styles.sectionLabel}>Request</Box>
-          <ShikiCodeBlock showLineNumbers={false}>
-            {typedStepsBlock}
-          </ShikiCodeBlock>
+          <Box className={styles.logContent}>
+            <ShikiCodeBlock showLineNumbers={false}>
+              {typedStepsBlock}
+            </ShikiCodeBlock>
+          </Box>
         </Box>
       )}
 

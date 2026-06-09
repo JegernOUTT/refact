@@ -240,7 +240,10 @@ export const WebTool: React.FC<WebToolProps> = ({
             {searchResults.map((result, idx) => {
               const safeUrl = isSafeHttpUrl(result.url) ? result.url : "";
               return (
-                <Box key={`${result.url}-${idx}`} className={styles.resultItem}>
+                <Box
+                  key={`${result.url}-${idx}`}
+                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
+                >
                   <Flex direction="column" gap="1">
                     {safeUrl ? (
                       <Link

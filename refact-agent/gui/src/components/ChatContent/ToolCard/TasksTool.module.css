@@ -4,14 +4,22 @@
 }
 
 .taskList {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
   display: flex;
+  max-height: 300px;
+  min-width: 0;
   flex-direction: column;
-  gap: var(--rf-space-1);
-  padding: var(--rf-space-1) 0;
+  gap: var(--rf-space-2);
+  overflow-y: auto;
 }
 
 .taskItem {
-  padding: var(--rf-space-1) var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-glass, var(--rf-surface-2));
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
 }
 
 .taskItem svg {
@@ -35,6 +43,12 @@
 
 .failed {
   color: var(--rf-color-danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inProgress {
+    animation: none;
+  }
 }
 
 @keyframes spin {

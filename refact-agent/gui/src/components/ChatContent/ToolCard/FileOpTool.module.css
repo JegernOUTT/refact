@@ -19,7 +19,18 @@
 }
 
 .resultContent {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 300px;
+  padding: var(--rf-space-2);
   overflow-y: auto;
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-glass, var(--rf-surface-2));
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
 }

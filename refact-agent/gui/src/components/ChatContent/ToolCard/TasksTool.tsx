@@ -37,7 +37,7 @@ const TaskStatusIcon: React.FC<{ status: Task["status"] }> = ({ status }) => {
 
 const TaskItem: React.FC<{ task: Task }> = ({ task }) => {
   return (
-    <Flex align="center" gap="2" className={styles.taskItem}>
+    <Flex align="center" gap="2" className={`${styles.taskItem} rf-enter-rise`}>
       <TaskStatusIcon status={task.status} />
       <Text size="1" className={styles[task.status]}>
         {task.content}

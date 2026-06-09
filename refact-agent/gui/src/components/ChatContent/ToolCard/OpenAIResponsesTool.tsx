@@ -184,10 +184,10 @@ export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({
           <Box mb="2">{renderOpenAiResponsesPayload(toolName, parsedArgs)}</Box>
         )}
 
-        <Text size="1" color="gray">
-          Raw JSON
-        </Text>
-        <ShikiCodeBlock showLineNumbers={false}>{rawJson}</ShikiCodeBlock>
+        <Box className={styles.sectionLabel}>Raw JSON</Box>
+        <Box className={styles.rawJson}>
+          <ShikiCodeBlock showLineNumbers={false}>{rawJson}</ShikiCodeBlock>
+        </Box>
       </Box>
     </ToolCard>
   );
@@ -223,7 +223,10 @@ function renderOpenAiResponsesPayload(
                     ? rr.description
                     : "";
               return (
-                <Box key={idx} className={styles.resultItem}>
+                <Box
+                  key={idx}
+                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
+                >
                   <Flex direction="column" gap="1">
                     <Text size="2" weight="medium">
                       {title}
@@ -275,7 +278,10 @@ function renderOpenAiResponsesPayload(
                     ? rr.content
                     : "";
               return (
-                <Box key={idx} className={styles.resultItem}>
+                <Box
+                  key={idx}
+                  className={`${styles.resultItem} rf-enter-rise rf-pressable`}
+                >
                   <Text size="2" weight="medium" className={styles.inlineCode}>
                     {filename}
                   </Text>

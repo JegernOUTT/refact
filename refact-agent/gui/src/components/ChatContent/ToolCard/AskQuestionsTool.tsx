@@ -361,7 +361,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        <Box className={styles.content}>
+        <Box className={`${styles.content} rf-enter-rise`}>
           <Flex direction="column" gap="3">
             {data.questions.map((q) => (
               <QuestionWidget
@@ -402,7 +402,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        <Box className={styles.content}>
+        <Box className={`${styles.content} rf-enter-rise`}>
           <Flex direction="column" gap="2">
             {data.questions.map((q) => (
               <Box key={q.id}>
@@ -435,7 +435,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
       toolCall={toolCall}
     >
       {data && (
-        <Box className={styles.content}>
+        <Box className={`${styles.content} rf-enter-rise`}>
           <Flex direction="column" gap="1">
             {data.questions.map((q) => (
               <Box key={q.id}>

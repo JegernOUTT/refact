@@ -1,8 +1,14 @@
 .content {
-  padding: var(--rf-space-2) 0;
+  min-width: 0;
+  padding: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-glass, var(--rf-surface-2));
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
 }
 
 .questionItem {
+  min-width: 0;
   padding: var(--rf-space-2) 0;
 }
 
