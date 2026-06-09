@@ -1,5 +1,4 @@
 import type { FC } from "react";
-import { CustomLabel } from "../CustomFieldsAndWidgets";
 import { toPascalCase } from "../../../utils/toPascalCase";
 import { Flex, Switch } from "../../ui";
 
@@ -20,12 +19,11 @@ export const IntegrationAvailability: FC<IntegrationAvailabilityProps> = ({
     onChange(fieldName, checked);
   };
 
-  // TODO: temporal solution to hide the switch for isolated mode
   if (fieldName === "when_isolated") return null;
 
-  const handleLabelClick = () => {
-    handleSwitchChange(value);
-  };
+  const label = toPascalCase(
+    fieldName === "on_your_laptop" ? "enable" : "run_in_docker",
+  );
 
   return (
     <Flex className={styles.availabilityToggle}>
@@ -35,12 +33,11 @@ export const IntegrationAvailability: FC<IntegrationAvailabilityProps> = ({
           checked={value}
           onCheckedChange={handleSwitchChange}
         />
-        <label htmlFor={`switch-${fieldName}`} onClick={handleLabelClick}>
-          <CustomLabel
-            label={toPascalCase(
-              fieldName === "on_your_laptop" ? "enable" : "run_in_docker",
-            )}
-          />
+        <label
+          className={styles.availabilityLabel}
+          htmlFor={`switch-${fieldName}`}
+        >
+          {label}
         </label>
       </Flex>
     </Flex>

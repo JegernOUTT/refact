@@ -1,14 +1,13 @@
-import { Flex } from "@radix-ui/themes";
-
-import styles from "./IntegrationForm.module.css";
 import { FC } from "react";
 import {
   areAllFieldsBoolean,
   Integration,
   IntegrationFieldValue,
 } from "../../../services/refact";
-import { IntegrationAvailability } from "./IntegrationAvailability";
 import { DeletePopover } from "../../DeletePopover";
+import { Flex } from "../../ui";
+import { IntegrationAvailability } from "./IntegrationAvailability";
+import styles from "./IntegrationForm.module.css";
 
 type FormAvailabilityAndDeleteProps = {
   integration: Integration;
@@ -30,14 +29,8 @@ export const FormAvailabilityAndDelete: FC<FormAvailabilityAndDeleteProps> = ({
   const { integr_values, integr_config_path, integr_name } = integration;
   if (!integr_values) return null;
   return (
-    <Flex align="start" justify="between">
-      <Flex
-        gap="4"
-        mb="4"
-        align="center"
-        justify="between"
-        className={styles.switchInline}
-      >
+    <div className={styles.availabilityRow}>
+      <div className={styles.switchInline}>
         {formValues?.available &&
           areAllFieldsBoolean(formValues.available) &&
           Object.entries(formValues.available).map(([key, value]) => (
@@ -53,14 +46,16 @@ export const FormAvailabilityAndDelete: FC<FormAvailabilityAndDeleteProps> = ({
               }
             />
           ))}
+      </div>
+      <Flex align="start">
+        <DeletePopover
+          itemName={integr_name}
+          deleteBy={integr_config_path}
+          isDisabled={isApplying}
+          isDeleting={isDeletingIntegration}
+          handleDelete={onDelete}
+        />
       </Flex>
-      <DeletePopover
-        itemName={integr_name}
-        deleteBy={integr_config_path}
-        isDisabled={isApplying}
-        isDeleting={isDeletingIntegration}
-        handleDelete={onDelete}
-      />
-    </Flex>
+    </div>
   );
 };

@@ -1,4 +1,4 @@
-import { Flex } from "@radix-ui/themes";
+import { Flex } from "../../components/ui";
 import { FC } from "react";
 import {
   CustomBoolField,

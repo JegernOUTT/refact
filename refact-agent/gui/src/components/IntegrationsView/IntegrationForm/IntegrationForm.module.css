@@ -1,58 +1,209 @@
+.root {
+  width: 100%;
+  min-width: 0;
+  padding-bottom: var(--rf-space-6);
+}
+
+.description {
+  margin: 0 0 var(--rf-space-2);
+}
+
+.formSurface {
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-4);
+}
+
+.formGrid {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
 .button {
   cursor: pointer;
-  padding: 0 var(--rf-space-3);
+  padding-inline: var(--rf-space-3);
   transition:
-    background-color 0.15s ease,
-    color 0.15s ease,
-    opacity 0.15s ease;
+    background-color var(--rf-dur-base) var(--rf-ease-standard),
+    color var(--rf-dur-base) var(--rf-ease-standard),
+    opacity var(--rf-dur-base) var(--rf-ease-standard);
 }
 
 .disabledButton {
   cursor: not-allowed;
-  backdrop-filter: blur(16px);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .DockerIcon {
   max-width: 40px;
   object-fit: cover;
 }
+
 .advancedButton {
-  background-color: transparent;
-  text-decoration: underline;
-  border-radius: 0;
-  cursor: pointer;
+  align-self: flex-start;
+  min-width: 0;
   overflow: hidden;
+  text-decoration: underline;
   text-wrap: nowrap;
 }
-.applyButton {
-  min-width: 140px;
-  display: block;
+
+.confirmationWrap {
+  display: flex;
+  min-width: 0;
+  gap: var(--rf-space-4);
 }
 
-@media (max-width: 538px) {
-  .applyButton {
-    width: 50%;
-  }
+.actionBar {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-end;
+  pointer-events: none;
 }
-@media (max-width: 238px) {
-  .applyButton {
-    width: 100%;
-  }
+
+.actionBar > * {
+  pointer-events: auto;
 }
-@media (max-width: 368px) {
-  .switchInline {
-    flex-direction: column;
-    gap: 0;
-    margin-bottom: var(--rf-space-3);
-  }
+
+.stickyActionBar {
+  position: sticky;
+  right: var(--rf-space-4);
+  bottom: var(--rf-space-4);
+}
+
+.fixedActionBar {
+  position: fixed;
+  right: var(--rf-space-5);
+  bottom: var(--rf-space-4);
+  left: var(--rf-space-3);
+  width: auto;
+  z-index: var(--rf-z-fixed);
+}
+
+.applyButton {
+  min-width: 140px;
+}
+
+.divider {
+  width: 100%;
+  min-width: 0;
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.switchInline {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  margin-bottom: var(--rf-space-3);
 }
 
 .gridContainer {
   display: grid;
-  grid-template-columns: repeat(1, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--rf-space-3);
+}
+
+.availabilityRow {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: var(--rf-space-3);
 }
 
 .availabilityToggle {
+  min-width: 0;
+}
+
+.availabilityLabel {
+  cursor: pointer;
+}
+
+.smartlinks {
+  width: 100%;
+  min-width: 0;
   margin-bottom: var(--rf-space-3);
+}
+
+.smartlinksRow {
+  min-width: 0;
+}
+
+.smartlinksActions {
+  min-width: 0;
+  flex: 1;
+}
+
+.smartlinksHeading {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  font-weight: 500;
+  line-height: var(--rf-line);
+}
+
+.errorSurface {
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-4);
+}
+
+.errorActions {
+  min-width: 0;
+}
+
+.logs {
+  min-width: 0;
+}
+
+.logsTitle {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: 600;
+  line-height: var(--rf-line);
+}
+
+.logsScroll {
+  width: 100%;
+  min-width: 0;
+}
+
+.logsBox {
+  max-height: 250px;
+  min-width: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .disabledButton {
+    backdrop-filter: none;
+  }
+}
+
+@media (max-width: 538px) {
+  .formSurface {
+    padding: var(--rf-space-3);
+  }
+
+  .applyButton {
+    width: 50%;
+  }
+}
+
+@media (max-width: 368px) {
+  .switchInline {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--rf-space-1);
+    margin-bottom: var(--rf-space-3);
+  }
+}
+
+@media (max-width: 238px) {
+  .applyButton {
+    width: 100%;
+  }
 }

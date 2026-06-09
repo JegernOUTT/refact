@@ -1,19 +1,94 @@
+.root {
+  width: 100%;
+  min-width: 0;
+  padding-bottom: var(--rf-space-6);
+}
+
+.loadingSurface,
+.unavailableSurface {
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-4);
+}
+
+.title {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--rf-space-2);
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-4);
+  font-weight: 600;
+  line-height: var(--rf-line);
+}
+
+.version {
+  flex-shrink: 0;
+}
+
+.divider {
+  width: 100%;
+  min-width: 0;
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.section {
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-3);
+}
+
+.section + .section {
+  margin-top: var(--rf-space-3);
+}
+
 .sectionHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  background: none;
-  border: none;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rf-color-fg);
   cursor: pointer;
-  padding: var(--rf-space-1) 0;
+  gap: var(--rf-space-3);
+  padding: 0;
   text-align: left;
 }
 
 .sectionHeader:hover {
-  opacity: 0.8;
+  color: var(--rf-color-accent);
 }
 
 .sectionContent {
+  min-width: 0;
+  padding-top: var(--rf-space-3);
+}
+
+.connectionStatus {
+  width: 100%;
+  min-width: 0;
+}
+
+.statusError {
+  width: 100%;
+  margin: 0;
+}
+
+.list {
+  min-width: 0;
+}
+
+.listItem {
+  min-width: 0;
   padding: var(--rf-space-2) 0;
+}
+
+.resourceName {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--rf-font-mono);
 }

@@ -1,6 +1,6 @@
 import React from "react";
-import { Badge, Button, Flex, Text } from "@radix-ui/themes";
-import { Spinner } from "../../Spinner";
+import { Badge, Button, Flex, Spinner, Text } from "../../ui";
+import styles from "./MCPServerView.module.css";
 
 type ConnectionStatusValue = string | Record<string, unknown>;
 
@@ -17,13 +17,15 @@ function getStatusLabel(status: ConnectionStatusValue): string {
   return "unknown";
 }
 
-function getStatusColor(label: string): "green" | "yellow" | "red" | "gray" {
+function getStatusTone(
+  label: string,
+): React.ComponentProps<typeof Badge>["tone"] {
   const lower = label.toLowerCase();
-  if (lower === "connected") return "green";
-  if (lower === "connecting" || lower === "reconnecting") return "yellow";
-  if (lower === "error") return "red";
-  if (lower === "disconnected") return "red";
-  return "gray";
+  if (lower === "connected") return "success";
+  if (lower === "connecting" || lower === "reconnecting") return "warning";
+  if (lower === "error") return "danger";
+  if (lower === "disconnected") return "danger";
+  return "muted";
 }
 
 function isSpinnerVisible(label: string, isReconnecting: boolean): boolean {
@@ -63,18 +65,18 @@ export const MCPConnectionStatus: React.FC<MCPConnectionStatusProps> = ({
   isReconnecting,
 }) => {
   const label = getStatusLabel(status);
-  const color = getStatusColor(label);
+  const tone = getStatusTone(label);
   const showSpinner = isSpinnerVisible(label, isReconnecting);
   const attemptInfo = getAttemptInfo(status);
   const nextRetryInfo = getNextRetryInfo(status);
 
   return (
-    <Flex align="center" gap="3" wrap="wrap">
+    <Flex align="center" className={styles.connectionStatus} gap="3" wrap="wrap">
       <Flex align="center" gap="2">
-        <Badge color={color} radius="full" size="2">
+        <Badge aria-label={`MCP connection status: ${label}`} tone={tone}>
           {label}
         </Badge>
-        {showSpinner && <Spinner spinning />}
+        {showSpinner && <Spinner size="sm" label="Reconnecting" />}
       </Flex>
       {attemptInfo && (
         <Text size="1" color="gray">
@@ -87,7 +89,7 @@ export const MCPConnectionStatus: React.FC<MCPConnectionStatusProps> = ({
         </Text>
       )}
       <Button
-        size="1"
+        size="sm"
         variant="soft"
         onClick={onReconnect}
         disabled={isReconnecting}
@@ -97,7 +99,7 @@ export const MCPConnectionStatus: React.FC<MCPConnectionStatusProps> = ({
       {typeof status === "object" &&
         "error" in status &&
         typeof status.error === "string" && (
-          <Text size="1" color="red">
+          <Text as="p" size="1" color="red" className={styles.statusError}>
             {status.error}
           </Text>
         )}

@@ -7,9 +7,15 @@
   border-bottom: none;
 }
 
+.toolBody {
+  flex: 1;
+  min-width: 0;
+}
+
 .expandButton {
-  background: none;
-  border: none;
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
   color: var(--rf-color-muted);
   cursor: pointer;
   padding: 0;
@@ -17,17 +23,19 @@
 }
 
 .expandButton:hover {
+  color: var(--rf-color-accent);
   text-decoration: underline;
 }
 
 .schemaBox {
-  background: var(--rf-surface-glass);
+  max-height: 200px;
+  min-width: 0;
+  overflow: auto;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-panel);
   padding: var(--rf-space-2);
-  overflow: auto;
-  max-height: 200px;
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
@@ -39,8 +47,8 @@
 
 .schemaPre {
   margin: 0;
-  font-size: var(--rf-text-1);
   font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
   white-space: pre-wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }

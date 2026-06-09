@@ -1,8 +1,9 @@
 import React from "react";
 import { useGetMCPLogs } from "./useGetMCPLogs";
 import { ScrollArea } from "../../ScrollArea";
-import { Box, Flex, Heading, Text } from "@radix-ui/themes";
+import { Flex, Text } from "../../ui";
 import { ShikiCodeBlock } from "../../Markdown/ShikiCodeBlock";
+import styles from "./IntegrationForm.module.css";
 
 type MCPLogsProps = {
   integrationPath: string;
@@ -21,26 +22,26 @@ export const MCPLogs: React.FC<MCPLogsProps> = ({
 
   if (!data) {
     if (isLoading) {
-      return <div>Loading...</div>;
+      return <Text>Loading...</Text>;
     }
-    return <div>No data</div>;
+    return <Text>No data</Text>;
   }
 
   const formattedData = formatMCPLogs(data.logs);
 
   return (
-    <Flex direction="column" gap="4">
-      <Heading as="h4" size="3">
+    <Flex className={styles.logs} direction="column" gap="4">
+      <h4 className={styles.logsTitle}>
         Runtime logs of {integrationName} server
-      </Heading>
-      <Text color="gray" size="2">
+      </h4>
+      <Text as="p" color="gray" size="2">
         Real-time diagnostic information from the MCP server. These logs help
         troubleshoot connection issues, monitor tool execution status, and
         verify proper server initialization. Critical for debugging when tools
         aren&apos;t appearing or functioning as expected.
       </Text>
-      <ScrollArea scrollbars="horizontal" style={{ width: "100%" }} asChild>
-        <Box maxHeight="250px">
+      <ScrollArea scrollbars="horizontal" className={styles.logsScroll} asChild>
+        <div className={styles.logsBox}>
           <ShikiCodeBlock
             className="language-bash"
             showLineNumbers={false}
@@ -50,7 +51,7 @@ export const MCPLogs: React.FC<MCPLogsProps> = ({
           >
             {formattedData}
           </ShikiCodeBlock>
-        </Box>
+        </div>
       </ScrollArea>
     </Flex>
   );

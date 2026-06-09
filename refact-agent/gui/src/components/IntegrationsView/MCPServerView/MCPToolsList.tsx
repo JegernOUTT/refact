@@ -1,11 +1,12 @@
 import React, { useState } from "react";
+import classNames from "classnames";
 import {
-  CounterClockwiseClockIcon,
-  ExclamationTriangleIcon,
-  LockClosedIcon,
-} from "@radix-ui/react-icons";
+  Lock,
+  RotateCcw,
+  TriangleAlert,
+} from "lucide-react";
 import type { MCPToolInfo } from "../../../services/refact/mcpServerInfo";
-import { Badge, Flex, Surface, Switch, Text } from "../../ui";
+import { Badge, Flex, Icon, Surface, Switch, Text } from "../../ui";
 import styles from "./MCPToolsList.module.css";
 
 type MCPToolsListProps = {
@@ -20,17 +21,17 @@ const AnnotationBadges: React.FC<{
     <Flex gap="1" wrap="wrap">
       {annotations.readOnlyHint && (
         <Badge tone="muted">
-          <LockClosedIcon /> readOnly
+          <Icon icon={Lock} size="sm" /> readOnly
         </Badge>
       )}
       {annotations.destructiveHint && (
         <Badge tone="danger">
-          <ExclamationTriangleIcon /> destructive
+          <Icon icon={TriangleAlert} size="sm" /> destructive
         </Badge>
       )}
       {annotations.idempotentHint && (
         <Badge tone="muted">
-          <CounterClockwiseClockIcon /> idempotent
+          <Icon icon={RotateCcw} size="sm" /> idempotent
         </Badge>
       )}
     </Flex>
@@ -42,14 +43,19 @@ const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <Surface className={styles.toolRow} radius="control" variant="plain">
+    <Surface
+      animated="rise"
+      className={styles.toolRow}
+      radius="control"
+      variant="plain"
+    >
       <Flex align="start" gap="3">
         <Switch
           checked={enabled}
           onCheckedChange={setEnabled}
           aria-label={`Toggle ${tool.name}`}
         />
-        <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
+        <Flex className={styles.toolBody} direction="column" gap="1">
           <Flex align="center" gap="2" wrap="wrap">
             <Text size="2" weight="medium">
               {tool.name}
@@ -57,12 +63,12 @@ const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
             <AnnotationBadges annotations={tool.annotations} />
           </Flex>
           {tool.description && (
-            <Text size="1" color="gray">
+            <Text as="p" size="1" color="gray">
               {tool.description}
             </Text>
           )}
           <button
-            className={styles.expandButton}
+            className={classNames(styles.expandButton, "rf-pressable")}
             onClick={() => setExpanded(!expanded)}
             type="button"
           >
@@ -70,13 +76,19 @@ const MCPToolRow: React.FC<{ tool: MCPToolInfo }> = ({ tool }) => {
               {expanded ? "Hide schema" : "Show schema"}
             </Text>
           </button>
-          {expanded && (
-            <div className={styles.schemaBox}>
-              <pre className={styles.schemaPre}>
-                {JSON.stringify(tool.input_schema, null, 2)}
-              </pre>
+          <div
+            className="rf-expand-grid"
+            data-open={expanded ? true : undefined}
+            data-state={expanded ? "open" : "closed"}
+          >
+            <div>
+              <div className={styles.schemaBox}>
+                <pre className={styles.schemaPre}>
+                  {JSON.stringify(tool.input_schema, null, 2)}
+                </pre>
+              </div>
             </div>
-          )}
+          </div>
         </Flex>
       </Flex>
     </Surface>

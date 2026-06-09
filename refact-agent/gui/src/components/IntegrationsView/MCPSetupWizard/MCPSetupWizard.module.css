@@ -64,15 +64,13 @@
   color: var(--rf-color-fg);
 }
 
-.advancedPanel {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-2);
+.advancedPanelWrap {
   margin-top: var(--rf-space-2);
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .advancedPanel {
-    animation: rf-enter-rise var(--rf-dur-med) var(--rf-ease-entrance) both;
-  }
+.advancedPanel {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
 }

@@ -210,19 +210,27 @@ export const MCPSetupWizard: FC<MCPSetupWizardProps> = ({
           >
             {advancedOpen ? "▼" : "▶"} Advanced: Use SSE transport instead
           </button>
-          {advancedOpen && (
-            <div className={styles.advancedPanel}>
-              <Switch
-                id="use-sse"
-                checked={useSSE}
-                onCheckedChange={setUseSSE}
-                data-testid="mcp-wizard-sse-checkbox"
-              />
-              <label className={styles.text} htmlFor="use-sse">
-                Use SSE transport
-              </label>
+          <div
+            className="rf-expand-grid"
+            data-open={advancedOpen ? true : undefined}
+            data-state={advancedOpen ? "open" : "closed"}
+          >
+            <div>
+              <div className={styles.advancedPanelWrap}>
+                <div className={styles.advancedPanel}>
+                  <Switch
+                    id="use-sse"
+                    checked={useSSE}
+                    onCheckedChange={setUseSSE}
+                    data-testid="mcp-wizard-sse-checkbox"
+                  />
+                  <label className={styles.text} htmlFor="use-sse">
+                    Use SSE transport
+                  </label>
+                </div>
+              </div>
             </div>
-          )}
+          </div>
         </div>
       )}
 

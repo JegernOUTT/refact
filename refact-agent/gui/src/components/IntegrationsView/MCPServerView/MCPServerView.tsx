@@ -1,20 +1,13 @@
 import React, { useState } from "react";
 import {
-  Box,
-  Button,
-  Flex,
-  Heading,
-  Separator,
-  Spinner,
-  Text,
-} from "@radix-ui/themes";
-import {
-  FileTextIcon,
-  GearIcon,
-  LightningBoltIcon,
-  ReaderIcon,
-  RowsIcon,
-} from "@radix-ui/react-icons";
+  Bolt,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  ListTree,
+  ScrollText,
+  Settings,
+} from "lucide-react";
 import {
   useGetMCPServerInfoQuery,
   useReconnectMCPServerMutation,
@@ -26,6 +19,7 @@ import { MCPPromptsList } from "./MCPPromptsList";
 import { MCPLogs } from "../IntegrationForm/MCPLogs";
 import { MCPOAuth } from "./MCPOAuth";
 import { toPascalCase } from "../../../utils/toPascalCase";
+import { Button, Flex, Icon, Spinner, Surface, Text } from "../../ui";
 import styles from "./MCPServerView.module.css";
 
 type CollapsibleSectionProps = {
@@ -46,7 +40,12 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
   const [expanded, setExpanded] = useState(defaultExpanded);
 
   return (
-    <Box>
+    <Surface
+      animated="rise"
+      className={styles.section}
+      radius="card"
+      variant="glass"
+    >
       <button
         className={styles.sectionHeader}
         onClick={() => setExpanded(!expanded)}
@@ -64,12 +63,18 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
             </Text>
           )}
         </Flex>
-        <Text size="1" color="gray">
-          {expanded ? "▲" : "▼"}
-        </Text>
+        <Icon icon={expanded ? ChevronDown : ChevronRight} size="sm" />
       </button>
-      {expanded && <Box className={styles.sectionContent}>{children}</Box>}
-    </Box>
+      <div
+        className="rf-expand-grid"
+        data-open={expanded ? true : undefined}
+        data-state={expanded ? "open" : "closed"}
+      >
+        <div>
+          <div className={styles.sectionContent}>{children}</div>
+        </div>
+      </div>
+    </Surface>
   );
 };
 
@@ -95,52 +100,66 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
 
   if (isLoading) {
     return (
-      <Flex p="4" align="center" justify="center" gap="2">
-        <Spinner size="2" />
-        <Text size="2" color="gray">
-          Loading MCP server info...
-        </Text>
-      </Flex>
+      <Surface
+        animated="rise"
+        className={styles.loadingSurface}
+        radius="card"
+        variant="glass"
+      >
+        <Flex align="center" justify="center" gap="2">
+          <Spinner size="sm" />
+          <Text size="2" color="gray">
+            Loading MCP server info...
+          </Text>
+        </Flex>
+      </Surface>
     );
   }
 
   if (isError || !data) {
     return (
-      <Flex direction="column" gap="3" p="4">
-        <Text size="2" color="gray">
-          MCP server info not available. The server may not be connected yet.
-        </Text>
-        <Flex align="center" gap="2">
-          <Button
-            size="2"
-            variant="soft"
-            onClick={handleReconnect}
-            disabled={isReconnecting}
-          >
-            {isReconnecting ? "Reconnecting..." : "Reconnect"}
-          </Button>
-          {isReconnecting && <Spinner size="2" />}
+      <Surface
+        animated="rise"
+        className={styles.unavailableSurface}
+        radius="card"
+        variant="glass"
+      >
+        <Flex direction="column" gap="3">
+          <Text as="p" size="2" color="gray">
+            MCP server info not available. The server may not be connected yet.
+          </Text>
+          <Flex align="center" gap="2" wrap="wrap">
+            <Button
+              size="md"
+              variant="soft"
+              onClick={handleReconnect}
+              disabled={isReconnecting}
+            >
+              {isReconnecting ? "Reconnecting..." : "Reconnect"}
+            </Button>
+            {isReconnecting && <Spinner size="sm" />}
+          </Flex>
+          <div className={styles.divider} role="separator" />
+          <MCPLogs
+            integrationPath={configPath}
+            integrationName={toPascalCase(integrName)}
+          />
         </Flex>
-        <Separator size="4" />
-        <MCPLogs
-          integrationPath={configPath}
-          integrationName={toPascalCase(integrName)}
-        />
-      </Flex>
+      </Surface>
     );
   }
 
   return (
-    <Flex direction="column" gap="3" pb="8">
+    <Flex className={`${styles.root} rf-enter`} direction="column" gap="3">
       <Flex align="center" justify="between" wrap="wrap" gap="2">
-        <Heading size="3">
+        <h3 className={styles.title}>
           {data.server_name ?? toPascalCase(integrName)}
           {data.server_version && (
-            <Text size="2" color="gray" ml="2">
+            <Text size="2" color="gray" className={styles.version}>
               v{data.server_version}
             </Text>
           )}
-        </Heading>
+        </h3>
       </Flex>
 
       {data.protocol_version && (
@@ -149,67 +168,59 @@ export const MCPServerView: React.FC<MCPServerViewProps> = ({
         </Text>
       )}
 
-      <Separator size="4" />
+      <div className={styles.divider} role="separator" />
 
       <MCPOAuth configPath={configPath} />
 
-      <CollapsibleSection
-        icon={<LightningBoltIcon />}
-        title="Connection"
-        defaultExpanded
-      >
-        <MCPConnectionStatus
-          status={data.status}
-          onReconnect={handleReconnect}
-          isReconnecting={isReconnecting}
-        />
-      </CollapsibleSection>
+      <div className="rf-stagger">
+        <CollapsibleSection
+          icon={<Icon icon={Bolt} size="sm" />}
+          title="Connection"
+          defaultExpanded
+        >
+          <MCPConnectionStatus
+            status={data.status}
+            onReconnect={handleReconnect}
+            isReconnecting={isReconnecting}
+          />
+        </CollapsibleSection>
 
-      <Separator size="4" />
+        <CollapsibleSection
+          icon={<Icon icon={Settings} size="sm" />}
+          title="Tools"
+          count={data.tools.length}
+          defaultExpanded
+        >
+          <MCPToolsList tools={data.tools} />
+        </CollapsibleSection>
 
-      <CollapsibleSection
-        icon={<GearIcon />}
-        title="Tools"
-        count={data.tools.length}
-        defaultExpanded
-      >
-        <MCPToolsList tools={data.tools} />
-      </CollapsibleSection>
-
-      {data.resources.length > 0 && (
-        <>
-          <Separator size="4" />
+        {data.resources.length > 0 && (
           <CollapsibleSection
-            icon={<RowsIcon />}
+            icon={<Icon icon={ListTree} size="sm" />}
             title="Resources"
             count={data.resources.length}
           >
             <MCPResourcesList resources={data.resources} />
           </CollapsibleSection>
-        </>
-      )}
+        )}
 
-      {data.prompts.length > 0 && (
-        <>
-          <Separator size="4" />
+        {data.prompts.length > 0 && (
           <CollapsibleSection
-            icon={<FileTextIcon />}
+            icon={<Icon icon={FileText} size="sm" />}
             title="Prompts"
             count={data.prompts.length}
           >
             <MCPPromptsList prompts={data.prompts} />
           </CollapsibleSection>
-        </>
-      )}
+        )}
 
-      <Separator size="4" />
-
-      <CollapsibleSection icon={<ReaderIcon />} title="Logs">
-        <MCPLogs
-          integrationPath={configPath}
-          integrationName={toPascalCase(integrName)}
-        />
-      </CollapsibleSection>
+        <CollapsibleSection icon={<Icon icon={ScrollText} size="sm" />} title="Logs">
+          <MCPLogs
+            integrationPath={configPath}
+            integrationName={toPascalCase(integrName)}
+          />
+        </CollapsibleSection>
+      </div>
     </Flex>
   );
 };
