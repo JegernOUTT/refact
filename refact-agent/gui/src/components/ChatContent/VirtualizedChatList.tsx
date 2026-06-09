@@ -11,9 +11,17 @@ import { Flex, Container, Box } from "@radix-ui/themes";
 import classNames from "classnames";
 import { ScrollToBottomButton } from "../ScrollArea/ScrollToBottomButton";
 import styles from "./ChatContent.module.css";
+import {
+  captureScrollAnchor,
+  ChatScrollAnchorContext,
+  scheduleScrollAnchorRestore,
+  type PreserveScrollAnchor,
+  type ScrollAnchorSnapshot,
+} from "./useChatScrollAnchor";
 
 const SCROLL_INTENT_MS = 500;
 const PASSIVE_SCROLL_GRACE_MS = 250;
+const ANCHOR_PREPARE_MAX_AGE_MS = 500;
 const MIN_MEASURED_LIST_HEIGHT = 1;
 const DEFAULT_ITEM_HEIGHT = 240;
 const VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT = { top: 20, bottom: 20 };
@@ -81,6 +89,12 @@ export function VirtualizedChatList<T extends { key: string }>({
   const suppressPassiveScrollUntilRef = useRef(0);
   const recentlyChangedOutputUntilRef = useRef(0);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const pendingAnchorSnapshotRef = useRef<{
+    snapshot: ScrollAnchorSnapshot | null;
+    capturedAt: number;
+  } | null>(null);
+  const cancelAnchorRestoreRef = useRef<(() => void) | null>(null);
   const [hasMeasuredHeight, setHasMeasuredHeight] = useState(false);
   // Timestamp of the last active user input that should scroll downward.
   // Used to distinguish real user scroll-down from Virtuoso measurement
@@ -106,6 +120,14 @@ export function VirtualizedChatList<T extends { key: string }>({
     resizeObserver.observe(wrapper);
     return () => resizeObserver.disconnect();
   }, []);
+
+  useLayoutEffect(
+    () => () => {
+      cancelAnchorRestoreRef.current?.();
+      cancelAnchorRestoreRef.current = null;
+    },
+    [],
+  );
 
   const lastItemKey = items.length > 0 ? items[items.length - 1].key : "";
   const itemsSignature = `${items.length}:${lastItemKey}`;
@@ -171,6 +193,8 @@ export function VirtualizedChatList<T extends { key: string }>({
     (_index: number, item: T) => (
       <Container
         className={styles.virtuosoItem}
+        data-chat-scroll-anchor-item="true"
+        data-chat-scroll-anchor-key={item.key}
         data-testid="chat-virtuoso-item"
       >
         {renderItem(item)}
@@ -178,6 +202,45 @@ export function VirtualizedChatList<T extends { key: string }>({
     ),
     [renderItem],
   );
+
+  const prepareScrollAnchor = useCallback(() => {
+    const scroller = scrollerRef.current;
+    pendingAnchorSnapshotRef.current = {
+      snapshot: scroller ? captureScrollAnchor(scroller) : null,
+      capturedAt: performance.now(),
+    };
+  }, []);
+
+  const preserveScrollAnchor = useCallback<PreserveScrollAnchor>((mutate) => {
+    const scroller = scrollerRef.current;
+    const pendingAnchor = pendingAnchorSnapshotRef.current;
+    const snapshot =
+      pendingAnchor &&
+      performance.now() - pendingAnchor.capturedAt <= ANCHOR_PREPARE_MAX_AGE_MS
+        ? pendingAnchor.snapshot
+        : scroller
+          ? captureScrollAnchor(scroller)
+          : null;
+
+    pendingAnchorSnapshotRef.current = null;
+    cancelAnchorRestoreRef.current?.();
+    cancelAnchorRestoreRef.current = null;
+    mutate();
+
+    if (!scroller || !snapshot) return;
+
+    suppressPassiveScrollUntilRef.current =
+      performance.now() + PASSIVE_SCROLL_GRACE_MS;
+    cancelAnchorRestoreRef.current = scheduleScrollAnchorRestore(
+      scroller,
+      snapshot,
+      () => {
+        lastScrollTopRef.current = scroller.scrollTop;
+        suppressPassiveScrollUntilRef.current =
+          performance.now() + PASSIVE_SCROLL_GRACE_MS;
+      },
+    );
+  }, []);
 
   const Scroller = useMemo(() => {
     const ScrollerComponent = React.forwardRef<
@@ -193,6 +256,15 @@ export function VirtualizedChatList<T extends { key: string }>({
         onKeyDown,
         ...restProps
       } = props;
+      const setScrollerNode = (node: HTMLDivElement | null) => {
+        scrollerRef.current = node;
+        if (typeof ref === "function") {
+          ref(node);
+        } else if (ref) {
+          ref.current = node;
+        }
+      };
+
       const handleWheel: React.WheelEventHandler<HTMLDivElement> = (event) => {
         const wheelHandledByNestedScroller = isWheelHandledByNestedScroller(
           event.currentTarget,
@@ -337,11 +409,12 @@ export function VirtualizedChatList<T extends { key: string }>({
 
       return (
         <div
-          ref={ref}
+          ref={setScrollerNode}
           style={{
             ...style,
             overflowY: "auto",
             overflowX: "hidden",
+            overflowAnchor: "none",
           }}
           data-testid="chat-virtuoso-scroller"
           className={classNames(styles.virtuosoScroller, className)}
@@ -410,43 +483,52 @@ export function VirtualizedChatList<T extends { key: string }>({
     [isStreaming],
   );
 
+  const scrollAnchorValue = useMemo(
+    () => ({ preserveScrollAnchor, prepareScrollAnchor }),
+    [preserveScrollAnchor, prepareScrollAnchor],
+  );
+
   return (
-    <Box
-      ref={wrapperRef}
-      style={{
-        flexGrow: 1,
-        height: "100%",
-        minWidth: 0,
-        maxWidth: "100%",
-        overflow: "hidden",
-        position: "relative",
-      }}
-      data-testid="chat-virtualized-list-wrapper"
-    >
-      {hasMeasuredHeight && (
-        <Virtuoso
-          ref={virtuosoRef}
-          data={items}
-          computeItemKey={computeItemKey}
-          itemContent={itemContent}
-          components={components}
-          atBottomStateChange={handleAtBottomChange}
-          followOutput={followOutput}
-          initialTopMostItemIndex={
-            initialScrollIndex !== undefined
-              ? { index: initialScrollIndex, align: "end" }
-              : undefined
-          }
-          atBottomThreshold={20}
-          increaseViewportBy={viewportPadding}
-          defaultItemHeight={DEFAULT_ITEM_HEIGHT}
-          minOverscanItemCount={VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT}
-          overscan={VIRTUOSO_OVERSCAN}
-          skipAnimationFrameInResizeObserver={true}
-        />
-      )}
-      {showFollowButton && <ScrollToBottomButton onClick={handleFollowClick} />}
-    </Box>
+    <ChatScrollAnchorContext.Provider value={scrollAnchorValue}>
+      <Box
+        ref={wrapperRef}
+        style={{
+          flexGrow: 1,
+          height: "100%",
+          minWidth: 0,
+          maxWidth: "100%",
+          overflow: "hidden",
+          position: "relative",
+        }}
+        data-testid="chat-virtualized-list-wrapper"
+      >
+        {hasMeasuredHeight && (
+          <Virtuoso
+            ref={virtuosoRef}
+            data={items}
+            computeItemKey={computeItemKey}
+            itemContent={itemContent}
+            components={components}
+            atBottomStateChange={handleAtBottomChange}
+            followOutput={followOutput}
+            initialTopMostItemIndex={
+              initialScrollIndex !== undefined
+                ? { index: initialScrollIndex, align: "end" }
+                : undefined
+            }
+            atBottomThreshold={20}
+            increaseViewportBy={viewportPadding}
+            defaultItemHeight={DEFAULT_ITEM_HEIGHT}
+            minOverscanItemCount={VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT}
+            overscan={VIRTUOSO_OVERSCAN}
+            skipAnimationFrameInResizeObserver={true}
+          />
+        )}
+        {showFollowButton && (
+          <ScrollToBottomButton onClick={handleFollowClick} />
+        )}
+      </Box>
+    </ChatScrollAnchorContext.Provider>
   );
 }
 

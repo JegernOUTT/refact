@@ -5,6 +5,10 @@ import { ToolCard as KitToolCard } from "../../ui";
 import { Icon } from "../../ui/Icon";
 import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
+import {
+  useChatScrollAnchor,
+  usePrepareChatScrollAnchor,
+} from "../useChatScrollAnchor";
 import { ToolCall } from "../../../services/refact/types";
 import styles from "./ToolCard.module.css";
 
@@ -35,12 +39,17 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   animate = true,
   toolCall,
 }) => {
+  const preserveScrollAnchor = useChatScrollAnchor();
+  const prepareScrollAnchor = usePrepareChatScrollAnchor();
   const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
     isOpen,
     200,
     animate,
   );
   const renderedOpen = animate ? isAnimatingOpen : isOpen;
+  const handleToggle = React.useCallback(() => {
+    preserveScrollAnchor(onToggle);
+  }, [onToggle, preserveScrollAnchor]);
 
   const title = (
     <span
@@ -68,7 +77,10 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
         className,
       )}
       open={renderedOpen}
-      onOpenChange={onToggle}
+      onPointerDownCapture={prepareScrollAnchor}
+      onMouseDownCapture={prepareScrollAnchor}
+      onKeyDownCapture={prepareScrollAnchor}
+      onOpenChange={handleToggle}
       status={status}
       title={title}
     >
