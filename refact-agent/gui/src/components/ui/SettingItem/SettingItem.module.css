@@ -4,8 +4,8 @@
   display: grid;
   min-width: 0;
   max-width: 100%;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-2) 0;
+  gap: var(--rf-row-gap);
+  padding: var(--rf-row-pad) 0;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
 }
@@ -53,7 +53,7 @@
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--rf-space-2);
+  gap: var(--rf-row-gap);
 }
 
 .title {

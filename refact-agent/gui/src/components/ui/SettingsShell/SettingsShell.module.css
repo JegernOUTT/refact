@@ -58,8 +58,8 @@
   max-width: 100%;
   min-height: var(--rf-control-h);
   align-items: center;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--rf-space-2);
+  gap: var(--rf-row-gap);
+  padding: var(--rf-row-pad);
   overflow: hidden;
   color: var(--rf-color-muted);
   background: transparent;

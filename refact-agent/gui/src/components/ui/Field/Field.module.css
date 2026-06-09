@@ -2,8 +2,8 @@
   display: grid;
   min-width: 0;
   max-width: 100%;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-2) 0;
+  gap: var(--rf-row-gap);
+  padding: var(--rf-row-pad) 0;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
 }
@@ -157,6 +157,5 @@
     --rf-input-max: 100%;
 
     grid-template-columns: minmax(0, 1fr);
-    gap: var(--rf-space-2);
   }
 }

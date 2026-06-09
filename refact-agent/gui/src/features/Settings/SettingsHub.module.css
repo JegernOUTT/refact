@@ -27,6 +27,13 @@
   background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
+  padding: var(--rf-panel-pad);
+}
+
+@media (width <= 640px) {
+  .shell {
+    padding: var(--rf-panel-pad-compact);
+  }
 }
 
 @media (prefers-reduced-transparency: reduce) {
