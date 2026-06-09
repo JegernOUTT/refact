@@ -120,3 +120,8 @@
     backdrop-filter: none;
   }
 }
+
+:global(.radix-themes[data-host="jetbrains"]) .card,
+:global(.radix-themes[data-host="jetbrains"]) .callout {
+  backdrop-filter: none;
+}

@@ -229,9 +229,11 @@
   padding: var(--rf-space-3);
   overflow: auto;
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
   resize: vertical;
@@ -346,12 +348,14 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
+  .yamlEditor,
   .errorBanner,
   .callout {
     backdrop-filter: none;
   }
 }
 
+:global(.radix-themes[data-host="jetbrains"]) .yamlEditor,
 :global(.radix-themes[data-host="jetbrains"]) .errorBanner,
 :global(.radix-themes[data-host="jetbrains"]) .callout {
   backdrop-filter: none;

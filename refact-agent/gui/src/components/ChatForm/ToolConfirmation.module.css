@@ -105,7 +105,9 @@
   overflow-y: auto;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .CacheGuardDiff {
@@ -121,9 +123,15 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .ToolConfirmationCard.ToolConfirmationCard {
+  .ToolConfirmationCard.ToolConfirmationCard,
+  .CacheGuardScroll {
     backdrop-filter: none;
   }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .ToolConfirmationCard.ToolConfirmationCard,
+:global(.radix-themes[data-host="jetbrains"]) .CacheGuardScroll {
+  backdrop-filter: none;
 }
 
 @media (max-width: calc(var(--rf-sidebar-w-min) + var(--rf-space-6))) {
