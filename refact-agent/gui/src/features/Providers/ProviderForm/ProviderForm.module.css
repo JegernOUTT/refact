@@ -77,6 +77,10 @@
   gap: var(--rf-space-3);
 }
 
+.defaultRows {
+  composes: rf-stagger from global;
+}
+
 .usageRow {
   display: flex;
   min-width: 0;
@@ -179,6 +183,6 @@
 }
 
 .smartlink:hover {
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass);
   color: var(--rf-color-fg);
 }

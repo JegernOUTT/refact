@@ -198,7 +198,7 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
     return (
       <div
         key={variant.id}
-        className={classNames(styles.providerRow, {
+        className={classNames(styles.providerRow, "rf-enter-rise", {
           [styles.providerRowSelected]: isSelected,
         })}
       >
@@ -282,10 +282,11 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
     <Surface
       variant="glass"
       animated="rise"
-      interactive={hasProviderRouting}
+      interactive={false}
       className={classNames(styles.modelCard, {
         [styles.disabledCard]: isLoading,
         [styles.clickable]: hasProviderRouting,
+        "rf-pressable": hasProviderRouting,
       })}
       onClick={handleCardClick}
     >
@@ -382,12 +383,19 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
               open={detailsOpen}
               onOpenChange={setDetailsOpen}
             >
-              <RadixCollapsible.Content className={styles.providerPanel}>
+              <RadixCollapsible.Content
+                className={classNames(styles.providerPanel, "rf-stagger")}
+              >
                 <span className={styles.mutedText}>
                   Selecting a provider will enable the model automatically.
                 </span>
                 {resolvedProviderVariants.length > 0 ? (
-                  <div className={styles.providerTableWrap}>
+                  <div
+                    className={classNames(
+                      styles.providerTableWrap,
+                      "rf-stagger",
+                    )}
+                  >
                     <div className={styles.providerHeaderRow}>
                       <span>Provider</span>
                       <span>Context</span>
@@ -402,7 +410,7 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                       <span>Action</span>
                     </div>
                     <div
-                      className={classNames(styles.providerRow, {
+                      className={classNames(styles.providerRow, "rf-enter-rise", {
                         [styles.providerRowSelected]:
                           optimisticSelectedProvider === "",
                       })}
@@ -423,8 +431,18 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                   </div>
                 ) : (
                   <div className={styles.providerTableWrap}>
-                    <div className={styles.availableProvidersList}>
-                      <div className={styles.availableProviderRow}>
+                    <div
+                      className={classNames(
+                        styles.availableProvidersList,
+                        "rf-stagger",
+                      )}
+                    >
+                      <div
+                        className={classNames(
+                          styles.availableProviderRow,
+                          "rf-enter-rise",
+                        )}
+                      >
                         <span className={styles.providerCellPrimary}>Auto</span>
                         {renderAutoProviderButton()}
                       </div>
@@ -438,7 +456,10 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                           optimisticSelectedProvider === provider;
                         return (
                           <div
-                            className={styles.availableProviderRow}
+                            className={classNames(
+                              styles.availableProviderRow,
+                              "rf-enter-rise",
+                            )}
                             key={provider}
                           >
                             <span className={styles.providerCellPrimary}>

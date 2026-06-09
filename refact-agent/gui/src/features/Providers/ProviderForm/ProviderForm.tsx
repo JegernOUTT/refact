@@ -260,6 +260,7 @@ const ProviderDefaultModelsSetup: React.FC = () => {
         {DEFAULT_MODEL_FIELDS.map(({ key, label, description }) => (
           <SettingItem
             key={key}
+            className="rf-enter-rise"
             title={label}
             description={description}
             layout="stack"
@@ -472,15 +473,16 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
             </>
           ) : null}
 
-          <div className={styles.formFields}>
+          <div className={`${styles.formFields} rf-stagger`}>
             {importantFields.map((field) => (
-              <SchemaField
-                key={field.key}
-                field={field}
-                value={formValues[field.key]}
-                disabled={isReadonly}
-                onSave={handleFieldSave}
-              />
+              <div key={field.key} className="rf-enter-rise">
+                <SchemaField
+                  field={field}
+                  value={formValues[field.key]}
+                  disabled={isReadonly}
+                  onSave={handleFieldSave}
+                />
+              </div>
             ))}
           </div>
 
@@ -498,15 +500,16 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
               </div>
 
               {areShowingExtraFields ? (
-                <div className={styles.formFields}>
+                <div className={`${styles.formFields} rf-stagger`}>
                   {extraFields.map((field) => (
-                    <SchemaField
-                      key={field.key}
-                      field={field}
-                      value={formValues[field.key]}
-                      disabled={isReadonly}
-                      onSave={handleFieldSave}
-                    />
+                    <div key={field.key} className="rf-enter-rise">
+                      <SchemaField
+                        field={field}
+                        value={formValues[field.key]}
+                        disabled={isReadonly}
+                        onSave={handleFieldSave}
+                      />
+                    </div>
                   ))}
                 </div>
               ) : null}

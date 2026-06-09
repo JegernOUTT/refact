@@ -76,6 +76,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   const devicePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loginLabel = PROVIDER_LOGIN_LABELS[baseProvider] ?? "Login";
+  const surfaceClassName = `${styles.container} rf-stagger`;
 
   const clearCallbackPollTimer = useCallback(() => {
     if (callbackPollTimerRef.current) {
@@ -292,8 +293,8 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
 
   if (oauthConnected) {
     return (
-      <Surface className={styles.container} variant="glass" animated="rise">
-        <div className={styles.headerRow}>
+      <Surface className={surfaceClassName} variant="glass" animated="rise">
+        <div className={`${styles.headerRow} rf-enter-rise`}>
           <div className={styles.inlineRow}>
             <span className={`${styles.title} ${styles.connected}`}>
               Connected
@@ -316,25 +317,25 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   if (sessionId && authorizeUrl) {
     if (oauthMode === "device" || userCode) {
       return (
-        <Surface className={styles.container} variant="glass" animated="rise">
-          <div className={styles.title}>
+        <Surface className={surfaceClassName} variant="glass" animated="rise">
+          <div className={`${styles.title} rf-enter-rise`}>
             Authorize{" "}
             {(PROVIDER_LOGIN_LABELS[baseProvider] ?? "provider").replace(
               "Login with ",
               "",
             )}
           </div>
-          <div className={styles.copy}>
+          <div className={`${styles.copy} rf-enter-rise`}>
             {instructions ??
               "Open the verification page and enter the code shown below."}
           </div>
           {userCode ? (
-            <div>
+            <div className="rf-enter-rise">
               <div className={styles.copy}>User code</div>
               <div className={styles.codeBox}>{userCode}</div>
             </div>
           ) : null}
-          <div>
+          <div className="rf-enter-rise">
             <div className={styles.copy}>Verification URL</div>
             <a
               href={authorizeUrl}
@@ -347,13 +348,13 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
               {authorizeUrl}
             </a>
           </div>
-          <div className={styles.copy}>
+          <div className={`${styles.copy} rf-enter-rise`}>
             {deviceStatus ?? "Waiting for device authorization"}
             {pollIntervalSeconds
               ? ` Checking every ${pollIntervalSeconds} seconds.`
               : ""}
           </div>
-          <div className={styles.actionRow}>
+          <div className={`${styles.actionRow} rf-enter-rise`}>
             <Button variant="primary" onClick={handleOpenAuthorizeUrl}>
               Open verification page
             </Button>
@@ -368,20 +369,24 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
               Cancel
             </Button>
           </div>
-          {error ? <div className={styles.errorText}>{error}</div> : null}
+          {error ? (
+            <div className={`${styles.errorText} rf-enter-rise`}>{error}</div>
+          ) : null}
         </Surface>
       );
     }
 
     if (oauthMode === "callback" && waitingForCallback) {
       return (
-        <Surface className={styles.container} variant="glass" animated="rise">
-          <div className={styles.title}>Waiting for authentication...</div>
-          <div className={styles.copy}>
+        <Surface className={surfaceClassName} variant="glass" animated="rise">
+          <div className={`${styles.title} rf-enter-rise`}>
+            Waiting for authentication...
+          </div>
+          <div className={`${styles.copy} rf-enter-rise`}>
             Complete the login in the browser window that opened. This page will
             update automatically.
           </div>
-          <div className={styles.actionRow}>
+          <div className={`${styles.actionRow} rf-enter-rise`}>
             <span className={styles.copy}>
               Browser didn&apos;t open?{" "}
               <a
@@ -399,19 +404,23 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
               Cancel
             </Button>
           </div>
-          {error ? <div className={styles.errorText}>{error}</div> : null}
+          {error ? (
+            <div className={`${styles.errorText} rf-enter-rise`}>{error}</div>
+          ) : null}
         </Surface>
       );
     }
 
     return (
-      <Surface className={styles.container} variant="glass" animated="rise">
-        <div className={styles.title}>Paste the authorization code</div>
-        <div className={styles.copy}>
+      <Surface className={surfaceClassName} variant="glass" animated="rise">
+        <div className={`${styles.title} rf-enter-rise`}>
+          Paste the authorization code
+        </div>
+        <div className={`${styles.copy} rf-enter-rise`}>
           A browser window should have opened. Log in and copy the code shown on
           the page.
         </div>
-        <div className={styles.actionRow}>
+        <div className={`${styles.actionRow} rf-enter-rise`}>
           <FieldText
             className={styles.fullWidthInput}
             placeholder="Paste code here..."
@@ -429,7 +438,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
             {isLoading ? "Connecting..." : "Connect"}
           </Button>
         </div>
-        <div className={styles.actionRow}>
+        <div className={`${styles.actionRow} rf-enter-rise`}>
           <span className={styles.copy}>
             Browser didn&apos;t open?{" "}
             <a
@@ -447,14 +456,16 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
             Cancel
           </Button>
         </div>
-        {error ? <div className={styles.errorText}>{error}</div> : null}
+        {error ? (
+          <div className={`${styles.errorText} rf-enter-rise`}>{error}</div>
+        ) : null}
       </Surface>
     );
   }
 
   return (
-    <Surface className={styles.container} variant="glass" animated="rise">
-      <div className={styles.headerRow}>
+    <Surface className={surfaceClassName} variant="glass" animated="rise">
+      <div className={`${styles.headerRow} rf-enter-rise`}>
         <div className={styles.title}>{loginLabel}</div>
         <Button
           variant="primary"
@@ -464,7 +475,9 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
           {isLoading ? "Starting..." : "Login"}
         </Button>
       </div>
-      {error ? <div className={styles.errorText}>{error}</div> : null}
+      {error ? (
+        <div className={`${styles.errorText} rf-enter-rise`}>{error}</div>
+      ) : null}
     </Surface>
   );
 };
