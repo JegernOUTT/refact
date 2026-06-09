@@ -418,7 +418,7 @@ export const DiffBlock: React.FC<{
               <button
                 key={action.label}
                 type="button"
-                className={styles.hunkActionButton}
+                className={`${styles.hunkActionButton} rf-pressable`}
                 onClick={action.onClick}
                 disabled={action.disabled}
                 title={action.label}

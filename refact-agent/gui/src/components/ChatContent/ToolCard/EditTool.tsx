@@ -185,7 +185,7 @@ export const EditTool: React.FC<EditToolProps> = ({
         icon: dryRunResult.isLoading ? (
           <Icon icon={LoaderCircle} size="sm" tone="accent" />
         ) : (
-          <CircleCheck />
+          <Icon icon={CircleCheck} size="sm" tone="success" />
         ),
         onClick: handleApplyDiff,
         disabled: dryRunResult.isLoading || !parsedToolCall,
@@ -195,7 +195,7 @@ export const EditTool: React.FC<EditToolProps> = ({
     if (replaceContent !== null && hasSelection) {
       actions.push({
         label: "Replace selection",
-        icon: <RotateCcw />,
+        icon: <Icon icon={RotateCcw} size="sm" />,
         onClick: handleReplace,
         disabled: !canPaste,
       });
