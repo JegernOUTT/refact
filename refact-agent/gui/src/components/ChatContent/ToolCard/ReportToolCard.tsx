@@ -1,4 +1,11 @@
-import { Copy, Check, FileText, BookOpen, LoaderCircle } from "lucide-react";
+import {
+  Copy,
+  Check,
+  FileText,
+  BookOpen,
+  ChevronDown,
+  LoaderCircle,
+} from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -16,6 +23,10 @@ import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
 import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
+import {
+  useChatScrollAnchor,
+  usePrepareChatScrollAnchor,
+} from "../useChatScrollAnchor";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useEventsBusForIDE } from "../../../hooks";
 import { isIdeHost } from "../../../utils/isIdeHost";
@@ -109,13 +120,15 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
 
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, defaultOpen);
+  const preserveScrollAnchor = useChatScrollAnchor();
+  const prepareScrollAnchor = usePrepareChatScrollAnchor();
   const [animateContent, setAnimateContent] = useState(false);
   const [bodyReady, setBodyReady] = useState(variant !== "taskDone");
 
   const handleAnimatedToggle = useCallback(() => {
     setAnimateContent(true);
-    handleToggle();
-  }, [handleToggle]);
+    preserveScrollAnchor(handleToggle);
+  }, [handleToggle, preserveScrollAnchor]);
 
   const summary = reportData?.summary ?? defaultSummary;
 
@@ -263,74 +276,88 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   const showSaveButton = isIdeHost();
   const variantClass = REPORT_VARIANT_CLASSES[variant];
 
-  const header = (
-    <Flex
-      className={classNames(
-        styles.header,
-        status === "running" && "rf-active-pulse",
-        status === "running" && styles.running,
-      )}
-      align="center"
-      gap="2"
-      onClick={handleAnimatedToggle}
-    >
-      <span className={styles.icon}>
-        {status === "running" ? (
-          <Icon icon={LoaderCircle} size="sm" tone="accent" />
-        ) : (
-          icon
-        )}
-      </span>
-      <Text
-        size="1"
+  const renderedOpen = animateContent ? isAnimatingOpen : isOpen;
+
+  const actions = showActions ? (
+    <>
+      <button
         className={classNames(
-          styles.summary,
-          status === "error" && styles.error,
-          variant === "taskDone" &&
-            status === "success" &&
-            styles.summaryTaskDone,
+          styles.actionButton,
+          copied && styles.copiedButton,
         )}
+        onClick={handleCopy}
+        title="Copy report"
+        type="button"
       >
-        {summary}
-      </Text>
-      {meta && (
-        <Text size="1" color="gray" className={styles.meta}>
-          {meta}
-        </Text>
+        {copied ? <Check /> : <Copy />}
+      </button>
+      {showSaveButton && (
+        <button
+          className={styles.actionButton}
+          onClick={handleSave}
+          title="Save as file"
+          type="button"
+        >
+          <FileText />
+        </button>
       )}
-      {status === "error" && (
-        <Text size="1" color="red" className={styles.errorBadge}>
-          failed
-        </Text>
-      )}
-      {showActions && (
-        <span className={styles.actions}>
-          <button
-            className={classNames(
-              styles.actionButton,
-              copied && styles.copiedButton,
-            )}
-            onClick={handleCopy}
-            title="Copy report"
-          >
-            {copied ? <Check /> : <Copy />}
-          </button>
-          {showSaveButton && (
-            <button
-              className={styles.actionButton}
-              onClick={handleSave}
-              title="Save as file"
-            >
-              <FileText />
-            </button>
+    </>
+  ) : null;
+
+  const header = (
+    <div className={styles.header}>
+      <button
+        aria-expanded={isOpen}
+        className={classNames(
+          styles.toggle,
+          status === "running" && "rf-active-pulse",
+        )}
+        type="button"
+        onClick={handleAnimatedToggle}
+        onKeyDownCapture={prepareScrollAnchor}
+        onMouseDownCapture={prepareScrollAnchor}
+        onPointerDownCapture={prepareScrollAnchor}
+      >
+        <span className={styles.icon}>
+          {status === "running" ? (
+            <Icon icon={LoaderCircle} size="sm" tone="accent" />
+          ) : (
+            icon
           )}
         </span>
-      )}
-    </Flex>
+        <span
+          className={classNames(
+            styles.summary,
+            status === "error" && styles.error,
+            variant === "taskDone" &&
+              status === "success" &&
+              styles.summaryTaskDone,
+          )}
+        >
+          {summary}
+        </span>
+        {meta && <span className={styles.meta}>{meta}</span>}
+        {status === "error" && (
+          <span className={styles.errorBadge}>failed</span>
+        )}
+        <span className={styles.spacer} />
+        <Icon className={styles.chevron} icon={ChevronDown} tone="faint" />
+      </button>
+      {actions && <div className={styles.actions}>{actions}</div>}
+    </div>
   );
 
   return (
-    <div className={classNames(styles.card, variantClass)}>
+    <section
+      className={classNames(
+        "rf-enter",
+        styles.card,
+        variantClass,
+        status === "running" && styles.running,
+      )}
+      data-open={renderedOpen}
+      data-status={status}
+    >
       <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
 
       {deferredEntertainmentText && (
@@ -349,9 +376,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
         <div
           className={classNames(
             "rf-expand-grid",
-            isAnimatingOpen && "is-open",
+            renderedOpen && "is-open",
             styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
+            renderedOpen && styles.contentWrapperOpen,
             !animateContent && styles.noTransition,
           )}
         >
@@ -377,7 +404,12 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
             </Box>
 
             {reportData.filesChanged && reportData.filesChanged.length > 0 && (
-              <Flex gap="2" wrap="wrap" py="1" px="1" align="center">
+              <Flex
+                className={styles.fileFooter}
+                gap="2"
+                wrap="wrap"
+                align="center"
+              >
                 <Text size="1" color="gray">
                   Files:
                 </Text>
@@ -399,7 +431,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
                 size="1"
                 color="gray"
                 as="p"
-                style={{ padding: "0 var(--space-1)" }}
+                className={styles.knowledgePath}
               >
                 <Flex as="span" align="center" gap="1">
                   <BookOpen />
@@ -410,7 +442,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           </div>
         </div>
       )}
-    </div>
+    </section>
   );
 };
 

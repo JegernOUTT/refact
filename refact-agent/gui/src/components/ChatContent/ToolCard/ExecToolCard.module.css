@@ -10,23 +10,6 @@
   gap: var(--rf-space-2);
 }
 
-.iconSpinner {
-  display: inline-flex;
-  width: var(--rf-icon-sm);
-  height: var(--rf-icon-sm);
-  align-items: center;
-  justify-content: center;
-}
-
-.spinnerDot {
-  width: var(--rf-icon-sm);
-  height: var(--rf-icon-sm);
-  border: var(--rf-hairline) solid var(--rf-color-accent-soft);
-  border-top-color: var(--rf-color-accent);
-  border-radius: var(--rf-radius-pill);
-  animation: exec-spinner var(--rf-dur-slow) linear infinite;
-}
-
 .summary {
   flex: 1 1 auto;
   min-width: 0;
@@ -115,6 +98,8 @@
 }
 
 .content {
+  display: grid;
+  gap: var(--rf-space-2);
   min-width: 0;
 }
 
@@ -122,7 +107,13 @@
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: var(--rf-space-1) var(--rf-space-3);
-  margin-bottom: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-2);
+  background: var(--rf-surface-glass, var(--rf-surface-2));
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .detailLabel {
@@ -141,7 +132,7 @@
 }
 
 .controls {
-  margin-bottom: var(--rf-space-2);
+  margin-bottom: 0;
 }
 
 .logButton,
@@ -157,13 +148,15 @@
 
 .outputSection {
   overflow: hidden;
-  background: transparent;
-  border-left: var(--rf-hairline) solid var(--rf-border);
-  border-radius: 0;
+  background: var(--rf-surface-glass, var(--rf-surface-2));
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .outputHeader {
-  padding: var(--rf-space-1) 0 var(--rf-space-1) var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
   background: transparent;
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
@@ -171,7 +164,7 @@
 .outputBody {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 360px;
-  padding: var(--rf-space-2) 0 var(--rf-space-2) var(--rf-space-2);
+  padding: var(--rf-space-2);
   overflow: auto;
 }
 
@@ -201,15 +194,16 @@
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-2);
-  margin-bottom: var(--rf-space-3);
 }
 
 .processListItem {
   min-width: 0;
   padding: var(--rf-space-2);
-  background: var(--rf-surface-1);
+  background: var(--rf-surface-glass, var(--rf-surface-2));
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .stdinInputRow {
@@ -233,19 +227,10 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
+  .detailsGrid,
+  .outputSection,
+  .processListItem,
   .stdinInputRow {
     backdrop-filter: none;
-  }
-}
-
-@keyframes exec-spinner {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spinnerDot {
-    animation: none;
   }
 }

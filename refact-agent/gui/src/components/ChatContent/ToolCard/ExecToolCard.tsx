@@ -429,15 +429,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     [host, logPath, postMessage],
   );
 
-  const icon = isBusy ? (
-    <span className={styles.iconSpinner}>
-      <span className={styles.spinnerDot} />
-    </span>
-  ) : toolName === "process_list" ? (
-    <Rows3 />
-  ) : (
-    <Code />
-  );
+  const icon = toolName === "process_list" ? <Rows3 /> : <Code />;
 
   const summary = (
     <span className={styles.execTitle} title={process.shortDescription}>

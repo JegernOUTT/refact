@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
-import { Flex, Text, Box } from "@radix-ui/themes";
-import { LoaderCircle } from "lucide-react";
+import { Text, Box } from "@radix-ui/themes";
+import { ChevronDown, LoaderCircle } from "lucide-react";
 import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useAutoExpandCollapse, ToolStatus } from "./useAutoExpandCollapse";
@@ -15,6 +15,10 @@ import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
 } from "../../../features/Buddy/reportBuddyFrontendError";
+import {
+  useChatScrollAnchor,
+  usePrepareChatScrollAnchor,
+} from "../useChatScrollAnchor";
 import styles from "./StreamingToolCard.module.css";
 
 const MAX_MD_RENDER_CHARS = 50_000;
@@ -48,6 +52,8 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
   const maybeResult = useAppSelector((state) =>
     selectToolResultById(state, toolCall.id),
   );
+  const preserveScrollAnchor = useChatScrollAnchor();
+  const prepareScrollAnchor = usePrepareChatScrollAnchor();
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult) return "running";
@@ -60,6 +66,9 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     status,
     storeKey,
   });
+  const handleToggle = useCallback(() => {
+    preserveScrollAnchor(onToggle);
+  }, [onToggle, preserveScrollAnchor]);
 
   const content =
     maybeResult && typeof maybeResult.content === "string"
@@ -139,43 +148,57 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     setBuddyCrashHotSlot("tool", null);
   }, [deferredEntertainmentText, status, summary]);
 
+  const renderedOpen = animate ? isAnimatingOpen : isOpen;
+
   const header = (
-    <Flex
-      className={classNames(
-        styles.header,
-        status === "running" && "rf-active-pulse",
-        status === "running" && styles.running,
-        status === "error" && styles.error,
-      )}
-      align="center"
-      gap="2"
-      onClick={onToggle}
-    >
-      <span className={styles.icon}>
-        {status === "running" ? (
-          <Icon icon={LoaderCircle} size="sm" tone="accent" />
-        ) : (
-          icon
+    <div className={styles.header}>
+      <button
+        aria-expanded={isOpen}
+        className={classNames(
+          styles.toggle,
+          status === "running" && "rf-active-pulse",
         )}
-      </span>
-      <Text size="1" className={styles.summary}>
-        {summary}
-      </Text>
-      {meta && (
-        <Text size="1" color="gray" className={styles.meta}>
-          {meta}
-        </Text>
-      )}
-      {status === "error" && (
-        <Text size="1" color="red" className={styles.errorBadge}>
-          failed
-        </Text>
-      )}
-    </Flex>
+        type="button"
+        onClick={handleToggle}
+        onKeyDownCapture={prepareScrollAnchor}
+        onMouseDownCapture={prepareScrollAnchor}
+        onPointerDownCapture={prepareScrollAnchor}
+      >
+        <span className={styles.icon}>
+          {status === "running" ? (
+            <Icon icon={LoaderCircle} size="sm" tone="accent" />
+          ) : (
+            icon
+          )}
+        </span>
+        <span
+          className={classNames(
+            styles.summary,
+            status === "error" && styles.error,
+          )}
+        >
+          {summary}
+        </span>
+        {meta && <span className={styles.meta}>{meta}</span>}
+        {status === "error" && (
+          <span className={styles.errorBadge}>failed</span>
+        )}
+        <span className={styles.spacer} />
+        <Icon className={styles.chevron} icon={ChevronDown} tone="faint" />
+      </button>
+    </div>
   );
 
   return (
-    <div className={styles.card}>
+    <section
+      className={classNames(
+        "rf-enter",
+        styles.card,
+        status === "running" && styles.running,
+      )}
+      data-open={renderedOpen}
+      data-status={status}
+    >
       <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
 
       {deferredEntertainmentText && (
@@ -194,9 +217,9 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
         <div
           className={classNames(
             "rf-expand-grid",
-            isAnimatingOpen && "is-open",
+            renderedOpen && "is-open",
             styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
+            renderedOpen && styles.contentWrapperOpen,
             !animate && styles.noTransition,
           )}
         >
@@ -217,7 +240,7 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
           </div>
         </div>
       )}
-    </div>
+    </section>
   );
 };
 
