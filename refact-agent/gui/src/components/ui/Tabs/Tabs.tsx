@@ -19,8 +19,12 @@ function TabsRoot({ children, ...props }: TabsProps) {
 }
 
 const TabsList = React.forwardRef<HTMLDivElement, TabsListProps>(
-  ({ activeIndex = 0, children, className, itemCount, ...props }, ref) => {
-    const count = itemCount ?? React.Children.count(children);
+  ({ activeIndex = 0, children, className, itemCount, style, ...props }, ref) => {
+    const rawCount = itemCount ?? React.Children.count(children);
+    const itemTotal = Number.isFinite(rawCount) ? Math.max(0, rawCount) : 0;
+    const safeCount = Math.max(1, itemTotal);
+    const rawActiveIndex = Number.isFinite(activeIndex) ? activeIndex : 0;
+    const safeActiveIndex = Math.min(Math.max(0, rawActiveIndex), safeCount - 1);
 
     return (
       <TabsPrimitive.List
@@ -29,12 +33,15 @@ const TabsList = React.forwardRef<HTMLDivElement, TabsListProps>(
         className={classNames(styles.list, className)}
         style={
           {
-            "--rf-tabs-count": count,
-            "--rf-tabs-index": activeIndex,
+            ...style,
+            "--rf-tabs-count": safeCount,
+            "--rf-tabs-index": safeActiveIndex,
           } as React.CSSProperties
         }
       >
-        <span aria-hidden="true" className={styles.indicator} />
+        {itemTotal > 0 ? (
+          <span aria-hidden="true" className={styles.indicator} />
+        ) : null}
         {children}
       </TabsPrimitive.List>
     );
