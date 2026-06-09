@@ -1,5 +1,6 @@
 // Public surface for the Refact UI kit.
 // Add future component exports below in ALPHABETICAL order, one per line, to minimize merge conflicts.
+export * from "./AnimatedList";
 export * from "./Badge";
 export { Button, ButtonGroup } from "./Button";
 export type {
@@ -32,6 +33,7 @@ export { IconButton } from "./Button";
 export type { IconButtonProps } from "./Button";
 export type { IconProps } from "./Icon";
 export * from "./LoadingState";
+export * from "./ListRow";
 export { Menu } from "./Menu";
 export type {
   MenuContentProps,
