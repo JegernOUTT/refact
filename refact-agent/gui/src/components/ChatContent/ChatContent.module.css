@@ -85,6 +85,37 @@
   outline-offset: var(--rf-hairline);
 }
 
+.userInputText {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.userInputTextCollapsed {
+  max-height: 12lh;
+  overflow: hidden;
+}
+
+.userInputTextCollapsed::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: calc(var(--rf-space-6) + var(--rf-space-2));
+  pointer-events: none;
+  content: "";
+  background: linear-gradient(to bottom, transparent, var(--rf-surface-glass));
+}
+
+.userInputExpandButton {
+  align-self: flex-start;
+  min-height: var(--rf-control-h-sm);
+  margin-top: var(--rf-space-1);
+  padding-inline: var(--rf-space-1);
+  color: var(--rf-color-muted);
+}
+
 .userInput :global(.rt-Text),
 .userInput :global(.rt-Heading),
 .userInput :global(p),

@@ -1,11 +1,12 @@
 import { Box, Container, Flex } from "@radix-ui/themes";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { UserMessage } from "../../services/refact";
 import type { Checkpoint } from "../../features/Checkpoints/types";
 import { RetryForm } from "../ChatForm";
 import { DialogImage } from "../DialogImage";
 import { Markdown } from "../Markdown";
+import { Button } from "../ui";
 import styles from "./ChatContent.module.css";
 import { Reveal } from "../Reveal";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
@@ -20,6 +21,9 @@ export type UserInputProps = {
   onDelete?: (messageId: string) => void;
 };
 
+const LONG_USER_MESSAGE_MIN_CHARS = 1100;
+const LONG_USER_MESSAGE_MIN_LINES = 12;
+
 const _UserInput: React.FC<UserInputProps> = ({
   messageIndex,
   messageId,
@@ -32,6 +36,7 @@ const _UserInput: React.FC<UserInputProps> = ({
   const copyToClipboard = useCopyToClipboard();
 
   const [showTextArea, setShowTextArea] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const handleCopy = useCallback(() => {
     const text =
@@ -124,6 +129,27 @@ const _UserInput: React.FC<UserInputProps> = ({
     return children.startsWith("🗜️ ");
   }, [children]);
 
+  const shouldClamp = useMemo(() => {
+    if (isCompressed) return false;
+    const lineCount = textContent.split(/\r\n|\r|\n/u).length;
+    return (
+      textContent.length > LONG_USER_MESSAGE_MIN_CHARS ||
+      lineCount > LONG_USER_MESSAGE_MIN_LINES
+    );
+  }, [isCompressed, textContent]);
+
+  useEffect(() => {
+    if (!shouldClamp) setExpanded(false);
+  }, [shouldClamp, textContent]);
+
+  const handleExpandClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      setExpanded((value) => !value);
+    },
+    [],
+  );
+
   if (showTextArea) {
     return (
       <Container pt="1">
@@ -150,9 +176,32 @@ const _UserInput: React.FC<UserInputProps> = ({
             ) : (
               <>
                 {textContent && (
-                  <Markdown canHaveInteractiveElements={true}>
-                    {textContent}
-                  </Markdown>
+                  <div
+                    className={[
+                      styles.userInputText,
+                      shouldClamp && !expanded
+                        ? styles.userInputTextCollapsed
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
+                    <Markdown canHaveInteractiveElements={true}>
+                      {textContent}
+                    </Markdown>
+                  </div>
+                )}
+                {shouldClamp && (
+                  <Button
+                    aria-expanded={expanded}
+                    className={styles.userInputExpandButton}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                    onClick={handleExpandClick}
+                  >
+                    {expanded ? "Show less" : "Show more"}
+                  </Button>
                 )}
                 {images.length > 0 && (
                   <Flex
