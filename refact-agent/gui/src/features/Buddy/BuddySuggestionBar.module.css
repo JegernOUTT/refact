@@ -11,7 +11,7 @@
   align-items: center;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2);
+  padding: var(--rf-panel-pad);
   background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border) !important;
   border-radius: var(--rf-radius-card);

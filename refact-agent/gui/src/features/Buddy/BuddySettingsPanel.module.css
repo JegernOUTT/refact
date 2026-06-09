@@ -3,7 +3,7 @@
   flex-direction: column;
   gap: var(--rf-space-3);
   min-width: 0;
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   border-color: var(--rf-border);
   box-shadow: var(--rf-elev-panel);
 }
@@ -49,7 +49,7 @@
   flex-direction: column;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);
@@ -71,9 +71,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--rf-space-3);
+  gap: var(--rf-row-gap);
   min-width: 0;
-  padding: var(--rf-space-2);
+  padding: var(--rf-row-pad);
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
   background: transparent;
@@ -136,9 +136,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--rf-space-2);
+  gap: var(--rf-row-gap);
   min-width: 0;
-  padding: var(--rf-space-2);
+  padding: var(--rf-row-pad);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-1);
@@ -191,7 +191,7 @@
   .panel,
   .section,
   .sectionWide {
-    padding: var(--rf-space-2);
+    padding: var(--rf-panel-pad-compact);
   }
 
   .panelHeader,
@@ -202,7 +202,7 @@
   }
 
   .row {
-    gap: var(--rf-space-2);
+    gap: var(--rf-row-gap);
   }
 
   .segmentedControl {

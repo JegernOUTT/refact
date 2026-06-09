@@ -29,7 +29,7 @@
   composes: rf-enter-rise from global;
   background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
@@ -67,8 +67,8 @@
   cursor: pointer;
   display: flex;
   font: inherit;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-2);
+  gap: var(--rf-row-gap);
+  padding: var(--rf-row-pad);
   text-align: left;
   width: 100%;
 }

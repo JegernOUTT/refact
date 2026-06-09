@@ -44,10 +44,10 @@
 .entryRow {
   display: flex;
   align-items: center;
-  gap: var(--rf-space-2);
+  gap: var(--rf-row-gap);
   width: 100%;
   min-width: 0;
-  padding: var(--rf-space-2) var(--rf-space-2);
+  padding: var(--rf-row-pad);
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-chip);
   background: transparent;

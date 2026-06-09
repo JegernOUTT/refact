@@ -7,7 +7,7 @@
   min-height: 0;
   height: 100%;
   max-height: clamp(220px, 28vh, 360px);
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   overflow: hidden;
   border-color: var(--rf-border);
   box-shadow: var(--rf-elev-panel);
@@ -48,12 +48,12 @@
   display: grid;
   box-sizing: border-box;
   grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto;
-  gap: var(--rf-space-2);
+  gap: var(--rf-row-gap);
   align-items: flex-start;
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  padding: var(--rf-space-2);
+  padding: var(--rf-row-pad);
   border: var(--rf-hairline) solid var(--rf-color-warning);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-glass);
@@ -145,7 +145,7 @@
 
 @media (max-width: 720px) {
   .panel {
-    padding: var(--rf-space-2);
+    padding: var(--rf-panel-pad-compact);
   }
 
   .listRow {
