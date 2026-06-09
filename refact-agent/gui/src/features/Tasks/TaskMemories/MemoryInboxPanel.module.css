@@ -1,34 +1,75 @@
 .root {
   display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
+  min-width: 0;
   height: 100%;
   min-height: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
   padding: var(--rf-space-2);
   overflow: hidden;
 }
 
 .header {
+  min-width: 0;
   flex-shrink: 0;
+}
+
+.headerCopy {
+  min-width: 0;
+}
+
+.mutedText,
+.cardPreviewMuted,
+.cardDate,
+.emptyContent,
+.pendingState {
+  color: var(--rf-color-muted);
 }
 
 .filters {
   flex-shrink: 0;
-  padding: var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
+  padding: var(--rf-space-3);
+}
+
+.filterRow,
+.tagActions {
+  min-width: 0;
 }
 
 .filterControl {
-  min-width: 140px;
+  width: min(180px, 100%);
+  min-width: min(140px, 100%);
+}
+
+.searchBox,
+.tagSearchBox {
+  position: relative;
+  display: flex;
+  min-width: min(180px, 100%);
+  align-items: center;
 }
 
 .searchBox {
-  flex: 1;
-  min-width: 180px;
+  flex: 1 1 220px;
+}
+
+.tagSearchBox {
+  flex: 1 1 100%;
+  margin-bottom: var(--rf-space-1);
+}
+
+.searchIcon {
+  position: absolute;
+  left: var(--rf-space-2);
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  color: var(--rf-color-muted);
+  pointer-events: none;
+}
+
+.searchInput {
+  width: 100%;
+  padding-left: var(--rf-space-5);
 }
 
 .tagSummary {
@@ -39,6 +80,12 @@
   min-width: 0;
 }
 
+.tagCloudInner {
+  min-width: 0;
+  padding-top: var(--rf-space-2);
+  overflow: hidden;
+}
+
 .tagChips {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   min-width: 0;
@@ -47,23 +94,41 @@
   padding-right: var(--rf-space-1);
 }
 
-.tagSearchBox {
-  flex-basis: 100%;
-  min-width: 180px;
-  margin-bottom: var(--rf-space-1);
+.tagChip {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 22px;
+  align-items: center;
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  overflow: hidden;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  font: 650 var(--rf-text-1) / 1 var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tagChip {
-  cursor: pointer;
+.tagChip:hover {
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
 }
 
 .tagChipActive {
-  box-shadow: 0 0 0 1px var(--rf-color-accent);
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
 }
 
 .tagChipStale {
   opacity: 0.65;
   text-decoration: line-through;
+}
+
+.errorState {
+  flex-shrink: 0;
 }
 
 .list {
@@ -74,29 +139,27 @@
   padding-right: var(--rf-space-1);
 }
 
+.loadingState {
+  display: flex;
+  justify-content: center;
+  padding: var(--rf-space-4);
+}
+
 .card {
-  border: var(--rf-hairline) solid var(--rf-border);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-  padding: var(--rf-space-3);
   min-height: 64px;
-  max-height: 96px;
+  padding: var(--rf-space-3);
+  cursor: default;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    border-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .card:hover {
-  border-color: var(--rf-border-strong);
-  background: var(--rf-surface-2);
-}
-
-.card[data-expanded="true"] {
-  max-height: none;
+  background: var(--rf-surface-1);
 }
 
 .cardPinned {
-  border-color: var(--rf-color-warning);
-  box-shadow: 0 0 0 1px
-    color-mix(in oklab, var(--rf-color-warning) 42%, transparent);
+  box-shadow: inset 2px 0 0 var(--rf-color-warning);
 }
 
 .cardFrame {
@@ -104,17 +167,18 @@
 }
 
 .cardCollapsedRow {
+  min-width: 0;
   min-height: 40px;
 }
 
 .cardBodyButton {
-  appearance: none;
   display: flex;
-  flex: 1;
   min-width: 0;
   min-height: 40px;
+  flex: 1;
   padding: 0;
   border: 0;
+  appearance: none;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -127,15 +191,15 @@
 }
 
 .cardBodyButton:focus-visible {
-  outline: 2px solid var(--rf-focus-ring);
-  outline-offset: 2px;
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-ctl);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
 }
 
 .cardBodyColumn {
-  flex: 1;
   min-width: 0;
   min-height: 40px;
+  flex: 1;
 }
 
 .cardTitleRow {
@@ -143,8 +207,8 @@
 }
 
 .cardBadges {
-  flex-shrink: 0;
   min-width: 0;
+  flex-shrink: 0;
 }
 
 .cardControls {
@@ -152,12 +216,15 @@
 }
 
 .cardIconButton {
-  width: 22px;
-  height: 22px;
+  color: var(--rf-color-muted);
 }
 
-.cardIconButton:hover {
+.cardIconButton:hover:not(:disabled) {
   color: var(--rf-color-accent);
+}
+
+.iconButtonPinned {
+  color: var(--rf-color-warning);
 }
 
 .cardTitle {
@@ -177,7 +244,7 @@
   min-width: 0;
 }
 
-.cardPreview {
+.cardPreviewMuted {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -186,13 +253,13 @@
 }
 
 .cardPreviewEmpty {
-  flex: 1;
   min-width: 0;
+  flex: 1;
 }
 
 .cardDate {
-  flex: 0 0 auto;
   max-width: 34%;
+  flex: 0 0 auto;
   overflow: hidden;
   text-align: right;
   text-overflow: ellipsis;
@@ -200,24 +267,23 @@
 }
 
 .archivePopover {
-  width: 220px;
+  width: min(220px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
 .expandedContent {
   composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
   display: flex;
+  max-height: 420px;
+  min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
-  max-height: 420px;
+  padding: var(--rf-space-3) 0 0;
   overflow: auto;
-  padding: var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-glass);
 }
 
 .expandedMarkdown {
-  color: var(--rf-fg);
+  min-width: 0;
+  color: var(--rf-color-fg);
 }
 
 .expandedTags {
@@ -226,15 +292,16 @@
 
 .frontmatterTable {
   width: 100%;
+  min-width: 0;
   border-collapse: collapse;
   color: var(--rf-color-muted);
-  font-size: var(--font-size-1);
+  font-size: var(--rf-text-1);
 }
 
 .frontmatterTable th,
 .frontmatterTable td {
   padding: var(--rf-space-1) var(--rf-space-2);
-  border-top: 1px solid var(--rf-border);
+  border-top: var(--rf-hairline) solid var(--rf-border);
   vertical-align: top;
 }
 
@@ -247,6 +314,7 @@
 }
 
 .frontmatterTable td {
+  min-width: 0;
   word-break: break-word;
 }
 
@@ -254,18 +322,47 @@
   font-style: italic;
 }
 
-.pendingState {
-  color: var(--rf-color-muted);
-}
-
 .emptyState {
   padding: var(--rf-space-6) var(--rf-space-3);
+  color: var(--rf-color-muted);
   text-align: center;
 }
 
-@media (prefers-reduced-transparency: reduce) {
+@media (max-width: 480px) {
+  .root {
+    padding: var(--rf-space-1);
+  }
+
+  .header,
+  .tagSummary,
+  .cardCollapsedRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .filters,
   .card {
-    backdrop-filter: none;
+    padding: var(--rf-space-2);
+  }
+
+  .filterControl,
+  .searchBox {
+    width: 100%;
+    flex-basis: 100%;
+  }
+
+  .cardControls {
+    align-items: flex-start;
+  }
+
+  .cardDate {
+    max-width: 42%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .tagChip {
+    transition: none;
   }
 }
