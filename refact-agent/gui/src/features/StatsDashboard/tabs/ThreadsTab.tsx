@@ -108,14 +108,18 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
       {items.length === 0 ? (
         <p className={styles.emptyText}>No matching threads.</p>
       ) : (
-        <Surface className={styles.tableWrapper} variant="plain">
+        <Surface
+          animated="rise"
+          className={styles.tableWrapper}
+          variant="glass"
+        >
           <table className={styles.table}>
             <thead>
               <tr>
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleSort("updated_at")}
                   >
                     Date{indicator("updated_at")}
@@ -127,7 +131,7 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleSort("message_count")}
                   >
                     Messages{indicator("message_count")}
@@ -136,7 +140,7 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleSort("total_tokens")}
                   >
                     Total Tokens{indicator("total_tokens")}
@@ -147,7 +151,7 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleSort("total_cost_usd")}
                   >
                     Cost{indicator("total_cost_usd")}

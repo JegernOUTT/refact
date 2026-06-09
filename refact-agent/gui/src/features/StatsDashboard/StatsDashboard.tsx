@@ -77,15 +77,24 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
             <OverviewTab dateRange={dateRange} />
           </Tabs.Content>
 
-          <Tabs.Content value="usage" className={styles.tabContent}>
+          <Tabs.Content
+            value="usage"
+            className={`${styles.tabContent} rf-enter`}
+          >
             <UsageTab dateRange={dateRange} />
           </Tabs.Content>
 
-          <Tabs.Content value="threads" className={styles.tabContent}>
+          <Tabs.Content
+            value="threads"
+            className={`${styles.tabContent} rf-enter`}
+          >
             <ThreadsTab dateRange={dateRange} />
           </Tabs.Content>
 
-          <Tabs.Content value="tasks" className={styles.tabContent}>
+          <Tabs.Content
+            value="tasks"
+            className={`${styles.tabContent} rf-enter`}
+          >
             <TasksTab dateRange={dateRange} />
           </Tabs.Content>
         </Tabs>

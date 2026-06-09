@@ -500,7 +500,11 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
           <Icon icon={Table2} size="md" tone="accent" />
           By Provider
         </h3>
-        <Surface className={styles.tableWrapper} variant="plain">
+        <Surface
+          animated="rise"
+          className={styles.tableWrapper}
+          variant="glass"
+        >
           <table className={styles.table}>
             <thead>
               <tr>
@@ -508,7 +512,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleProviderSort("total_calls")}
                   >
                     Calls{" "}
@@ -522,7 +526,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleProviderSort("total_tokens")}
                   >
                     Tokens{" "}
@@ -538,7 +542,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleProviderSort("total_cost_usd")}
                   >
                     Cost{" "}
@@ -580,7 +584,11 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
           <Icon icon={Table2} size="md" tone="accent" />
           By Model
         </h3>
-        <Surface className={styles.tableWrapper} variant="plain">
+        <Surface
+          animated="rise"
+          className={styles.tableWrapper}
+          variant="glass"
+        >
           <table className={styles.table}>
             <thead>
               <tr>
@@ -588,7 +596,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleModelSort("total_calls")}
                   >
                     Calls{" "}
@@ -606,7 +614,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleModelSort("total_cost_usd")}
                   >
                     Cost{" "}
@@ -620,7 +628,7 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 <th className={styles.th}>
                   <button
                     type="button"
-                    className={styles.sortButton}
+                    className={`${styles.sortButton} rf-pressable`}
                     onClick={() => toggleModelSort("avg_duration_ms")}
                   >
                     Avg Duration{" "}

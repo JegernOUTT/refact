@@ -18,8 +18,10 @@
   gap: var(--rf-space-3);
   min-width: 0;
   overflow: hidden;
-  background: transparent;
-  border-color: transparent;
+  border-color: var(--rf-border);
+  background: var(--rf-surface-glass);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .chartCanvas {
@@ -91,4 +93,10 @@
   cursor: pointer;
   font: inherit;
   text-align: left;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .chartBox {
+    backdrop-filter: none;
+  }
 }
