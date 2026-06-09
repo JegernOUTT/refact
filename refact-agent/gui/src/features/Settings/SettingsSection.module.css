@@ -1,26 +1,27 @@
 .section {
   display: grid;
   width: 100%;
-  max-width: var(--rf-settings-w, 720px);
+  max-width: min(100%, var(--rf-settings-w, 720px));
   min-width: 0;
   gap: var(--rf-space-4);
-  padding: var(--rf-space-4) var(--rf-space-3) var(--rf-space-5);
+  padding: var(--rf-space-3) var(--rf-space-3) var(--rf-space-5);
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
 }
 
 .wide {
-  max-width: var(--rf-settings-w-wide, 1040px);
+  max-width: min(100%, var(--rf-settings-w-wide, 1040px));
 }
 
 .header {
   display: flex;
   min-width: 0;
+  max-width: 100%;
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--rf-space-3) var(--rf-space-4);
-  padding-bottom: var(--rf-space-4);
+  gap: var(--rf-space-2) var(--rf-space-4);
+  padding-bottom: var(--rf-space-3);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
@@ -39,9 +40,10 @@
 
 .copy {
   display: grid;
-  min-width: min(100%, 260px);
+  min-width: 0;
+  max-width: 100%;
   flex: 1 1 0;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-2xs);
 }
 
 .title,
@@ -64,6 +66,7 @@
 .actions {
   display: flex;
   min-width: 0;
+  max-width: 100%;
   flex: 0 1 auto;
   flex-wrap: wrap;
   align-items: center;
@@ -74,12 +77,14 @@
 .body {
   display: grid;
   min-width: 0;
+  max-width: 100%;
   gap: var(--rf-space-4);
 }
 
 .group {
   display: grid;
   min-width: 0;
+  max-width: 100%;
   gap: var(--rf-space-3);
 }
 
@@ -93,6 +98,7 @@
 .groupRows {
   display: grid;
   min-width: 0;
+  max-width: 100%;
   gap: var(--rf-space-2);
 }
 
@@ -104,6 +110,7 @@
 
 @media (width <= 640px) {
   .section {
+    gap: var(--rf-space-3);
     padding: var(--rf-space-3) 0 var(--rf-space-5);
   }
 

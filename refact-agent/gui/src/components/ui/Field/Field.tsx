@@ -245,7 +245,10 @@ export function FieldSelect({
         className={styles.selectTrigger}
         placeholder={placeholder}
       />
-      <Select.Content maxHeight="260px" maxWidth="360px">
+      <Select.Content
+        maxHeight="calc(var(--rf-control-h) * 8 + var(--rf-space-2))"
+        maxWidth="var(--rf-input-max, 360px)"
+      >
         {options.map((option) => (
           <Select.Item
             disabled={option.disabled}

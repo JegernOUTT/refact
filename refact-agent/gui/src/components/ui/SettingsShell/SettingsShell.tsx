@@ -53,7 +53,10 @@ export function SettingsShell({
             aria-label={navLabel}
             className={styles.sectionSelect}
           />
-          <Select.Content maxHeight="260px" maxWidth="360px">
+          <Select.Content
+            maxHeight="calc(var(--rf-control-h) * 8 + var(--rf-space-2))"
+            maxWidth="var(--rf-input-max, 360px)"
+          >
             {sections.map((section) => (
               <Select.Item key={section.id} value={section.id}>
                 {section.label}
