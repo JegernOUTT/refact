@@ -47,6 +47,10 @@
   flex-wrap: wrap;
 }
 
+.messageToolbar > :first-child {
+  min-width: min(100%, calc(var(--rf-space-6) * 4));
+}
+
 .iconGroup {
   flex: 0 1 auto;
   flex-wrap: wrap;
@@ -63,12 +67,12 @@
 }
 
 .messageContent {
-  min-height: 112px;
+  min-height: calc(var(--rf-control-h-lg) * 3);
   resize: vertical;
 }
 
 .promptTextarea {
-  min-height: 200px;
+  min-height: calc(var(--rf-control-h-lg) * 5);
   resize: vertical;
 }
 
@@ -77,7 +81,7 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 200px;
+  min-height: calc(var(--rf-control-h-lg) * 5);
   height: 100%;
   flex: 1;
   resize: none;
@@ -85,7 +89,7 @@
 }
 
 .extraFieldsEditor {
-  min-height: 120px;
+  min-height: calc(var(--rf-control-h-lg) * 3);
   resize: vertical;
 }
 
@@ -118,7 +122,7 @@
   left: 0;
   right: 0;
   z-index: var(--rf-z-popover);
-  max-height: 150px;
+  max-height: calc(var(--rf-control-h-lg) * 4);
   overflow-y: auto;
   border: var(--rf-hairline) solid var(--rf-border-strong);
   border-radius: var(--rf-radius-card);
@@ -174,7 +178,7 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 100px;
+  min-height: calc(var(--rf-control-h-lg) * 3);
   flex: 1;
   flex-direction: column;
   overflow: hidden;
@@ -266,7 +270,7 @@
   font-size: var(--rf-text-1);
 }
 
-@media (width <= 300px) {
+@media (width <= 18.75rem) {
   .addRow {
     align-items: stretch;
   }
@@ -329,7 +333,7 @@
   }
 
   .suggestionItem:hover {
-    transform: translateY(-1px) scale(1);
+    transform: translateY(calc(-1 * var(--rf-hairline))) scale(1);
   }
 
   .suggestionItem:active {
@@ -365,7 +369,7 @@
 @keyframes customization-editor-rise {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(var(--rf-space-xs));
   }
 
   to {
@@ -374,14 +378,14 @@
   }
 }
 
-@media (width <= 520px) {
+@media (width <= 32.5rem) {
   .switchGrid,
   .fieldGrid {
     grid-template-columns: minmax(0, 1fr);
   }
 }
 
-@media (width <= 420px) {
+@media (width <= 26.25rem) {
   .messageToolbar {
     align-items: stretch;
   }
@@ -397,13 +401,13 @@
   }
 }
 
-@media (width <= 720px) {
+@media (width <= 45rem) {
   .formTabContent {
     overflow-y: visible;
   }
 }
 
-@container (max-width: 620px) {
+@container (max-width: 38.75rem) {
   .parameterRow {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     align-items: stretch;
@@ -414,7 +418,7 @@
   }
 }
 
-@container (max-width: 380px) {
+@container (max-width: 23.75rem) {
   .parameterRow {
     grid-template-columns: minmax(0, 1fr);
   }

@@ -95,7 +95,7 @@ const ConfigList: React.FC<{
             key={item.id}
             role="button"
             tabIndex={0}
-            className={`${styles.configRow} ${
+            className={`${styles.configRow} rf-enter-rise rf-pressable ${
               selectedId === item.id ? styles.selected : ""
             }`}
             onClick={() => onSelect(item.id)}
@@ -326,7 +326,7 @@ export const ConfigEditor: React.FC<{
   const scopeChanged = targetScope !== configItem.scope;
 
   return (
-    <div className={styles.configEditor}>
+    <div className={`${styles.configEditor} rf-enter-rise`}>
       {draftExpired && (
         <div className={styles.callout}>
           <Icon icon={Info} size="sm" tone="warning" />
@@ -338,6 +338,8 @@ export const ConfigEditor: React.FC<{
         <span className={styles.configTitle}>{configId}</span>
         <div className={styles.editorActions}>
           <SegmentedControl
+            aria-label="Editor view"
+            className={styles.editorToggle}
             size="sm"
             value={view}
             onValueChange={(v) => setView(v as EditorView)}
@@ -345,8 +347,15 @@ export const ConfigEditor: React.FC<{
               {
                 value: "form",
                 label: <Icon icon={SlidersHorizontal} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Form editor",
               },
-              { value: "yaml", label: <Icon icon={Code} size="sm" /> },
+              {
+                value: "yaml",
+                label: <Icon icon={Code} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "YAML editor",
+              },
             ]}
           />
           <Button
@@ -365,12 +374,24 @@ export const ConfigEditor: React.FC<{
       <div className={styles.scopeRow}>
         {canSaveToLocal ? (
           <SegmentedControl
+            aria-label="Save scope"
+            className={styles.scopeToggle}
             size="sm"
             value={targetScope}
             onValueChange={(v) => setTargetScope(v as "global" | "local")}
             options={[
-              { value: "global", label: <Icon icon={Globe} size="sm" /> },
-              { value: "local", label: <Icon icon={File} size="sm" /> },
+              {
+                value: "global",
+                label: <Icon icon={Globe} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Global scope",
+              },
+              {
+                value: "local",
+                label: <Icon icon={File} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Project scope",
+              },
             ]}
           />
         ) : (
@@ -464,7 +485,7 @@ const CreateConfigDialog: React.FC<{
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content maxWidth="400px">
+      <Dialog.Content maxWidth="calc(var(--rf-space-6) * 12)">
         <Dialog.Title>Create {KIND_LABELS[kind]}</Dialog.Title>
         <div className={styles.dialogBody}>
           <FieldText
@@ -476,6 +497,8 @@ const CreateConfigDialog: React.FC<{
             <span className={styles.scopeLabel}>Save to:</span>
             {hasProjectRoot ? (
               <SegmentedControl
+                aria-label="Config save scope"
+                className={styles.dialogScopeToggle}
                 value={scope}
                 onValueChange={(v) => setScope(v as "global" | "local")}
                 options={[
@@ -693,14 +716,19 @@ export const Customization: React.FC<CustomizationProps> = ({
     >
       {KIND_ORDER.map((kind) => (
         <Tabs.Trigger key={kind} value={kind}>
-          {KIND_LABELS[kind]} ({getItemsForKind(kind).length})
+          <span className={styles.tabTriggerContent}>
+            <span className={styles.tabText}>{KIND_LABELS[kind]}</span>
+            <Badge className={styles.tabCount} tone="muted">
+              {getItemsForKind(kind).length}
+            </Badge>
+          </span>
         </Tabs.Trigger>
       ))}
     </Tabs.List>
   );
 
   const inner = (
-    <>
+    <div className={`${styles.pageShell} rf-enter`}>
       {backButton}
 
       {registry?.errors && registry.errors.length > 0 && (
@@ -762,7 +790,7 @@ export const Customization: React.FC<CustomizationProps> = ({
           getAllItems().some((i) => i.local_path !== "")
         }
       />
-    </>
+    </div>
   );
 
   if (embedded) return inner;

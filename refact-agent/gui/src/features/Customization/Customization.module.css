@@ -1,3 +1,11 @@
+.pageShell {
+  display: grid;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
 .configList {
   display: grid;
   width: 100%;
@@ -23,12 +31,12 @@
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--rf-space-2);
+  padding: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  background: transparent;
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
-  color: var(--rf-color-fg);
   cursor: pointer;
-  transform: translateY(0) scale(1);
 }
 
 .configRow:hover {
@@ -44,6 +52,10 @@
 .configRow.selected {
   background: var(--rf-color-accent-soft);
   border-color: var(--rf-border-strong);
+}
+
+.configRow.selected:hover {
+  background: var(--rf-color-accent-soft);
 }
 
 .rowInfo {
@@ -93,6 +105,26 @@
   min-width: 0;
 }
 
+.tabTriggerContent {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rf-space-1);
+}
+
+.tabText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabCount {
+  flex: 0 0 auto;
+}
+
 .listPanel {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   box-sizing: border-box;
@@ -134,7 +166,7 @@
 }
 
 .configTitle {
-  flex: 1 1 min(100%, 14rem);
+  flex: 1 1 min(100%, calc(var(--rf-space-6) * 7));
   min-width: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
@@ -162,9 +194,19 @@
   align-items: center;
   gap: var(--rf-space-2);
 }
+
 .editorActions {
   flex: 0 1 auto;
   justify-content: flex-end;
+}
+
+.editorToggle,
+.scopeToggle {
+  flex: 0 0 auto;
+}
+
+.dialogScopeToggle {
+  width: 100%;
 }
 
 .formContainer {
@@ -172,6 +214,7 @@
   max-width: 100%;
   min-width: 0;
 }
+
 .formContainer,
 .formContainer * {
   box-sizing: border-box;
@@ -200,6 +243,8 @@
 }
 
 .backRow {
+  max-width: 100%;
+  min-width: 0;
   padding: var(--rf-space-3) var(--rf-space-3) 0;
 }
 
@@ -207,13 +252,13 @@
   max-width: calc(100% - 2 * var(--rf-space-3));
   margin: 0 var(--rf-space-3);
   padding: var(--rf-space-2) var(--rf-space-3);
-  border: var(--rf-hairline) solid var(--rf-color-danger);
-  border-radius: var(--rf-radius-ctl);
   background: color-mix(
     in srgb,
     var(--rf-color-danger) 10%,
     var(--rf-surface-glass)
   );
+  border: var(--rf-hairline) solid var(--rf-color-danger);
+  border-radius: var(--rf-radius-ctl);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
@@ -236,9 +281,9 @@
   gap: var(--rf-space-2);
   padding: var(--rf-space-2) var(--rf-space-3);
   color: var(--rf-color-fg);
+  background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-color-warning);
   border-radius: var(--rf-radius-ctl);
-  background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
   font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
@@ -284,6 +329,10 @@
   margin-top: var(--rf-space-4);
 }
 
+.dialogFooter > button {
+  min-width: max-content;
+}
+
 .errorBanner,
 .errorText,
 .mutedText,
@@ -296,61 +345,6 @@
   overflow-wrap: anywhere;
 }
 
-@media (width <= 420px) {
-  .configTitle {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-}
-
-@media (width <= 720px) {
-  .kindTabs {
-    grid-auto-flow: row;
-  }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .editorPanel,
-  .configEditor,
-  .errorBanner,
-  .callout {
-    animation: customization-panel-rise var(--rf-dur-med)
-      var(--rf-ease-entrance) both;
-  }
-
-  .configRow {
-    transition:
-      background-color var(--rf-dur-fast) var(--rf-ease-standard),
-      border-color var(--rf-dur-fast) var(--rf-ease-standard),
-      transform var(--rf-dur-fast) var(--rf-ease-standard);
-    will-change: transform;
-  }
-
-  .configRow:hover {
-    transform: translateY(-1px) scale(1);
-  }
-
-  .configRow:active {
-    transform: translateY(0) scale(0.98);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .editorPanel,
-  .configEditor,
-  .errorBanner,
-  .callout,
-  .configRow {
-    animation: none;
-    transition: none;
-  }
-
-  .configRow:hover,
-  .configRow:active {
-    transform: translateY(0) scale(1);
-  }
-}
-
 @media (prefers-reduced-transparency: reduce) {
   .errorBanner,
   .callout {
@@ -358,19 +352,12 @@
   }
 }
 
-@keyframes customization-panel-rise {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+:global(.radix-themes[data-host="jetbrains"]) .errorBanner,
+:global(.radix-themes[data-host="jetbrains"]) .callout {
+  backdrop-filter: none;
 }
 
-@media (width <= 640px) {
+@media (width <= 42rem) {
   .configRow {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -394,5 +381,43 @@
   .scopeRow,
   .dialogFooter {
     justify-content: flex-start;
+  }
+}
+
+@media (width <= 30rem) {
+  .configTitle {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .editorActions {
+    width: 100%;
+  }
+}
+
+@media (width <= 24rem) {
+  .configRow {
+    align-items: start;
+  }
+
+  .kindTabs {
+    grid-auto-flow: row;
+  }
+
+  .tabTriggerContent {
+    justify-content: flex-start;
+  }
+
+  .editorActions,
+  .editorActions > button {
+    width: 100%;
+  }
+
+  .editorActions > button {
+    min-width: max-content;
+  }
+
+  .editorToggle {
+    width: 100%;
   }
 }
