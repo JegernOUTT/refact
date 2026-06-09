@@ -25,9 +25,11 @@
   min-width: 0;
   padding: var(--rf-space-2);
   color: var(--rf-color-muted);
-  background: var(--rf-surface-glass, var(--rf-surface-2));
+  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .codeBox,
@@ -43,12 +45,30 @@
   padding: var(--rf-space-2);
   overflow-y: auto;
   color: var(--rf-color-muted);
-  background: var(--rf-surface-glass, var(--rf-surface-2));
+  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .sectionLabel {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .resultItem,
+  .codeBox,
+  .rawJson {
+    background: var(--rf-surface-glass);
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .resultItem,
+:global(.radix-themes[data-host="jetbrains"]) .codeBox,
+:global(.radix-themes[data-host="jetbrains"]) .rawJson {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }

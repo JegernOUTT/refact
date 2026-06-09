@@ -26,5 +26,24 @@
 
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 300px;
+  padding: var(--rf-space-2);
   overflow-y: auto;
+  color: var(--rf-color-muted);
+  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .resultContent {
+    background: var(--rf-surface-glass);
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .resultContent {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }

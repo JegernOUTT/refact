@@ -83,7 +83,7 @@
 }
 
 .hunkActionButton:hover {
-  background: var(--rf-surface-1);
+  background: color-mix(in oklab, var(--rf-surface-glass) 44%, transparent);
   color: var(--rf-color-fg);
 }
 
@@ -197,4 +197,14 @@
 
 .fileItem {
   min-width: 0;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .hunkActionButton:hover {
+    background: var(--rf-surface-glass);
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .hunkActionButton:hover {
+  background: var(--rf-surface-glass);
 }

@@ -65,10 +65,12 @@
   height: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  background: var(--rf-surface-glass);
+  background: color-mix(in oklab, var(--rf-surface-glass) 62%, transparent);
   border: var(--rf-hairline) solid var(--rf-border);
   border-left-color: var(--rf-color-accent);
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   transition:
     background-color var(--rf-dur-fast) var(--rf-ease-standard),
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -76,8 +78,8 @@
 }
 
 .userInput:hover {
-  background: var(--rf-surface-2);
-  border-color: var(--rf-border);
+  background: color-mix(in oklab, var(--rf-surface-glass) 72%, transparent);
+  border-color: var(--rf-border-strong);
 }
 
 .userInput:focus-within {
@@ -276,9 +278,11 @@
 
 .diff_file_body {
   min-width: min-content;
-  background: var(--rf-surface-1);
+  background: color-mix(in oklab, var(--rf-surface-glass) 54%, transparent);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   overflow: hidden;
 }
 
@@ -363,6 +367,9 @@
   border-radius: var(--rf-radius-ctl);
   padding: var(--rf-space-2);
   overflow-x: auto;
+  background: color-mix(in oklab, var(--rf-surface-glass) 50%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .tool_result_markdown :global(p) {
@@ -404,6 +411,26 @@
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .userInput,
+  .diff_file_body,
+  .tool_result_markdown {
+    background: var(--rf-surface-glass);
+    backdrop-filter: none;
+  }
+
+  .userInput:hover {
+    background: var(--rf-surface-glass);
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .userInput,
+:global(.radix-themes[data-host="jetbrains"]) .diff_file_body,
+:global(.radix-themes[data-host="jetbrains"]) .tool_result_markdown {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }
 
 .queuedMessagePriority {
