@@ -190,6 +190,14 @@
   align-items: stretch;
 }
 
+.focusGrid > *,
+.detailUtilityGrid > * {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 .detailsArea {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -209,6 +217,7 @@
 .cardShell {
   display: flex;
   min-height: 0;
+  overflow: hidden;
 }
 
 .cardShell > * {
@@ -889,8 +898,10 @@
   }
 
   .scrollList {
-    flex: 0 0 auto;
-    overflow-y: visible;
+    flex: 1 1 auto;
+    max-height: clamp(180px, 42vh, 320px);
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .draftMeta {

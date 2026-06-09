@@ -8,6 +8,7 @@
   gap: var(--rf-space-1);
   flex-wrap: wrap;
   min-width: 0;
+  overflow: hidden;
 }
 
 /* Filter tabs reuse the shared chip pill so the header controls match
@@ -121,14 +122,15 @@
  * scrollbar on long chat titles. */
 .entriesScroll {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  flex: 1;
-  min-height: 0;
-  min-width: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--rf-space-1);
+  min-height: 0;
+  min-width: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 @keyframes buddy-spin {

@@ -38,7 +38,6 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
       <div className={styles.root}>
         <header className={styles.header}>
           <Button
-            className={styles.backButton}
             leftIcon={ArrowLeft}
             onClick={backFromDashboard}
             size="sm"

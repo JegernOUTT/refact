@@ -13,11 +13,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
+  justify-items: start;
   gap: var(--rf-space-3);
-}
-
-.backButton {
-  justify-self: start;
 }
 
 .title {
@@ -60,7 +57,6 @@
     justify-items: stretch;
   }
 
-  .backButton,
   .rangeControls {
     justify-self: stretch;
   }

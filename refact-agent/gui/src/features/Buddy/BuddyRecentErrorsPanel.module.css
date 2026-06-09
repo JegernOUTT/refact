@@ -21,7 +21,7 @@
   gap: var(--rf-space-2);
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .sectionLabel {
@@ -47,7 +47,7 @@
 .listRow {
   display: grid;
   box-sizing: border-box;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto;
   gap: var(--rf-space-2);
   align-items: flex-start;
   width: 100%;
@@ -126,7 +126,7 @@
   gap: var(--rf-space-2);
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .errorActions > * {
