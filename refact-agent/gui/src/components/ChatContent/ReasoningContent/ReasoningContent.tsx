@@ -69,6 +69,9 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   const durationCapturedRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
+  const isActivelyThinking =
+    isStreaming && !!reasoningContent && !hasMessageContent;
+  const renderedOpen = isActivelyThinking || isOpen;
 
   useEffect(() => {
     if (stateKey && store) store.set(stateKey, isOpen);
@@ -76,9 +79,6 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
 
   // Track thinking duration - stop when message content starts appearing
   useEffect(() => {
-    const isActivelyThinking =
-      isStreaming && !!reasoningContent && !hasMessageContent;
-
     if (isActivelyThinking) {
       // Started thinking
       if (startTimeRef.current === null) {
@@ -95,7 +95,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
       setThinkingDuration(duration);
       durationCapturedRef.current = true;
     }
-  }, [isStreaming, reasoningContent, hasMessageContent]);
+  }, [isActivelyThinking]);
 
   // Auto-collapse after entire message finishes streaming
   useEffect(() => {
@@ -126,7 +126,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   useEffect(() => {
     if (
       isStreaming &&
-      isOpen &&
+      renderedOpen &&
       contentRef.current &&
       !userScrolledRef.current
     ) {
@@ -135,7 +135,7 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
         el.scrollTop = el.scrollHeight;
       }
     }
-  }, [reasoningContent, isStreaming, isOpen]);
+  }, [reasoningContent, isStreaming, renderedOpen]);
 
   // Reset user scroll flag when streaming starts
   useEffect(() => {
@@ -161,8 +161,6 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
     setIsOpen((prev) => !prev);
   }, []);
 
-  const isActivelyThinking =
-    isStreaming && !!reasoningContent && !hasMessageContent;
   const summaryText = isActivelyThinking
     ? "Thinking..."
     : thinkingDuration !== null
@@ -175,11 +173,11 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
   );
   const deferredContent = useStreamingMarkdown(
     formattedContent,
-    isStreaming && isOpen,
+    isStreaming && renderedOpen,
   );
 
   useEffect(() => {
-    if (isStreaming && isOpen) {
+    if (isStreaming && renderedOpen) {
       const text = deferredContent ?? formattedContent;
       setBuddyCrashHotSlot("reasoning", text);
       addBuddyCrashBreadcrumb("reasoning", text);
@@ -187,9 +185,9 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
     }
 
     setBuddyCrashHotSlot("reasoning", null);
-  }, [deferredContent, formattedContent, isOpen, isStreaming]);
+  }, [deferredContent, formattedContent, renderedOpen, isStreaming]);
 
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(isOpen, 200);
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(renderedOpen);
 
   return (
     <div className={styles.card}>
@@ -217,9 +215,9 @@ export const ReasoningContent: React.FC<ReasoningContentProps> = ({
         <div
           className={classNames(
             "rf-expand-grid",
-            isAnimatingOpen && "is-open",
+            renderedOpen && isAnimatingOpen && "is-open",
             styles.contentWrapper,
-            isAnimatingOpen && styles.contentWrapperOpen,
+            renderedOpen && isAnimatingOpen && styles.contentWrapperOpen,
           )}
         >
           <div className={styles.contentInner}>

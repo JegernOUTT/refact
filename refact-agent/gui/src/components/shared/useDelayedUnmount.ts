@@ -1,50 +1,65 @@
 import { useState, useEffect, useLayoutEffect } from "react";
+import { useReducedMotion } from "../../hooks/useReducedMotion";
 
-/**
- * Hook that handles mount/unmount with animations.
- * Returns { shouldRender, isAnimatingOpen } where:
- * - shouldRender: true while content should be in DOM (including during animations)
- * - isAnimatingOpen: true when the open animation should be applied (delayed by 1 frame on mount)
- *
- * @param isOpen - Whether the content should be visible
- * @param delayMs - How long to wait before unmounting (should match animation duration)
- * @param animate - Whether to animate the transition (when false, state changes are instant)
- */
 export function useDelayedUnmount(
   isOpen: boolean,
-  delayMs = 200,
+  delayMs = 150,
   animate = true,
 ): { shouldRender: boolean; isAnimatingOpen: boolean } {
+  const reducedMotion = useReducedMotion();
+  const shouldAnimate = animate && !reducedMotion;
   const [shouldRender, setShouldRender] = useState(isOpen);
   const [isAnimatingOpen, setIsAnimatingOpen] = useState(isOpen);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!shouldAnimate) {
+      setShouldRender(isOpen);
+      setIsAnimatingOpen(isOpen);
+      return;
+    }
+
     if (isOpen) {
       setShouldRender(true);
-      if (!animate) {
+      if (!shouldRender) {
         setIsAnimatingOpen(true);
       }
-    } else {
-      setIsAnimatingOpen(false);
-      if (!animate) {
-        setShouldRender(false);
-        return;
-      }
-      const timer = setTimeout(() => {
-        setShouldRender(false);
-      }, delayMs);
-      return () => clearTimeout(timer);
+      return;
     }
-  }, [isOpen, delayMs, animate]);
+
+    setIsAnimatingOpen(false);
+  }, [isOpen, shouldRender, shouldAnimate]);
 
   useLayoutEffect(() => {
-    if (isOpen && shouldRender && animate) {
-      const raf = requestAnimationFrame(() => {
-        setIsAnimatingOpen(true);
-      });
-      return () => cancelAnimationFrame(raf);
+    if (!isOpen || !shouldRender || !shouldAnimate || isAnimatingOpen) return;
+
+    const open = () => setIsAnimatingOpen(true);
+    const raf =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(open)
+        : null;
+    const timer = setTimeout(open, 0);
+
+    return () => {
+      if (raf !== null && typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(raf);
+      }
+      clearTimeout(timer);
+    };
+  }, [isOpen, shouldRender, shouldAnimate, isAnimatingOpen]);
+
+  useEffect(() => {
+    if (isOpen || !shouldRender) return;
+
+    if (!shouldAnimate) {
+      setShouldRender(false);
+      return;
     }
-  }, [isOpen, shouldRender, animate]);
+
+    const timer = setTimeout(() => {
+      setShouldRender(false);
+    }, delayMs);
+    return () => clearTimeout(timer);
+  }, [isOpen, shouldRender, delayMs, shouldAnimate]);
 
   return { shouldRender, isAnimatingOpen };
 }
