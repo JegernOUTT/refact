@@ -6,6 +6,15 @@ vi.mock("../Portal/Portal", () => ({
   Portal: ({ children }: { children: JSX.Element }) => children,
 }));
 
+const HANDOFF_OPTIONS = [
+  "Include last user message + responses",
+  "Include all opened files",
+  "Include all edited files",
+  "Include research, subagent & planning results",
+  "Generate summary",
+  "Include all user messages + responses",
+];
+
 describe("TrajectoryButton", () => {
   it("renders the trajectory button", () => {
     render(<TrajectoryButton />);
@@ -28,9 +37,9 @@ describe("TrajectoryButton", () => {
     expect(
       within(popover).getByRole("tab", { name: "Compress in-place" }),
     ).toBeInTheDocument();
-    expect(
-      within(popover).getByRole("tab", { name: "Handoff" }),
-    ).toBeInTheDocument();
+
+    const handoffTab = within(popover).getByRole("tab", { name: "Handoff" });
+    expect(handoffTab).toBeInTheDocument();
     expect(
       within(popover).getByRole("checkbox", { name: "Drop all context files" }),
     ).toBeInTheDocument();
@@ -39,6 +48,17 @@ describe("TrajectoryButton", () => {
     ).toBeInTheDocument();
     expect(
       within(popover).getByRole("button", { name: "Apply" }),
+    ).toBeInTheDocument();
+
+    await user.click(handoffTab);
+
+    for (const option of HANDOFF_OPTIONS) {
+      expect(
+        within(popover).getByRole("checkbox", { name: option }),
+      ).toBeInTheDocument();
+    }
+    expect(
+      within(popover).getByRole("button", { name: "Create" }),
     ).toBeInTheDocument();
   });
 });

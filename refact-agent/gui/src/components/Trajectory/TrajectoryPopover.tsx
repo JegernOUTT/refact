@@ -214,6 +214,17 @@ export const TrajectoryPopoverContent: React.FC<
               Include all opened files
             </Checkbox>
             <Checkbox
+              checked={handoffOptions.include_all_edited_context}
+              onCheckedChange={(checked) =>
+                updateHandoffOption(
+                  "include_all_edited_context",
+                  checked === true,
+                )
+              }
+            >
+              Include all edited files
+            </Checkbox>
+            <Checkbox
               checked={handoffOptions.include_agentic_tools}
               onCheckedChange={(checked) =>
                 updateHandoffOption("include_agentic_tools", checked === true)
