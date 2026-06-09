@@ -254,7 +254,11 @@ export const MemoryCard: React.FC<MemoryCardProps> = ({
         </Flex>
 
         {isExpanded && (
-          <div className="rf-expand-grid">
+          <div
+            className="rf-expand-grid"
+            data-open={isExpanded}
+            data-state="open"
+          >
             <div
               className={styles.expandedContent}
               data-testid={`memory-card-expanded-${memory.filename}`}

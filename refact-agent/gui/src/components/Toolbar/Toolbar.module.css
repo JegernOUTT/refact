@@ -228,15 +228,18 @@
   border-radius: var(--rf-radius-chip);
   cursor: pointer;
   opacity: 0;
-  pointer-events: auto;
+  pointer-events: none;
   transition:
     opacity var(--rf-dur-fast) var(--rf-ease-standard),
     background-color var(--rf-dur-fast) var(--rf-ease-standard),
     color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
-.tabWrap:hover .tabClose {
+.tabWrap:hover .tabClose,
+.tabButton:focus-visible ~ .tabClose,
+.tabClose:focus-visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .tabClose:hover {
@@ -247,6 +250,7 @@
 .tabButtonActive ~ .tabClose,
 .tabButton[data-state="active"] ~ .tabClose {
   opacity: 0.72;
+  pointer-events: auto;
 }
 
 .tabButtonActive ~ .tabClose:hover,
@@ -272,6 +276,7 @@
 @media (hover: none) {
   .tabClose {
     opacity: 1;
+    pointer-events: auto;
   }
 }
 

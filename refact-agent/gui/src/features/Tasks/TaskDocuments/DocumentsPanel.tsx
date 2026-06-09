@@ -18,6 +18,10 @@ import {
   Tooltip,
 } from "../../../components/ui";
 import type { BadgeTone } from "../../../components/ui";
+import {
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../../../components/shared/useDelayedUnmount";
 import { DocumentEditor } from "./DocumentEditor";
 import {
   type TaskDocumentSummary,
@@ -78,6 +82,16 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
   onDelete,
 }) => {
   const pinned = document.pinned;
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
+    isExpanded,
+    COLLAPSE_ANIMATION_MS,
+  );
+  const lastExpandedContent = React.useRef<string | undefined>(expandedContent);
+  if (expandedContent !== undefined) {
+    lastExpandedContent.current = expandedContent;
+  }
+  const renderedExpandedContent =
+    expandedContent ?? (!isExpanded ? lastExpandedContent.current : undefined);
 
   return (
     <Surface
@@ -193,16 +207,20 @@ const DocumentRow: React.FC<DocumentRowProps> = ({
         </Flex>
       </Flex>
 
-      {isExpanded && (
-        <div className="rf-expand-grid">
+      {shouldRender && (
+        <div
+          className="rf-expand-grid"
+          data-open={isAnimatingOpen}
+          data-state={isAnimatingOpen ? "open" : "closed"}
+        >
           <div className={styles.content}>
             {isExpandedLoading ? (
               <div className={styles.inlineLoading}>
                 <Spinner size="sm" />
               </div>
-            ) : expandedContent !== undefined ? (
+            ) : renderedExpandedContent !== undefined ? (
               <Markdown canHaveInteractiveElements={false}>
-                {expandedContent}
+                {renderedExpandedContent}
               </Markdown>
             ) : (
               <Text size="2" className={styles.mutedText}>

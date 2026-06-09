@@ -344,6 +344,31 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [dispatch, activeTab, allThreads],
   );
 
+  const tabByValue = useMemo(() => {
+    const next = new Map<string, Tab>();
+    openTasks.forEach((task) => {
+      next.set(task.id, {
+        type: "task",
+        taskId: task.id,
+        taskName: task.name.trim() || "Task",
+      });
+    });
+    tabs.forEach((tab) => {
+      next.set(tab.id, { type: "chat", id: tab.id });
+    });
+    return next;
+  }, [openTasks, tabs]);
+
+  const handleTabValueChange = useCallback(
+    (value: string) => {
+      const nextTab = tabByValue.get(value);
+      if (nextTab) {
+        goToTab(nextTab);
+      }
+    },
+    [goToTab, tabByValue],
+  );
+
   const handleCloseTaskTab = useCallback(
     (event: MouseEvent, taskId: string) => {
       event.stopPropagation();
@@ -532,6 +557,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
               ? activeTab.taskId
               : "dashboard"
         }
+        onValueChange={handleTabValueChange}
       >
         <KitTabs.List className={styles.tabList}>
           {openTasks.map((task) => {
@@ -584,9 +610,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                       "rf-pressable",
                       isActive && styles.tabButtonActive,
                     )}
-                    onClick={() =>
-                      goToTab({ type: "task", taskId: task.id, taskName })
-                    }
                     onAuxClick={(event) =>
                       handleMiddleClickClose(event, {
                         type: "task",
@@ -615,6 +638,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   type="button"
                   className={styles.tabClose}
                   title="Close task tab"
+                  aria-label="Close tab"
                   draggable={false}
                   onMouseDown={stopClosePointerEvent}
                   onPointerDown={stopClosePointerEvent}
@@ -674,7 +698,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                       "rf-pressable",
                       isActive && styles.tabButtonActive,
                     )}
-                    onClick={() => goToTab({ type: "chat", id: tab.id })}
                     onAuxClick={(event) =>
                       handleMiddleClickClose(event, {
                         type: "chat",
@@ -719,6 +742,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
                   type="button"
                   className={styles.tabClose}
                   title="Close tab"
+                  aria-label="Close tab"
                   draggable={false}
                   onMouseDown={stopClosePointerEvent}
                   onPointerDown={stopClosePointerEvent}
