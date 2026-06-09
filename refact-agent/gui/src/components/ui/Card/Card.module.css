@@ -1,3 +1,36 @@
-.card {
+.card[data-selected="true"] {
+  border-color: var(--rf-color-accent);
+}
+
+.card[data-selected="true"][data-card-variant="surface-1"] {
+  background: var(--rf-color-accent-soft);
+}
+
+.card[data-selected="true"]:not(
+    [data-card-variant="surface-1"],
+    [data-card-variant="glass"]
+  ) {
+  box-shadow: inset 0 0 0 9999px var(--rf-color-accent-soft);
+}
+
+.card[data-selected="true"][data-card-variant="glass"] {
+  box-shadow:
+    var(--rf-elev-panel),
+    inset 0 0 0 9999px var(--rf-color-accent-soft);
+}
+
+.paddingNone {
+  padding: 0;
+}
+
+.paddingSm {
+  padding: var(--rf-space-2);
+}
+
+.paddingMd {
   padding: var(--rf-space-3);
+}
+
+.paddingLg {
+  padding: var(--rf-space-4);
 }
