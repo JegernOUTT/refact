@@ -40,9 +40,9 @@ export const TasksTab: React.FC<Props> = ({ dateRange }) => {
               <th className={styles.th}>Cost</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="rf-stagger">
             {allModes.map((m) => (
-              <tr key={m.mode}>
+              <tr key={m.mode} className="rf-enter-rise">
                 <td className={styles.td}>{m.mode}</td>
                 <td className={styles.td}>{m.total_calls}</td>
                 <td className={styles.td}>

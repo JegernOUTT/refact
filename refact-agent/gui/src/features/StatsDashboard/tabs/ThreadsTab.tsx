@@ -159,9 +159,9 @@ export const ThreadsTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="rf-stagger">
               {items.map((c) => (
-                <tr key={c.id}>
+                <tr key={c.id} className="rf-enter-rise">
                   <td className={styles.td}>{formatDate(c.updated_at)}</td>
                   <td className={`${styles.td} ${styles.titleCell}`}>
                     {c.title || c.id}

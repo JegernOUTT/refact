@@ -555,9 +555,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="rf-stagger">
               {sortedProviders.map((p) => (
-                <tr key={p.provider}>
+                <tr key={p.provider} className="rf-enter-rise">
                   <td className={styles.td}>{p.provider}</td>
                   <td className={styles.td}>{p.total_calls}</td>
                   <td className={styles.td}>
@@ -641,9 +641,9 @@ export const UsageTab: React.FC<Props> = ({ dateRange }) => {
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="rf-stagger">
               {sortedModels.map((m) => (
-                <tr key={`${m.provider}/${m.model}`}>
+                <tr key={`${m.provider}/${m.model}`} className="rf-enter-rise">
                   <td className={styles.td}>{m.model}</td>
                   <td className={styles.td}>{m.total_calls}</td>
                   <td className={styles.td}>
