@@ -1,7 +1,7 @@
 .section {
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-2);
+  gap: var(--rf-section-gap);
   flex-shrink: 0;
 }
 
