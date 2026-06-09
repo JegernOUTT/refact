@@ -124,15 +124,22 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         type={type}
       >
         {loading ? (
-          <span aria-hidden="true" className={styles.spinner}>
+          <span
+            aria-hidden="true"
+            className={classNames(styles.icon, styles.spinner)}
+          >
             <Icon icon={LoaderCircle} size={iconSize} tone={iconTone} />
           </span>
         ) : leftIcon ? (
-          <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
+          <span aria-hidden="true" className={styles.icon}>
+            <Icon icon={leftIcon} size={iconSize} tone={iconTone} />
+          </span>
         ) : null}
         <span className={styles.label}>{children}</span>
         {rightIcon && !loading ? (
-          <Icon icon={rightIcon} size={iconSize} tone={iconTone} />
+          <span aria-hidden="true" className={styles.icon}>
+            <Icon icon={rightIcon} size={iconSize} tone={iconTone} />
+          </span>
         ) : null}
       </button>
     );
@@ -191,7 +198,7 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
       >
         <span
           aria-hidden="true"
-          className={loading ? styles.spinner : undefined}
+          className={classNames(styles.icon, loading && styles.spinner)}
         >
           <Icon
             icon={loading ? LoaderCircle : icon}

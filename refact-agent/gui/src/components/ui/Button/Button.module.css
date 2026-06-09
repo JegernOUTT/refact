@@ -5,31 +5,49 @@
   min-width: 0;
   align-items: center;
   justify-content: center;
-  gap: var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: transparent;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
   font-weight: 650;
-  line-height: var(--rf-line);
+  line-height: 1;
   cursor: pointer;
   user-select: none;
 }
 
 .button {
+  gap: var(--rf-space-2);
   padding: 0 var(--rf-space-3);
+}
+
+.button.size-sm {
+  gap: var(--rf-space-1);
+  padding: 0 var(--rf-space-2);
+}
+
+.button.size-lg {
+  padding: 0 var(--rf-space-4);
 }
 
 .iconButton {
   padding: 0;
 }
 
-.iconButton > span {
+.icon,
+.iconButton > span,
+.label > svg {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   line-height: 0;
+}
+
+.label > svg,
+.icon > svg,
+.iconButton > span > svg {
+  display: block;
 }
 
 .button:focus-visible,
@@ -55,25 +73,44 @@
   border-color: var(--rf-border-strong);
 }
 
+.button:has(.label:empty),
+.button:has(.label > svg:only-child) {
+  width: max(var(--rf-control-h), 28px);
+  min-width: max(var(--rf-control-h), 28px);
+  padding: 0;
+}
+
+.button.size-sm:has(.label:empty),
+.button.size-sm:has(.label > svg:only-child) {
+  width: 28px;
+  min-width: 28px;
+}
+
+.button.size-lg:has(.label:empty),
+.button.size-lg:has(.label > svg:only-child) {
+  width: var(--rf-control-h-lg);
+  min-width: var(--rf-control-h-lg);
+}
+
 .size-sm {
-  min-height: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
   font-size: var(--rf-text-2);
 }
 
 .size-md {
-  min-height: var(--rf-control-h);
+  height: var(--rf-control-h);
   font-size: var(--rf-text-3);
 }
 
 .size-lg {
-  min-height: var(--rf-control-h-lg);
+  height: var(--rf-control-h-lg);
   font-size: var(--rf-text-4);
 }
 
 .iconButton.size-sm {
-  width: var(--rf-control-h-sm);
-  min-width: var(--rf-control-h-sm);
-  min-height: var(--rf-control-h-sm);
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
 }
 
 .iconButton.size-md {
@@ -87,8 +124,12 @@
 }
 
 .label {
+  display: inline-flex;
   min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-1);
   overflow: hidden;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -160,8 +201,6 @@
 }
 
 .spinner {
-  display: inline-flex;
-  flex-shrink: 0;
   animation: spin var(--rf-dur-slow) linear infinite;
 }
 

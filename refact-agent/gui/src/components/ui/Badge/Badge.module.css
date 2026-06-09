@@ -1,9 +1,10 @@
 .badge {
   display: inline-flex;
-  align-items: center;
   max-width: 100%;
   min-height: 18px;
-  padding: 0 var(--rf-space-2);
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
   border: var(--rf-hairline) solid currentColor;
   border-radius: var(--rf-radius-chip);
   background: transparent;
@@ -11,8 +12,16 @@
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-1);
   font-weight: 650;
-  line-height: 1.45;
+  line-height: 1;
   vertical-align: middle;
+}
+
+.badge > svg {
+  display: block;
+  flex: 0 0 auto;
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  line-height: 0;
 }
 
 @media (prefers-reduced-motion: no-preference) {
