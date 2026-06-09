@@ -668,7 +668,7 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);
@@ -698,7 +698,7 @@
   background: color-mix(in oklab, var(--rf-surface-glass) 58%, transparent);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   max-height: min(240px, calc(100dvh - var(--rf-space-6) * 4));
   overflow-y: auto;
   overflow-wrap: anywhere;
@@ -716,7 +716,7 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-1);
-  padding: var(--rf-space-2);
+  padding: var(--rf-row-pad);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);

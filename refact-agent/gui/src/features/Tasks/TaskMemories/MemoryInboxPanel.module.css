@@ -330,7 +330,7 @@
 
 @media (max-width: 480px) {
   .root {
-    padding: var(--rf-space-1);
+    padding: var(--rf-panel-pad-compact);
   }
 
   .header,
@@ -342,7 +342,7 @@
 
   .filters,
   .card {
-    padding: var(--rf-space-2);
+    padding: var(--rf-panel-pad-compact);
   }
 
   .filterControl,

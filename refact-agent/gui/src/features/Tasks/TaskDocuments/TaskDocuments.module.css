@@ -196,12 +196,12 @@
 
 @media (max-width: 640px) {
   .root {
-    padding: var(--rf-space-1);
+    padding: var(--rf-panel-pad-compact);
   }
 
   .filters,
   .row {
-    padding: var(--rf-space-2);
+    padding: var(--rf-panel-pad-compact);
   }
 
   .rowTop,
