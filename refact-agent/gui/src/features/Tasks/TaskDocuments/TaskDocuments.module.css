@@ -5,7 +5,7 @@
   min-height: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
-  padding: var(--rf-space-2);
+  padding: var(--rf-panel-pad);
   overflow: hidden;
 }
 
@@ -16,7 +16,7 @@
 
 .filters {
   flex-shrink: 0;
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
 }
 
 .filterRow {
@@ -52,7 +52,7 @@
 }
 
 .row {
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   cursor: pointer;
   transition:
     background-color var(--rf-dur-fast) var(--rf-ease-standard),

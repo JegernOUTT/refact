@@ -3,7 +3,7 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);
@@ -30,7 +30,7 @@
   border-radius: var(--rf-radius-card);
   background: color-mix(in oklab, var(--rf-surface-glass) 58%, transparent);
   box-shadow: var(--rf-elev-panel);
-  padding: var(--rf-space-2);
+  padding: var(--rf-row-pad);
   min-width: 0;
 }
 
