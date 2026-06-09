@@ -1,7 +1,7 @@
 .nav {
   display: flex;
-  gap: var(--rf-space-1);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  gap: var(--rf-space-2xs);
+  padding: var(--rf-space-2xs) var(--rf-space-1);
   border-radius: var(--rf-radius-card);
   flex-shrink: 0;
   min-width: 0;
@@ -14,7 +14,7 @@
   align-items: center;
   gap: var(--rf-space-2xs);
   min-width: 0;
-  padding: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
   border-radius: var(--rf-radius-chip);
   border: none;
   background: transparent;
@@ -22,7 +22,8 @@
   cursor: pointer;
   transition:
     background var(--rf-dur-fast) var(--rf-ease-standard),
-    color var(--rf-dur-fast) var(--rf-ease-standard);
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .navButton:hover {
@@ -31,8 +32,9 @@
 }
 
 .navButton[data-active] {
-  background: var(--rf-color-accent-soft);
+  background: var(--rf-surface-1);
   color: var(--rf-color-accent);
+  box-shadow: inset 0 -2px 0 var(--rf-color-accent);
 }
 
 .navButton:focus-visible {

@@ -47,7 +47,7 @@
 .nav {
   display: grid;
   min-width: 0;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-2xs);
 }
 
 .navItem {
@@ -56,7 +56,7 @@
   min-height: var(--rf-control-h);
   align-items: center;
   gap: var(--rf-space-2);
-  padding: 0 var(--rf-space-3);
+  padding: var(--rf-space-2) var(--rf-space-2);
   overflow: hidden;
   color: var(--rf-color-muted);
   background: transparent;
@@ -87,8 +87,9 @@
 
 .navItem[aria-current="page"] {
   color: var(--rf-color-fg);
-  background: var(--rf-color-accent-soft);
-  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-1);
+  border-color: var(--rf-border);
+  box-shadow: inset 2px 0 0 var(--rf-color-accent);
 }
 
 .content {
@@ -119,7 +120,8 @@
     transition:
       color var(--rf-dur-fast) var(--rf-ease-standard),
       background-color var(--rf-dur-fast) var(--rf-ease-standard),
-      border-color var(--rf-dur-fast) var(--rf-ease-standard);
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
   }
 }
 
