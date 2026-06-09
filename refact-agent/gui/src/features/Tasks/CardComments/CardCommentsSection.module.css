@@ -62,6 +62,12 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .commentsRoot {
+    background: var(--rf-surface-glass);
     backdrop-filter: none;
   }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .commentsRoot {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }

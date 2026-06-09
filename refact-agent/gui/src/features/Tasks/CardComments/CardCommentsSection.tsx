@@ -159,7 +159,7 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
   const threaded = threadComments(comments);
 
   return (
-    <section className={styles.commentsRoot}>
+    <section className={classNames(styles.commentsRoot, "rf-enter-rise")}>
       <div className={styles.commentsHeader}>
         <Icon icon={MessageCircle} size="sm" tone="muted" />
         <Text size="2" weight="medium">
@@ -189,7 +189,7 @@ export const CardCommentsSection: React.FC<CardCommentsSectionProps> = ({
         )}
       </Flex>
 
-      <Box className={styles.composer}>
+      <Box className={classNames(styles.composer, "rf-enter-rise")}>
         {replyTo && (
           <Flex align="center" gap="2" mb="1">
             <Badge tone="muted">

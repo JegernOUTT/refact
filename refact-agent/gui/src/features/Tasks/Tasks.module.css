@@ -776,6 +776,17 @@
   .cardDetailMetaItem,
   .cardDetailSectionBlock,
   .deleteWorktreeBody {
+    background: var(--rf-surface-glass);
     backdrop-filter: none;
   }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .kanbanColumn,
+:global(.radix-themes[data-host="jetbrains"]) .kanbanCard,
+:global(.radix-themes[data-host="jetbrains"]) .taskItem,
+:global(.radix-themes[data-host="jetbrains"]) .cardDetailMetaItem,
+:global(.radix-themes[data-host="jetbrains"]) .cardDetailSectionBlock,
+:global(.radix-themes[data-host="jetbrains"]) .deleteWorktreeBody {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }

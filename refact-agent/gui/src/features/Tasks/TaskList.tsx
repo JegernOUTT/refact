@@ -85,7 +85,7 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onClick, onDelete }) => {
   return (
     <Card animated="rise" className={styles.taskItem} interactive>
       <button
-        className={styles.taskItemButton}
+        className={`${styles.taskItemButton} rf-pressable`}
         type="button"
         onClick={(event) => {
           event.preventDefault();

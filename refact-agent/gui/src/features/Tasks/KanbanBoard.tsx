@@ -73,6 +73,7 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
       className={classNames(
         styles.kanbanCard,
         onClick && styles.kanbanCardClickable,
+        onClick && "rf-pressable",
       )}
       interactive={Boolean(onClick)}
       onClick={handleClick}
