@@ -95,7 +95,7 @@
   display: grid;
   min-width: 0;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2) 0;
+  padding: var(--rf-space-2) var(--rf-space-2);
 }
 
 .section:first-child {
@@ -129,6 +129,13 @@
 .settingsRow,
 .effortRow {
   justify-content: space-between;
+}
+
+.settingsRow,
+.sliderContainer,
+.effortRow,
+.budgetSection .sliderTrack {
+  padding: var(--rf-row-pad, var(--rf-space-2));
 }
 
 .reasoningLabel {
@@ -165,7 +172,6 @@
 
 .sliderContainer {
   min-width: 0;
-  padding: 0;
 }
 
 .slider {
@@ -264,7 +270,6 @@
 }
 
 .reasoningWarning {
-  margin-top: var(--rf-space-2);
   padding: var(--rf-space-2) var(--rf-space-3);
   color: var(--rf-color-warning);
   background: color-mix(in srgb, var(--rf-color-warning) 12%, transparent);

@@ -60,7 +60,7 @@
   min-width: 0;
   flex: 1 1 auto;
   overflow-y: auto;
-  padding-right: var(--rf-space-1);
+  padding-right: var(--rf-space-2);
 }
 
 .group {
@@ -70,7 +70,7 @@
 }
 
 .groupLabel {
-  padding: 0 var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
   font-weight: 700;

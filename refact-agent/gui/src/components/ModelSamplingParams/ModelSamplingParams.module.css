@@ -73,7 +73,7 @@
 .effortRow,
 .sliderHeader,
 .sliderTrack {
-  padding: 0;
+  padding: var(--rf-row-pad, var(--rf-space-2));
 }
 
 @media (width <= 640px) {

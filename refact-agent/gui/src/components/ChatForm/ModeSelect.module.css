@@ -78,9 +78,12 @@
 }
 
 .content {
-  padding: 0;
   width: min(360px, calc(100vw - var(--rf-space-4)));
   max-width: min(360px, calc(100vw - var(--rf-space-4)));
+}
+
+.content > div {
+  padding: var(--rf-space-2);
 }
 
 .modeList {
@@ -96,7 +99,7 @@
 .separator {
   flex: 0 0 auto;
   height: var(--rf-hairline);
-  margin: var(--rf-space-1) var(--rf-space-2);
+  margin: var(--rf-space-2) var(--rf-space-2);
   background: var(--rf-border);
 }
 
