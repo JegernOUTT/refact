@@ -3,7 +3,10 @@ import classNames from "classnames";
 import { LoaderCircle } from "lucide-react";
 import { ToolCard as KitToolCard } from "../../ui";
 import { Icon } from "../../ui/Icon";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
+import {
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
 import {
   useChatScrollAnchor,
@@ -41,7 +44,11 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
 }) => {
   const preserveScrollAnchor = useChatScrollAnchor();
   const prepareScrollAnchor = usePrepareChatScrollAnchor();
-  const { shouldRender } = useDelayedUnmount(isOpen, 200, animate);
+  const { shouldRender } = useDelayedUnmount(
+    isOpen,
+    COLLAPSE_ANIMATION_MS,
+    animate,
+  );
   const shouldRenderBody = isOpen || shouldRender;
   const handleToggle = React.useCallback(() => {
     preserveScrollAnchor(onToggle);

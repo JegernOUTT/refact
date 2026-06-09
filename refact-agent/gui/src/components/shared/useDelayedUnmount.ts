@@ -1,6 +1,8 @@
 import { useState, useEffect, useLayoutEffect } from "react";
 import { useReducedMotion } from "../../hooks/useReducedMotion";
 
+export const COLLAPSE_ANIMATION_MS = 200;
+
 export function useDelayedUnmount(
   isOpen: boolean,
   delayMs = 150,

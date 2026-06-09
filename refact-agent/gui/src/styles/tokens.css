@@ -54,6 +54,9 @@
   --rf-dur-fast: 0.12s;
   --rf-dur-med: 0.2s;
   --rf-dur-slow: 0.32s;
+  --rf-collapse-duration: 200ms;
+  --rf-toolcard-motion-duration: var(--rf-collapse-duration);
+  --rf-collapse-enter-y: -8px;
   --rf-stagger: 0.03s;
   --rf-ease-standard: cubic-bezier(0.2, 0.7, 0.2, 1);
   --rf-ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);

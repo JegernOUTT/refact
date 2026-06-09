@@ -75,6 +75,22 @@
   line-height: var(--rf-line);
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  .resultPanel,
+  .resultItem {
+    transition:
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .resultPanel,
+  .resultItem {
+    transition: none;
+  }
+}
+
 @media (prefers-reduced-transparency: reduce) {
   .resultPanel,
   .resultItem {

@@ -1,33 +1,41 @@
 .root {
-  --rf-toolcard-body-offset: calc(var(--rf-control-h-sm) + var(--rf-space-2));
-  --rf-toolcard-body-padding-block: var(--rf-space-2);
-  --rf-toolcard-body-padding-inline-start: var(--rf-toolcard-body-offset);
-
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
-  background: transparent;
-  border-radius: var(--rf-radius-card);
 }
 
-.header {
+.variant-card {
+  padding: var(--rf-space-2);
+  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+.variant-compact {
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+}
+
+.headerRow {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-1) 0;
 }
 
-.toggle {
+.trigger {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
   min-height: var(--rf-control-h-sm);
   align-items: center;
   gap: var(--rf-space-2);
-  padding: 0 var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-2);
   color: inherit;
   text-align: left;
   background: transparent;
@@ -37,24 +45,28 @@
   font: inherit;
 }
 
-.toggle:hover {
+.trigger:hover {
   color: var(--rf-color-fg);
   background: var(--rf-surface-1);
 }
 
-.toggle:focus-visible {
+.trigger:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-hairline);
 }
 
-.leadingIcon {
+.icon {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--rf-color-muted);
 }
 
-.title {
+.headerContent {
   min-width: 0;
   overflow: hidden;
-  color: var(--rf-color-fg);
+  color: inherit;
   font-size: var(--rf-text-3);
   font-weight: 700;
   line-height: var(--rf-line);
@@ -70,8 +82,10 @@
 
 .chevron {
   flex: 0 0 auto;
-  transition: transform var(--rf-toolcard-motion-duration)
-    var(--rf-ease-entrance);
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  color: var(--rf-color-faint);
+  transition: transform var(--rf-collapse-duration) var(--rf-ease-entrance);
 }
 
 .root[data-open="true"] .chevron {
@@ -91,7 +105,7 @@
   pointer-events: none;
 }
 
-.root[data-open="true"] .bodyGrid {
+.bodyGrid[data-open="true"] {
   pointer-events: auto;
 }
 
@@ -101,44 +115,49 @@
   transform: translateY(var(--rf-collapse-enter-y)) translateZ(0);
 }
 
-.root[data-open="true"] .bodyShell {
+.bodyGrid[data-open="true"] .bodyShell {
   opacity: 1;
   transform: translateY(0) translateZ(0);
 }
 
-/*
- * Canonical tool body contract: this outer body owns indentation and padding.
- * Feature tool bodies add local structure, not competing outer padding shells.
- */
 .body {
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-toolcard-body-padding-block) 0
-    var(--rf-toolcard-body-padding-block)
-    var(--rf-toolcard-body-padding-inline-start);
+  padding-block: var(--rf-space-2);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
-  background: transparent;
-  border: 0;
-  border-radius: 0;
+}
+
+.status-running,
+.status-streaming {
+  color: var(--rf-color-muted);
+}
+
+.status-success .icon {
+  color: var(--rf-color-success);
+}
+
+.status-error .headerContent,
+.status-error .icon {
+  color: var(--rf-color-danger);
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .bodyGrid {
-    transition: grid-template-rows var(--rf-toolcard-motion-duration)
+    transition: grid-template-rows var(--rf-collapse-duration)
       var(--rf-ease-entrance);
   }
 
   .bodyShell {
     transition:
-      opacity var(--rf-toolcard-motion-duration) var(--rf-ease-entrance),
-      transform var(--rf-toolcard-motion-duration) var(--rf-ease-entrance);
+      opacity var(--rf-collapse-duration) var(--rf-ease-entrance),
+      transform var(--rf-collapse-duration) var(--rf-ease-entrance);
     will-change: opacity, transform;
   }
 
-  .root:not([data-open="true"]) .bodyShell {
+  .bodyGrid:not([data-open="true"]) .bodyShell {
     will-change: auto;
   }
 }
@@ -153,4 +172,16 @@
   .bodyShell {
     transform: none;
   }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .variant-card {
+    background: var(--rf-surface-glass);
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .variant-card {
+  background: var(--rf-surface-glass);
+  backdrop-filter: none;
 }

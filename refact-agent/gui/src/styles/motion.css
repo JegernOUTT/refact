@@ -126,7 +126,8 @@
   }
 
   .rf-expand-grid {
-    transition: grid-template-rows var(--rf-dur-med) var(--rf-ease-standard);
+    transition: grid-template-rows var(--rf-collapse-duration)
+      var(--rf-ease-entrance);
   }
 
   .rf-pressable {

@@ -77,6 +77,7 @@ export function ToolCard({
           aria-expanded={isOpen}
           className={classNames(
             styles.toggle,
+            "rf-pressable",
             (status === "running" || status === "streaming") &&
               "rf-active-pulse",
           )}
