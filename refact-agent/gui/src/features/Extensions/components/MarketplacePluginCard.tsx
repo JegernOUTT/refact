@@ -9,6 +9,33 @@ import type { PluginEntry } from "../../../services/refact/plugins";
 
 import styles from "./MarketplacePluginCard.module.css";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringifyMutationValue(value: unknown, fallback: string): string {
+  if (typeof value === "string") {
+    return value === "[object Object]" ? fallback : value;
+  }
+  if (value == null) return fallback;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function getMutationErrorMessage(error: unknown, fallback: string): string {
+  if (!isRecord(error)) return fallback;
+  if ("data" in error) return stringifyMutationValue(error.data, fallback);
+  if ("message" in error)
+    return stringifyMutationValue(error.message, fallback);
+  return fallback;
+}
+
 export type MarketplacePluginCardProps = {
   plugin: PluginEntry;
   isInstalled: boolean;
@@ -36,21 +63,9 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
 
   const errorMessage =
     installError != null
-      ? String(
-          "data" in installError
-            ? installError.data
-            : "message" in installError
-              ? installError.message
-              : "Install failed",
-        )
+      ? getMutationErrorMessage(installError, "Install failed")
       : uninstallError != null
-        ? String(
-            "data" in uninstallError
-              ? uninstallError.data
-              : "message" in uninstallError
-                ? uninstallError.message
-                : "Uninstall failed",
-          )
+        ? getMutationErrorMessage(uninstallError, "Uninstall failed")
         : null;
 
   return (

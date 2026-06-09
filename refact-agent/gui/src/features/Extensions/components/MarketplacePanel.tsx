@@ -25,6 +25,33 @@ import { MarketplacePluginCard } from "./MarketplacePluginCard";
 
 import styles from "./MarketplacePanel.module.css";
 
+type PluginIdentity = Pick<PluginEntry, "marketplace" | "name">;
+
+function getPluginKey(plugin: PluginIdentity): string {
+  return `${plugin.marketplace}:${plugin.name}`;
+}
+
+type InstalledPluginWithMarketplace = {
+  name: string;
+  marketplace?: unknown;
+  installed_at: string;
+};
+
+function hasMarketplace(plugin: { marketplace?: unknown }): plugin is {
+  marketplace: string;
+} {
+  return (
+    typeof plugin.marketplace === "string" && plugin.marketplace.length > 0
+  );
+}
+
+function getInstalledPluginKey(plugin: {
+  name: string;
+  marketplace?: unknown;
+}) {
+  return hasMarketplace(plugin) ? getPluginKey(plugin) : plugin.name;
+}
+
 type MarketplaceSectionProps = {
   marketplace: MarketplaceEntry;
   searchQuery: string;
@@ -50,11 +77,18 @@ const MarketplaceSection: React.FC<MarketplaceSectionProps> = ({
     if (!data) return [];
     if (!searchQuery) return data.plugins;
     const q = searchQuery.toLowerCase();
-    return data.plugins.filter(
-      (p) =>
+    return data.plugins.filter((p) => {
+      const description =
+        (
+          p as Omit<PluginEntry, "description"> & {
+            description?: string | null;
+          }
+        ).description ?? "";
+      return (
         p.name.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q),
-    );
+        description.toLowerCase().includes(q)
+      );
+    });
   }, [data, searchQuery]);
 
   return (
@@ -103,9 +137,9 @@ const MarketplaceSection: React.FC<MarketplaceSectionProps> = ({
         <div className={`${styles.pluginsGrid} rf-stagger`}>
           {filteredPlugins.map((plugin) => (
             <MarketplacePluginCard
-              key={plugin.name}
+              key={getPluginKey(plugin)}
               plugin={plugin}
-              isInstalled={installedIds.has(plugin.name)}
+              isInstalled={installedIds.has(getPluginKey(plugin))}
             />
           ))}
         </div>
@@ -141,11 +175,12 @@ export const MarketplacePanel: React.FC = () => {
 
   const installedIds = useMemo<Set<string>>(() => {
     if (!installedData) return new Set();
-    return new Set(installedData.installed.map((p) => p.name));
+    return new Set(installedData.installed.map(getInstalledPluginKey));
   }, [installedData]);
 
   const marketplaces = marketplacesData?.marketplaces ?? [];
-  const installed = installedData?.installed ?? [];
+  const installed = (installedData?.installed ??
+    []) as InstalledPluginWithMarketplace[];
 
   if (!loadingMarketplaces && marketplacesError) {
     return (
@@ -240,7 +275,10 @@ export const MarketplacePanel: React.FC = () => {
           {installedExpanded && (
             <div className={`${styles.installedList} rf-stagger`}>
               {installed.map((plugin) => (
-                <div key={plugin.name} className={styles.installedItem}>
+                <div
+                  key={getInstalledPluginKey(plugin)}
+                  className={styles.installedItem}
+                >
                   <div className={styles.installedInfo}>
                     <span className={styles.heading}>{plugin.name}</span>
                     <span className={styles.muted}>
