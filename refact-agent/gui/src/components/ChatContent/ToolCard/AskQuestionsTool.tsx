@@ -362,7 +362,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         toolCall={toolCall}
       >
         <Box className={`${styles.content} rf-enter-rise`}>
-          <Flex direction="column" gap="3">
+          <Flex direction="column" gap="2">
             {data.questions.map((q) => (
               <QuestionWidget
                 key={q.id}

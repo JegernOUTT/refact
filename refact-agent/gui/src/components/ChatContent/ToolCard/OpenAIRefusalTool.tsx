@@ -41,7 +41,9 @@ export const OpenAIRefusalTool: React.FC<Props> = ({ toolCall }) => {
       <Text size="1" color="gray">
         Raw JSON
       </Text>
-      <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      <Box className={styles.rawJson}>
+        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      </Box>
     </ToolCard>
   );
 };

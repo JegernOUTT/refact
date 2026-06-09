@@ -51,7 +51,11 @@
   --rf-code-block-padding: 0;
   --rf-code-block-radius: 0;
 
+  display: grid;
+  gap: var(--rf-space-2);
   min-width: 0;
+  max-width: 100%;
+  line-height: var(--rf-line);
 }
 
 .running .titleRow {

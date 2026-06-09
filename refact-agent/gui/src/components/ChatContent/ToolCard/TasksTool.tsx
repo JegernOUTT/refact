@@ -103,7 +103,7 @@ export const TasksTool: React.FC<TasksToolProps> = ({ toolCall }) => {
       toolCall={toolCall}
     >
       {tasks.length > 0 && (
-        <Box className={styles.taskList}>
+        <Box className={`${styles.taskList} rf-stagger`}>
           {tasks.map((task) => (
             <TaskItem key={task.id} task={task} />
           ))}

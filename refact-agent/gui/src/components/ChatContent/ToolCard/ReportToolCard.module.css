@@ -1,16 +1,13 @@
 .variantTaskDone {
-  border-left: 2px solid var(--rf-color-success);
-  padding-left: var(--rf-space-2);
+  color: var(--rf-color-fg);
 }
 
 .variantPlan {
-  border-left: 2px solid var(--rf-color-danger);
-  padding-left: var(--rf-space-2);
+  color: var(--rf-color-fg);
 }
 
 .variantReport {
-  border-left: 2px solid var(--rf-color-info);
-  padding-left: var(--rf-space-2);
+  color: var(--rf-color-fg);
 }
 
 .card {
@@ -231,7 +228,7 @@
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   min-width: 0;
   max-height: 400px;
-  padding: var(--rf-space-3);
+  padding: var(--rf-space-2);
   overflow-y: auto;
   color: var(--rf-color-muted);
   background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);

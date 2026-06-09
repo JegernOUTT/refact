@@ -1,8 +1,7 @@
 .list {
-  margin-top: var(--rf-space-2);
+  margin-top: 0;
   padding-top: var(--rf-space-2);
   border-top: 1px solid var(--rf-border);
-  padding-left: var(--rf-space-3);
 }
 
 .item {
@@ -55,7 +54,6 @@
 .content {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   padding: var(--rf-space-1) 0;
-  padding-left: var(--rf-space-3);
   max-height: 200px;
   overflow-y: auto;
 }

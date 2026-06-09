@@ -64,14 +64,14 @@ export const OpenAIWebSearchCallTool: React.FC<Props> = ({ toolCall }) => {
           <Text size="1" color="gray">
             Results ({results.length})
           </Text>
-          <Box className={styles.resultList}>
+          <Box className={`${styles.resultList} rf-stagger`}>
             {results.map((r, idx) => {
               const title = r.title ?? "(no title)";
               const url = r.url ?? "";
               const safeUrl = url && isSafeHttpUrl(url) ? url : "";
               const snippet = r.snippet ?? r.description ?? "";
               return (
-                <Box key={idx} className={styles.resultItem}>
+                <Box key={idx} className={`${styles.resultItem} rf-enter-rise rf-pressable`}>
                   <Flex direction="column" gap="1">
                     {safeUrl ? (
                       <Link
@@ -108,7 +108,9 @@ export const OpenAIWebSearchCallTool: React.FC<Props> = ({ toolCall }) => {
       <Text size="1" color="gray">
         Raw JSON
       </Text>
-      <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      <Box className={styles.rawJson}>
+        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      </Box>
     </ToolCard>
   );
 };

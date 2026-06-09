@@ -236,7 +236,7 @@ export const WebTool: React.FC<WebToolProps> = ({
           <Text size="1" color="gray">
             Results ({searchResults.length})
           </Text>
-          <Box className={styles.resultList}>
+          <Box className={`${styles.resultList} rf-stagger`}>
             {searchResults.map((result, idx) => {
               const safeUrl = isSafeHttpUrl(result.url) ? result.url : "";
               return (

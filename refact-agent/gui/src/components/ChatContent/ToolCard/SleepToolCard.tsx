@@ -240,8 +240,8 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({ toolCall }) => {
         className={styles.sleepCard}
       >
         {isRunning && (
-          <Flex direction="column" gap="3" className={styles.countdown}>
-            <Flex align="center" justify="between" gap="3" wrap="wrap">
+          <Flex direction="column" gap="2" className={styles.countdown}>
+            <Flex align="center" justify="between" gap="2" wrap="wrap">
               <Flex direction="column" gap="1">
                 <Text weight="bold" className={styles.countdownText}>
                   Sleeping… {formatSeconds(remainingMs)} remaining

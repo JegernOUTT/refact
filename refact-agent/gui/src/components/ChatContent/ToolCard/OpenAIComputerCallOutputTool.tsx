@@ -1,11 +1,12 @@
 import { Monitor, Image } from "lucide-react";
 import React, { useMemo } from "react";
-import { Flex, Text } from "@radix-ui/themes";
+import { Box, Flex, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
 import type { ToolCall } from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
 import { DialogImage } from "../../DialogImage";
+import styles from "./OpenAIResponsesTool.module.css";
 import { useOpenAiResponsesToolCardState } from "./openaiResponsesToolCardState";
 
 type Props = {
@@ -51,7 +52,9 @@ export const OpenAIComputerCallOutputTool: React.FC<Props> = ({ toolCall }) => {
       <Text size="1" color="gray">
         Raw JSON
       </Text>
-      <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      <Box className={styles.rawJson}>
+        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      </Box>
     </ToolCard>
   );
 };

@@ -1,6 +1,6 @@
 import { Monitor } from "lucide-react";
 import React, { useMemo } from "react";
-import { Text } from "@radix-ui/themes";
+import { Box, Text } from "@radix-ui/themes";
 
 import { ToolCard } from "./ToolCard";
 import type { ToolCall } from "../../../services/refact/types";
@@ -40,7 +40,9 @@ export const OpenAIComputerCallTool: React.FC<Props> = ({ toolCall }) => {
       <Text size="1" color="gray">
         Raw JSON
       </Text>
-      <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      <Box className={styles.rawJson}>
+        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      </Box>
     </ToolCard>
   );
 };

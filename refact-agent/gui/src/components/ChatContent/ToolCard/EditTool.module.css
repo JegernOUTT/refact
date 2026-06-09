@@ -1,9 +1,9 @@
 .diffContent {
   min-width: 0;
-  padding-left: var(--rf-space-2);
+  max-width: 100%;
   font-family: var(--rf-font-mono);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
 }
 
 .diffBlock {

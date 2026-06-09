@@ -60,7 +60,7 @@ const FileEditItem: React.FC<FileEditItemProps> = ({
 }) => {
   return (
     <div className={styles.fileItem}>
-      <Box className={` scrollX`}>
+      <Box className="scrollX">
         {diffs.map((diff, i) => (
           <DiffBlock
             key={i}
@@ -215,7 +215,7 @@ export const EditTool: React.FC<EditToolProps> = ({
   if (!shouldRenderDiffs) return null;
 
   return isSingleFile ? (
-    <Box className={` scrollX`}>
+    <Box className="scrollX">
       {allDiffs.map((diff, i) => (
         <DiffBlock
           key={i}

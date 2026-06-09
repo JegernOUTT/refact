@@ -16,62 +16,23 @@
 }
 
 .resultList {
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  display: grid;
-  gap: var(--rf-space-2);
-  max-height: 300px;
-  margin-top: var(--rf-space-1);
-  overflow-y: auto;
+  composes: resultList from "./ToolCardBody.module.css";
 }
 
 .resultItem {
-  min-width: 0;
-  padding: var(--rf-space-2);
-  color: var(--rf-color-muted);
-  background: color-mix(in oklab, var(--rf-surface-glass) 48%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
+  composes: resultItem from "./ToolCardBody.module.css";
 }
 
 .resultContent {
-  --rf-code-block-bg: transparent;
-  --rf-code-block-border-width: 0;
-  --rf-code-block-margin: 0;
-  --rf-code-block-padding: 0;
-  --rf-code-block-radius: 0;
-
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  padding: var(--rf-space-2);
-  overflow-y: auto;
-  color: var(--rf-color-muted);
-  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
+  composes: resultPanel from "./ToolCardBody.module.css";
 }
 
 .markdownContent {
   width: 100%;
+  min-width: 0;
+  line-height: var(--rf-line);
 }
 
 .markdownContent :global(p) {
   white-space: pre-wrap;
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .resultItem,
-  .resultContent {
-    background: var(--rf-surface-glass);
-    backdrop-filter: none;
-  }
-}
-
-:global(.radix-themes[data-host="jetbrains"]) .resultItem,
-:global(.radix-themes[data-host="jetbrains"]) .resultContent {
-  background: var(--rf-surface-glass);
-  backdrop-filter: none;
 }

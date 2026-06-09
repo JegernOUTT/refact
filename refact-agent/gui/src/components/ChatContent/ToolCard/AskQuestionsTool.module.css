@@ -1,12 +1,6 @@
 .content {
   min-width: 0;
-  padding: var(--rf-space-2);
   color: var(--rf-color-muted);
-  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .questionItem {
@@ -94,14 +88,12 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .content,
   .singleSelectOption:hover {
     background: var(--rf-surface-glass);
     backdrop-filter: none;
   }
 }
 
-:global(.radix-themes[data-host="jetbrains"]) .content,
 :global(.radix-themes[data-host="jetbrains"]) .singleSelectOption:hover {
   background: var(--rf-surface-glass);
   backdrop-filter: none;

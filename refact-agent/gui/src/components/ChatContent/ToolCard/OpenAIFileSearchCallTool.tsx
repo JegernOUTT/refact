@@ -55,12 +55,12 @@ export const OpenAIFileSearchCallTool: React.FC<Props> = ({ toolCall }) => {
           <Text size="1" color="gray">
             Matches ({results.length})
           </Text>
-          <Box className={styles.resultList}>
+          <Box className={`${styles.resultList} rf-stagger`}>
             {results.map((r, idx) => {
               const filename = r.filename ?? r.file_name ?? "(file)";
               const text = r.text ?? r.content ?? "";
               return (
-                <Box key={idx} className={styles.resultItem}>
+                <Box key={idx} className={`${styles.resultItem} rf-enter-rise rf-pressable`}>
                   <Text size="2" weight="medium" className={styles.inlineCode}>
                     {filename}
                   </Text>
@@ -81,7 +81,9 @@ export const OpenAIFileSearchCallTool: React.FC<Props> = ({ toolCall }) => {
       <Text size="1" color="gray">
         Raw JSON
       </Text>
-      <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      <Box className={styles.rawJson}>
+        <ShikiCodeBlock showLineNumbers={false}>{state.rawJson}</ShikiCodeBlock>
+      </Box>
     </ToolCard>
   );
 };

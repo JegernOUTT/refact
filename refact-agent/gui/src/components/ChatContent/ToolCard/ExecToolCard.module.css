@@ -165,7 +165,8 @@
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 360px;
   padding: var(--rf-space-2);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .outputPre {
@@ -173,8 +174,9 @@
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
   line-height: var(--rf-line);
+  min-width: max-content;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .outputEmpty {

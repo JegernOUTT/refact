@@ -1,7 +1,3 @@
-.sleepCard {
-  border-left: 2px solid var(--rf-color-accent);
-  padding-left: var(--rf-space-2);
-}
 
 .summarySuccess {
   color: var(--rf-color-success);
@@ -12,7 +8,7 @@
 }
 
 .countdown {
-  padding: var(--rf-space-3);
+  padding: var(--rf-space-2);
   border: 1px solid var(--rf-border);
   border-radius: var(--radius-3);
   background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);

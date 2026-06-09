@@ -9,43 +9,13 @@
 }
 
 .logContent {
-  --rf-code-block-bg: transparent;
-  --rf-code-block-border-width: 0;
-  --rf-code-block-margin: 0;
-  --rf-code-block-padding: 0;
-  --rf-code-block-radius: 0;
-
-  composes: scrollbarThin from "../../shared/scrollbar.module.css";
-  max-height: 300px;
-  padding: var(--rf-space-2);
-  overflow-y: auto;
-  color: var(--rf-color-muted);
-  background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
+  composes: resultPanel from "./ToolCardBody.module.css";
 }
 
 .section {
-  min-width: 0;
-  padding-top: var(--rf-space-2);
+  composes: section from "./ToolCardBody.module.css";
 }
 
 .sectionLabel {
-  margin-bottom: var(--rf-space-1);
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .logContent {
-    background: var(--rf-surface-glass);
-    backdrop-filter: none;
-  }
-}
-
-:global(.radix-themes[data-host="jetbrains"]) .logContent {
-  background: var(--rf-surface-glass);
-  backdrop-filter: none;
+  composes: sectionLabel from "./ToolCardBody.module.css";
 }

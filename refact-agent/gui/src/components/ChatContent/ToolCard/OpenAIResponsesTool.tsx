@@ -180,9 +180,8 @@ export const OpenAIResponsesTool: React.FC<OpenAIResponsesToolProps> = ({
       <Box className={styles.content}>
         {content ? <Markdown>{content}</Markdown> : null}
 
-        {parsedArgs != null && typeof parsedArgs === "object" && (
-          <Box mb="2">{renderOpenAiResponsesPayload(toolName, parsedArgs)}</Box>
-        )}
+        {parsedArgs != null && typeof parsedArgs === "object" &&
+          renderOpenAiResponsesPayload(toolName, parsedArgs)}
 
         <Box className={styles.sectionLabel}>Raw JSON</Box>
         <Box className={styles.rawJson}>
@@ -210,7 +209,7 @@ function renderOpenAiResponsesPayload(
           <Text size="1" color="gray">
             Results ({results.length})
           </Text>
-          <Box className={styles.resultList}>
+          <Box className={`${styles.resultList} rf-stagger`}>
             {results.slice(0, 20).map((r, idx) => {
               const rr = r as Record<string, unknown>;
               const title =
@@ -262,7 +261,7 @@ function renderOpenAiResponsesPayload(
           <Text size="1" color="gray">
             Matches ({results.length})
           </Text>
-          <Box className={styles.resultList}>
+          <Box className={`${styles.resultList} rf-stagger`}>
             {results.slice(0, 50).map((r, idx) => {
               const rr = r as Record<string, unknown>;
               const filename =
