@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { Text, Box } from "@radix-ui/themes";
-import { ChevronDown, LoaderCircle } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
 import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useAutoExpandCollapse, ToolStatus } from "./useAutoExpandCollapse";
@@ -8,8 +8,8 @@ import { useAppSelector } from "../../../hooks";
 import { selectToolResultById } from "../../../features/Chat/Thread/selectors";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
-import { useDelayedUnmount } from "../../shared/useDelayedUnmount";
 import { ToolCallTooltip } from "./ToolCallTooltip";
+import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
 import { useStreamingMarkdown } from "../../Markdown/useStreamingMarkdown";
 import {
   addBuddyCrashBreadcrumb,
@@ -66,7 +66,7 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     status,
     storeKey,
   });
-  const handleToggle = useCallback(() => {
+  const handleOpenChange = useCallback(() => {
     preserveScrollAnchor(onToggle);
   }, [onToggle, preserveScrollAnchor]);
 
@@ -79,12 +79,6 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     content &&
     content.length <= MAX_MD_RENDER_CHARS &&
     looksLikeMarkdown(content);
-
-  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
-    isOpen && !!content,
-    200,
-    animate,
-  );
 
   const entertainmentMessage = useMemo(() => {
     if (status !== "running") return null;
@@ -108,10 +102,7 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     entertainmentText,
     status === "running",
   );
-  const deferredContent = useStreamingMarkdown(
-    isOpen ? content : null,
-    status === "running",
-  );
+  const deferredContent = useStreamingMarkdown(content, status === "running");
 
   const entertainmentRef = useRef<HTMLDivElement | null>(null);
   const userScrolledRef = useRef(false);
@@ -148,58 +139,74 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
     setBuddyCrashHotSlot("tool", null);
   }, [deferredEntertainmentText, status, summary]);
 
-  const renderedOpen = animate ? isAnimatingOpen : isOpen;
-
   const header = (
-    <div className={styles.header}>
-      <button
-        aria-expanded={isOpen}
+    <span
+      className={classNames(
+        styles.titleRow,
+        status === "running" && "rf-active-pulse",
+      )}
+    >
+      <span className={styles.icon}>
+        {status === "running" ? (
+          <Icon icon={LoaderCircle} size="sm" tone="accent" />
+        ) : (
+          icon
+        )}
+      </span>
+      <span
         className={classNames(
-          styles.toggle,
-          status === "running" && "rf-active-pulse",
+          styles.summary,
+          status === "error" && styles.error,
         )}
-        type="button"
-        onClick={handleToggle}
-        onKeyDownCapture={prepareScrollAnchor}
-        onMouseDownCapture={prepareScrollAnchor}
-        onPointerDownCapture={prepareScrollAnchor}
       >
-        <span className={styles.icon}>
-          {status === "running" ? (
-            <Icon icon={LoaderCircle} size="sm" tone="accent" />
-          ) : (
-            icon
-          )}
-        </span>
-        <span
-          className={classNames(
-            styles.summary,
-            status === "error" && styles.error,
-          )}
-        >
-          {summary}
-        </span>
-        {meta && <span className={styles.meta}>{meta}</span>}
-        {status === "error" && (
-          <span className={styles.errorBadge}>failed</span>
-        )}
-        <span className={styles.spacer} />
-        <Icon className={styles.chevron} icon={ChevronDown} tone="faint" />
-      </button>
-    </div>
+        {summary}
+      </span>
+      {meta && <span className={styles.meta}>{meta}</span>}
+      {status === "error" && <span className={styles.errorBadge}>failed</span>}
+    </span>
   );
 
-  return (
-    <section
+  const hasContentBody = !!deferredContent;
+  const card = (
+    <AnimatedCollapsible
+      animate={animate}
       className={classNames(
         "rf-enter",
         styles.card,
         status === "running" && styles.running,
+        !hasContentBody && styles.withoutBody,
       )}
-      data-open={renderedOpen}
       data-status={status}
+      header={header}
+      onKeyDownCapture={prepareScrollAnchor}
+      onMouseDownCapture={prepareScrollAnchor}
+      onOpenChange={handleOpenChange}
+      onPointerDownCapture={prepareScrollAnchor}
+      open={isOpen}
+      status={status}
+      variant="compact"
     >
-      <ToolCallTooltip toolCall={toolCall}>{header}</ToolCallTooltip>
+      {hasContentBody ? (
+        <Box className={styles.content}>
+          {shouldRenderMarkdown ? (
+            <Text size="2">
+              <Markdown isStreaming={status === "running"}>
+                {deferredContent}
+              </Markdown>
+            </Text>
+          ) : (
+            <ShikiCodeBlock showLineNumbers={false}>
+              {deferredContent}
+            </ShikiCodeBlock>
+          )}
+        </Box>
+      ) : null}
+    </AnimatedCollapsible>
+  );
+
+  return (
+    <div className={styles.stack}>
+      <ToolCallTooltip toolCall={toolCall}>{card}</ToolCallTooltip>
 
       {deferredEntertainmentText && (
         <div
@@ -212,35 +219,7 @@ export const StreamingToolCard: React.FC<StreamingToolCardProps> = ({
           </Text>
         </div>
       )}
-
-      {shouldRender && deferredContent && (
-        <div
-          className={classNames(
-            "rf-expand-grid",
-            renderedOpen && "is-open",
-            styles.contentWrapper,
-            renderedOpen && styles.contentWrapperOpen,
-            !animate && styles.noTransition,
-          )}
-        >
-          <div className={styles.contentInner}>
-            <Box className={styles.content}>
-              {shouldRenderMarkdown ? (
-                <Text size="2">
-                  <Markdown isStreaming={status === "running"}>
-                    {deferredContent}
-                  </Markdown>
-                </Text>
-              ) : (
-                <ShikiCodeBlock showLineNumbers={false}>
-                  {deferredContent}
-                </ShikiCodeBlock>
-              )}
-            </Box>
-          </div>
-        </div>
-      )}
-    </section>
+    </div>
   );
 };
 

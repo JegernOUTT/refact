@@ -1,51 +1,21 @@
-.card {
-  --rf-toolcard-indent: calc(var(--rf-control-h-sm) + var(--rf-space-2));
-
+.stack {
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
+}
+
+.card {
+  --rf-toolcard-indent: calc(var(--rf-control-h-sm) + var(--rf-space-2));
+
   overflow: visible;
-  color: var(--rf-color-fg);
-  font-family: var(--rf-font-ui);
-  background: transparent;
-  border-radius: var(--rf-radius-card);
 }
 
-.header {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-1) 0;
-}
-
-.toggle {
+.titleRow {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
-  min-height: var(--rf-control-h-sm);
   align-items: center;
   gap: var(--rf-space-2);
-  padding: 0 var(--rf-space-2);
-  color: inherit;
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-radius: var(--rf-radius-ctl);
-  cursor: pointer;
-  font: inherit;
-  transition: filter 0.15s ease;
-}
-
-.toggle:hover {
-  color: var(--rf-color-fg);
-  background: transparent;
-  filter: brightness(1.3);
-}
-
-.toggle:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
 }
 
 .icon {
@@ -75,9 +45,13 @@
   white-space: nowrap;
 }
 
-.running .summary,
-.running .toggle {
+.running .titleRow,
+.running .summary {
   color: var(--rf-color-muted);
+}
+
+.withoutBody > :global(.rf-expand-grid) {
+  display: none;
 }
 
 .error {
@@ -100,20 +74,6 @@
   font-size: var(--rf-text-1);
 }
 
-.spacer {
-  flex: 1 1 auto;
-  min-width: var(--rf-space-2);
-}
-
-.chevron {
-  flex: 0 0 auto;
-  transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.card[data-open="true"] .chevron {
-  transform: rotate(180deg);
-}
-
 .entertainmentContent {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   max-height: 260px;
@@ -129,34 +89,6 @@
   overflow-wrap: anywhere;
 }
 
-.contentWrapper {
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.contentWrapperOpen {
-  pointer-events: auto;
-}
-
-.noTransition {
-  transition: none !important;
-}
-
-.contentInner {
-  display: grid;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  padding: var(--rf-space-2) 0 var(--rf-space-2) var(--rf-toolcard-indent);
-  overflow: hidden;
-  opacity: 0;
-  transform: translateY(calc(-1 * var(--rf-space-1))) translateZ(0);
-}
-
-.contentWrapperOpen .contentInner {
-  opacity: 1;
-  transform: translateY(0) translateZ(0);
-}
-
 .content {
   --rf-code-block-bg: transparent;
   --rf-code-block-border-width: 0;
@@ -167,6 +99,7 @@
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   min-width: 0;
   max-height: 400px;
+  margin-left: var(--rf-toolcard-indent);
   padding: var(--rf-space-2);
   overflow-y: auto;
   color: var(--rf-color-muted);
@@ -187,28 +120,4 @@
 :global(.radix-themes[data-host="jetbrains"]) .content {
   background: var(--rf-surface-glass);
   backdrop-filter: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .contentInner {
-    transition:
-      opacity var(--rf-dur-med) var(--rf-ease-standard),
-      transform var(--rf-dur-med) var(--rf-ease-standard);
-    will-change: opacity, transform;
-  }
-
-  .contentWrapper:not(.contentWrapperOpen) .contentInner {
-    will-change: auto;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chevron,
-  .contentInner {
-    transition: none;
-  }
-
-  .contentInner {
-    transform: none;
-  }
 }
