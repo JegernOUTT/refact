@@ -18,6 +18,19 @@
   margin-right: var(--space-2);
 }
 
+.tokenDetailsPopover {
+  --rf-overlay-popover-min: 280px;
+}
+
+.tokenDetailsTabsList {
+  --rf-control-h: var(--rf-control-h-sm);
+  width: 100%;
+}
+
+.tokenDetailsTabsList [role="tab"] {
+  padding-inline: var(--rf-space-2);
+}
+
 .providerIndicatorTrigger {
   cursor: default;
   padding: 0;

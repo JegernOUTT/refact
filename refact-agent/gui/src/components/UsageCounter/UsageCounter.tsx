@@ -4,9 +4,9 @@ import {
   HoverCard,
   Text,
   Box,
-  Tabs,
   Popover,
 } from "../LongTailPrimitives";
+import { Tabs } from "../ui";
 import classNames from "classnames";
 import React, { useMemo, useState } from "react";
 
@@ -280,6 +280,8 @@ const DefaultHoverTriggerContent: React.FC<{
 }) => {
   const hasUsd = totalUsd !== undefined && totalUsd > 0;
   const showUsd = hasUsd;
+  const [tokenDetailsTab, setTokenDetailsTab] = useState("summary");
+  const tokenDetailsActiveIndex = tokenDetailsTab === "map" ? 1 : 0;
 
   return (
     <Flex align="center" gap="3">
@@ -319,29 +321,32 @@ const DefaultHoverTriggerContent: React.FC<{
           size="1"
           side="top"
           align="center"
-          style={{ minWidth: "280px" }}
+          minWidth="280px"
+          className={styles.tokenDetailsPopover}
         >
-          <Tabs.Root defaultValue="summary">
-            <Tabs.List size="1">
+          <Tabs value={tokenDetailsTab} onValueChange={setTokenDetailsTab}>
+            <Tabs.List
+              activeIndex={tokenDetailsActiveIndex}
+              itemCount={2}
+              className={styles.tokenDetailsTabsList}
+            >
               <Tabs.Trigger value="summary">Summary</Tabs.Trigger>
               <Tabs.Trigger value="map">Breakdown</Tabs.Trigger>
             </Tabs.List>
-            <Box pt="2">
-              <Tabs.Content value="summary">
-                <TokensHoverContent
-                  currentSessionTokens={currentSessionTokens}
-                  maxContextTokens={maxContextTokens}
-                  inputTokens={inputTokens}
-                  outputTokens={outputTokens}
-                  cacheReadTokens={cacheReadTokens}
-                  cacheCreationTokens={cacheCreationTokens}
-                />
-              </Tabs.Content>
-              <Tabs.Content value="map">
-                <TokensMapContent tokenMap={tokenMap} />
-              </Tabs.Content>
-            </Box>
-          </Tabs.Root>
+            <Tabs.Content value="summary">
+              <TokensHoverContent
+                currentSessionTokens={currentSessionTokens}
+                maxContextTokens={maxContextTokens}
+                inputTokens={inputTokens}
+                outputTokens={outputTokens}
+                cacheReadTokens={cacheReadTokens}
+                cacheCreationTokens={cacheCreationTokens}
+              />
+            </Tabs.Content>
+            <Tabs.Content value="map">
+              <TokensMapContent tokenMap={tokenMap} />
+            </Tabs.Content>
+          </Tabs>
         </Popover.Content>
       </Popover.Root>
     </Flex>
