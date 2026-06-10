@@ -128,16 +128,21 @@ describe("SegmentedControl", () => {
     expect(indicator).not.toBeNull();
   });
 
-  it("sizes to content while keeping equal segment tracks", async () => {
+  it("sizes to content while keeping equal segment tracks without gutter tails", async () => {
     const css = await readFile(
       path.resolve(__dirname, "SegmentedControl.module.css"),
       "utf8",
     );
     const root = css.match(/\.root \{[^}]+\}/)?.[0] ?? "";
+    const segment = css.match(/\.segment \{[^}]+\}/)?.[0] ?? "";
+    const label = css.match(/\.label \{[^}]+\}/)?.[0] ?? "";
 
     expect(root).toContain("display: inline-grid;");
     expect(root).toContain("grid-auto-columns: minmax(0, 1fr);");
     expect(root).toContain("max-width: 100%;");
+    expect(root).toContain("scrollbar-gutter: auto;");
+    expect(segment).toContain("scrollbar-gutter: auto;");
+    expect(label).toContain("scrollbar-gutter: auto;");
   });
 
   it("keeps text segments labelled by their visible text", () => {

@@ -4,6 +4,7 @@
   min-width: 0;
   max-width: 100%;
   overflow-x: hidden;
+  scrollbar-gutter: auto;
 
   transform: translateZ(0);
   will-change: transform;
@@ -14,6 +15,7 @@
 
   width: max-content;
   max-width: 100%;
+  scrollbar-gutter: auto;
 }
 
 .tabStrip [role="tab"] {

@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
 
@@ -20,6 +23,20 @@ describe("Tabs", () => {
       "--rf-tabs-count": "2",
       "--rf-tabs-index": "1",
     });
+  });
+
+  it("does not reserve a global scrollbar gutter in tab strips", async () => {
+    const css = await readFile(
+      path.resolve(__dirname, "Tabs.module.css"),
+      "utf8",
+    );
+    const list = css.match(/\.list \{[^}]+\}/)?.[0] ?? "";
+    const trigger = css.match(/\.trigger \{[^}]+\}/)?.[0] ?? "";
+
+    expect(list).toContain("display: grid;");
+    expect(list).toContain("scrollbar-gutter: auto;");
+    expect(list).toContain("overflow: auto hidden;");
+    expect(trigger).toContain("scrollbar-gutter: auto;");
   });
 
   it("renders an empty tab list without an indicator", () => {

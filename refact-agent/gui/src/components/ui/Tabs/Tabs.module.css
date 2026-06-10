@@ -6,6 +6,7 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  scrollbar-gutter: auto;
   padding: var(--rf-space-1);
   overflow: auto hidden;
   overscroll-behavior-x: contain;
@@ -37,6 +38,7 @@
   z-index: 1;
   min-width: 0;
   min-height: var(--rf-control-h);
+  scrollbar-gutter: auto;
   padding: 0 var(--rf-space-3);
   overflow: hidden;
   color: var(--rf-color-muted);

@@ -30,15 +30,18 @@ describe("TrajectoryButton", () => {
     expect(button).toBeInTheDocument();
   });
 
-  it("sizes the handoff tab strip to its labels instead of stretching a blank tail", async () => {
+  it("sizes the handoff popover controls without inherited gutter tails", async () => {
     const css = await readFile(
       path.resolve(__dirname, "TrajectoryPopover.module.css"),
       "utf8",
     );
+    const popoverContent = css.match(/\.popoverContent \{[^}]+\}/)?.[0] ?? "";
     const tabStrip = css.match(/\.tabStrip \{[^}]+\}/)?.[0] ?? "";
 
+    expect(popoverContent).toContain("scrollbar-gutter: auto;");
     expect(tabStrip).toContain("width: max-content;");
     expect(tabStrip).toContain("max-width: 100%;");
+    expect(tabStrip).toContain("scrollbar-gutter: auto;");
     expect(tabStrip).not.toMatch(/\n\s*width: 100%;/);
   });
 

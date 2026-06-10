@@ -306,7 +306,14 @@ function ModelRow({ model, onSelect, selected, selectedRef }: ModelRowProps) {
           ) : null}
         </span>
       </span>
-      {selected ? <Icon icon={Check} size="sm" tone="accent" /> : null}
+      {selected ? (
+        <Icon
+          className={styles.rowCheck}
+          icon={Check}
+          size="sm"
+          tone="accent"
+        />
+      ) : null}
     </button>
   );
 }
