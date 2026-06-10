@@ -3,6 +3,7 @@ import { type FC, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
   Dialog,
+  FieldError,
   FieldStack,
   FieldText,
   Switch,
@@ -49,6 +50,22 @@ function parseReasoningEffortOptions(value: string): string[] | undefined {
   return options.length > 0 ? options : undefined;
 }
 
+function getSaveErrorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    const data = record.data;
+    if (typeof data === "object" && data !== null) {
+      const dataRecord = data as Record<string, unknown>;
+      if (typeof dataRecord.detail === "string") return dataRecord.detail;
+      if (typeof dataRecord.error === "string") return dataRecord.error;
+    }
+    if (typeof data === "string") return data;
+    if (typeof record.error === "string") return record.error;
+    if (typeof record.message === "string") return record.message;
+  }
+  return "Failed to save custom model. Please try again.";
+}
+
 export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
   providerName,
   isOpen,
@@ -73,6 +90,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
   const [outputPrice, setOutputPrice] = useState("");
   const [cacheReadPrice, setCacheReadPrice] = useState("");
   const [cacheCreationPrice, setCacheCreationPrice] = useState("");
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const isEditing = Boolean(initialModel);
 
@@ -95,6 +113,7 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
     setOutputPrice(toInputValue(model?.pricing?.generated));
     setCacheReadPrice(toInputValue(model?.pricing?.cache_read));
     setCacheCreationPrice(toInputValue(model?.pricing?.cache_creation));
+    setSaveError(null);
   }, []);
 
   useEffect(() => {
@@ -161,12 +180,14 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
         : null,
     };
 
+    setSaveError(null);
+
     try {
       await addCustomModel({ providerName, model }).unwrap();
       resetForm();
       onClose();
-    } catch {
-      return;
+    } catch (error) {
+      setSaveError(getSaveErrorMessage(error));
     }
   }, [
     addCustomModel,
@@ -336,6 +357,8 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
               </span>
             ) : null}
           </div>
+
+          {saveError ? <FieldError>{saveError}</FieldError> : null}
         </div>
 
         <div className={styles.modalActions}>
