@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { delay, http, HttpResponse } from "msw";
 import {
@@ -35,6 +37,26 @@ const PLANNER_ID = "planner-test-1";
 const LEGACY_PATH = "/tmp/refact/legacy/wt-path";
 const LEGACY_TOOLTIP =
   "This worktree was created before the registry; recreate it via `restart_agent(mode=fresh)` to enable actions.";
+
+function readGuiSource(path: string): Promise<string> {
+  return readFile(resolve(process.cwd(), "src", path), "utf8");
+}
+
+function readCssBlock(source: string, selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(
+    source,
+  );
+  if (match?.index === undefined) {
+    throw new Error(`Missing CSS block for ${selector}`);
+  }
+  const start = source.indexOf("{", match.index);
+  const end = source.indexOf("\n}", start);
+  if (start === -1 || end === -1) {
+    throw new Error(`Malformed CSS block for ${selector}`);
+  }
+  return source.slice(start + 1, end);
+}
 
 type MockWorktreePanelProps = {
   open: boolean;
@@ -990,6 +1012,82 @@ describe("TaskWorkspace layout and chat surfaces", () => {
         }).boardHeightPx,
       ).toBe(180),
     );
+  });
+
+  it("planner_and_agents_overflow_inside_single_panel_scroll_owners", async () => {
+    const planners = Array.from({ length: 18 }, (_, index) => ({
+      id: `planner-overflow-${index}`,
+      title: `Overflow planner ${index}`,
+      created_at: `2026-01-01T00:${String(index).padStart(2, "0")}:00Z`,
+      updated_at: `2026-01-01T00:${String(index).padStart(2, "0")}:00Z`,
+    }));
+    const cards = Array.from({ length: 24 }, (_, index) =>
+      makeCard({
+        id: `T-${index}`,
+        title: `Overflow agent ${index}`,
+        column: index % 3 === 0 ? "doing" : index % 3 === 1 ? "done" : "failed",
+        agent_chat_id: `agent-overflow-${index}`,
+      }),
+    );
+    server.use(...taskWorkspaceHandlers(cards[0], []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json(planners),
+      ),
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json({ ...makeBoard(cards[0]), cards }),
+      ),
+    );
+
+    const { user } = render(
+      <div style={{ height: 360 }}>
+        <TaskWorkspace taskId={TASK_ID} />
+      </div>,
+      {
+        preloadedState: workspacePreloadedState("planner-overflow-0"),
+      },
+    );
+
+    await screen.findByText("Overflow planner 1");
+    await waitFor(() =>
+      expect(screen.getAllByText("Overflow agent 23").length).toBeGreaterThan(
+        1,
+      ),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Expand planners and agents" }),
+    );
+
+    const plannerScrollOwners = screen.getAllByTestId(
+      "planner-panel-scroll-owner",
+    );
+    const agentsScrollOwners = screen.getAllByTestId(
+      "agents-panel-scroll-owner",
+    );
+    expect(plannerScrollOwners).toHaveLength(1);
+    expect(agentsScrollOwners).toHaveLength(1);
+    expect(plannerScrollOwners[0].parentElement?.className).toContain(
+      "panelScrollArea",
+    );
+    expect(agentsScrollOwners[0].parentElement?.className).toContain(
+      "panelScrollArea",
+    );
+    expect(plannerScrollOwners[0].querySelector("div")).not.toBeNull();
+    expect(agentsScrollOwners[0].querySelector("div")).not.toBeNull();
+
+    const css = await readGuiSource("features/Tasks/Tasks.module.css");
+    const panelsSection = readCssBlock(css, ".panelsSection");
+    const panelList = readCssBlock(css, ".panelList");
+    const panelContent = readCssBlock(css, ".panelContent");
+    const panelScrollArea = readCssBlock(css, ".panelScrollArea");
+
+    expect(panelsSection).toContain("min-height: 120px");
+    expect(panelsSection).toContain("max-height: 240px");
+    expect(panelList).toContain("min-height: 0");
+    expect(panelContent).toContain("min-height: 0");
+    expect(panelScrollArea).toContain("flex: 1 1 0");
+    expect(panelScrollArea).toContain("min-height: 0");
+    expect(panelScrollArea).toContain("overflow: hidden");
   });
 
   it("selects_planner_and_agent_chats_and_renders_workspace_tabs", async () => {

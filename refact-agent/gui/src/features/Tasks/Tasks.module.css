@@ -378,14 +378,17 @@
 }
 
 .workspaceChromeCollapse {
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-height: 0;
 }
 
 .panelsWrapper {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   gap: 0;
   padding: 0;
+  overflow: hidden;
 }
 
 .panelsHeader,
@@ -404,20 +407,23 @@
 
 .panelsSection {
   display: flex;
-  gap: var(--rf-space-3);
-  padding: var(--rf-panel-pad);
   min-height: 120px;
   max-height: 240px;
+  min-width: 0;
+  gap: var(--rf-space-3);
+  padding: var(--rf-panel-pad);
   overflow: hidden;
 }
 
 .panelsCollapse {
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-height: 0;
 }
 
 .panelList {
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -450,10 +456,17 @@
 }
 
 .panelContent {
-  flex: 1;
+  flex: 1 1 0;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.panelScrollArea {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chatSection {

@@ -312,7 +312,11 @@ const PlannerPanel: React.FC<PlannerPanelProps> = ({
             </Text>
           </Flex>
         ) : (
-          <ScrollArea scrollbars="vertical">
+          <ScrollArea
+            className={styles.panelScrollArea}
+            data-testid="planner-panel-scroll-owner"
+            scrollbars="vertical"
+          >
             <Flex direction="column" gap="1" className="rf-stagger">
               {plannerChats.map((planner) => (
                 <PlannerItem
@@ -398,7 +402,11 @@ const AgentsPanel: React.FC<AgentsPanelProps> = ({
             </Text>
           </Flex>
         ) : (
-          <ScrollArea scrollbars="vertical">
+          <ScrollArea
+            className={styles.panelScrollArea}
+            data-testid="agents-panel-scroll-owner"
+            scrollbars="vertical"
+          >
             <Flex direction="column" gap="1" className="rf-stagger">
               {activeAgents.map((card) => renderAgentItem(card, "doing"))}
               {completedAgents.map((card) => renderAgentItem(card, "done"))}
