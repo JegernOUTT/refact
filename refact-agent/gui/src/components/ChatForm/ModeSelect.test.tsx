@@ -109,13 +109,19 @@ describe("ModeSelect", () => {
       path.resolve(__dirname, "ModeSelect.module.css"),
       "utf8",
     );
-    const content = css.match(/\.content,\n\.content > div \{[^}]+\}/)?.[0] ?? "";
+    const content =
+      css.match(/\.content,\n\.content > div \{[^}]+\}/)?.[0] ?? "";
     const item = css.match(/\.item,\n\.addModeItem \{[^}]+\}/)?.[0] ?? "";
 
     expect(content).toContain("box-sizing: border-box;");
     expect(content).toContain("min-width: 0;");
     expect(item).toContain("width: 100%;");
     expect(item).toContain("border-radius: 0;");
+
+    const selected = css.match(/\.itemSelected \{[^}]+\}/)?.[0] ?? "";
+    expect(selected).toContain(
+      "box-shadow: var(--rf-scrollbar-size, 8px) 0 0 var(--rf-surface-2);",
+    );
   });
 
   test("selecting a mode before chat starts applies mode and thread defaults directly", async () => {

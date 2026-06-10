@@ -41,6 +41,7 @@ describe("TrajectoryButton", () => {
     expect(popoverContent).toContain("scrollbar-gutter: auto;");
     expect(tabStrip).toContain("width: max-content;");
     expect(tabStrip).toContain("max-width: 100%;");
+    expect(tabStrip).toContain("grid-auto-columns: max-content;");
     expect(tabStrip).toContain("scrollbar-gutter: auto;");
     expect(tabStrip).not.toMatch(/\n\s*width: 100%;/);
   });

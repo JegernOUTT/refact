@@ -8,6 +8,12 @@ import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
 import { Chat } from "../../src/features/Chat";
+import { TrajectoryButton } from "../../src/components/Trajectory";
+import { ModeSelect } from "../../src/components/ChatForm/ModeSelect";
+import {
+  ModelSelector,
+  type ModelOption,
+} from "../../src/components/ui/ModelSelector";
 import { BuddyHome } from "../../src/features/Buddy";
 import { setBuddySnapshot } from "../../src/features/Buddy/buddySlice";
 import {
@@ -560,6 +566,70 @@ const defaults: ProviderDefaults = {
   chat_buddy: { model: "openai_codex_personal/gpt-5.5-buddy" },
 };
 
+const overlayRegressionModels: ModelOption[] = [
+  {
+    value: "openai_codex_personal/gpt-5.5",
+    displayName: "OpenAI Codex Personal GPT 5.5",
+    group: "openai_codex_personal",
+    badges: ["default"],
+    contextWindow: "128K ctx",
+  },
+  {
+    value: "openai_codex_personal/gpt-5.5-planner",
+    displayName: "Task Planner GPT 5.5",
+    group: "openai_codex_personal",
+    badges: ["task-agent"],
+    contextWindow: "128K ctx",
+  },
+  {
+    value: "local_experimental_provider_with_long_name/tiny-but-useful-model",
+    displayName: "Tiny Useful Local Model",
+    group: "local_experimental_provider_with_long_name",
+    badges: ["light"],
+    contextWindow: "32K ctx",
+  },
+];
+
+const overlayRegressionModelGroups = [
+  { id: "openai_codex_personal", label: "OpenAI Codex Personal" },
+  {
+    id: "local_experimental_provider_with_long_name",
+    label: "Local Experimental Provider",
+  },
+];
+
+const chatModesResponse = {
+  modes: [
+    {
+      id: "agent",
+      title: "Agent",
+      description: "Autonomous coding mode",
+      tools_count: 12,
+      thread_defaults: {
+        include_project_info: true,
+        checkpoints_enabled: true,
+        auto_approve_editing_tools: false,
+        auto_approve_dangerous_commands: false,
+      },
+      ui: { order: 1, tags: ["editing", "tools"] },
+    },
+    {
+      id: "ask",
+      title: "Ask",
+      description: "Quick answers without edits",
+      tools_count: 0,
+      thread_defaults: {
+        include_project_info: true,
+        checkpoints_enabled: false,
+        auto_approve_editing_tools: false,
+        auto_approve_dangerous_commands: false,
+      },
+      ui: { order: 2, tags: ["chat"] },
+    },
+  ],
+  errors: [],
+};
+
 const configItem = (
   kind: ConfigItem["kind"],
   id: string,
@@ -898,6 +968,8 @@ window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (path === "/v1/providers")
     return Promise.resolve(jsonResponse(providerList));
+  if (path === "/v1/chat-modes")
+    return Promise.resolve(jsonResponse(chatModesResponse));
   if (path === "/v1/caps") return Promise.resolve(jsonResponse(caps));
   if (path === "/v1/defaults") return Promise.resolve(jsonResponse(defaults));
   if (path === "/v1/customization/registry") {
@@ -1013,6 +1085,32 @@ if (!root) {
   throw new Error("Missing #refact-chat route showcase root");
 }
 
+const OverlayRegressionSurface = () => {
+  const [model, setModel] = React.useState("openai_codex_personal/gpt-5.5");
+  const [mode, setMode] = React.useState("agent");
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: "var(--rf-space-4)",
+        justifyItems: "start",
+        minWidth: 0,
+        padding: "var(--rf-space-5)",
+      }}
+    >
+      <TrajectoryButton />
+      <ModelSelector
+        groups={overlayRegressionModelGroups}
+        models={overlayRegressionModels}
+        value={model}
+        onSelect={setModel}
+      />
+      <ModeSelect selectedMode={mode} onModeChange={setMode} />
+    </div>
+  );
+};
+
 const ShowcaseSurface = () => {
   const currentPage = useSelector((state: RootState) => {
     const page = state.pages[state.pages.length - 1];
@@ -1020,6 +1118,10 @@ const ShowcaseSurface = () => {
       ? page
       : marketplaceTabToPage(marketplaceTab);
   });
+
+  if (route === "overlay-regression") {
+    return <OverlayRegressionSurface />;
+  }
 
   if (route === "chat") {
     return <Chat host="web" tabbed={false} backFromChat={() => undefined} />;

@@ -54,20 +54,21 @@ describe("ModelSelector", () => {
     const row = css.match(/\.row \{[^}]+\}/)?.[0] ?? "";
     const rowPaint = css.match(/\.row::before \{[^}]+\}/)?.[0] ?? "";
     const rowHover =
-      css.match(/\.row:hover:not\(:disabled\)::before \{[^}]+\}/)?.[0] ??
-      "";
+      css.match(/\.row:hover:not\(:disabled\)::before \{[^}]+\}/)?.[0] ?? "";
     const rowSelected =
-      css.match(/\.row\[data-selected="true"\]::before \{[^}]+\}/)?.[0] ??
-      "";
+      css.match(/\.row\[data-selected="true"\]::before \{[^}]+\}/)?.[0] ?? "";
     const rowContent = css.match(/\.rowContent \{[^}]+\}/)?.[0] ?? "";
 
     expect(listRoot).toContain(
-      "--rf-model-selector-row-paint-outset-inline-end: var(--rf-scrollbar-size, 8px);",
+      "--rf-model-selector-row-paint-outset-inline-end: calc(",
     );
+    expect(listRoot).toContain("var(--rf-scrollbar-size, 8px)");
+    expect(listRoot).toContain("2 * var(--rf-hairline)");
     expect(row).toContain("position: relative;");
     expect(row).toContain("background: transparent;");
+    expect(rowPaint).toContain("inset-inline: 0");
     expect(rowPaint).toContain(
-      "inset-inline: 0 calc(-1 * var(--rf-model-selector-row-paint-outset-inline-end));",
+      "calc(-1 * var(--rf-model-selector-row-paint-outset-inline-end));",
     );
     expect(rowPaint).toContain("pointer-events: none;");
     expect(rowHover).toContain("background: var(--rf-surface-1);");

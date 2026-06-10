@@ -11,7 +11,9 @@
 }
 
 .listRoot {
-  --rf-model-selector-row-paint-outset-inline-end: var(--rf-scrollbar-size, 8px);
+  --rf-model-selector-row-paint-outset-inline-end: calc(
+    var(--rf-scrollbar-size, 8px) + 2 * var(--rf-hairline)
+  );
 
   display: flex;
   gap: var(--rf-space-2);
@@ -108,7 +110,8 @@
 .row::before {
   position: absolute;
   inset-block: 0;
-  inset-inline: 0 calc(-1 * var(--rf-model-selector-row-paint-outset-inline-end));
+  inset-inline: 0
+    calc(-1 * var(--rf-model-selector-row-paint-outset-inline-end));
   z-index: 0;
   background: transparent;
   content: "";

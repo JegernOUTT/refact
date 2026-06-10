@@ -15,7 +15,12 @@
 
   width: max-content;
   max-width: 100%;
+  grid-auto-columns: max-content;
   scrollbar-gutter: auto;
+}
+
+.tabStrip [aria-hidden="true"] {
+  display: none;
 }
 
 .tabStrip [role="tab"] {
